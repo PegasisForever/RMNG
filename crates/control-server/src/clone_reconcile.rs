@@ -1051,15 +1051,16 @@ pub(crate) fn codex_parity_stamp_entry_for(entries: &[TarEntry]) -> TarEntry {
 /// Read a JSON guest file for a merge: missing or blank seeds the merge base as `{}`.
 /// Anything present-but-unparseable is a hard error — matching the old jq merges, which
 /// failed on those rather than silently repairing a file the operator may be editing.
+/// Reads straight from the clone's live home (merged view), no daemon roundtrip.
 async fn read_json_merge_base(
-    app: &App,
+    _app: &App,
     clone_id: &str,
-    guest_path: &str,
+    rel_path: &str,
     label: &str,
 ) -> Result<serde_json::Value> {
-    let raw = match app.docker.read_clone_file(clone_id, guest_path).await.with_context(|| {
-        format!("{clone_id}: reading {label}")
-    })? {
+    let raw = match crate::home_overlay::read_clone_home(clone_id, rel_path)
+        .with_context(|| format!("{clone_id}: reading {label}"))?
+    {
         None => return Ok(serde_json::json!({})),
         Some(bytes) => bytes,
     };
@@ -1071,28 +1072,18 @@ async fn read_json_merge_base(
         .with_context(|| format!("{clone_id}: {label} is not valid JSON"))
 }
 
-/// Upload one managed guest file (0600, clone-owned). Tar upload is atomic from the
-/// clone's view like the old decode-to-temp-and-rename dance, with no guest shell.
+/// Write one managed guest file straight into the clone's live home (atomic temp +
+/// rename, 0600, clone-owned) — the clone sees it instantly, with no guest shell and no
+/// tar roundtrip.
 async fn upload_guest_file(
-    app: &App,
+    _app: &App,
     clone_id: &str,
     rel_path: &str,
     data: Vec<u8>,
     label: &str,
 ) -> Result<()> {
-    app.docker
-        .upload_tar(
-            clone_id,
-            vec![TarEntry {
-                path: rel_path.to_string(),
-                data,
-                mode: 0o600,
-                uid: CLONE_UID,
-                gid: CLONE_GID,
-            }],
-        )
-        .await
-        .with_context(|| format!("{clone_id}: uploading {label}"))
+    crate::home_overlay::write_clone_home(clone_id, rel_path, &data)
+        .with_context(|| format!("{clone_id}: writing {label}"))
 }
 
 /// Interactive Claude Code (and the inner Cursor agent / any human `claude`) reads its MCP servers
@@ -1503,7 +1494,7 @@ async fn ensure_codex_parity(
 }
 
 /// Keep interactive Claude Code's `~/.claude.json` MCP set in sync (desktop headed-only, linear
-/// always). Read-merge-upload through the daemon: no guest shell, and the operator's
+/// always). Read-merge-write against the clone's live home: no guest shell, and the operator's
 /// project history in that file is never at the mercy of a heredoc. Stamped on the
 /// canonical merge output so it only runs when the desired set changes — retrofitting
 /// `desktop` onto existing headed clones and removing it from existing headless ones on
@@ -1517,14 +1508,14 @@ async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<
     {
         return Ok(false);
     }
-    let base = read_json_merge_base(app, clone_id, "/home/rmng/.claude.json", "~/.claude.json")
+    let base = read_json_merge_base(app, clone_id, ".claude.json", "~/.claude.json")
         .await?;
     let merged = merge_claude_mcp(&base, headless)
         .with_context(|| format!("{clone_id}: merging ~/.claude.json MCP"))?;
     upload_guest_file(
         app,
         clone_id,
-        "home/rmng/.claude.json",
+        ".claude.json",
         merged.to_string().into_bytes(),
         "~/.claude.json MCP",
     )
@@ -1537,8 +1528,8 @@ async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<
 }
 
 /// Keep Cursor's `~/.cursor/mcp.json` pointed at the same managed servers, so the agent a person
-/// drives in the clone's IDE has the tools the CLI agents already have. Read-merge-upload
-/// through the daemon; stamped on a hash of the canonical output, so a headless flip or a
+/// drives in the clone's IDE has the tools the CLI agents already have. Read-merge-write
+/// against the clone's live home; stamped on a hash of the canonical output, so a headless flip or a
 /// rotated Linear key re-applies on the next pass.
 async fn ensure_cursor_mcp(
     app: &App,
@@ -1555,14 +1546,14 @@ async fn ensure_cursor_mcp(
         return Ok(false);
     }
     let base =
-        read_json_merge_base(app, clone_id, "/home/rmng/.cursor/mcp.json", "~/.cursor/mcp.json")
+        read_json_merge_base(app, clone_id, ".cursor/mcp.json", "~/.cursor/mcp.json")
             .await?;
     let merged = merge_cursor_mcp(&base, headless, linear_key)
         .with_context(|| format!("{clone_id}: merging ~/.cursor/mcp.json MCP"))?;
     upload_guest_file(
         app,
         clone_id,
-        "home/rmng/.cursor/mcp.json",
+        ".cursor/mcp.json",
         merged.to_string().into_bytes(),
         "~/.cursor/mcp.json MCP",
     )
@@ -1640,7 +1631,7 @@ pub(crate) fn codex_mcp_stamp_entry_for(headless: bool) -> TarEntry {
 
 /// Keep Codex's `~/.codex/config.toml` MCP tables in sync (desktop headed-only, linear always),
 /// merging rather than overwriting so the operator's own settings in that file survive.
-/// Read-merge-upload through the daemon.
+/// Read-merge-write against the clone's live home.
 async fn ensure_codex_mcp(app: &App, clone_id: &str, headless: bool) -> Result<bool> {
     let desired = codex_mcp_desired(headless);
     if read_stamp(app, clone_id, codex_mcp_stamp_path(), "codex mcp")
@@ -1652,10 +1643,7 @@ async fn ensure_codex_mcp(app: &App, clone_id: &str, headless: bool) -> Result<b
     }
     // Missing file merges from empty (the old script created it); TOML is line-merged so
     // nothing present-but-unusual can fail the parse — it passes through untouched.
-    let current = app
-        .docker
-        .read_clone_file(clone_id, "/home/rmng/.codex/config.toml")
-        .await
+    let current = crate::home_overlay::read_clone_home(clone_id, ".codex/config.toml")
         .with_context(|| format!("{clone_id}: reading ~/.codex/config.toml"))?;
     let text = current
         .as_deref()
@@ -1665,7 +1653,7 @@ async fn ensure_codex_mcp(app: &App, clone_id: &str, headless: bool) -> Result<b
     upload_guest_file(
         app,
         clone_id,
-        "home/rmng/.codex/config.toml",
+        ".codex/config.toml",
         merged.into_bytes(),
         "~/.codex/config.toml MCP",
     )
@@ -2295,7 +2283,7 @@ mod tests {
 
     #[test]
     fn no_reconcile_script_removes_provider_credentials() {
-        // The credential and MCP merges are pure-Rust tar uploads now (no guest scripts
+        // The credential and MCP merges are pure-Rust home writes now (no guest scripts
         // left that could touch auth files); the remaining exec scripts are covered here.
         let scripts: Vec<(&str, String)> = vec![
             ("ssh_bootstrap", ssh_bootstrap_script().to_string()),

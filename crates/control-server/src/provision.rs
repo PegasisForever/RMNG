@@ -9,7 +9,7 @@
 //!
 //! Caller-facing division of responsibility (as with `orchestrate.rs`): `jobs.rs` owns the
 //! `Operation` record + the progress→op-log plumbing and calls the flows here; credential
-//! pushes go straight through the daemon (tar upload / file read), with no guest scripting.
+//! pushes go straight into the clone's live home on the local filesystem, with no guest scripting.
 //! These functions address a clone by its
 //! container *name*, which equals the clone id (`RmngClone.managed` rows) — no container id is
 //! stored anywhere.

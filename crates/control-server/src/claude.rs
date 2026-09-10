@@ -21,8 +21,8 @@
 //! empty refresh token, so its Claude Code can never rotate the pair this server owns. It
 //! gets the account's identity with it ([`identity_json`]), because Claude Code names its
 //! account to Anthropic on every request and a token swap alone leaves it naming the
-//! previous one. Those writes go through the daemon (tar upload), addressing the clone
-//! by container name.
+//! previous one. Those writes go straight into the clone's live home (merged view),
+//! addressing the clone by container name.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1906,10 +1906,6 @@ fn merge_claude_identity(
     }
 }
 
-/// Guest uid/gid for `home/rmng/**` tar uploads (mirrors provision/reconcile).
-const CLONE_UID: u64 = 1000;
-const CLONE_GID: u64 = 1000;
-
 /// What was last delivered to a clone, as one comparable string: the token AND the identity
 /// that went with it. A rebind can hand a clone a different account whose token happens to
 /// be pushed already, and comparing tokens alone would call that clone current while it
@@ -1923,7 +1919,7 @@ fn push_key(acct: &StoredClaudeAccount) -> String {
 }
 
 /// Install `acct`'s access token AND its identity into clone `host_id` — direct file
-/// writes through the daemon (tar upload + daemon-side read), no guest shell. Hot-swaps
+/// writes straight into the clone's live home, no guest shell and no daemon roundtrip. Hot-swaps
 /// a running clone with **no** agent-wrapper restart, because Claude Code re-reads both
 /// files at request time.
 /// Best-effort; errors are returned to log. Low-level: callers that target an assigned host
@@ -1932,51 +1928,26 @@ fn push_key(acct: &StoredClaudeAccount) -> String {
 /// The token alone used to be the whole push, which left `~/.claude.json` naming whoever the
 /// clone ran before. Measured on CT 105 on 2026-09-04: 11 of 14 readable clones declared an
 /// account that was not the one their token belonged to. See [`identity_json`].
-pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredClaudeAccount) -> Result<()> {
+pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredClaudeAccount) -> Result<()> {
     let token = acct.access_token.trim();
     if !token.starts_with("sk-ant-") {
         bail!("refusing to apply a non-`sk-ant-` token");
     }
     // The credentials file is server-owned wholesale: overwrite, never merge.
-    app.docker
-        .upload_tar(
-            host_id,
-            vec![crate::docker::TarEntry {
-                path: "home/rmng/.claude/.credentials.json".to_string(),
-                data: credentials_json(token).into_bytes(),
-                mode: 0o600,
-                uid: CLONE_UID,
-                gid: CLONE_GID,
-            }],
-        )
-        .await
-        .with_context(|| format!("{host_id}: uploading Claude credentials"))?;
+    crate::home_overlay::write_clone_home(host_id, ".claude/.credentials.json", credentials_json(token).as_bytes())
+        .with_context(|| format!("{host_id}: writing Claude credentials"))?;
     // The identity is a separate outcome from the token. A clone that took the token and
     // refused the identity still works, so this is a warning rather than a failed push.
     if let Some(patch_str) = identity_json(acct) {
         let patch: serde_json::Value = serde_json::from_str(&patch_str)
             .with_context(|| format!("{host_id}: identity patch is not JSON"))?;
-        let current = app
-            .docker
-            .read_clone_file(host_id, "/home/rmng/.claude.json")
-            .await
+        let current = crate::home_overlay::read_clone_home(host_id, ".claude.json")
             .with_context(|| format!("{host_id}: reading ~/.claude.json"))?;
         match merge_claude_identity(current.as_deref(), &patch) {
             IdentityMerge::Current => {}
             IdentityMerge::Updated(body) => {
-                app.docker
-                    .upload_tar(
-                        host_id,
-                        vec![crate::docker::TarEntry {
-                            path: "home/rmng/.claude.json".to_string(),
-                            data: body.into_bytes(),
-                            mode: 0o600,
-                            uid: CLONE_UID,
-                            gid: CLONE_GID,
-                        }],
-                    )
-                    .await
-                    .with_context(|| format!("{host_id}: uploading ~/.claude.json identity"))?;
+                crate::home_overlay::write_clone_home(host_id, ".claude.json", body.as_bytes())
+                    .with_context(|| format!("{host_id}: writing ~/.claude.json identity"))?;
             }
             IdentityMerge::Skipped(reason) => {
                 tracing::warn!("{host_id} kept {}'s token but not its identity: {}", acct.email, reason);
@@ -1989,10 +1960,8 @@ pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredClaudeAcco
 /// Remove clone `host_id`'s `~/.claude/.credentials.json`, leaving it
 /// with no Claude token. Used when a clone's account is set to "none" (unassigned) —
 /// callers should also [`ClaudeStore::forget_pushed`] the host.
-pub async fn clear_clone_token(app: &App, host_id: &str) -> Result<()> {
-    app.docker
-        .remove_clone_file(host_id, "/home/rmng/.claude/.credentials.json")
-        .await
+pub async fn clear_clone_token(_app: &App, host_id: &str) -> Result<()> {
+    crate::home_overlay::remove_clone_home(host_id, ".claude/.credentials.json")
 }
 
 /// Refresh-if-needed and install `email`'s access token into clone `host_id` (== its

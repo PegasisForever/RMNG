@@ -43,10 +43,6 @@ const ROTATE_SECS: u64 = 600;
 /// resetting (spec: "more than 24h from the next 7d reset").
 const RESET_MIN_HEADROOM_SECS: i64 = 24 * 3600;
 
-/// Guest uid/gid for `home/rmng/**` tar uploads (mirrors provision/reconcile).
-const CLONE_UID: u64 = 1000;
-const CLONE_GID: u64 = 1000;
-
 /// Merge the `openai-codex` provider entry into a pi `auth.json` body, preserving the
 /// operator's other providers. A missing, corrupt, or non-object current file seeds
 /// from the fragment alone — same rule the old guest-side jq merge used.
@@ -490,54 +486,29 @@ fn pi_auth_json(acct: &StoredCodexAccount) -> String {
 }
 
 /// Install `acct`'s tokens into clone `host_id`'s `~/.codex/auth.json` and merge them into
-/// `~/.pi/agent/auth.json` — direct file writes through the daemon, no guest shell.
+/// `~/.pi/agent/auth.json` — direct filesystem writes into the clone's live home, no guest shell.
 /// Sanity-checks the access token is a JWT (`eyJ…`). Best-effort hot-swap; codex and pi both
 /// re-read their auth file per call.
-pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredCodexAccount) -> Result<()> {
+pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredCodexAccount) -> Result<()> {
     if !acct.access_token.starts_with("eyJ") {
         bail!("refusing to apply a non-JWT codex access token");
     }
     // `~/.codex/auth.json` is server-owned wholesale: overwrite, never merge.
-    app.docker
-        .upload_tar(
-            host_id,
-            vec![crate::docker::TarEntry {
-                path: "home/rmng/.codex/auth.json".to_string(),
-                data: auth_json(acct).into_bytes(),
-                mode: 0o600,
-                uid: CLONE_UID,
-                gid: CLONE_GID,
-            }],
-        )
-        .await
-        .with_context(|| format!("{host_id}: uploading Codex auth"))?;
+    crate::home_overlay::write_clone_home(host_id, ".codex/auth.json", auth_json(acct).as_bytes())
+        .with_context(|| format!("{host_id}: writing Codex auth"))?;
     // pi's file belongs to the operator (their other providers live in it): merge only
     // the `openai-codex` key, never overwrite. Upload only on change.
     let fragment: serde_json::Value = serde_json::from_str(&pi_auth_json(acct))
         .with_context(|| format!("{host_id}: pi auth fragment is not JSON"))?;
-    let current = app
-        .docker
-        .read_clone_file(host_id, "/home/rmng/.pi/agent/auth.json")
-        .await
+    let current = crate::home_overlay::read_clone_home(host_id, ".pi/agent/auth.json")
         .with_context(|| format!("{host_id}: reading pi auth"))?;
     let merged = merge_pi_auth(current.as_deref(), &fragment);
     let current_value = current
         .as_deref()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
     if current_value.as_ref() != Some(&merged) {
-        app.docker
-            .upload_tar(
-                host_id,
-                vec![crate::docker::TarEntry {
-                    path: "home/rmng/.pi/agent/auth.json".to_string(),
-                    data: merged.to_string().into_bytes(),
-                    mode: 0o600,
-                    uid: CLONE_UID,
-                    gid: CLONE_GID,
-                }],
-            )
-            .await
-            .with_context(|| format!("{host_id}: uploading pi auth"))?;
+        crate::home_overlay::write_clone_home(host_id, ".pi/agent/auth.json", merged.to_string().as_bytes())
+            .with_context(|| format!("{host_id}: writing pi auth"))?;
     }
     Ok(())
 }
@@ -545,14 +516,10 @@ pub async fn apply_clone_token(app: &App, host_id: &str, acct: &StoredCodexAccou
 /// Remove clone `host_id`'s `~/.codex/auth.json`, leaving it with no Codex token, and
 /// drop only the `openai-codex` key from its pi auth file — the operator's other
 /// providers stay. Removes the pi file itself when no keys remain.
-pub async fn clear_clone_token(app: &App, host_id: &str) -> Result<()> {
-    app.docker
-        .remove_clone_file(host_id, "/home/rmng/.codex/auth.json")
-        .await?;
-    if let Some(bytes) = app
-        .docker
-        .read_clone_file(host_id, "/home/rmng/.pi/agent/auth.json")
-        .await
+pub async fn clear_clone_token(_app: &App, host_id: &str) -> Result<()> {
+    crate::home_overlay::remove_clone_home(host_id, ".codex/auth.json")
+        .with_context(|| format!("{host_id}: clearing Codex auth"))?;
+    if let Some(bytes) = crate::home_overlay::read_clone_home(host_id, ".pi/agent/auth.json")
         .with_context(|| format!("{host_id}: reading pi auth for clear"))?
     {
         if let Ok(serde_json::Value::Object(mut map)) =
@@ -560,23 +527,15 @@ pub async fn clear_clone_token(app: &App, host_id: &str) -> Result<()> {
         {
             if map.remove("openai-codex").is_some() {
                 if map.is_empty() {
-                    app.docker
-                        .remove_clone_file(host_id, "/home/rmng/.pi/agent/auth.json")
-                        .await?;
+                    crate::home_overlay::remove_clone_home(host_id, ".pi/agent/auth.json")
+                        .with_context(|| format!("{host_id}: removing emptied pi auth"))?;
                 } else {
-                    app.docker
-                        .upload_tar(
-                            host_id,
-                            vec![crate::docker::TarEntry {
-                                path: "home/rmng/.pi/agent/auth.json".to_string(),
-                                data: serde_json::Value::Object(map).to_string().into_bytes(),
-                                mode: 0o600,
-                                uid: CLONE_UID,
-                                gid: CLONE_GID,
-                            }],
-                        )
-                        .await
-                        .with_context(|| format!("{host_id}: uploading cleared pi auth"))?;
+                    crate::home_overlay::write_clone_home(
+                        host_id,
+                        ".pi/agent/auth.json",
+                        serde_json::Value::Object(map).to_string().as_bytes(),
+                    )
+                    .with_context(|| format!("{host_id}: writing cleared pi auth"))?;
                 }
             }
         }

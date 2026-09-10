@@ -69,6 +69,92 @@ pub fn merged_dir(homes: &str, id: &str) -> PathBuf {
     Path::new(homes).join(MERGED_DIR).join(id)
 }
 
+/// Direct filesystem IO into a clone's live home (the merged view). The server holds
+/// these mounts itself from clone creation to deletion, so for files under `/home/rmng`
+/// this replaces daemon tar roundtrips: plain reads/writes the clone sees instantly, with
+/// no guest shell and no archive parsing. `rel` is the home-relative path
+/// (`".claude.json"`, `".codex/auth.json"`). Files outside the home bind (e.g. the
+/// `/etc/rmng` stamps) still go through the daemon.
+///
+/// `homes` is a parameter (not the [`crate::zfs::HOMES_DIR`] constant) so tests can point
+/// at a scratch dir.
+/// Read one home-relative file. `None` when missing — an explicit absence branch.
+pub fn read_home_file(homes: &Path, id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+    let path = homes.join(MERGED_DIR).join(id).join(rel);
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {} in {id}'s home", path.display())),
+    }
+}
+
+/// Write one home-relative file atomically (temp + rename in the same dir), mode 0600,
+/// owned by the clone user — the same landing the old tar uploads gave. Missing parents
+/// are created and the whole chain chowned, so a file never lands under a root-owned
+/// dir its agent cannot write beside (the phase-30 lesson).
+pub fn write_home_file(homes: &Path, id: &str, rel: &str, data: &[u8]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let root = homes.join(MERGED_DIR).join(id);
+    let path = root.join(rel);
+    let parent = path.parent().with_context(|| format!("no parent for home path {rel:?}"))?;
+    // Own the full chain: only missing components are created, but every component down
+    // to the merged root is chowned — deterministic no matter who made the dir.
+    let mut dir = root.clone();
+    chown(&dir)?;
+    if let Ok(rel_parent) = parent.strip_prefix(&root) {
+        for comp in rel_parent.components() {
+            dir.push(comp);
+            if !dir.exists() {
+                std::fs::create_dir(&dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+            }
+            chown(&dir)?;
+        }
+    }
+    let tmp = parent.join(".rmng-write.tmp");
+    std::fs::write(&tmp, data).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, PermissionsExt::from_mode(0o600))?;
+    chown(&tmp)?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("installing {} in {id}'s home", path.display()))?;
+    Ok(())
+}
+
+fn chown(path: &Path) -> Result<()> {
+    std::os::unix::fs::chown(path, Some(1000), Some(1000))
+        .with_context(|| format!("chowning {}", path.display()))
+}
+
+/// Delete one home-relative file (`rm -f` semantics: missing is fine).
+pub fn remove_home_file(homes: &Path, id: &str, rel: &str) -> Result<()> {
+    let path = homes.join(MERGED_DIR).join(id).join(rel);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {} from {id}'s home", path.display())),
+    }
+}
+
+/// This server's live homes root.
+fn live_homes() -> &'static Path {
+    Path::new(crate::zfs::HOMES_DIR)
+}
+
+/// [`read_home_file`] against this server's homes.
+pub fn read_clone_home(id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
+    read_home_file(live_homes(), id, rel)
+}
+
+/// [`write_home_file`] against this server's homes.
+pub fn write_clone_home(id: &str, rel: &str, data: &[u8]) -> Result<()> {
+    write_home_file(live_homes(), id, rel, data)
+}
+
+/// [`remove_home_file`] against this server's homes.
+pub fn remove_clone_home(id: &str, rel: &str) -> Result<()> {
+    remove_home_file(live_homes(), id, rel)
+}
+
 /// Lowerdir currently mounted at `merged`, if it is an overlay mount. A mountinfo line
 /// naming our mountpoint without a parseable lowerdir is an error, not an unmounted
 /// verdict: remounting blind over it risks EBUSY and hides a world we do not understand.
@@ -288,6 +374,41 @@ pub async fn remount_all(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_homes(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("rmng-hometest-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".merged").join("c1")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn home_roundtrip_missing_read_and_remove_are_none_and_ok() {
+        let homes = scratch_homes("roundtrip");
+        assert_eq!(read_home_file(&homes, "c1", ".codex/auth.json").unwrap(), None);
+        remove_home_file(&homes, "c1", ".codex/auth.json").unwrap();
+        write_home_file(&homes, "c1", ".codex/auth.json", b"{\"a\":1}").unwrap();
+        assert_eq!(
+            read_home_file(&homes, "c1", ".codex/auth.json").unwrap().as_deref(),
+            Some(b"{\"a\":1}".as_slice())
+        );
+        remove_home_file(&homes, "c1", ".codex/auth.json").unwrap();
+        assert_eq!(read_home_file(&homes, "c1", ".codex/auth.json").unwrap(), None);
+        let _ = std::fs::remove_dir_all(&homes);
+    }
+
+    #[test]
+    fn home_write_creates_parents_and_lands_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let homes = scratch_homes("parents");
+        write_home_file(&homes, "c1", ".pi/agent/auth.json", b"{}").unwrap();
+        let path = homes.join(".merged").join("c1").join(".pi/agent/auth.json");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        // No temp droppings beside the installed file.
+        assert!(std::fs::read_dir(path.parent().unwrap()).unwrap().count() == 1);
+        let _ = std::fs::remove_dir_all(&homes);
+    }
 
     #[test]
     fn digest_path_keeps_it_a_single_safe_component() {
