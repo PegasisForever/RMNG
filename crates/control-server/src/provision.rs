@@ -542,6 +542,18 @@ async fn clone_container_after_create(
             0o600,
         ),
         (
+            format!("home/{CLONE_USER}/.config/mcp/mcp.json"),
+            crate::clone_reconcile::merge_pi_mcp(
+                &serde_json::json!({}),
+                headless,
+                &linear_key,
+            )
+            .with_context(|| format!("clone {hostname}: rendering initial ~/.config/mcp/mcp.json"))?
+            .to_string()
+            .into_bytes(),
+            0o600,
+        ),
+        (
             format!("home/{CLONE_USER}/.claude/settings.json"),
             crate::clone_reconcile::claude_settings_initial().into_bytes(),
             0o644,

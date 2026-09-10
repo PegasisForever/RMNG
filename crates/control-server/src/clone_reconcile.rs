@@ -222,6 +222,92 @@ pub(crate) fn merge_cursor_mcp(
     )
 }
 
+/// The `mcpServers` entries for the pi-mcp-adapter's user-global file
+/// (`~/.config/mcp/mcp.json`, its top-precedence shared config). Same managed set as
+/// Cursor, translated to the adapter's file schema: plain `{url}` servers, and the
+/// Linear key by reference (`bearerTokenEnv` reads the clone session env at connect
+/// time, so no secret ever lands in the file). Skipped servers are never written, never
+/// deleted — set-only like every other merge. With this file in place, installing the
+/// adapter extension in a TUI pi is zero-config: it reads this path on its own.
+fn pi_mcp_want(headless: bool, linear_key: &str) -> serde_json::Value {
+    let mut want = serde_json::Map::new();
+    for m in managed_mcp() {
+        if headless && m.headless_only {
+            continue;
+        }
+        // A server the clone cannot authenticate is skipped, not written keyless.
+        if m.bearer_env.is_some() && linear_key.is_empty() {
+            continue;
+        }
+        let mut server = serde_json::json!({ "url": m.url });
+        if let Some(env) = m.bearer_env {
+            server["bearerTokenEnv"] = serde_json::json!(env);
+        }
+        want.insert(m.name.to_string(), server);
+    }
+    serde_json::Value::Object(want)
+}
+
+/// Merge the managed MCP set into `~/.config/mcp/mcp.json`: set each wanted server
+/// under `.mcpServers`, keep everything else (the operator's own servers share this
+/// file). A non-object base or `.mcpServers` is a hard error.
+pub(crate) fn merge_pi_mcp(
+    base: &serde_json::Value,
+    headless: bool,
+    linear_key: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let want = pi_mcp_want(headless, linear_key);
+    let mut servers = match base.get("mcpServers") {
+        None | Some(serde_json::Value::Null) => serde_json::Map::new(),
+        Some(serde_json::Value::Object(map)) => map.clone(),
+        Some(_) => {
+            return Err(anyhow::anyhow!(
+                "~/.config/mcp/mcp.json .mcpServers is not an object"
+            ));
+        }
+    };
+    for (name, server) in want.as_object().cloned().unwrap_or_default() {
+        servers.insert(name, server);
+    }
+    set_json_key(
+        base,
+        "~/.config/mcp/mcp.json",
+        "mcpServers",
+        serde_json::Value::Object(servers),
+    )
+}
+
+fn pi_mcp_stamp_path() -> &'static str {
+    "etc/rmng/pi-mcp"
+}
+
+/// Hash of the canonical merge output, so the headless bit, a rotated Linear key, and
+/// any future change to the managed set all re-apply on the next pass. Only the hash is
+/// stored — the key itself never lands in a stamp file.
+fn pi_mcp_desired(headless: bool, linear_key: &str) -> String {
+    // `expect`: merging onto `{}` cannot fail (only a non-object base errors).
+    let canonical = merge_pi_mcp(&serde_json::json!({}), headless, linear_key)
+        .expect("empty object takes the pi MCP merge")
+        .to_string();
+    desired_payload_hash(&[TarEntry {
+        path: "pi-mcp".into(),
+        data: canonical.into_bytes(),
+        mode: 0,
+        uid: 0,
+        gid: 0,
+    }])
+}
+
+pub(crate) fn pi_mcp_stamp_entry_for(headless: bool, linear_key: &str) -> TarEntry {
+    TarEntry {
+        path: pi_mcp_stamp_path().to_string(),
+        data: format!("{}\n", pi_mcp_desired(headless, linear_key)).into_bytes(),
+        mode: 0o644,
+        uid: 0,
+        gid: 0,
+    }
+}
+
 fn cursor_mcp_stamp_path() -> &'static str {
     "etc/rmng/cursor-mcp"
 }
@@ -1622,6 +1708,46 @@ async fn ensure_cursor_mcp(
     Ok(true)
 }
 
+/// Keep the pi-mcp-adapter's user-global `~/.config/mcp/mcp.json` pointed at the same
+/// managed servers, so a TUI pi with the adapter extension installed gets the tools with
+/// zero config. Read-merge-write against the clone's live home; stamped like the rest.
+async fn ensure_pi_mcp(
+    app: &App,
+    clone_id: &str,
+    headless: bool,
+    linear_key: &str,
+) -> Result<bool> {
+    let desired = pi_mcp_desired(headless, linear_key);
+    if read_stamp(app, clone_id, pi_mcp_stamp_path(), "pi mcp")
+        .await?
+        .as_deref()
+        == Some(desired.as_str())
+    {
+        return Ok(false);
+    }
+    let base =
+        read_json_merge_base(app, clone_id, ".config/mcp/mcp.json", "~/.config/mcp/mcp.json")
+            .await?;
+    let merged = merge_pi_mcp(&base, headless, linear_key)
+        .with_context(|| format!("{clone_id}: merging ~/.config/mcp/mcp.json MCP"))?;
+    upload_guest_file(
+        app,
+        clone_id,
+        ".config/mcp/mcp.json",
+        merged.to_string().into_bytes(),
+        "~/.config/mcp/mcp.json MCP",
+    )
+    .await?;
+    app.docker
+        .upload_tar(
+            clone_id,
+            vec![pi_mcp_stamp_entry_for(headless, linear_key)],
+        )
+        .await
+        .with_context(|| format!("{clone_id}: writing pi mcp stamp"))?;
+    Ok(true)
+}
+
 /// Install the activity probe and register it in Claude Code's settings.
 ///
 /// Claude Code reloads `settings.json` live, so an already-running agent picks the hooks up
@@ -1969,6 +2095,29 @@ async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSe
                     tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile failed: {e:#}");
                 } else {
                     tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile still failing: {e:#}");
+                }
+            }
+        }
+
+        // The pi-mcp-adapter's `~/.config/mcp/mcp.json`: same set, adapter schema.
+        // Merged, not rewritten: the operator's own servers share that file.
+        match ensure_pi_mcp(app, id, h.headless, &linear_key).await {
+            Ok(true) => {
+                warned.remove(&format!("{id}:pi-mcp"));
+                tracing::info!(
+                    target: "clone_reconcile",
+                    "clone {id}: synced ~/.config/mcp/mcp.json MCP servers (headless={})",
+                    h.headless
+                );
+            }
+            Ok(false) => {
+                warned.remove(&format!("{id}:pi-mcp"));
+            }
+            Err(e) => {
+                if warned.insert(format!("{id}:pi-mcp")) {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.config/mcp/mcp.json MCP reconcile failed: {e:#}");
+                } else {
+                    tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.config/mcp/mcp.json MCP reconcile still failing: {e:#}");
                 }
             }
         }
@@ -3191,6 +3340,40 @@ mod hook_tests {
     }
 
     #[test]
+    #[test]
+    fn pi_adapter_file_carries_the_managed_set_in_adapter_schema() {
+        // Headed with a key: both servers, linear by env reference (no secret in the file).
+        let v = merge_pi_mcp(&serde_json::json!({}), false, "lin_key").unwrap();
+        assert_eq!(v["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
+        assert_eq!(
+            v["mcpServers"]["linear"]["url"],
+            "https://mcp.linear.app/mcp"
+        );
+        assert_eq!(v["mcpServers"]["linear"]["bearerTokenEnv"], "LINEAR_API_KEY");
+        assert!(
+            !v.to_string().contains("lin_key"),
+            "the key itself must never land in the file"
+        );
+        // Headless skips desktop; keyless skips linear.
+        let v = merge_pi_mcp(&serde_json::json!({}), true, "lin_key").unwrap();
+        assert!(v["mcpServers"].get("desktop").is_none());
+        assert!(v["mcpServers"]["linear"].is_object());
+        let v = merge_pi_mcp(&serde_json::json!({}), false, "").unwrap();
+        assert!(v["mcpServers"]["desktop"].is_object());
+        assert!(v["mcpServers"]["linear"].is_null());
+        // The operator's own servers share the file and survive the merge.
+        let base = serde_json::json!({"mcpServers": {"mine": {"url": "http://x"}}});
+        let v = merge_pi_mcp(&base, false, "lin_key").unwrap();
+        assert_eq!(v["mcpServers"]["mine"]["url"], "http://x");
+        assert!(v["mcpServers"]["desktop"].is_object());
+        // A non-object base is a hard error.
+        assert!(merge_pi_mcp(&serde_json::json!([1]), false, "lin_key").is_err());
+        // The stamp tracks the headless bit and the key's presence without carrying it.
+        assert_ne!(pi_mcp_desired(false, "k"), pi_mcp_desired(true, "k"));
+        assert_ne!(pi_mcp_desired(false, "k1"), pi_mcp_desired(false, ""));
+        assert!(!pi_mcp_desired(false, "k1").contains("k1"));
+    }
+
     fn a_headless_clone_skips_desktop_and_a_keyless_one_skips_linear() {
         let dir = tmpdir("cursordrop");
         let path = dir.join("mcp.json");
