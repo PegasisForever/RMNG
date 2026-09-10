@@ -19,6 +19,8 @@
 //!
 //! Every step asserts the state it leaves behind and aborts on the first failure, best-effort
 //! deleting whatever it made (ids are printed either way, for hand cleanup if that misses).
+//! The run temporarily points the preset's startup script at a marker (restored after,
+//! even on failure) and asserts create + fork both ran it as the clone user.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -34,6 +36,8 @@ struct Runner {
     client: Client,
     budget: Duration,
     made: Vec<String>,
+    /// (`preset`, original script) to restore on the way out — success or failure.
+    script_restore: Option<(String, String)>,
 }
 
 impl Runner {
@@ -70,6 +74,16 @@ impl Runner {
     }
 
     /// Poll `/api/state` until the clone-daemon holds its media session (headed
+    /// A finished op's log lines, for asserting on what a step recorded.
+    async fn op_log(&self, op: &Operation, what: &str) -> Result<Vec<String>> {
+        let st = self.client.state().await?;
+        st.operations
+            .iter()
+            .find(|o| o.id == op.id)
+            .map(|o| o.log.clone())
+            .ok_or_else(|| anyhow::anyhow!("{what}: op {} already pruned, log unreadable", op.id))
+    }
+
     /// clones only). Separate from op completion: the op succeeds when the
     /// container is up, which says nothing about the agent stack inside.
     async fn wait_connected(&self, id: &str, what: &str) -> Result<()> {
@@ -157,7 +171,13 @@ impl Runner {
         Ok((w, h, sd))
     }
 
-    async fn cleanup(&self) {
+    async fn cleanup(&mut self) {
+        if let Some((preset, script)) = self.script_restore.take() {
+            println!("e2e: restoring preset '{preset}' startup script ...");
+            if let Err(e) = self.client.set_preset_startup_script(&preset, &script).await {
+                eprintln!("e2e: WARNING: script restore failed: {e:#}");
+            }
+        }
         for id in &self.made {
             if !self.hosts_contain(id).await.unwrap_or(true) {
                 continue;
@@ -187,6 +207,7 @@ async fn main() -> Result<()> {
         client: Client::new(server.clone()),
         budget,
         made: vec![],
+        script_restore: None,
     };
     let run = run(&mut r, &preset).await;
     if let Err(e) = &run {
@@ -198,6 +219,24 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     println!("E2E PASS");
+    Ok(())
+}
+
+/// The preset startup script ran as the clone user: the op log carries `exit 0`, the
+/// marker echo, and the `rmng` username — proving user, not root, ran it.
+async fn assert_startup_ran(r: &Runner, op: &Operation, marker: &str, what: &str) -> Result<()> {
+    let log = r.op_log(op, what).await?;
+    let text = log.join("\n");
+    if !text.contains("startup script: exit 0") {
+        bail!("{what}: no successful startup-script line in op log:\n{text}");
+    }
+    if !text.contains(marker) {
+        bail!("{what}: startup marker missing from op log:\n{text}");
+    }
+    if !text.lines().any(|l| l.trim() == "rmng") {
+        bail!("{what}: script did not run as the clone user:\n{text}");
+    }
+    println!("e2e: {what} ran the startup script as rmng (exit 0)");
     Ok(())
 }
 
@@ -229,6 +268,18 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
         .as_secs();
     let title = format!("e2e-{stamp}");
 
+    // 0b. Point the preset's startup script at a marker, restoring the original on the
+    // way out (see cleanup): create + fork below then prove the script ran as the clone
+    // user by reading their op logs.
+    let marker = format!("e2e-startup-{stamp}");
+    let script = format!("echo {marker} && whoami");
+    r.script_restore = Some((preset.to_string(), found.startup_script.clone()));
+    r.client
+        .set_preset_startup_script(preset, &script)
+        .await
+        .context("PUT /api/config startup script")?;
+    println!("e2e: preset startup script set to marker '{marker}'");
+
     // 1. Create a plain clone (builds the preset image on demand on a cold cache).
     println!("e2e: create '{title}' ...");
     let op = r
@@ -237,6 +288,7 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
         .await
         .context("POST /api/clone")?;
     r.wait_op(&op, "create").await?;
+    assert_startup_ran(r, &op, &marker, "create").await?;
     let id = op.target.clone();
     r.made.push(id.clone());
     let st = r.client.state().await?;
@@ -265,12 +317,14 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
             &id,
             &ForkOpts {
                 first_message: Some("e2e fork"),
+                run_startup_script: true,
                 ..Default::default()
             },
         )
         .await
         .context("POST /api/fork")?;
     r.wait_op(&op, "fork").await?;
+    assert_startup_ran(r, &op, &marker, "fork").await?;
     let fork = op.target.clone();
     r.made.push(fork.clone());
     if !r.hosts_contain(&fork).await? {
@@ -333,5 +387,6 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
         }
     }
     r.made.clear();
+    r.cleanup().await;
     Ok(())
 }

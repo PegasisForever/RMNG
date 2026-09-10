@@ -143,6 +143,20 @@ impl Client {
         Ok(Self::check(resp).await?.json().await?)
     }
 
+    async fn put_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> Result<T> {
+        let resp = self
+            .http
+            .put(format!("{}{path}", self.base))
+            .json(body)
+            .send()
+            .await?;
+        Ok(Self::check(resp).await?.json().await?)
+    }
+
     /// POST an op-starting endpoint. Clone/fork/rebase/prebuild answer
     /// `{"ok": true, "op": {...}}` (the dashboard reads `.op` off the same
     /// envelope), so unwrap it here rather than in every caller.
@@ -368,6 +382,22 @@ impl Client {
     /// The redacted server config (presets, account groups, docker settings — no secrets).
     pub async fn config(&self) -> Result<AppConfigRedacted> {
         self.get_json("/api/config").await
+    }
+
+    /// Replace one preset's startup script (`PUT /api/config` carrying the preset list).
+    /// The e2e sets a marker script before creating and restores the original after.
+    pub async fn set_preset_startup_script(&self, preset: &str, script: &str) -> Result<()> {
+        let mut cfg = self.config().await?;
+        let row = cfg
+            .presets
+            .iter_mut()
+            .find(|p| p.name == preset)
+            .ok_or_else(|| anyhow!("preset '{preset}' not in server config"))?;
+        row.startup_script = script.to_string();
+        let _: Value = self
+            .put_json("/api/config", &json!({ "presets": cfg.presets }))
+            .await?;
+        Ok(())
     }
 
     /// Proxy a desktop-automation tool call to a clone's daemon MCP
