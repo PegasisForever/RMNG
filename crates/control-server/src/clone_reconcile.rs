@@ -281,9 +281,10 @@ fn pi_mcp_stamp_path() -> &'static str {
     "etc/rmng/pi-mcp"
 }
 
-/// Hash of the canonical merge output, so the headless bit, a rotated Linear key, and
-/// any future change to the managed set all re-apply on the next pass. Only the hash is
-/// stored — the key itself never lands in a stamp file.
+/// Hash of the canonical merge output, so the headless bit, a key being added or
+/// removed, and any future change to the managed set all re-apply at the next converge
+/// trigger. A mere rotation changes nothing (the file holds a reference, not the key).
+/// Only the hash is stored — the key itself never lands in a stamp file.
 fn pi_mcp_desired(headless: bool, linear_key: &str) -> String {
     // `expect`: merging onto `{}` cannot fail (only a non-object base errors).
     let canonical = merge_pi_mcp(&serde_json::json!({}), headless, linear_key)
