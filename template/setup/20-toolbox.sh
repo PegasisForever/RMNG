@@ -10,6 +10,7 @@
 # desktop is already in place from phase 10.
 set -euo pipefail
 . /setup/lib.sh
+enable_err_trap
 
 log "dev toolbox: third-party apt repos (docker/chrome/gh/cursor/mozilla/azure/gcloud/stripe)"
 . /etc/os-release; CODENAME="${VERSION_CODENAME:-resolute}"

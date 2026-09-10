@@ -16,6 +16,13 @@ export SYSTEMD_OFFLINE=1
 # so a step line is just a build-log line.
 log()  { echo "  >> $*"; }
 
+# Strict-build failure reporter: under `set -e`, the ERR trap fires on the exact command
+# that fails, with its line number. Silent on success; precise on failure — a strict
+# build must never die without naming the step. Each phase script enables it after
+# sourcing this file.
+report_err() { echo "  !! FAILED at line $1: $2" >&2; }
+enable_err_trap() { trap 'report_err "$LINENO" "$BASH_COMMAND"' ERR; }
+
 # Strict-build rule: every phase script runs under `set -euo pipefail` and NOTHING swallows
 # a failure — no `warn`, no `|| true` on real steps. A failed install fails the template
 # build here, not surfaces later as a degraded clone. The only tolerated fallbacks are

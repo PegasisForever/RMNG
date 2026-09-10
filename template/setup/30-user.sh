@@ -10,6 +10,7 @@
 # Env (from the Dockerfile ARGs on the RUN line): USERNAME, MONITORS, CLONE_SOCKET.
 set -euo pipefail
 . /setup/lib.sh
+enable_err_trap
 
 : "${USERNAME:?USERNAME is required}"
 : "${CLONE_SOCKET:?CLONE_SOCKET is required}"

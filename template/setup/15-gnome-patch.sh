@@ -13,6 +13,7 @@
 # Recommends. This also means no apt lists are needed here (phase 10 dropped them).
 set -euo pipefail
 . /setup/lib.sh
+enable_err_trap
 
 DEB=/tmp/gnome-shell.deb
 test -f "$DEB"

@@ -10,6 +10,7 @@
 # /dev/dri/renderD128), Mesa VA-API decode, no DM. Replaces the old g-r-d/GDM handover.
 set -euo pipefail
 . /setup/lib.sh
+enable_err_trap
 
 log "apt update + full-upgrade"
 apt-get update -qq && apt-get full-upgrade -y -qq
