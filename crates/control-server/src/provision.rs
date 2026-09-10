@@ -220,11 +220,10 @@ pub(crate) fn compose_clone_env(
     let mut env = control;
     env.extend(clone_key);
     env.extend(preset.iter().cloned());
-    // Seeded HERE rather than left to the reconciler: every other var above reaches the clone in
+    // Seeded HERE rather than left to a later sync: every other var above reaches the clone in
     // the create path's one `upload_tar` (~3 s), but `ANTHROPIC_MODEL` used to be added only by
-    // the per-clone resync — so a fresh clone spent up to a full `RECONCILE_INTERVAL` (measured:
-    // 30 s) with no default model, running Claude Code on its built-in one instead of ours. The
-    // resync still owns keeping it current, and now finds it already correct.
+    // a later resync — so a fresh clone spent its first seconds with no default model, running
+    // Claude Code on its built-in one instead of ours.
     env.push(crate::clone_reconcile::claude_model_env_var());
     env
 }

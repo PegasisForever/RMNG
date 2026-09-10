@@ -8,7 +8,6 @@
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -18,7 +17,6 @@ use crate::app::App;
 use crate::docker::TarEntry;
 use crate::files::is_safe_id;
 
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const CLONE_UID: u64 = 1000;
 const CLONE_GID: u64 = 1000;
 
@@ -384,10 +382,9 @@ const FALLBACK_CLAUDE_MODEL: &str = "opus[1m]";
 /// A clone's `ANTHROPIC_MODEL` line.
 ///
 /// Shared by BOTH env-writing paths so they agree byte-for-byte: the create path
-/// (`jobs::run_clone`) and the per-clone resync below. Keeping one definition is what stops a
-/// fresh clone from being born without the var and then having the reconciler add it up to
-/// `RECONCILE_INTERVAL` later — a visible ~30 s window in which the clone's Claude Code ran on
-/// its built-in default instead of ours.
+/// (`jobs::run_clone`) and the trigger-driven resync. Keeping one definition is what stops a
+/// fresh clone from being born without the var — a visible window in which the clone's
+/// Claude Code ran on its built-in default instead of ours.
 pub(crate) fn claude_model_env_var() -> wire::EnvVar {
     wire::EnvVar {
         key: "ANTHROPIC_MODEL".into(),
@@ -1888,32 +1885,6 @@ async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSe
         }
 }
 
-/// The 30 s loop: SSH only. Everything else converges via explicit triggers
-/// ([`sync_all_running`] at boot and on Settings save, post-op convergence after
-/// fork/rebase/migrate, pre-boot tar at create).
-async fn reconcile_once(app: &App, warned: &mut HashSet<String>) {
-    let hosts: Vec<_> = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .filter(|h| h.managed && !h.archived && is_safe_id(&h.id))
-        .collect();
-    for h in &hosts {
-        let id = h.id.as_str();
-        if !app.docker.is_running(id).await.unwrap_or(false) {
-            continue;
-        }
-        sync_clone_ssh(app, id, warned).await;
-    }
-    let managed: HashSet<String> = hosts.iter().map(|h| h.id.clone()).collect();
-    warned.retain(|key| {
-        key.split_once(':')
-            .map(|(id, _)| managed.contains(id))
-            .unwrap_or(false)
-    });
-}
-
 /// Post-op convergence: run the full chain for one clone in the background after
 /// fork/rebase/migrate/unarchive complete. The clone may not be running yet (rebase ends
 /// stopped; migration restarts the fleet after the window), so this waits — bounded —
@@ -1965,19 +1936,13 @@ pub async fn sync_all_running(app: &App, reason: &str) {
     tracing::info!(target: "clone_reconcile", "sync-all ({reason}): converged {n} clones");
 }
 
+/// Convergence entry point, run once at server start: a single full pass over every
+/// running managed clone, so upgrades (payload, probe, MCP sets) land without waiting
+/// on any timer. There is no polling loop anymore — after boot, convergence rides
+/// explicit triggers only: the pre-boot tar (create), Settings-save fan-out, and
+/// post-op sync after fork/rebase/migrate/unarchive.
 pub async fn run(app: App) {
-    tracing::info!(
-        "clone reconciler started (one full boot pass, then SSH-only every {}s)",
-        RECONCILE_INTERVAL.as_secs()
-    );
-    // Boot pass: converge everything server code owns (payload, probe, MCP sets) right
-    // after a restart, so upgrades land without waiting on any timer.
     sync_all_running(&app, "boot").await;
-    let mut warned = HashSet::new();
-    loop {
-        reconcile_once(&app, &mut warned).await;
-        tokio::time::sleep(RECONCILE_INTERVAL).await;
-    }
 }
 
 #[cfg(test)]
