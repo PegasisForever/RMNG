@@ -1,12 +1,14 @@
-// The clone dialog's tab strip: which kind of clone this is going to be. The three tabs are
-// three different requests, not three views of one — the fields below change, and so does the
-// server route the Clone button ends up hitting.
+// The clone dialog's tab strip: which kind of clone this is going to be. The four tabs are
+// four different requests, not four views of one — the fields below change, and so does the
+// server route the Clone button ends up hitting. The first three fork the picked source
+// clone; the fourth creates from a template image onto a fresh empty home.
 import type { CloneMode } from "~/lib/cloneDraft";
 
 const TABS: { mode: CloneMode; label: string }[] = [
   { mode: "existing", label: "Existing ticket" },
   { mode: "create", label: "New ticket" },
   { mode: "plain", label: "No ticket" },
+  { mode: "template", label: "From template" },
 ];
 
 export function CloneModeTabs({

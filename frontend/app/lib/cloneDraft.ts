@@ -8,14 +8,16 @@
 import type { Operation } from "~/lib/types";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
-/** Which of the dialog's three tabs is open. Each one builds a different clone request. */
-export type CloneMode = "existing" | "create" | "plain";
+/** Which of the dialog's four tabs is open. Each one builds a different clone request:
+ *  the first three fork a live source clone, the fourth creates from a template image
+ *  onto a fresh empty home dataset. */
+export type CloneMode = "existing" | "create" | "plain" | "template";
 
 /** Everything the operator can type or pick in the dialog. One editable model, edited through
  *  a single `updateField`, so the View takes two props for the form instead of thirty. */
 export interface CloneDraft {
-  /** Source clone id to fork; null until the picker settles on one. Gen-2 rule: the
-   *  dialog always forks a live clone, never a template image. */
+  /** Source clone id to fork; null until the picker settles on one. Only the first
+   *  three tabs fork — the template tab creates from an image and leaves this null. */
   source: string | null;
   mode: CloneMode;
   /** Existing-ticket tab: a Linear link or a bare `WE-142`. */
@@ -45,6 +47,8 @@ export interface CloneDraft {
   codexAccount: string;
   /** No-ticket tab: the hand-picked preset. The ticket tabs never pick one by hand. */
   plainPreset: string;
+  /** Template tab: the hand-picked preset whose Dockerfile builds the image. */
+  templatePreset: string;
   /** Headless clone: no desktop, so the viewer shows a tmux tab view instead of a stream. */
   headless: boolean;
   /** Run the preset's startup script as the clone user. On unless unchecked. */
@@ -68,6 +72,7 @@ export function emptyCloneDraft(ticket = ""): CloneDraft {
     claudeAccount: "",
     codexAccount: "",
     plainPreset: "",
+    templatePreset: "",
     headless: false,
     runStartupScript: true,
   };
@@ -97,7 +102,7 @@ export function teamKeysOf(presets: PresetRedacted[]): TeamKey[] {
  * The preset that will actually drive the clone, per tab — mirroring what the server does so
  * the dialog shows the truth rather than a guess.
  *
- * - `plain`: whatever the operator picked by hand.
+ * - `plain` / `template`: whatever the operator picked by hand.
  * - `create`: implied by the chosen team key. The key comes from the presets' own labels, so
  *   picking a team IS picking a preset — which is why that tab has no preset dropdown.
  * - `existing`: auto-selected from the ticket-id prefix, mirroring the server's
@@ -107,13 +112,15 @@ export function teamKeysOf(presets: PresetRedacted[]): TeamKey[] {
 export function resolvePreset(
   mode: CloneMode,
   presets: PresetRedacted[],
-  { plainPreset, team, ticketPrefix }: {
+  { plainPreset, templatePreset, team, ticketPrefix }: {
     plainPreset?: string;
+    templatePreset?: string;
     team?: string;
     ticketPrefix?: string;
   },
 ): PresetRedacted | undefined {
   if (mode === "plain") return presets.find((p) => p.name === plainPreset);
+  if (mode === "template") return presets.find((p) => p.name === templatePreset);
   if (mode === "create") {
     return team
       ? presets.find((p) => p.labels.some((l) => l.toLowerCase() === team.toLowerCase()))
@@ -131,7 +138,7 @@ export function resolvePreset(
  * exactly the requests it would reject. `create` opens the issue with the *resolved* preset's
  * key (`resolve_issue`), so that one preset must have it; `existing` only fetches, and the
  * server tries every preset's key in turn (`fetch_issue_any`), so any one of them will do.
- * `plain` never touches Linear.
+ * `plain` and `template` never touch Linear.
  *
  * `configLoaded` is separate from "no presets": `presets` starts empty while the config is in
  * flight, which is indistinguishable from "none configured", and without the gate the warning
@@ -143,7 +150,7 @@ export function linearKeyMissing(
   preset: PresetRedacted | undefined,
   configLoaded: boolean,
 ): boolean {
-  if (!configLoaded || mode === "plain") return false;
+  if (!configLoaded || mode === "plain" || mode === "template") return false;
   if (mode === "create") return !preset?.linearKey;
   return !presets.some((p) => p.linearKey !== "");
 }
@@ -154,7 +161,8 @@ export function linearKeyMissing(
  * A source clone is always required; then: `existing` needs a parseable ticket AND a preset
  * that claims its prefix — with the preset dropdown gone there is no way to override the
  * auto-selection, so a prefix nothing claims is a request the server would 400; `create` needs
- * a team key + title; `plain` a title + a preset whenever any are configured.
+ * a team key + title; `plain` and `template` a title + a preset whenever any are
+ * configured.
  */
 export function cloneDraftValid(
   draft: CloneDraft,
@@ -179,6 +187,9 @@ export function cloneDraftValid(
       ? ticketParsed && (presets.length === 0 || !!preset)
       : draft.mode === "create"
         ? draft.title.trim().length > 0 && draft.team.trim().length > 0
+        : draft.mode === "template"
+        ? draft.title.trim().length > 0 &&
+          (presets.length === 0 || !!draft.templatePreset)
         : draft.title.trim().length > 0 && (presets.length === 0 || !!draft.plainPreset);
   return (!needsSource || !!draft.source) && modeValid && !keyMissing;
 }

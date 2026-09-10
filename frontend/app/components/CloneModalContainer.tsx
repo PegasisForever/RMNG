@@ -1,21 +1,20 @@
-// Clone dialog, network half. Pick a live clone to fork, then one of three ticket modes:
-// paste an existing Linear ticket (link or `WE-142`); create a new ticket (team key + title +
-// rich-text description); or a plain no-ticket clone (title + optional first message).
+// Clone dialog, network half. Four tabs: three fork a live source clone (an existing
+// Linear ticket, a new ticket, or plain no-ticket), and the fourth creates from a template
+// image onto a fresh empty home dataset.
 //
-// Gen-2 rule: this dialog ALWAYS forks. The source picker lists live clones, never template
-// images (template create has its own modal), and submit files `POST /api/fork` with the
-// ticket mode's answer plus preset/accounts/instructions; omitted fields inherit the
-// source's bindings server-side. Key handling, account fields, and instruction boxes
-// below feed that payload.
+// Fork submit files `POST /api/fork` with the ticket mode's answer plus
+// preset/accounts/instructions; omitted fields inherit the source's bindings server-side.
+// Template submit files `POST /api/clone` in plain mode (title + preset), always headed
+// with the preset's default accounts.
 //
-// Three things live here and nowhere below: the config read that supplies the presets and
-// the account pools, the fork POST, and the operation the POST returns. The dialog stays
-// open on that operation and closes only when it settles, which is why the op list is a
-// prop rather than something the View could ever have. The markup is CloneModalView.
+// Four things live here and nowhere below: the config read that supplies the presets and
+// the account pools, the fork/clone POSTs, and the operation the POST returns. The dialog
+// stays open on that operation and closes only when it settles, which is why the op list
+// is a prop rather than something the View could ever have. The markup is CloneModalView.
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 
 import { CloneModalView } from "~/components/CloneModalView";
-import { getConfig } from "~/lib/api";
+import { getConfig, type ClonePayload } from "~/lib/api";
 import { keysForTeam, issueCreate } from "~/lib/linear/mutations";
 import {
   cloneLinearMeta,
@@ -35,6 +34,7 @@ import {
   resolvePreset,
   teamKeysOf,
   type CloneDraft,
+  type CloneMode,
 } from "~/lib/cloneDraft";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
@@ -52,8 +52,10 @@ export function CloneModalContainer({
   accounts,
   initialTicket = "",
   initialSource = null,
+  initialMode = null,
   onClose,
   onFork,
+  onClone,
 }: {
   /** Live clones to fork from; the dialog shows only forkable rows (managed, not archived). */
   clones: Clone[];
@@ -68,15 +70,21 @@ export function CloneModalContainer({
   initialTicket?: string;
   /** Pre-selects a source clone, e.g. from the clone's own menu. Null = pick by hand. */
   initialSource?: string | null;
+  /** Opens the dialog on this tab, e.g. the old template-create button opens `template`. */
+  initialMode?: CloneMode | null;
   onClose: () => void;
   /** Starts the fork and resolves with the driving Operation. The dialog stays open,
    *  showing its progress, until the operation settles. Payload carries the ticket
    *  mode's answer plus preset/accounts/instructions; omitted fields inherit server-side. */
   onFork: (source: string, headless: boolean, payload: ForkPayload) => Promise<Operation>;
+  /** Starts a template clone and resolves with the driving Operation. Same lifecycle as
+   *  a fork: the dialog stays open, showing its progress, until the operation settles. */
+  onClone: (payload: ClonePayload) => Promise<Operation>;
 }) {
   const [draft, setDraft] = useState<CloneDraft>(() => ({
     ...emptyCloneDraft(initialTicket),
     source: initialSource,
+    ...(initialMode ? { mode: initialMode } : {}),
   }));
   const update = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>
@@ -95,6 +103,12 @@ export function CloneModalContainer({
     if (sources.length > 0) update("source", sources[0].id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clones]);
+  useEffect(() => {
+    if (!clonesLoading && sources.length === 0 && draft.mode !== "template") {
+      update("mode", "template");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clonesLoading, sources.length]);
 
   // Account pools and presets (from config).
   const [claudeGroups, setClaudeGroups] = useState<CloneGroup[]>([]);
@@ -121,12 +135,15 @@ export function CloneModalContainer({
       .finally(() => setConfigLoaded(true));
   }, []);
 
-  // The no-ticket tab needs an explicit preset — default to the first one.
+  // The no-ticket and template tabs need an explicit preset — default to the first one.
   useEffect(() => {
     if (draft.mode === "plain" && draft.plainPreset === "" && presets.length > 0) {
       update("plainPreset", presets[0].name);
     }
-  }, [draft.mode, draft.plainPreset, presets, update]);
+    if (draft.mode === "template" && draft.templatePreset === "" && presets.length > 0) {
+      update("templatePreset", presets[0].name);
+    }
+  }, [draft.mode, draft.plainPreset, draft.templatePreset, presets, update]);
 
   const teamKeys = useMemo(() => teamKeysOf(presets), [presets]);
 
@@ -139,6 +156,7 @@ export function CloneModalContainer({
   const parsedTicket = parseTicketInput(draft.ticket);
   const preset = resolvePreset(draft.mode, presets, {
     plainPreset: draft.plainPreset,
+    templatePreset: draft.templatePreset,
     team: draft.team,
     ticketPrefix: parsedTicket?.prefix,
   });
@@ -148,6 +166,7 @@ export function CloneModalContainer({
     preset,
     ticketParsed: !!parsedTicket,
     keyMissing,
+    needsSource: draft.mode !== "template",
   });
 
   // --- operation tracking ---------------------------------------------------------------
@@ -165,8 +184,9 @@ export function CloneModalContainer({
     if (op) setOpSeen(true);
     if (op?.status === "error") {
       setFailed(true);
-      setError(op.message || "the fork failed");
+      setError(op.message || (draft.mode === "template" ? "the clone failed" : "the fork failed"));
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [op]);
   useEffect(() => {
     if (!opId) return;
@@ -246,8 +266,7 @@ export function CloneModalContainer({
   }
 
   function submit() {
-    const source = draft.source;
-    if (!valid || busy || !source) return;
+    if (!valid || busy) return;
     // Clear the previous attempt so a retry after a failure tracks the NEW op, not the old
     // failed one (which is still in `operations` for another minute before it's pruned).
     setError(null);
@@ -255,6 +274,20 @@ export function CloneModalContainer({
     setOpSeen(false);
     setFailed(false);
     setStarting(true);
+    if (draft.mode === "template") {
+      const payload: ClonePayload = {
+        plain: { title: draft.title.trim(), message: "" },
+        ...(draft.templatePreset ? { preset: draft.templatePreset } : {}),
+        runStartupScript: draft.runStartupScript,
+      };
+      onClone(payload)
+        .then((started) => setOpId(started.id))
+        .catch((e: Error) => setError(e.message))
+        .finally(() => setStarting(false));
+      return;
+    }
+    const source = draft.source;
+    if (!source) return;
     // Ticket tabs resolve Linear first (existing: lookup, new: open + move to In
     // Progress); the answer rides the fork payload and replaces the source context.
     // Plain mode sends only its display name + optional first message.

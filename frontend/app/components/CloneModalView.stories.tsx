@@ -35,6 +35,7 @@ function derive(draft: CloneDraft, presets: PresetRedacted[]) {
   const parsedTicket = parseTicketInput(draft.ticket);
   const preset = resolvePreset(draft.mode, presets, {
     plainPreset: draft.plainPreset,
+    templatePreset: draft.templatePreset,
     team: draft.team,
     ticketPrefix: parsedTicket?.prefix,
   });
@@ -162,6 +163,18 @@ export const Forking: Story = {
     ...form(makeCloneDraft({ ticket: cloneTicketUrl })),
     busy: true,
     operation: makeOperation({ target: "pega-we-143", source: "pega-we-142" }),
+  },
+};
+
+/** The From-template tab: title plus a hand-picked preset onto a fresh empty home. No
+ *  source picker (there is nothing to fork), no account overrides (the preset's defaults
+ *  drive), no Linear warning, and the button reads Clone. */
+export const Template: Story = {
+  args: {
+    ...sources(),
+    ...form(
+      makeCloneDraft({ mode: "template", title: "encoder-scratch", templatePreset: "webapp" }),
+    ),
   },
 };
 

@@ -1,10 +1,10 @@
-// The clone dialog's markup: a source clone to fork, one of
-// three ticket modes, the account overrides, and the button bar. It renders from props
-// alone — no config fetch, no fork POST, no operation stream — so every state it can be
-// in is a story. CloneModalContainer owns all three of those and hands the results down.
+// The clone dialog's markup: four tabs (three fork modes plus template create), the
+// account overrides, and the button bar. It renders from props alone — no config fetch,
+// no fork/clone POST, no operation stream — so every state it can be in is a story.
+// CloneModalContainer owns all three of those and hands the results down.
 //
-// Gen-2 rule: this dialog ALWAYS forks. Its source is a live clone id, never a template
-// image (template create has its own modal).
+// The first three tabs fork the picked source clone; the fourth creates from a template
+// image onto a fresh empty home dataset (always headed, always the preset's defaults).
 //
 // The form is one editable model (`CloneDraft`) plus a single `onDraftChange`, rather than
 // thirty value/onChange pairs. What is NOT in the draft is everything the server decides:
@@ -115,27 +115,6 @@ export function CloneModalView({
         </h3>
 
         <div className="h-[49.5rem] min-h-0 shrink overflow-y-auto pr-0.5">
-          <div className="mt-3 space-y-2">
-            <label className={`${cloneLabel} font-medium`}>
-              Source clone to fork
-              <select
-                value={draft.source ?? ""}
-                disabled={busy || clonesLoading}
-                onChange={(e) => onDraftChange("source", e.target.value || null)}
-                className={cloneField}
-              >
-                <option value="" disabled>
-                  {clonesLoading ? "Loading clones…" : clones.length === 0 ? "No forkable clones — use template create" : "Pick a clone"}
-                </option>
-                {clones.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.id}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-
           <div className="mt-3">
             <CloneModeTabs
               mode={draft.mode}
@@ -143,6 +122,30 @@ export function CloneModalView({
               onModeChange={(mode) => onDraftChange("mode", mode)}
             />
           </div>
+
+          {/* Only the fork tabs take a source: the template tab builds an image. */}
+          {draft.mode !== "template" ? (
+            <div className="mt-3 space-y-2">
+              <label className={`${cloneLabel} font-medium`}>
+                Source clone to fork
+                <select
+                  value={draft.source ?? ""}
+                  disabled={busy || clonesLoading}
+                  onChange={(e) => onDraftChange("source", e.target.value || null)}
+                  className={cloneField}
+                >
+                  <option value="" disabled>
+                    {clonesLoading ? "Loading clones…" : clones.length === 0 ? "No forkable clones" : "Pick a clone"}
+                  </option>
+                  {clones.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          ) : null}
 
           {/* No height pin on the tab block — the whole scroll body above carries it, so each
               tab is free to be its natural size. */}
@@ -166,7 +169,7 @@ export function CloneModalView({
               onTitleChange={(title) => onDraftChange("title", title)}
               onPriorityChange={(priority) => onDraftChange("priority", priority)}
             />
-          ) : (
+          ) : draft.mode === "plain" ? (
             <ClonePlainFields
               title={draft.title}
               message={draft.message}
@@ -177,18 +180,74 @@ export function CloneModalView({
               onPresetChange={(name) => onDraftChange("plainPreset", name)}
               onSubmit={onSubmit}
             />
+          ) : (
+            <div className="mt-3 space-y-2">
+              <p className="text-[11px] text-slate-400 dark:text-slate-500">
+                Starts with an empty home on its own dataset — the agent pulls the repo
+                itself. Always headed, always the preset's default accounts.
+              </p>
+              <label className={`${cloneLabel} font-medium`}>
+                Clone title
+                <input
+                  value={draft.title}
+                  disabled={busy}
+                  onChange={(e) => onDraftChange("title", e.target.value)}
+                  placeholder="encoder-scratch"
+                  className={cloneField}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onSubmit();
+                  }}
+                />
+              </label>
+              <label className={`${cloneLabel} font-medium`}>
+                Preset
+                <select
+                  value={draft.templatePreset}
+                  disabled={busy || presets.length === 0}
+                  onChange={(e) => onDraftChange("templatePreset", e.target.value)}
+                  className={cloneField}
+                >
+                  {presets.length === 0 ? (
+                    <option value="" disabled>
+                      No presets configured
+                    </option>
+                  ) : (
+                    presets.map((p) => (
+                      <option key={p.name} value={p.name}>
+                        {p.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </label>
+              <label
+                className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400"
+                title="Runs the preset's startup script as the clone user when the clone is created"
+              >
+                <input
+                  type="checkbox"
+                  checked={draft.runStartupScript}
+                  disabled={busy}
+                  onChange={(e) => onDraftChange("runStartupScript", e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+                />
+                Run startup script
+              </label>
+            </div>
           )}
 
-          <CloneAccountFields
-            accounts={accounts}
-            claudeGroups={claudeGroups}
-            codexGroups={codexGroups}
-            preset={preset}
-            claudeAccount={draft.claudeAccount}
-            codexAccount={draft.codexAccount}
-            onClaudeAccountChange={(value) => onDraftChange("claudeAccount", value)}
-            onCodexAccountChange={(value) => onDraftChange("codexAccount", value)}
-          />
+          {draft.mode !== "template" ? (
+            <CloneAccountFields
+              accounts={accounts}
+              claudeGroups={claudeGroups}
+              codexGroups={codexGroups}
+              preset={preset}
+              claudeAccount={draft.claudeAccount}
+              codexAccount={draft.codexAccount}
+              onClaudeAccountChange={(value) => onDraftChange("claudeAccount", value)}
+              onCodexAccountChange={(value) => onDraftChange("codexAccount", value)}
+            />
+          ) : null}
 
           {linearKeyMissing ? (
             <p className="mt-3 text-[11px] text-red-600 dark:text-red-400">
@@ -206,7 +265,7 @@ export function CloneModalView({
               a half-width column truncates them to uselessness. Five rows each: they take
               prose, and the dialog has the room now that only the Existing tab carries the
               preset line. Still resizable. */}
-          {draft.mode !== "plain" ? (
+          {draft.mode === "existing" || draft.mode === "create" ? (
             <div className="mt-3 space-y-2 text-xs">
               <label className={`${cloneLabel} font-medium`}>
                 Clone agent instructions
@@ -233,12 +292,14 @@ export function CloneModalView({
             </div>
           ) : null}
 
-          <CloneOptionsRow
-            headless={draft.headless}
-            onHeadlessChange={(headless) => onDraftChange("headless", headless)}
-            runStartupScript={draft.runStartupScript}
-            onRunStartupScriptChange={(run) => onDraftChange("runStartupScript", run)}
-          />
+          {draft.mode !== "template" ? (
+            <CloneOptionsRow
+              headless={draft.headless}
+              onHeadlessChange={(headless) => onDraftChange("headless", headless)}
+              runStartupScript={draft.runStartupScript}
+              onRunStartupScriptChange={(run) => onDraftChange("runStartupScript", run)}
+            />
+          ) : null}
         </div>
 
         {error ? (
@@ -266,7 +327,7 @@ export function CloneModalView({
             disabled={!valid || busy}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
-            {busy ? "Forking…" : "Fork clone"}
+            {busy ? (draft.mode === "template" ? "Cloning…" : "Forking…") : draft.mode === "template" ? "Clone" : "Fork clone"}
           </button>
         </div>
       </div>

@@ -98,6 +98,13 @@ test("the no-ticket tab uses the hand-picked preset", () => {
   );
 });
 
+test("the template tab uses its own hand-picked preset", () => {
+  expect(
+    resolvePreset("template", presets, { templatePreset: "side" })?.name,
+  ).toBe("side");
+  expect(resolvePreset("template", presets, {})).toBeUndefined();
+});
+
 test("the new-ticket tab derives the preset from the team key", () => {
   // Picking a team IS picking a preset — which is why that tab has no preset dropdown.
   expect(resolvePreset("create", presets, { team: "aw" })?.name).toBe("side");
@@ -180,6 +187,11 @@ test("creating a ticket needs the RESOLVED preset's own key", () => {
   expect(linearKeyMissing("create", presets, undefined, true)).toBe(true);
 });
 
+test("the fork-free tabs never need a Linear key", () => {
+  expect(linearKeyMissing("plain", presets, undefined, true)).toBe(false);
+  expect(linearKeyMissing("template", presets, undefined, true)).toBe(false);
+});
+
 test("looking a ticket up needs ANY preset's key", () => {
   // `fetch_issue_any` tries every configured key in turn, so the resolved preset is beside
   // the point — including when nothing has resolved yet.
@@ -203,6 +215,7 @@ const check = (
     preset: PresetRedacted | undefined;
     ticketParsed: boolean;
     keyMissing: boolean;
+    needsSource: boolean;
   }> = {},
 ) =>
   cloneDraftValid(d, {
@@ -277,6 +290,25 @@ test("a no-ticket clone needs a title, and a preset whenever any are configured"
   expect(
     check(draft({ mode: "plain", title: "scratch" }), { presets: [] }),
   ).toBe(true);
+});
+
+test("a template clone needs a title, and a preset whenever any are configured", () => {
+  const t = (o: object) =>
+    check(draft({ mode: "template", source: null, ...o }), {
+      needsSource: false,
+    });
+  expect(t({ title: "scratch", templatePreset: "work" })).toBe(true);
+  expect(t({ title: "scratch", templatePreset: "" })).toBe(false);
+  expect(t({ title: "", templatePreset: "work" })).toBe(false);
+  // Nothing configured, so there is no preset to pick and the title carries the form.
+  expect(check(draft({ mode: "template", source: null, title: "scratch" }), {
+    presets: [],
+    needsSource: false,
+  })).toBe(true);
+  // …but without the template opt-out a missing source still blocks, like every tab.
+  expect(
+    check(draft({ mode: "template", source: null, title: "x", templatePreset: "work" })),
+  ).toBe(false);
 });
 
 test("a missing Linear key blocks an otherwise complete form", () => {

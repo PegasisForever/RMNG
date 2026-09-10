@@ -18,7 +18,6 @@ import { useSearchParams } from "react-router";
 import { AppShellV2, type SideFocus } from "~/components/AppShellV2";
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
 import { CloneModalContainer } from "~/components/CloneModalContainer";
-import { TemplateModalContainer } from "~/components/TemplateModalContainer";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { RebaseModalContainer } from "~/components/RebaseModalContainer";
@@ -104,6 +103,7 @@ import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
+import type { CloneMode } from "~/lib/cloneDraft";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { LxcStats } from "~/lib/wire/LxcStats";
@@ -175,7 +175,9 @@ export function DashboardContainer({
 
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
-  const [templateOpen, setTemplateOpen] = useState(false);
+  /** Which tab the clone dialog opens on. The old template-create button opens it on
+   *  `template`; everything else leaves it null (the dialog picks its own default). */
+  const [cloneInitialMode, setCloneInitialMode] = useState<CloneMode | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // The shared cosmetic account order and the live clock. Both are session reads, so they
   // are resolved here and handed down: the rail's usage bars and the settings account lists
@@ -781,7 +783,8 @@ export function DashboardContainer({
           onOpenSettings: () => setSettingsOpen(true),
           onNewTemplateClone: () => {
             setNewCloneColumn(null);
-            setTemplateOpen(true);
+            setCloneInitialMode("template");
+            setCloneOpen(true);
           },
           onImportAccount: () => openImport(null),
           onReplaceAccount: (account) => openImport(account),
@@ -923,8 +926,10 @@ export function DashboardContainer({
           operations={state.operations}
           accounts={accounts}
           initialTicket={ticketPrefill}
+          initialMode={cloneInitialMode}
           onClose={() => {
             setCloneOpen(false);
+            setCloneInitialMode(null);
             setNewCloneColumn(null);
             setTicketPrefill("");
             // Land on the clone that was just made. The dialog only closes once its
@@ -954,27 +959,7 @@ export function DashboardContainer({
               return op;
             })
           }
-        />
-      ) : null}
-
-      {templateOpen ? (
-        <TemplateModalContainer
-          operations={state.operations}
-          onClose={() => {
-            setTemplateOpen(false);
-            setNewCloneColumn(null);
-            setTicketPrefill("");
-            // Land on the clone that was just made. The dialog only closes once its
-            // operation has settled, so by the time this runs the clone either exists or
-            // the create failed — hence the check, so a failed create leaves the current
-            // selection alone rather than pointing at a clone that never appeared.
-            const made = newClone ? clonesById.get(newClone) : null;
-            if (made) selectClone(made);
-            setNewClone(null);
-          }}
-          // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
-          // progress, and closes when the op settles. So this just starts it and hands the
-          // Operation back — errors surface inside the dialog, not in the page banner.
+          // Template tab: same lifecycle as a fork, through the clone route instead.
           onClone={(payload) =>
             duplicateClone(payload).then((op) => {
               if (newCloneColumn) {
