@@ -36,10 +36,8 @@ export function makeAppConfig(
       seedSnapshot: null,
       homesParent: "tank/rmng/homes",
     },
-    claude: {
-      pinnedEmail: "alex@example.com",
-    },
-    codex: { pinnedEmail: null, autoReset: false },
+    claude: {},
+    codex: { autoReset: false },
     // Built per call, down to the member list, so two configs from this builder never share
     // an array with each other or with the accounts fixture module.
     cloneGroups: makeCloneGroups(),

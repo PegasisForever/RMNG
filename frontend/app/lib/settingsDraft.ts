@@ -67,17 +67,15 @@ export interface SettingsDraft {
   hostnamePrefix: string;
   cloneCpus: number;
   cloneMemoryMb: number;
-  claude: { pinnedEmail: string };
   claudeGroups: GroupDraft[];
-  codex: { pinnedEmail: string; autoReset: boolean };
+  codex: { autoReset: boolean };
   codexGroups: GroupDraft[];
   chroma: ChromaMode;
   agentPlaybook: string;
   globalPrompt: string;
   ssh: SshConfig;
   /** Which GPT answers the stuck question, and which Codex account pays for it.
-   *  `codexEmail` is flattened to "" here, as `claude.pinnedEmail` is, so no input has to
-   *  handle a null. */
+   *  `codexEmail` is flattened to "" here so no input has to handle a null. */
   judge: { codexModel: string; codexEmail: string };
 }
 
@@ -153,15 +151,11 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     hostnamePrefix: c.docker.hostnamePrefix,
     cloneCpus: c.docker.cloneCpus,
     cloneMemoryMb: c.docker.cloneMemoryMb,
-    claude: {
-      pinnedEmail: c.claude.pinnedEmail ?? "",
-    },
     claudeGroups: c.cloneGroups.map((g) => ({
       name: g.name,
       accounts: [...g.accounts],
     })),
     codex: {
-      pinnedEmail: c.codex.pinnedEmail ?? "",
       autoReset: c.codex.autoReset,
     },
     codexGroups: c.codexGroups.map((g) => ({
@@ -211,9 +205,8 @@ export function settingsPatch(
       cloneCpus: draft.cloneCpus,
       cloneMemoryMb: draft.cloneMemoryMb,
     },
-    claude: { ...draft.claude, pinnedEmail: draft.claude.pinnedEmail || null },
     cloneGroups: savedGroups(draft.claudeGroups),
-    codex: { ...draft.codex, pinnedEmail: draft.codex.pinnedEmail || null },
+    codex: { autoReset: draft.codex.autoReset },
     codexGroups: savedGroups(draft.codexGroups),
     chroma: draft.chroma,
     ssh: draft.ssh,

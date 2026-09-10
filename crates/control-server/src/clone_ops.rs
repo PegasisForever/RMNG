@@ -103,7 +103,7 @@ fn provider_rank(p: Option<wire::Provider>) -> u8 {
 
 /// Publish `views` (all of `provider`) into `ControlState.claude_accounts`, replacing
 /// exactly this provider's existing rows and leaving every other provider's rows intact.
-/// `views` are sorted pinned-email-first then alphabetical; the combined list is then
+/// `views` are sorted alphabetical; the combined list is then
 /// stable-sorted by provider rank so grouping is deterministic. This is what lets the
 /// Claude and Codex pollers coexist without clobbering each other (each poller previously
 /// did `s.claude_accounts = views`, which would erase the other provider).
@@ -111,7 +111,6 @@ pub(crate) fn replace_provider_views(
     app: &App,
     provider: wire::Provider,
     mut views: Vec<wire::ClaudeUsage>,
-    pinned: Option<&str>,
 ) {
     // An account deleted while this pass was running must not ride back in on it. A poll
     // snapshots its account list at the top and then spends a 400ms stagger and up to a 10s
@@ -125,14 +124,7 @@ pub(crate) fn replace_provider_views(
     .collect();
     views.retain(|u| still_imported.contains(&u.email));
 
-    views.sort_by(|a, b| {
-        let ap = Some(a.email.as_str()) == pinned;
-        let bp = Some(b.email.as_str()) == pinned;
-        if ap != bp {
-            return if ap { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater };
-        }
-        a.email.cmp(&b.email)
-    });
+    views.sort_by(|a, b| a.email.cmp(&b.email));
     let mut changes = Vec::new();
     app.store.mutate(|s| {
         let mut merged: Vec<wire::ClaudeUsage> =
@@ -381,17 +373,16 @@ mod tests {
             s.claude_accounts =
                 vec![view("a@c", Provider::Claude), view("b@c", Provider::Claude), view("z@o", Provider::Codex)];
         });
-        // A codex poll publishes a new codex set (pinned y@o first).
+        // A codex poll publishes a new codex set, sorted alphabetical.
         replace_provider_views(
             &app,
             Provider::Codex,
             vec![view("z@o", Provider::Codex), view("y@o", Provider::Codex)],
-            Some("y@o"),
         );
         let st = app.store.get();
         // Both claude rows still present.
         assert_eq!(st.claude_accounts.iter().filter(|u| u.provider == Some(Provider::Claude)).count(), 2);
-        // Codex rows are the new set, pinned first.
+        // Codex rows are the new set, alphabetical.
         let codex: Vec<_> = st
             .claude_accounts
             .iter()
@@ -400,7 +391,7 @@ mod tests {
             .collect();
         assert_eq!(codex, vec!["y@o", "z@o"]);
         // An empty codex publish drops all codex rows but keeps claude.
-        replace_provider_views(&app, Provider::Codex, vec![], None);
+        replace_provider_views(&app, Provider::Codex, vec![]);
         let st2 = app.store.get();
         assert_eq!(st2.claude_accounts.len(), 2);
         assert!(st2.claude_accounts.iter().all(|u| u.provider == Some(Provider::Claude)));
@@ -438,7 +429,7 @@ mod tests {
 
         // The delete, mid-pass: the store loses the account while `views` still names it.
         crate::codex::test_delete(&app, "deleted@o");
-        replace_provider_views(&app, Provider::Codex, views, None);
+        replace_provider_views(&app, Provider::Codex, views);
 
         let published: Vec<String> = app
             .store

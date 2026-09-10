@@ -18,11 +18,10 @@ import {
   type SettingsCategory,
 } from "~/components/SettingsNav";
 import {
-  AgentsPane,
   BoardPane,
-  ClaudePane,
   ClonesPane,
-  CodexPane,
+  LayoutPane,
+  LlmPane,
   PresetsPane,
   ServerPane,
   type SettingsPaneProps,
@@ -123,10 +122,9 @@ const PANES: Record<
   React.ComponentType<SettingsPaneProps>
 > = {
   board: BoardPane,
-  agents: AgentsPane,
+  layout: LayoutPane,
   presets: PresetsPane,
-  claude: ClaudePane,
-  codex: CodexPane,
+  llm: LlmPane,
   clones: ClonesPane,
   server: ServerPane,
 };

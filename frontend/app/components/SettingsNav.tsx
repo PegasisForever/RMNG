@@ -1,18 +1,17 @@
-// The settings panel's category rail: the seven groups every settings section is filed under,
+// The settings panel's category rail: the eight groups every settings section is filed under,
 // and the control that moves between them. A column down the left of a desktop-width panel, a
 // horizontally scrolling strip above the pane on a phone.
 //
 // The categories are data rather than markup, so the panel, the panes and the stories all read
 // one list, and hiding a category (a page with no board) is a filter instead of a branch.
-import { Bot, Boxes, Container, LayoutGrid, Server, Sparkles, Terminal } from "lucide-react";
+import { Bot, Boxes, Container, LayoutGrid, Monitor, Server } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 export type SettingsCategory =
   | "board"
-  | "agents"
+  | "layout"
   | "presets"
-  | "claude"
-  | "codex"
+  | "llm"
   | "clones"
   | "server";
 
@@ -26,10 +25,9 @@ export interface SettingsCategoryInfo {
  *  what the server was installed with last. */
 export const SETTINGS_CATEGORIES: SettingsCategoryInfo[] = [
   { id: "board", label: "Board", icon: LayoutGrid },
-  { id: "agents", label: "Agents", icon: Bot },
+  { id: "layout", label: "Layout", icon: Monitor },
   { id: "presets", label: "Presets", icon: Boxes },
-  { id: "claude", label: "Claude", icon: Sparkles },
-  { id: "codex", label: "Codex", icon: Terminal },
+  { id: "llm", label: "LLM", icon: Bot },
   { id: "clones", label: "Clones", icon: Container },
   { id: "server", label: "Server", icon: Server },
 ];

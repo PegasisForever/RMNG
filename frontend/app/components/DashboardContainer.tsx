@@ -103,7 +103,6 @@ import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
-import type { CloneMode } from "~/lib/cloneDraft";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { LxcStats } from "~/lib/wire/LxcStats";
@@ -175,9 +174,6 @@ export function DashboardContainer({
 
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
-  /** Which tab the clone dialog opens on. The old template-create button opens it on
-   *  `template`; everything else leaves it null (the dialog picks its own default). */
-  const [cloneInitialMode, setCloneInitialMode] = useState<CloneMode | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // The shared cosmetic account order and the live clock. Both are session reads, so they
   // are resolved here and handed down: the rail's usage bars and the settings account lists
@@ -781,11 +777,6 @@ export function DashboardContainer({
           activeLayout: state.activeLayout ?? "",
           onActivateLayout: (name) => run(activateLayout(name)),
           onOpenSettings: () => setSettingsOpen(true),
-          onNewTemplateClone: () => {
-            setNewCloneColumn(null);
-            setCloneInitialMode("template");
-            setCloneOpen(true);
-          },
           onImportAccount: () => openImport(null),
           onReplaceAccount: (account) => openImport(account),
           onRefresh: () => {
@@ -926,10 +917,8 @@ export function DashboardContainer({
           operations={state.operations}
           accounts={accounts}
           initialTicket={ticketPrefill}
-          initialMode={cloneInitialMode}
           onClose={() => {
             setCloneOpen(false);
-            setCloneInitialMode(null);
             setNewCloneColumn(null);
             setTicketPrefill("");
             // Land on the clone that was just made. The dialog only closes once its

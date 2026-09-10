@@ -28,8 +28,8 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       seedSnapshot: null,
       homesParent: "tank/rmng/homes",
     },
-    claude: { pinnedEmail: "alex@example.com" },
-    codex: { pinnedEmail: null, autoReset: false },
+    claude: {},
+    codex: { autoReset: false },
     cloneGroups: [{ name: "pooled", accounts: ["alex@example.com"] }],
     codexGroups: [],
     presets: [
@@ -60,8 +60,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
  *  it is a request body, not a value this app consumes. */
 type Patch = {
   docker: { hostnamePrefix: string };
-  claude: { pinnedEmail: string | null };
-  codex: { pinnedEmail: string | null };
+  codex: { autoReset: boolean };
   cloneGroups: { name: string; accounts: string[] }[];
   codexGroups: { name: string; accounts: string[] }[];
   layoutPresets: {
@@ -198,14 +197,6 @@ test("a blank account default is sent as-is, because blank is a real answer", ()
   draft.presets = [{ ...draft.presets[0], claudeAccount: "" }];
 
   expect(patch(draft).presets[0].claudeAccount).toBe("");
-});
-
-test("a blank pinned email is sent as null rather than an empty string", () => {
-  const draft = settingsDraftFrom(config());
-  draft.claude = { ...draft.claude, pinnedEmail: "" };
-
-  expect(patch(draft).claude.pinnedEmail).toBeNull();
-  expect(patch(draft).codex.pinnedEmail).toBeNull();
 });
 
 test("an unnamed layout preset is dropped and negative geometry is clamped", () => {

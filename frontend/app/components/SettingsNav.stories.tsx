@@ -31,14 +31,14 @@ export const Default: Story = {};
 
 /** Partway down the rail, which is where the active fill has to read as the current pane
  *  rather than as a hover. */
-export const MidList: Story = { args: { active: "claude" } };
+export const MidList: Story = { args: { active: "llm" } };
 
 /** A page with no board drops that category. The rail is a filter of one list, so nothing
  *  else moves. */
 export const NoBoard: Story = {
   args: {
     categories: SETTINGS_CATEGORIES.filter((c) => c.id !== "board"),
-    active: "agents",
+    active: "presets",
   },
 };
 

@@ -1598,7 +1598,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
     let accts = app.codex.snapshot();
     let cfg = app.config();
     if accts.is_empty() {
-        crate::clone_ops::replace_provider_views(app, wire::Provider::Codex, Vec::new(), None);
+        crate::clone_ops::replace_provider_views(app, wire::Provider::Codex, Vec::new());
         return Ok(false);
     }
 
@@ -1745,12 +1745,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
         }
     }
 
-    crate::clone_ops::replace_provider_views(
-        app,
-        wire::Provider::Codex,
-        views,
-        cfg.codex.pinned_email.as_deref(),
-    );
+    crate::clone_ops::replace_provider_views(app, wire::Provider::Codex, views);
 
     push_stale_tokens(app).await;
 

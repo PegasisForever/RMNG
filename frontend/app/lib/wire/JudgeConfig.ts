@@ -22,7 +22,7 @@ codexModel: string,
  * account, so a rig with one account needs no answer here. The calls come out of that
  * account's weekly ChatGPT allowance, the same one its clones spend.
  *
- * `Option` for the same reason [`ClaudeConfig::pinned_email`] is one: a `PUT` reads an
+ * `Option` because a `PUT` reads an
  * empty string as "keep what is stored", so `null` is how the panel says "no account in
  * particular" once one has been picked.
  */

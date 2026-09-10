@@ -2,10 +2,6 @@
 
 export type CodexConfig = { 
 /**
- * Account email pinned to the top of the usage list.
- */
-pinnedEmail: string | null, 
-/**
  * When true, auto-spend one banked reset credit once every managed Codex account
  * is over the weekly cap with no 7d reset within 24h (see `codex.rs` fleet gate).
  */

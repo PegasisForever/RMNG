@@ -55,8 +55,6 @@ export interface BoardRailProps {
   activeLayout: string;
   onActivateLayout: (name: string) => void;
   onOpenSettings: () => void;
-  /** Open the template-create dialog (fresh empty home). Null column: filed later. */
-  onNewTemplateClone: () => void;
   /** Import an account from a clone that is already signed in. */
   onImportAccount: () => void;
   /** Sign in to an account that takes over from a dead one (the "sign in again" badge). */
@@ -78,7 +76,6 @@ export function BoardRail({
   activeLayout,
   onActivateLayout,
   onOpenSettings,
-  onNewTemplateClone,
   onImportAccount,
   onReplaceAccount,
   onRefresh,
@@ -139,14 +136,6 @@ export function BoardRail({
           CPU {lxcUsage.cpu} · MEM {lxcUsage.mem} · DISK {lxcUsage.disk}
         </div>
       ) : null}
-
-      <button
-        type="button"
-        onClick={onNewTemplateClone}
-        className="flex items-center justify-center gap-1.5 rounded-lg border border-emerald-600/40 px-2 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-950"
-      >
-        New from template
-      </button>
 
       <ClaudeAccountsPanel
         accounts={accounts}

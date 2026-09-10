@@ -316,20 +316,11 @@ pub fn dockerfile_tag(dockerfile: &str) -> String {
     format!("rmng-p-{:016x}", fnv1a64(dockerfile.trim_end().as_bytes()))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
+/// No knobs left (usage poll interval + pinned email are hardcoded/gone). The struct
+/// stays so the `claude` key in old config files keeps parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct ClaudeConfig {
-    /// Account email pinned to the top of the usage list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_email: Option<String>,
-}
-
-impl Default for ClaudeConfig {
-    fn default() -> Self {
-        Self { pinned_email: None }
-    }
-}
+pub struct ClaudeConfig {}
 
 /// What settles the clones the file checks cannot: GPT, on an imported Codex account's
 /// ChatGPT plan. See [`crate::MonitorState`].
@@ -352,7 +343,7 @@ pub struct JudgeConfig {
     /// account, so a rig with one account needs no answer here. The calls come out of that
     /// account's weekly ChatGPT allowance, the same one its clones spend.
     ///
-    /// `Option` for the same reason [`ClaudeConfig::pinned_email`] is one: a `PUT` reads an
+    /// `Option` because a `PUT` reads an
     /// empty string as "keep what is stored", so `null` is how the panel says "no account in
     /// particular" once one has been picked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -376,9 +367,6 @@ fn default_codex_judge_model() -> String {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct CodexConfig {
-    /// Account email pinned to the top of the usage list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pinned_email: Option<String>,
     /// When true, auto-spend one banked reset credit once every managed Codex account
     /// is over the weekly cap with no 7d reset within 24h (see `codex.rs` fleet gate).
     #[serde(default)]
@@ -387,10 +375,7 @@ pub struct CodexConfig {
 
 impl Default for CodexConfig {
     fn default() -> Self {
-        Self {
-            pinned_email: None,
-            auto_reset: false,
-        }
+        Self { auto_reset: false }
     }
 }
 
@@ -757,9 +742,8 @@ mod tests {
 
     #[test]
     fn codex_config_defaults_and_passthrough() {
-        // Defaults: no pinned email, no auto-reset. Retired poll keys in JSON are dropped.
+        // Defaults: no auto-reset. Retired poll/pinned keys in JSON are dropped.
         let c = AppConfig::default();
-        assert!(c.codex.pinned_email.is_none());
         assert!(!c.codex.auto_reset, "auto_reset defaults to false");
         let off: AppConfig = serde_json::from_str(
             r#"{ "codex": { "pollSecs": 300, "usagePolling": false, "autoReset": true } }"#,

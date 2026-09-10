@@ -34,7 +34,6 @@ import {
   resolvePreset,
   teamKeysOf,
   type CloneDraft,
-  type CloneMode,
 } from "~/lib/cloneDraft";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
@@ -52,7 +51,6 @@ export function CloneModalContainer({
   accounts,
   initialTicket = "",
   initialSource = null,
-  initialMode = null,
   onClose,
   onFork,
   onClone,
@@ -70,8 +68,6 @@ export function CloneModalContainer({
   initialTicket?: string;
   /** Pre-selects a source clone, e.g. from the clone's own menu. Null = pick by hand. */
   initialSource?: string | null;
-  /** Opens the dialog on this tab, e.g. the old template-create button opens `template`. */
-  initialMode?: CloneMode | null;
   onClose: () => void;
   /** Starts the fork and resolves with the driving Operation. The dialog stays open,
    *  showing its progress, until the operation settles. Payload carries the ticket
@@ -84,7 +80,6 @@ export function CloneModalContainer({
   const [draft, setDraft] = useState<CloneDraft>(() => ({
     ...emptyCloneDraft(initialTicket),
     source: initialSource,
-    ...(initialMode ? { mode: initialMode } : {}),
   }));
   const update = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>

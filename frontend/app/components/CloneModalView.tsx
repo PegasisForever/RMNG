@@ -182,10 +182,6 @@ export function CloneModalView({
             />
           ) : (
             <div className="mt-3 space-y-2">
-              <p className="text-[11px] text-slate-400 dark:text-slate-500">
-                Starts with an empty home on its own dataset — the agent pulls the repo
-                itself. Always headed, always the preset's default accounts.
-              </p>
               <label className={`${cloneLabel} font-medium`}>
                 Clone title
                 <input
@@ -327,7 +323,7 @@ export function CloneModalView({
             disabled={!valid || busy}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
-            {busy ? (draft.mode === "template" ? "Cloning…" : "Forking…") : draft.mode === "template" ? "Clone" : "Fork clone"}
+            {busy ? "Creating…" : "Create"}
           </button>
         </div>
       </div>

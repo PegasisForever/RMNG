@@ -808,7 +808,7 @@ pub async fn poll_once(app: &App) -> Result<bool> {
 async fn poll_inner(app: &App) -> Result<bool> {
     let accts = app.claude.snapshot();
     if accts.is_empty() {
-        crate::clone_ops::replace_provider_views(app, wire::Provider::Claude, Vec::new(), None);
+        crate::clone_ops::replace_provider_views(app, wire::Provider::Claude, Vec::new());
         return Ok(false);
     }
 
@@ -882,13 +882,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
         }
     }
 
-    let cfg = app.config();
-    crate::clone_ops::replace_provider_views(
-        app,
-        wire::Provider::Claude,
-        views,
-        cfg.claude.pinned_email.as_deref(),
-    );
+    crate::clone_ops::replace_provider_views(app, wire::Provider::Claude, views);
 
     // Rotations were fanned out per account as they happened; this sweep only retries
     // pushes that failed and catches clones reassigned during the pass.

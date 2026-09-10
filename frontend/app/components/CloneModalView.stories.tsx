@@ -120,7 +120,7 @@ export const FromTicket: Story = {
 };
 
 /** The New-ticket tab. The team dropdown is also the preset selector, so the resolved-preset
- *  line is gone; the description editor takes its place, and the button reads Fork clone. */
+ *  line is gone; the description editor takes its place. */
 export const NewTicket: Story = {
   args: {
     ...sources(),

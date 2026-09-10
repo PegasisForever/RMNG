@@ -15,7 +15,6 @@ import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
 import { SettingsLayoutPresets } from "~/components/SettingsLayoutPresets";
 import type { SettingsPanelViewProps } from "~/components/SettingsPanelView";
 import { SettingsPresetList } from "~/components/SettingsPresetList";
-import { SettingsProviderFields } from "~/components/SettingsProviderFields";
 import { SettingsServerSection } from "~/components/SettingsServerSection";
 import { SettingsSshSection } from "~/components/SettingsSshSection";
 import { SettingsStuckSection } from "~/components/SettingsStuckSection";
@@ -30,8 +29,7 @@ export type SettingsPaneProps = SettingsPanelViewProps & {
   rows: { claude: ClaudeUsage[]; codex: ClaudeUsage[] };
 };
 
-/** Board: the dashboard's swim lanes and the monitor arrangements the viewer switches between.
- *  Both apply the moment they are saved. */
+/** Board: the dashboard's swim lanes. Applies the moment it is saved. */
 export function BoardPane({
   draft,
   onDraftChange,
@@ -67,6 +65,15 @@ export function BoardPane({
         </Section>
       ) : null}
 
+    </>
+  );
+}
+
+/** Layout: the named monitor arrangements the viewer switches between. Applies the moment
+ *  it is saved. */
+export function LayoutPane({ draft, onDraftChange }: SettingsPaneProps) {
+  return (
+    <>
       <Section
         title="Layout presets"
         effect="immediate"
@@ -81,32 +88,15 @@ export function BoardPane({
   );
 }
 
-/** Agents: the two prompt layers every clone is built with. The global one is every agent's
- *  native rules file; the second is the node-agent's alone. */
-export function AgentsPane({
+/** Presets: the two prompt layers every clone is built with, then Linear identity (key +
+ *  the ticket-id prefixes that auto-select it) plus the env vars a clone is created with. */
+export function PresetsPane({
   draft,
   onDraftChange,
-  onTestJudge,
-  judgeTestMessage,
-  rows,
+  accounts,
 }: SettingsPaneProps) {
   return (
     <>
-      {/* How RMNG tells a clone that is thinking from one that is waiting on you. */}
-      <SettingsStuckSection
-        model={draft.judge.codexModel}
-        email={draft.judge.codexEmail}
-        accounts={rows.codex.map((a) => a.email)}
-        onModelChange={(v) =>
-          onDraftChange("judge", { ...draft.judge, codexModel: v })
-        }
-        onEmailChange={(v) =>
-          onDraftChange("judge", { ...draft.judge, codexEmail: v })
-        }
-        onTest={onTestJudge}
-        testMessage={judgeTestMessage}
-      />
-
       {/* Layer a: the shared operating memory EVERY agent reads as its native global rules
           (CLAUDE.md / AGENTS.md). Kept in sync into existing clones by the reconciler. */}
       <Section
@@ -138,56 +128,40 @@ export function AgentsPane({
           className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
         />
       </Section>
-    </>
-  );
-}
 
-/** Presets: Linear identity (key + the ticket-id prefixes that auto-select it) plus the env
- *  vars a clone is created with. */
-export function PresetsPane({
-  draft,
-  onDraftChange,
-  accounts,
-}: SettingsPaneProps) {
-  return (
-    <Section
-      title="Presets"
-      effect="immediate"
-      hint="A preset = Linear API key + the ticket-id prefixes (Linear team keys, e.g. DEV) that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by the ticket's team prefix (DEV-196 → DEV); other clones require an explicit pick."
-    >
-      <SettingsPresetList
-        presets={draft.presets}
-        accounts={accounts}
-        claudeGroups={draft.claudeGroups}
-        codexGroups={draft.codexGroups}
-        onChange={(presets) => onDraftChange("presets", presets)}
-      />
-    </Section>
+      <Section
+        title="Presets"
+        effect="immediate"
+        hint="A preset = Linear API key + the ticket-id prefixes (Linear team keys, e.g. DEV) that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by the ticket's team prefix (DEV-196 → DEV); other clones require an explicit pick."
+      >
+        <SettingsPresetList
+          presets={draft.presets}
+          accounts={accounts}
+          claudeGroups={draft.claudeGroups}
+          codexGroups={draft.codexGroups}
+          onChange={(presets) => onDraftChange("presets", presets)}
+        />
+      </Section>
+    </>
   );
 }
 
 /** Claude: the provider's own polling and pin, the imported accounts clones draw from, and the
  *  named pools built out of them. */
-export function ClaudePane({
+/** LLM: both providers' accounts and pools in one pane. The two providers' pools are
+ *  independent, and a clone binds one of each, so neither list is a filter of the other. */
+export function LlmPane({
   draft,
   onDraftChange,
   rows,
   onReorderAccounts,
   onDeleteAccount,
+  onDeleteCodexAccount,
   onImportAccount,
   onReplaceAccount,
 }: SettingsPaneProps) {
   return (
     <>
-      <Section title="Claude">
-        <SettingsProviderFields
-          pinnedEmail={draft.claude.pinnedEmail}
-          onPinnedEmailChange={(v) =>
-            onDraftChange("claude", { ...draft.claude, pinnedEmail: v })
-          }
-        />
-      </Section>
-
       {/* There is no in-browser login: the control-server harvests an account's tokens off a
           clone that is already signed in, hence "Import account" rather than "Add". */}
       <Section
@@ -216,35 +190,6 @@ export function ClaudePane({
           onChange={(groups) => onDraftChange("claudeGroups", groups)}
         />
       </Section>
-    </>
-  );
-}
-
-/** Codex: the twin of the Claude pane. The two providers' pools are independent, and a clone
- *  binds one of each, so neither list is a filter of the other. */
-export function CodexPane({
-  draft,
-  onDraftChange,
-  rows,
-  onReorderAccounts,
-  onDeleteCodexAccount,
-  onReplaceAccount,
-}: SettingsPaneProps) {
-  return (
-    <>
-      <Section title="Codex">
-        <SettingsProviderFields
-          pinnedEmail={draft.codex.pinnedEmail}
-          onPinnedEmailChange={(v) =>
-            onDraftChange("codex", { ...draft.codex, pinnedEmail: v })
-          }
-          autoReset={{
-            value: draft.codex.autoReset,
-            onChange: (v) =>
-              onDraftChange("codex", { ...draft.codex, autoReset: v }),
-          }}
-        />
-      </Section>
 
       {/* Importing is provider-picked inside the same modal the Claude list opens, so this
           list has no entry point of its own. */}
@@ -259,6 +204,17 @@ export function CodexPane({
           onReorder={(ids) => onReorderAccounts("codex", ids)}
           onReplace={onReplaceAccount}
         />
+        <label className="mt-3 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+          <input
+            type="checkbox"
+            checked={draft.codex.autoReset}
+            onChange={(e) =>
+              onDraftChange("codex", { ...draft.codex, autoReset: e.target.checked })
+            }
+          />
+          Auto-use Codex reset credits (when every account is &gt;95% weekly and none
+          reset within 24h, spend one banked reset to bring an account back)
+        </label>
       </Section>
 
       <Section
@@ -277,14 +233,18 @@ export function CodexPane({
   );
 }
 
-/** Clones: the Docker settings every new clone is created with. Clone images are gen-2
- *  preset builds: each preset's Dockerfile builds into a hash tag on demand, so there is no
- *  image list to manage here. */
+/** Clones: the Docker settings every new clone is created with, plus how RMNG tells a
+ *  clone that is thinking from one that is waiting on you. Clone images are gen-2 preset
+ *  builds: each preset's Dockerfile builds into a hash tag on demand, so there is no image
+ *  list to manage here. */
 export function ClonesPane({
   draft,
   onDraftChange,
   testMessage,
   onTestDocker,
+  onTestJudge,
+  judgeTestMessage,
+  rows,
 }: SettingsPaneProps) {
   return (
     <>
@@ -300,6 +260,21 @@ export function ClonesPane({
           onTest={onTestDocker}
         />
       </Section>
+
+      {/* How RMNG tells a clone that is thinking from one that is waiting on you. */}
+      <SettingsStuckSection
+        model={draft.judge.codexModel}
+        email={draft.judge.codexEmail}
+        accounts={rows.codex.map((a) => a.email)}
+        onModelChange={(v) =>
+          onDraftChange("judge", { ...draft.judge, codexModel: v })
+        }
+        onEmailChange={(v) =>
+          onDraftChange("judge", { ...draft.judge, codexEmail: v })
+        }
+        onTest={onTestJudge}
+        testMessage={judgeTestMessage}
+      />
     </>
   );
 }

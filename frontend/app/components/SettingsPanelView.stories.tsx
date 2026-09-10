@@ -156,19 +156,12 @@ type Story = StoryObj<typeof meta>;
  *  pinned under both. Every other pane is one click away. */
 export const Default: Story = { args: { ...base() } };
 
-/** Agents: the two prompt layers, which are the panel's longest pane. The rail stays put
- *  while they scroll. */
-export const Agents: Story = { args: { ...base(), category: "agents" } };
-
-/** Presets: one section, and the one that grows without limit. A workspace per row. */
+/** Presets: the two prompt layers on top, then one section per workspace. */
 export const Presets: Story = { args: { ...base(), category: "presets" } };
 
-/** Claude: the provider's polling, its imported accounts, and the pools built from them,
- *  which used to be three sections scattered down one scroll. */
-export const Claude: Story = { args: { ...base(), category: "claude" } };
-
-/** Codex: the same three sections for the other provider. */
-export const Codex: Story = { args: { ...base(), category: "codex" } };
+/** LLM: both providers' accounts and pools in one pane — Claude's three sections, then
+ *  Codex's three. */
+export const Llm: Story = { args: { ...base(), category: "llm" } };
 
 /** Clones: the Docker settings every new clone is created with. */
 export const Clones: Story = { args: { ...base(), category: "clones" } };
@@ -207,7 +200,7 @@ export const NoAccounts: Story = {
     ...base(),
     accounts: [],
     draft: makeSettingsDraft({ claudeGroups: [], codexGroups: [] }),
-    category: "claude",
+    category: "llm",
   },
 };
 
