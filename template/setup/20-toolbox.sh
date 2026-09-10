@@ -138,7 +138,11 @@ mc_install(){
   [ -d /tmp/squashfs-root ] || return 1
   rm -rf /opt/mission-center; mv /tmp/squashfs-root /opt/mission-center; chown -R root:root /opt/mission-center
   printf '#!/bin/sh\nexec /opt/mission-center/AppRun "$@"\n' > /usr/local/bin/mission-center; chmod 755 /usr/local/bin/mission-center
-  [ -d /opt/mission-center/usr/share/icons ] && cp -rn /opt/mission-center/usr/share/icons/* /usr/share/icons/ 2>/dev/null
+  # Icons: upstream ships a single top-level .svg (themed Icon= name, no icon tree).
+  # Install it into hicolor/scalable where the themed lookup finds it.
+  mc_icon="$(ls /opt/mission-center/*.svg 2>/dev/null | head -1 || true)"; [ -n "$mc_icon" ]
+  install -d /usr/share/icons/hicolor/scalable/apps
+  cp "$mc_icon" /usr/share/icons/hicolor/scalable/apps/
   d="$(ls /opt/mission-center/usr/share/applications/*.desktop 2>/dev/null | head -1 || true)"; [ -n "$d" ] || d="$(ls /opt/mission-center/*.desktop 2>/dev/null | head -1 || true)"
   [ -n "$d" ] || return 1
   sed -E 's#^Exec=.*#Exec=/usr/local/bin/mission-center#; s#^TryExec=.*#TryExec=/usr/local/bin/mission-center#' "$d" > /usr/share/applications/io.missioncenter.MissionCenter.desktop
