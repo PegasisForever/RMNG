@@ -839,7 +839,7 @@ pub(crate) fn rmng_hook_entries() -> Vec<TarEntry> {
 ///
 /// That file is Claude Code's own user state: `model`, `theme`, `effortLevel`,
 /// `enabledPlugins`, whatever it adds next. So this sets `.hooks` and touches nothing else,
-/// the same jq-merge shape [`claude_mcp_script`] uses on `~/.claude.json` for the same reason.
+/// the same merge shape [`merge_claude_mcp`] uses on `~/.claude.json` for the same reason.
 /// Assigning the whole `.hooks` object rather than merging into it is deliberate: it is how a
 /// renamed or dropped event stops firing, instead of lingering forever the way a
 /// merge-only-what-we-emit would leave it.
@@ -895,30 +895,33 @@ pub(crate) fn cursor_hooks_initial() -> String {
     serde_json::json!({ "version": 1, "hooks": cursor_hooks_object() }).to_string()
 }
 
-pub(crate) fn claude_hook_script() -> String {
-    let claude = format!(".hooks = {}", claude_hooks_object());
-    let cursor = format!(".version = 1 | .hooks = {}", cursor_hooks_object());
+/// Merge the probe registration into a `~/.claude/settings.json` body: whole-`.hooks`
+/// assignment, everything else untouched. Pure-Rust port of the old jq merge — assigning
+/// (not deep-merging) is deliberate, so a renamed or dropped event stops firing instead
+/// of lingering. A non-object base is a hard error, matching the old merge.
+pub(crate) fn merge_claude_hooks(
+    base: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let mut root = base
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("~/.claude/settings.json is not a JSON object"))?;
+    root.insert("hooks".to_string(), claude_hooks_object());
+    Ok(serde_json::Value::Object(root))
+}
 
-    // Both files belong to the user, so both are merged rather than written: Claude Code
-    // keeps `model`, `theme` and `enabledPlugins` in one, and Cursor's own hooks would live
-    // beside ours in the other.
-    format!(
-        r#"set -e
-merge() {{
-  d="$(dirname "$1")"
-  install -d -o rmng -g rmng -m 755 "$d"
-  [ -s "$1" ] || printf '{{}}' > "$1"
-  tmp="$(mktemp)"
-  jq "$2" "$1" > "$tmp"
-  cat "$tmp" > "$1"
-  rm -f "$tmp"
-  chown rmng:rmng "$1"
-  chmod 644 "$1"
-}}
-merge /home/rmng/.claude/settings.json '{claude}'
-merge /home/rmng/.cursor/hooks.json '{cursor}'
-"#
-    )
+/// Merge the probe registration into a `~/.cursor/hooks.json` body (`.version = 1` plus
+/// whole-`.hooks` assignment). Same port, same rules.
+pub(crate) fn merge_cursor_hooks(
+    base: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let mut root = base
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("~/.cursor/hooks.json is not a JSON object"))?;
+    root.insert("version".to_string(), serde_json::json!(1));
+    root.insert("hooks".to_string(), cursor_hooks_object());
+    Ok(serde_json::Value::Object(root))
 }
 
 fn claude_hook_stamp_path() -> &'static str {
@@ -929,13 +932,18 @@ fn claude_hook_stamp_path() -> &'static str {
 /// [`HOOK_EVENTS`] re-pushes to every clone with no manual version bump to remember.
 fn claude_hook_desired() -> String {
     let mut entries = rmng_hook_entries();
-    entries.push(TarEntry {
-        path: "registration".into(),
-        data: claude_hook_script().into_bytes(),
-        mode: 0,
-        uid: 0,
-        gid: 0,
-    });
+    for (path, data) in [
+        ("registration-claude", claude_settings_initial()),
+        ("registration-cursor", cursor_hooks_initial()),
+    ] {
+        entries.push(TarEntry {
+            path: path.into(),
+            data: data.into_bytes(),
+            mode: 0,
+            uid: 0,
+            gid: 0,
+        });
+    }
     desired_payload_hash(&entries)
 }
 
@@ -1082,7 +1090,19 @@ async fn upload_guest_file(
     data: Vec<u8>,
     label: &str,
 ) -> Result<()> {
-    crate::home_overlay::write_clone_home(clone_id, rel_path, &data)
+    upload_guest_file_at_mode(_app, clone_id, rel_path, data, 0o600, label).await
+}
+
+/// [`upload_guest_file`] with an explicit mode (hook registrations are 0644, not 0600).
+async fn upload_guest_file_at_mode(
+    _app: &App,
+    clone_id: &str,
+    rel_path: &str,
+    data: Vec<u8>,
+    mode: u32,
+    label: &str,
+) -> Result<()> {
+    crate::home_overlay::write_clone_home(clone_id, rel_path, &data, mode)
         .with_context(|| format!("{clone_id}: writing {label}"))
 }
 
@@ -1449,10 +1469,25 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
         clone_id,
         &app.config().ssh.authorized_keys,
     )?;
-    app.docker
-        .upload_tar(clone_id, entries)
-        .await
-        .with_context(|| format!("{clone_id}: uploading ssh material"))?;
+    // `authorized_keys` goes straight into the live home (the prepare step above already
+    // ensured `~/.ssh` 700); the host keys still ride the tar — they live under `/etc`.
+    crate::home_overlay::write_clone_home(
+        clone_id,
+        ".ssh/authorized_keys",
+        crate::ssh::render_authorized_keys(&app.config().ssh.authorized_keys).as_bytes(),
+        0o600,
+    )
+    .with_context(|| format!("{clone_id}: writing ssh authorized_keys"))?;
+    let etc_entries: Vec<_> = entries
+        .into_iter()
+        .filter(|e| !e.path.starts_with("home/"))
+        .collect();
+    if !etc_entries.is_empty() {
+        app.docker
+            .upload_tar(clone_id, etc_entries)
+            .await
+            .with_context(|| format!("{clone_id}: uploading ssh host keys"))?;
+    }
     exec_ok(app, clone_id, ssh_bootstrap_script(), "bootstrap sshd").await?;
     app.docker
         .upload_tar(clone_id, vec![ssh_stamp_entry()])
@@ -1480,12 +1515,16 @@ async fn ensure_codex_parity(
         return Ok(false);
     }
 
-    // Parent dirs come pre-created from the template (phase 30) with the right owner —
-    // no prepare step: the tar lands directly.
-    app.docker
-        .upload_tar(clone_id, entries)
-        .await
-        .with_context(|| format!("{clone_id}: uploading Codex parity config"))?;
+    // Parent dirs come pre-created from the template (phase 30) with the right owner;
+    // write_clone_home backstops the rest (creating + chowning as needed). Every entry
+    // in this set lives under the home bind — anything else is a bug, fail loud.
+    for e in &entries {
+        let rel = e.path.strip_prefix("home/rmng/").with_context(|| {
+            format!("{clone_id}: parity entry outside the home bind: {}", e.path)
+        })?;
+        crate::home_overlay::write_clone_home(clone_id, rel, &e.data, e.mode)
+            .with_context(|| format!("{clone_id}: writing parity file {}", e.path))?;
+    }
     app.docker
         .upload_tar(clone_id, vec![codex_parity_stamp_entry(&desired)])
         .await
@@ -1582,18 +1621,31 @@ async fn ensure_claude_hook(app: &App, clone_id: &str) -> Result<bool> {
     {
         return Ok(false);
     }
-    // Parent dirs (~/.rmng, ~/.claude, ~/.cursor) come pre-created from the template.
-    app.docker
-        .upload_tar(clone_id, rmng_hook_entries())
-        .await
-        .with_context(|| format!("{clone_id}: uploading the activity probe"))?;
-    exec_ok(
-        app,
-        clone_id,
-        &claude_hook_script(),
-        "register hooks in ~/.claude/settings.json",
-    )
-    .await?;
+    // Probe straight into the live home (0755: it executes); parents come pre-created
+    // from the template, with write_clone_home as backstop.
+    crate::home_overlay::write_clone_home(clone_id, ".rmng/hook.py", RMNG_HOOK_PY.as_bytes(), 0o755)
+        .with_context(|| format!("{clone_id}: writing the activity probe"))?;
+    // Registrations merge into the operator's own settings files (0644, as before).
+    for (rel, label, merged) in [
+        (
+            ".claude/settings.json",
+            "~/.claude/settings.json",
+            merge_claude_hooks(
+                &read_json_merge_base(app, clone_id, ".claude/settings.json", "~/.claude/settings.json").await?,
+            ),
+        ),
+        (
+            ".cursor/hooks.json",
+            "~/.cursor/hooks.json",
+            merge_cursor_hooks(
+                &read_json_merge_base(app, clone_id, ".cursor/hooks.json", "~/.cursor/hooks.json").await?,
+            ),
+        ),
+    ] {
+        let merged = merged.with_context(|| format!("{clone_id}: merging {label} hooks"))?;
+        upload_guest_file_at_mode(app, clone_id, rel, merged.to_string().into_bytes(), 0o644, label)
+            .await?;
+    }
     app.docker
         .upload_tar(clone_id, vec![claude_hook_stamp_entry()])
         .await
@@ -2288,7 +2340,6 @@ mod tests {
         let scripts: Vec<(&str, String)> = vec![
             ("ssh_bootstrap", ssh_bootstrap_script().to_string()),
             ("etc_environment_sync", etc_environment_sync_script("A=1\n")),
-            ("claude_hook", claude_hook_script()),
         ];
         for (name, body) in scripts {
             for cred in [".claude/.credentials.json", ".codex/auth.json"] {
@@ -2355,7 +2406,7 @@ mod tests {
         assert!(agents_body.contains("SENTINEL-A+C"));
 
         // `~/.codex/config.toml` is deliberately NOT in this set: it is merged in place by
-        // `codex_mcp_merge_script` so the operator's own settings survive, not shipped as a tar
+        // `merge_codex_config` so the operator's own settings survive, not shipped as a tar
         // entry that would overwrite the file. Shipping it here again would silently reintroduce
         // the clobber.
         assert!(
@@ -2845,35 +2896,28 @@ mod tests {
 mod hook_tests {
     use super::*;
 
-    /// Run the real generated script against a real file, the way the Codex and
-    /// `/etc/environment` merges are tested. Asserting on the script's text would pass while
-    /// the jq program was wrong.
+    /// Run the real merge functions against real files, the way the Codex and
+    /// `/etc/environment` merges are tested. The merges are pure Rust now, so no shell
+    /// is involved — same behavioral coverage, minus the bash.
     fn run(settings: &std::path::Path) -> String {
         run_both(settings).0
     }
 
-    /// Both files the script merges: Claude Code's settings and Cursor's hooks.
+    /// Both files the merge touches: Claude Code's settings and Cursor's hooks.
     fn run_both(settings: &std::path::Path) -> (String, String) {
         let cursor = settings.with_file_name("cursor-hooks.json");
-        let script = claude_hook_script()
-            .replace(
-                "/home/rmng/.claude/settings.json",
-                settings.to_str().unwrap(),
-            )
-            .replace("/home/rmng/.cursor/hooks.json", cursor.to_str().unwrap())
-            .replace("chown rmng:rmng", "true")
-            // Ownership needs root; the directory still has to be created.
-            .replace("install -d -o rmng -g rmng -m 755", "mkdir -p");
-        let out = std::process::Command::new("bash")
-            .arg("-c")
-            .arg(&script)
-            .output()
-            .expect("run the hook registration script");
-        assert!(
-            out.status.success(),
-            "script failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let read_base = |path: &std::path::Path| -> serde_json::Value {
+            let raw = std::fs::read(path).unwrap_or_default();
+            if raw.iter().all(|b| b.is_ascii_whitespace()) {
+                serde_json::json!({})
+            } else {
+                serde_json::from_slice(&raw).unwrap()
+            }
+        };
+        let merged_settings = merge_claude_hooks(&read_base(settings)).unwrap();
+        std::fs::write(settings, merged_settings.to_string()).unwrap();
+        let merged_cursor = merge_cursor_hooks(&read_base(&cursor)).unwrap();
+        std::fs::write(&cursor, merged_cursor.to_string()).unwrap();
         (
             std::fs::read_to_string(settings).unwrap(),
             std::fs::read_to_string(&cursor).unwrap(),

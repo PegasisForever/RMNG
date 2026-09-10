@@ -300,12 +300,17 @@ fn render_bastion_files(app: &App, data_dir: &str, extra: Option<&str>) -> bool 
     changed
 }
 
-/// Push the current `authorized_keys` into each running managed clone whose last-pushed
-/// hash differs. `pushed` tracks `clone_id → keys_hash` so a tar upload happens only on a
-/// real change or a newly-seen clone. Best-effort per clone.
-async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<String, u64>) {
+/// Push the current `authorized_keys` into each managed clone whose last-pushed hash
+/// differs — straight into the live home, so stopped clones take it too (no more "at next
+/// provision/boot" gap). `pushed` tracks `clone_id → keys_hash` so a write happens only on
+/// a real change or a newly-seen clone. Best-effort per clone.
+/// Pushes only `authorized_keys` live; the clone's own host key is provision-time only
+/// (changing it under a running sshd would need a restart). Nothing else under `~/.ssh`
+/// is ours to write.
+async fn push_keys_to_clones(app: &App, pushed: &mut HashMap<String, u64>) {
     let cfg = app.config();
     let hash = keys_hash(&cfg.ssh.authorized_keys);
+    let body = render_authorized_keys(&cfg.ssh.authorized_keys);
     for host in app
         .store
         .get()
@@ -316,27 +321,24 @@ async fn push_keys_to_clones(app: &App, data_dir: &str, pushed: &mut HashMap<Str
         if pushed.get(&host.id) == Some(&hash) {
             continue;
         }
-        if !app.docker.is_running(&host.id).await.unwrap_or(false) {
-            continue; // stopped clones get keys at next provision/boot
+        if !crate::home_overlay::clone_home_present(&host.id) {
+            continue; // deleted (mount torn down)
         }
-        match clone_ssh_tar_entries(data_dir, &host.id, &cfg.ssh.authorized_keys) {
-            // Push only `authorized_keys` live; the clone's own host key is provision-time only
-            // (changing it under a running sshd would need a restart), so filter to the home/
-            // files. Nothing else under ~/.ssh is ours to write.
-            Ok(entries) => {
-                let ak: Vec<_> = entries
-                    .into_iter()
-                    .filter(|e| e.path.starts_with("home/"))
-                    .collect();
-                match app.docker.upload_tar(&host.id, ak).await {
-                    Ok(()) => {
-                        pushed.insert(host.id.clone(), hash);
-                        tracing::info!(target: "ssh", "pushed authorized_keys to {}", host.id);
-                    }
-                    Err(e) => tracing::warn!(target: "ssh", "push keys to {} failed: {e}", host.id),
-                }
+        let write = crate::home_overlay::ensure_clone_home_dir(&host.id, ".ssh", 0o700)
+            .and_then(|()| {
+                crate::home_overlay::write_clone_home(
+                    &host.id,
+                    ".ssh/authorized_keys",
+                    body.as_bytes(),
+                    0o600,
+                )
+            });
+        match write {
+            Ok(()) => {
+                pushed.insert(host.id.clone(), hash);
+                tracing::info!(target: "ssh", "pushed authorized_keys to {}", host.id);
             }
-            Err(e) => tracing::warn!(target: "ssh", "key material for {} failed: {e}", host.id),
+            Err(e) => tracing::warn!(target: "ssh", "push keys to {} failed: {e}", host.id),
         }
     }
 }
@@ -350,7 +352,7 @@ pub async fn apply_now(app: &App) {
         reload_sshd().await;
     }
     let mut once = std::collections::HashMap::new();
-    push_keys_to_clones(app, &data_dir, &mut once).await;
+    push_keys_to_clones(app, &mut once).await;
 }
 
 /// Let `ssh -J` reach a clone that the create job has not registered yet.
@@ -415,7 +417,7 @@ async fn run_sshd(mut child: Child, app: &App, data_dir: &str, pushed: &mut Hash
                 // Reload PermitOpen without dropping live tunnels.
                 reload_sshd().await;
             }
-            push_keys_to_clones(app, data_dir, pushed).await;
+            push_keys_to_clones(app, pushed).await;
         }
     };
     tokio::select! {
@@ -458,7 +460,7 @@ pub async fn run(app: App) {
     let mut spawn_error_logged = false;
     loop {
         render_bastion_files(&app, &data_dir, None);
-        push_keys_to_clones(&app, &data_dir, &mut pushed).await;
+        push_keys_to_clones(&app, &mut pushed).await;
         let started = Instant::now();
         match spawn_sshd() {
             Ok(child) => {

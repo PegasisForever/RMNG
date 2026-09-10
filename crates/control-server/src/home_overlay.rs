@@ -92,7 +92,7 @@ pub fn read_home_file(homes: &Path, id: &str, rel: &str) -> Result<Option<Vec<u8
 /// owned by the clone user — the same landing the old tar uploads gave. Missing parents
 /// are created and the whole chain chowned, so a file never lands under a root-owned
 /// dir its agent cannot write beside (the phase-30 lesson).
-pub fn write_home_file(homes: &Path, id: &str, rel: &str, data: &[u8]) -> Result<()> {
+pub fn write_home_file(homes: &Path, id: &str, rel: &str, data: &[u8], mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let root = homes.join(MERGED_DIR).join(id);
     let path = root.join(rel);
@@ -113,7 +113,7 @@ pub fn write_home_file(homes: &Path, id: &str, rel: &str, data: &[u8]) -> Result
     }
     let tmp = parent.join(".rmng-write.tmp");
     std::fs::write(&tmp, data).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, PermissionsExt::from_mode(0o600))?;
+    std::fs::set_permissions(&tmp, PermissionsExt::from_mode(mode))?;
     chown(&tmp)?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("installing {} in {id}'s home", path.display()))?;
@@ -135,9 +135,56 @@ pub fn remove_home_file(homes: &Path, id: &str, rel: &str) -> Result<()> {
     }
 }
 
+/// Ensure a home-relative dir exists with an exact mode, owned by the clone user.
+/// sshd's `StrictModes` refuses `authorized_keys` under a group/world-writable `.ssh`,
+/// so that dir goes through here (0700) rather than the default-mode parents
+/// [`write_home_file`] makes.
+pub fn ensure_home_dir(homes: &Path, id: &str, rel: &str, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = homes.join(MERGED_DIR).join(id).join(rel);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {} in {id}'s home", dir.display()))?;
+    std::fs::set_permissions(&dir, PermissionsExt::from_mode(mode))
+        .with_context(|| format!("chmodding {} in {id}'s home", dir.display()))?;
+    chown(&dir)
+}
+
+/// Create a home-relative symlink (unit masks: link → `/dev/null`). Parents are ensured
+/// like [`write_home_file`]. Any existing file/symlink at the path is replaced; an
+/// existing dir is a hard error. Link ownership is deliberately left to the process
+/// (root on the CT): the kernel ignores symlink ownership on resolution, so the old
+/// tar's 0:0 was incidental, not load-bearing.
+pub fn write_home_symlink(homes: &Path, id: &str, rel: &str, target: &str) -> Result<()> {
+    let root = homes.join(MERGED_DIR).join(id);
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {} in {id}'s home", parent.display()))?;
+    }
+    match std::fs::symlink_metadata(&path) {
+        Ok(md) if md.file_type().is_dir() => {
+            anyhow::bail!("refusing to replace dir {} in {id}'s home", path.display())
+        }
+        Ok(_) => std::fs::remove_file(&path)
+            .with_context(|| format!("removing {} in {id}'s home", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("stating {} in {id}'s home", path.display())),
+    }
+    std::os::unix::fs::symlink(target, &path)
+        .with_context(|| format!("linking {} in {id}'s home", path.display()))?;
+    Ok(())
+}
+
 /// This server's live homes root.
 fn live_homes() -> &'static Path {
     Path::new(crate::zfs::HOMES_DIR)
+}
+
+/// Whether clone `id` has a live home (merged view mounted). False for deleted clones
+/// (mount torn down) — the push passes skip those the way they used to skip stopped
+/// containers, while stopped-but-existing clones now take the push.
+pub fn clone_home_present(id: &str) -> bool {
+    live_homes().join(MERGED_DIR).join(id).is_dir()
 }
 
 /// [`read_home_file`] against this server's homes.
@@ -146,13 +193,23 @@ pub fn read_clone_home(id: &str, rel: &str) -> Result<Option<Vec<u8>>> {
 }
 
 /// [`write_home_file`] against this server's homes.
-pub fn write_clone_home(id: &str, rel: &str, data: &[u8]) -> Result<()> {
-    write_home_file(live_homes(), id, rel, data)
+pub fn write_clone_home(id: &str, rel: &str, data: &[u8], mode: u32) -> Result<()> {
+    write_home_file(live_homes(), id, rel, data, mode)
+}
+
+/// [`ensure_home_dir`] against this server's homes.
+pub fn ensure_clone_home_dir(id: &str, rel: &str, mode: u32) -> Result<()> {
+    ensure_home_dir(live_homes(), id, rel, mode)
 }
 
 /// [`remove_home_file`] against this server's homes.
 pub fn remove_clone_home(id: &str, rel: &str) -> Result<()> {
     remove_home_file(live_homes(), id, rel)
+}
+
+/// [`write_home_symlink`] against this server's homes.
+pub fn symlink_clone_home(id: &str, rel: &str, target: &str) -> Result<()> {
+    write_home_symlink(live_homes(), id, rel, target)
 }
 
 /// Lowerdir currently mounted at `merged`, if it is an overlay mount. A mountinfo line
@@ -387,7 +444,7 @@ mod tests {
         let homes = scratch_homes("roundtrip");
         assert_eq!(read_home_file(&homes, "c1", ".codex/auth.json").unwrap(), None);
         remove_home_file(&homes, "c1", ".codex/auth.json").unwrap();
-        write_home_file(&homes, "c1", ".codex/auth.json", b"{\"a\":1}").unwrap();
+        write_home_file(&homes, "c1", ".codex/auth.json", b"{\"a\":1}", 0o600).unwrap();
         assert_eq!(
             read_home_file(&homes, "c1", ".codex/auth.json").unwrap().as_deref(),
             Some(b"{\"a\":1}".as_slice())
@@ -401,7 +458,7 @@ mod tests {
     fn home_write_creates_parents_and_lands_0600() {
         use std::os::unix::fs::PermissionsExt;
         let homes = scratch_homes("parents");
-        write_home_file(&homes, "c1", ".pi/agent/auth.json", b"{}").unwrap();
+        write_home_file(&homes, "c1", ".pi/agent/auth.json", b"{}", 0o600).unwrap();
         let path = homes.join(".merged").join("c1").join(".pi/agent/auth.json");
         assert_eq!(std::fs::read(&path).unwrap(), b"{}");
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);

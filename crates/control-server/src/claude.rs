@@ -1934,7 +1934,7 @@ pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredClaudeAcc
         bail!("refusing to apply a non-`sk-ant-` token");
     }
     // The credentials file is server-owned wholesale: overwrite, never merge.
-    crate::home_overlay::write_clone_home(host_id, ".claude/.credentials.json", credentials_json(token).as_bytes())
+    crate::home_overlay::write_clone_home(host_id, ".claude/.credentials.json", credentials_json(token).as_bytes(), 0o600)
         .with_context(|| format!("{host_id}: writing Claude credentials"))?;
     // The identity is a separate outcome from the token. A clone that took the token and
     // refused the identity still works, so this is a warning rather than a failed push.
@@ -1946,7 +1946,7 @@ pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredClaudeAcc
         match merge_claude_identity(current.as_deref(), &patch) {
             IdentityMerge::Current => {}
             IdentityMerge::Updated(body) => {
-                crate::home_overlay::write_clone_home(host_id, ".claude.json", body.as_bytes())
+                crate::home_overlay::write_clone_home(host_id, ".claude.json", body.as_bytes(), 0o600)
                     .with_context(|| format!("{host_id}: writing ~/.claude.json identity"))?;
             }
             IdentityMerge::Skipped(reason) => {
@@ -2077,10 +2077,9 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     let mut unreachable = 0usize;
     for chunk in targets.chunks(PUSH_CONCURRENCY) {
         let results = futures::future::join_all(chunk.iter().map(|(id, acct)| async move {
-            // A clone whose container is not running cannot take a push, and asking costs a
-            // fraction of what the failing exec does. On a fleet with many stopped clones
-            // that is most of the pass.
-            if !app.docker.is_running(id).await.unwrap_or(false) {
+            // The push is a plain home write now, which works stopped or running — the
+            // only clone that cannot take one is a deleted one (mount torn down).
+            if !crate::home_overlay::clone_home_present(id) {
                 return (id, acct, None);
             }
             (id, acct, Some(apply_clone_token(app, id, acct).await))
@@ -2092,7 +2091,7 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
             match outcome {
                 None => {
                     unreachable += 1;
-                    tracing::debug!("skipping token push to {id}: not running");
+                    tracing::debug!("skipping token push to {id}: no live home");
                 }
                 Some(Ok(())) => {
                     ok += 1;
@@ -2114,7 +2113,7 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     }
 
     tracing::info!(
-        "claude token push{} done in {:?}: {ok} pushed, {failed} failed, {unreachable} not running",
+        "claude token push{} done in {:?}: {ok} pushed, {failed} failed, {unreachable} without live home",
         only.map(|e| format!(" [{e}]")).unwrap_or_default(),
         started.elapsed()
     );

@@ -394,22 +394,16 @@ async fn clone_container_after_create(
     // injected on headed clones, above.)
     if headless {
         on_progress("inject", "headless: masking desktop units (pre-boot)");
-        docker
-            .upload_symlinks(
-                container,
-                &[
-                    (
-                        "home/rmng/.config/systemd/user/gnome-headless.service".to_string(),
-                        "/dev/null".to_string(),
-                    ),
-                    (
-                        "home/rmng/.config/systemd/user/rmng-clone-daemon.service".to_string(),
-                        "/dev/null".to_string(),
-                    ),
-                ],
-            )
-            .await
-            .with_context(|| format!("clone {hostname}: headless unit-mask upload failed"))?;
+        // Direct into the live home (mounted before container create): same landing as
+        // the old symlink-tar upload, no daemon roundtrip.
+        for unit in [
+            ".config/systemd/user/gnome-headless.service",
+            ".config/systemd/user/rmng-clone-daemon.service",
+        ] {
+            crate::home_overlay::symlink_clone_home(hostname, unit, "/dev/null").with_context(
+                || format!("clone {hostname}: masking {unit} failed"),
+            )?;
+        }
     }
 
     // The clone's identity and env, written while the container is STILL STOPPED.

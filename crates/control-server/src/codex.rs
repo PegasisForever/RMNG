@@ -494,7 +494,7 @@ pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredCodexAcco
         bail!("refusing to apply a non-JWT codex access token");
     }
     // `~/.codex/auth.json` is server-owned wholesale: overwrite, never merge.
-    crate::home_overlay::write_clone_home(host_id, ".codex/auth.json", auth_json(acct).as_bytes())
+    crate::home_overlay::write_clone_home(host_id, ".codex/auth.json", auth_json(acct).as_bytes(), 0o600)
         .with_context(|| format!("{host_id}: writing Codex auth"))?;
     // pi's file belongs to the operator (their other providers live in it): merge only
     // the `openai-codex` key, never overwrite. Upload only on change.
@@ -507,7 +507,7 @@ pub async fn apply_clone_token(_app: &App, host_id: &str, acct: &StoredCodexAcco
         .as_deref()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(b).ok());
     if current_value.as_ref() != Some(&merged) {
-        crate::home_overlay::write_clone_home(host_id, ".pi/agent/auth.json", merged.to_string().as_bytes())
+        crate::home_overlay::write_clone_home(host_id, ".pi/agent/auth.json", merged.to_string().as_bytes(), 0o600)
             .with_context(|| format!("{host_id}: writing pi auth"))?;
     }
     Ok(())
@@ -534,6 +534,7 @@ pub async fn clear_clone_token(_app: &App, host_id: &str) -> Result<()> {
                         host_id,
                         ".pi/agent/auth.json",
                         serde_json::Value::Object(map).to_string().as_bytes(),
+                        0o600,
                     )
                     .with_context(|| format!("{host_id}: writing cleared pi auth"))?;
                 }
@@ -621,7 +622,8 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     let (mut ok, mut failed, mut unreachable) = (0usize, 0usize, 0usize);
     for chunk in targets.chunks(crate::claude::PUSH_CONCURRENCY) {
         let results = futures::future::join_all(chunk.iter().map(|(id, email, acct)| async move {
-            if !app.docker.is_running(id).await.unwrap_or(false) {
+            // Plain home write now: works stopped or running, skips only deleted clones.
+            if !crate::home_overlay::clone_home_present(id) {
                 return (id, email, acct, None);
             }
             (
@@ -637,7 +639,7 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
             match outcome {
                 None => {
                     unreachable += 1;
-                    tracing::debug!("skipping codex token push to {id}: not running");
+                    tracing::debug!("skipping codex token push to {id}: no live home");
                 }
                 Some(Ok(())) => {
                     ok += 1;
@@ -659,7 +661,7 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     }
 
     tracing::info!(
-        "codex token push done in {:?}: {ok} pushed, {failed} failed, {unreachable} not running",
+        "codex token push done in {:?}: {ok} pushed, {failed} failed, {unreachable} without live home",
         started.elapsed()
     );
 }
