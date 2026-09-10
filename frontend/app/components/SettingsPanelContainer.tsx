@@ -59,8 +59,9 @@ export interface SettingsPanelContainerProps {
   /** Delete an imported Codex account by email. */
   onDeleteCodexAccount: (email: string) => void;
   /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
-   *  control-server harvests the tokens off a clone that's already signed in. */
-  onImportAccount: () => void;
+   *  control-server harvests the tokens off a clone that's already signed in. Takes the
+   *  provider tab + preselected group for the group tree's per-group import buttons. */
+  onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
   onReplaceAccount: (account: ClaudeUsage) => void;
   // --- board columns ---
   /** The dashboard board's columns, left to right. Omit to hide the section entirely,

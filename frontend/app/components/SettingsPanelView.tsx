@@ -69,7 +69,9 @@ export interface SettingsPanelViewProps {
   onDeleteCodexAccount: (email: string) => void;
   /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
    *  control-server harvests the tokens off a clone that's already signed in. */
-  onImportAccount: () => void;
+  /** Open the import modal, optionally on one provider tab with a group preselected
+   *  (the settings group tree's per-group import buttons). */
+  onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
   onReplaceAccount: (account: ClaudeUsage) => void;
 
   /** The last failed load or save, in the panel's own banner. */

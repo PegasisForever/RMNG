@@ -5,20 +5,18 @@ import { fn } from "storybook/test";
 import { SettingsGroupsEditor } from "./SettingsGroupsEditor";
 import { accountsNow, makeClaudeAccounts } from "./__fixtures__/accounts";
 import { makeSettingsDraft } from "./__fixtures__/appConfig";
-import { orderedAccounts } from "~/lib/settingsDraft";
 
 /** The editor sits in the panel's body, so the story gives it the same width. */
 function Frame({ children }: { children: React.ReactNode }) {
   return <div className="w-[38rem] p-4">{children}</div>;
 }
 
-/** One provider's emails, derived the way the panel derives them. */
-function emails(provider: "claude" | "codex") {
-  return orderedAccounts(makeClaudeAccounts(accountsNow), {})[provider].map((a) => a.email);
+/** Both providers' rows, the way the panel hands them to the editor. */
+function allAccounts() {
+  return makeClaudeAccounts(accountsNow);
 }
 
 const CLAUDE_HINT = "Import some accounts first to add them to a group.";
-const CODEX_HINT = "Import some Codex accounts first to add them to a group.";
 
 const meta = {
   title: "Settings/Components/SettingsGroupsEditor",
@@ -26,9 +24,10 @@ const meta = {
   parameters: { layout: "centered" },
   args: {
     groups: makeSettingsDraft().groups,
-    accountEmails: [...emails("claude"), ...emails("codex")],
+    accounts: allAccounts(),
     noAccountsHint: CLAUDE_HINT,
     onChange: fn(),
+    onImportAccount: fn(),
   },
   render: (args) => (
     <Frame>
@@ -41,8 +40,18 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** Two pools over mixed Claude + Codex members. An account can sit in several pools; the
- *  pools are how a clone's binding is resolved, not a partition. */
+ *  pools are how a clone's binding is resolved, not a partition. Drag a row across pools
+ *  to move it, or inside its pool to reorder. */
 export const Mixed: Story = { args: { groups: makeSettingsDraft().groups } };
+
+/** An imported account claimed by no pool. Saving deletes it, so it is listed with the
+ *  reason instead of silently vanishing on save. */
+export const UngroupedWarning: Story = {
+  args: {
+    groups: [{ name: "solo", accounts: ["alex@example.com"] }],
+    accounts: allAccounts(),
+  },
+};
 
 /** No pools configured. Every clone then falls through to the server's own account chain. */
 export const Empty: Story = {
@@ -53,9 +62,9 @@ export const Empty: Story = {
  *  account does not help a Codex pool. */
 export const NoAccountsImported: Story = {
   args: {
-    groups: makeSettingsDraft().groups,
-    accountEmails: [],
-    noAccountsHint: CODEX_HINT,
+    groups: [],
+    accounts: [],
+    noAccountsHint: CLAUDE_HINT,
   },
 };
 

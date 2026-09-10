@@ -186,6 +186,9 @@ export function DashboardContainer({
   );
   // The group an "add account" OAuth login is in flight for (null = modal closed).
   const [importOpen, setImportOpen] = useState(false);
+  // Preselected provider tab + pool for the import modal (the settings group tree's
+  // per-group buttons). Nulls mean the modal's own defaults.
+  const [importSeed, setImportSeed] = useState<{ provider?: "claude" | "codex"; group?: string }>({});
   // The dead account the sign-in modal is standing in for, or null for a plain import.
   // One modal serves both: a replacement IS a sign-in, it just knows what it takes over.
   const [replacing, setReplacing] = useState<ClaudeUsage | null>(null);
@@ -558,9 +561,14 @@ export function DashboardContainer({
   // leaves on the first SSE frame and nothing here has to wait for it. The usage poll is
   // deliberately NOT chained: it walks every remaining account at a 400ms stagger with a 10s
   // timeout each, and chaining it made the delete look like it took half a minute to land.
-  /** Open the sign-in modal, either plain or standing in for `account`. */
-  const openImport = (account: ClaudeUsage | null) => {
+  /** Open the sign-in modal, either plain or standing in for `account`. `seed` preselects
+   *  the provider tab + pool (the settings group tree imports into one pool directly). */
+  const openImport = (
+    account: ClaudeUsage | null,
+    seed: { provider?: "claude" | "codex"; group?: string } = {},
+  ) => {
     setReplacing(account);
+    setImportSeed(seed);
     setImportOpen(true);
   };
 
@@ -773,7 +781,7 @@ export function DashboardContainer({
           activeLayout: state.activeLayout ?? "",
           onActivateLayout: (name) => run(activateLayout(name)),
           onOpenSettings: () => setSettingsOpen(true),
-          onImportAccount: () => openImport(null),
+          onImportAccount: (provider, group) => openImport(null, { provider, group }),
           onReplaceAccount: (account) => openImport(account),
           onRefresh: () => {
             void Promise.all([refreshClaudeUsage(), refreshCodexUsage()]);
@@ -971,7 +979,7 @@ export function DashboardContainer({
           updateServer={updateServer}
           operations={state.operations}
           restartServer={restartServer}
-          onImportAccount={() => openImport(null)}
+          onImportAccount={(provider, group) => openImport(null, { provider, group })}
           onReplaceAccount={(account) => openImport(account)}
           onDeleteAccount={onDeleteAccount}
           onDeleteCodexAccount={onDeleteCodexAccount}
@@ -1015,6 +1023,8 @@ export function DashboardContainer({
       {importOpen ? (
         <ImportAccountModalContainer
           groupNames={groups.map((g) => g.name)}
+          initialProvider={importSeed.provider}
+          initialGroup={importSeed.group}
           replacing={
             replacing
               ? {

@@ -951,8 +951,9 @@ Everything else is returned verbatim — ports, `layoutPresets`/`activeLayout`, 
 socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`,
 `agentPlaybook` (the editable agent playbook seeded with the shipped default and injected into new
 clones — non-secret; a preset's optional `agentPlaybook` append rides along in each `presets` row),
-the Claude/Codex poll config, and the two account pools `cloneGroups`/`codexGroups` (names +
-member emails only — no credentials, so they pass through unredacted). See
+the Claude/Codex poll config, and the single account-pool list `groups` (names +
+member emails only — no credentials, so they pass through unredacted). An empty pool list
+normalizes to one `Default` pool on save. See
 [PROTOCOL.md](PROTOCOL.md#config-schema) for the schema.
 
 ### `PUT /api/config` (partial merge) → `{ config, restartRequired, networkWarning? }`
@@ -965,9 +966,10 @@ bound the old path at startup) even though it is a one-time field (see below). A
 flip (`setupComplete` false → true) materializes the lazy `rmng` network here; a failure is
 non-fatal and echoed as `networkWarning`. Merge rules: an **empty string keeps** the stored
 value; a non-empty string replaces it; `presets` rows merge by name (blank `linearKey` keeps
-the stored one); `cloneGroups`/`codexGroups` are replaced **wholesale** (the pool editor always
-posts the full list, so an omitted pool is a deletion and `[]` clears them — the two providers'
-lists are independent). `docker.subnet` is validated as an IPv4 `/16`–`/24` CIDR. One-time fields
+the stored one); `groups` is replaced **wholesale** (the pool editor always
+posts the full list, so an omitted pool is a deletion and `[]` normalizes to one empty
+`Default` pool). A save whose patch touches `groups` deletes imported accounts the new list
+leaves unclaimed (an account in zero groups is removed; the save fails 400 if a clone pins it). `docker.subnet` is validated as an IPv4 `/16`–`/24` CIDR. One-time fields
 (`dataDir`, `cloneSocket`, `docker.subnet`) are locked once `setupComplete` latches (which
 itself is a one-way latch).
 
@@ -1019,10 +1021,10 @@ The selection is kept apart from the resolved account because the two answer dif
 one pinned to that exact account, and a sub clone inherits the *selection* so a parent on `auto`
 doesn't pin its children to whatever it happens to be running.
 
-**Account pools are config, not endpoints.** They are the two `cloneGroups` / `codexGroups` lists
-(each `{name, accounts: [email]}`), edited **wholesale** through `PUT /api/config` like any other
+**Account pools are config, not endpoints.** They are the single `groups` list
+(each `{name, accounts: [email]}`, providers mixed), edited **wholesale** through `PUT /api/config` like any other
 setting — the editor always sends the full list, so a plain array replace is the merge rule and an
-empty array clears the pools. There are no dedicated group endpoints. A clone bound to a pool
+empty array normalizes to one empty `Default` pool. There are no dedicated group endpoints. A clone bound to a pool
 sticks to its account (preserving its Anthropic prompt cache, since an account switch cold-starts
 it) until that account is exhausted or leaves the pool. The 10-minute rotator then moves it to the
 least-loaded member.

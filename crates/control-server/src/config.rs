@@ -291,10 +291,12 @@ mod tests {
         assert_eq!(merged.groups[0].name, "team");
         assert_eq!(merged.groups[0].accounts, vec!["a@x.com"]);
         assert_eq!(merged.groups[1].name, "beta");
-        // An empty array clears the pools outright — there is no "every clone must bind
-        // one" invariant to re-seed a default for.
+        // An empty array normalizes to the backstop pool — there is always at least one
+        // group. The save sweep then deletes the accounts the emptied list orphaned.
         let cleared = merge_update(&merged, serde_json::json!({ "groups": [] })).unwrap();
-        assert!(cleared.groups.is_empty());
+        assert_eq!(cleared.groups.len(), 1);
+        assert_eq!(cleared.groups[0].name, "Default");
+        assert!(cleared.groups[0].accounts.is_empty());
     }
 
     #[test]
@@ -323,6 +325,22 @@ mod tests {
         assert!(m2.codex.auto_reset);
         assert_eq!(m2.groups.len(), 1, "codex patch must not disturb pools");
         assert_eq!(m2.groups[0].name, "team");
+    }
+
+    #[test]
+    fn empty_pool_list_normalizes_to_one_default_group() {
+        // No `groups` key at all (fresh config, old client) → the backstop all the same.
+        let merged = merge_update(&AppConfig::default(), serde_json::json!({})).unwrap();
+        assert_eq!(merged.groups.len(), 1);
+        assert_eq!(merged.groups[0].name, "Default");
+        // A patch that names pools keeps them verbatim — no backstop appended.
+        let kept = merge_update(
+            &AppConfig::default(),
+            serde_json::json!({ "groups": [{ "name": "team", "accounts": [] }] }),
+        )
+        .unwrap();
+        assert_eq!(kept.groups.len(), 1);
+        assert_eq!(kept.groups[0].name, "team");
     }
 
     /// A base config that has finished first-run setup (latch locked).
@@ -661,6 +679,14 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
     let incoming_presets = incoming.get("presets").cloned();
     deep_merge(&mut cur, &incoming);
     let mut merged: AppConfig = serde_json::from_value(cur)?;
+    // Pool backstop: there is always at least one group. A save that empties the list
+    // (every pool deleted) normalizes to a single `Default` pool rather than none.
+    if merged.groups.is_empty() {
+        merged.groups = vec![wire::CloneGroup {
+            name: "Default".into(),
+            accounts: Vec::new(),
+        }];
+    }
     if let Some(serde_json::Value::Array(rows)) = incoming_presets {
         merged.presets = merge_presets(&base.presets, &rows);
     }

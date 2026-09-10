@@ -251,9 +251,7 @@ the config. `PUT /api/config` returns
 | `docker` | `DockerConfig` | see below | daemon socket + `rmng`-network subnet + hostname prefix + per-clone limits |
 | `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (the key is a credential, and `GET /api/config` vends it to the clients) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
-| `clone_groups` | `CloneGroup[]` | `[]` | named account pools for Claude rotation (not secret) |
-| `codex` | `CodexConfig` | — | Codex usage polling config |
-| `codex_groups` | `CloneGroup[]` | `[]` | named account pools for Codex rotation (not secret) |
+| `groups` | `CloneGroup[]` | `[]` | the single named account-pool list (Claude + Codex members mixed); a clone binds at most one pool, each rotator side only sees its own provider members (not secret) |
 | `agent_playbook` | string | shipped default | the desktop agent's base playbook (operating notes + ticket procedure), injected into each new clone at creation as its system-prompt append (written to the clone's `~/.config/rmng/agent-instructions.md`, where the agent-wrapper reads it, overriding its baked-in fallback). Seeded from the wrapper's `agent-instructions.md`; editable in Settings; **non-secret** (passes through the redacted view); applies to the next clone (**not restart-required**) |
 | `judge` | `JudgeConfig` | `gpt-5.6-luna` | working-vs-stuck detection: `codexModel` (default `gpt-5.6-luna`) and `codexEmail` (`null` = the first imported Codex account). No credential of its own: the calls run on that account's ChatGPT plan, using the token the server already holds to run its clones. Nothing secret, so the whole struct passes through the redacted view. No Codex account imported ⇒ no clone is ever reported `working` (see [monitorState](API.md#monitorstate)). Settings → Agents; **not restart-required** |
 
@@ -324,8 +322,10 @@ the config. `PUT /api/config` returns
   windows map to 5h/weekly by `limit_window_seconds`. Disable with `codex.usagePolling=false`
   (refresh + push still run).
 - **`CodexConfig`**: `poll_secs`, `pinned_email?`, `usage_polling` (bool, default `true`).
-- **`codexGroups`** (`CloneGroup[]`): same structure as `clone_groups`, used for Codex
-  account rotation. Selected at clone/swap time as `group:<name>`.
+- **`groups`** (`CloneGroup[]`): the single pool list above. A clone binds one pool via its
+  clone-level `group` (each side resolving to its own provider's least-used member); a legacy
+  per-side `group:<name>` selection still binds it. Selected at clone/swap time as the shared
+  `group` field.
 - **`Clone`** carries `codexAccountEmail` / `codexGroup` / `codexSelection` alongside the
   Claude equivalents. One clone can hold both a Claude and a Codex account simultaneously.
 

@@ -16,12 +16,17 @@ import { beginLogin, completeLogin } from "~/lib/api";
 
 export function ImportAccountModalContainer({
   groupNames,
+  initialProvider,
+  initialGroup,
   replacing,
   onClose,
   onImported,
 }: {
   /** Pool names from the single `config.groups` list — one list for both providers. */
   groupNames: string[];
+  /** Preselected provider tab / pool (the settings group tree's per-group import). */
+  initialProvider?: "claude" | "codex";
+  initialGroup?: string;
   /** An account this sign-in stands in for. Its provider is the one being signed in, so the
    *  provider tabs go away, and its pools are inherited, so the pool picker does too. */
   replacing?: { provider: "claude" | "codex"; email: string } | null;
@@ -29,11 +34,11 @@ export function ImportAccountModalContainer({
   onImported: (email: string) => void;
 }) {
   const [provider, setProvider] = useState<"claude" | "codex">(
-    replacing?.provider ?? "claude",
+    replacing?.provider ?? initialProvider ?? "claude",
   );
   const [loginUrl, setLoginUrl] = useState<string | null>(null);
   const [pasted, setPasted] = useState("");
-  const [group, setGroup] = useState("");
+  const [group, setGroup] = useState(initialGroup ?? "");
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

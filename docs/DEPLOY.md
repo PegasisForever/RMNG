@@ -148,9 +148,10 @@ Consequences worth knowing before you deploy:
 Accounts are added by **signing in to the provider from the dashboard** (Settings → the account
 panels). The server owns the OAuth pair from that moment and hands each clone a short-lived
 access token with an empty refresh token, so no clone can rotate what the server holds. An
-account can join a pool as it is added. Named **pools** (`cloneGroups` / `codexGroups` in
-`config.json`) are edited in Settings and balanced by a 10-minute sticky rotator. Full endpoint
-reference: [API.md](API.md#accounts-claude--codex).
+account can join a pool as it is added. Named **pools** (the single `groups` list in
+`config.json`, Claude and Codex members mixed) are edited in Settings and balanced per-side by a
+10-minute sticky rotator. A clone binds at most one pool, which feeds both providers. Full
+endpoint reference: [API.md](API.md#accounts-claude--codex).
 
 ### Upgrading a fleet that ran the retired `rmng-cliproxy` sidecar
 
@@ -166,8 +167,8 @@ operator action and no re-login** — on first boot the new server does three th
    rotation landing *after* the migration copied a credential would invalidate the copy — leaving
    a store of dead tokens and forcing exactly the fleet-wide re-login this avoids.
 2. **Carries the credentials back** into `data/claude-accounts.json` / `data/codex-accounts.json`
-   (`0600`), rebuilding the `cloneGroups` / `codexGroups` pools from the per-pool directories each
-   account was found in. One-shot and stamp-gated by `data/.token-unmigration-done` — deliberately
+   (`0600`), rebuilding the single `groups` pool list from the per-pool directories each
+   account was found in (same-named pools merge members). One-shot and stamp-gated by `data/.token-unmigration-done` — deliberately
    a *different* stamp from the forward migration's `.token-migration-done`, which may still be
    sitting there and means the opposite thing. The old credential files are only read, never
    consumed, so a failure part-way just retries on the next boot.

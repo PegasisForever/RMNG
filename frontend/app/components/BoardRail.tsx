@@ -54,7 +54,7 @@ export interface BoardRailProps {
   onActivateLayout: (name: string) => void;
   onOpenSettings: () => void;
   /** Import an account from a clone that is already signed in. */
-  onImportAccount: () => void;
+  onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
   /** Sign in to an account that takes over from a dead one (the "sign in again" badge). */
   onReplaceAccount: (account: ClaudeUsage) => void;
   /** Trigger an immediate usage refresh. */

@@ -208,13 +208,14 @@ export function LlmPane({
       <Section
         title="Groups"
         effect="immediate"
-        hint="A pool of accounts a clone binds as one. A bound clone keeps its account until that account exhausts, then moves to the least-used member of its own provider."
+        hint="Pools of accounts a clone binds as one — drag to reorder, across pools to move. A bound clone keeps its account until that account exhausts, then moves to the least-used member of its own provider. An account left in no pool is deleted on save."
       >
         <SettingsGroupsEditor
           groups={draft.groups}
-          accountEmails={[...rows.claude, ...rows.codex].map((a) => a.email)}
+          accounts={[...rows.claude, ...rows.codex]}
           noAccountsHint="Import some accounts first to add them to a group."
           onChange={(groups) => onDraftChange("groups", groups)}
+          onImportAccount={(provider, group) => onImportAccount(provider, group)}
         />
       </Section>
     </>

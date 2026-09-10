@@ -1881,6 +1881,7 @@ async fn config_put(
     Json(incoming): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let old = app.config();
+    let touches_groups = incoming.get("groups").is_some();
     let merged = config::merge_update(&old, incoming)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     config::save(&merged).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1890,6 +1891,14 @@ async fn config_put(
     // never rebalanced again, with nothing logged. Repoint those clones at `auto` here, while we
     // can still see WHICH pools went away.
     heal_dangling_pool_bindings(&app, &old, &merged);
+    // The group tree's rule: an account in zero groups is removed. Only when the patch
+    // touched the pools — otherwise a plain settings save would eat a freshly imported
+    // account that was never assigned to a pool yet.
+    if touches_groups {
+        crate::clone_ops::sweep_ungrouped_accounts(&app)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    }
     let restart_required = config::restart_required(&old, &merged);
     // Keep the DockerCtl's cached subnet in lockstep with the just-saved config BEFORE the
     // lazy `rmng` bridge is materialized (the wizard-finish flip below, and the first clone).
@@ -2870,6 +2879,56 @@ mod tests {
         assert_eq!(mixed.codex_selection.as_deref(), Some("auto"));
         assert_eq!(mixed.codex_group, None);
         assert_eq!(mixed.claude_selection.as_deref(), Some("me@x.com"));
+    }
+
+    #[tokio::test]
+    async fn save_sweep_deletes_accounts_no_pool_claims() {
+        let app = test_app();
+        crate::claude::upsert_account(
+            &app,
+            crate::claude::StoredClaudeAccount {
+                id: "kept".into(),
+                email: "kept@x.com".into(),
+                account_uuid: "uuid-kept".into(),
+                org_uuid: String::new(),
+                org_name: String::new(),
+                active: true,
+                access_token: "sk-ant-oat01-x".into(),
+                refresh_token: String::new(),
+                expires_at: 4_102_444_800_000,
+                scopes: Vec::new(),
+                last_refresh: None,
+            },
+        )
+        .unwrap();
+        crate::claude::upsert_account(
+            &app,
+            crate::claude::StoredClaudeAccount {
+                id: "gone".into(),
+                email: "gone@x.com".into(),
+                account_uuid: "uuid-gone".into(),
+                org_uuid: String::new(),
+                org_name: String::new(),
+                active: true,
+                access_token: "sk-ant-oat01-x".into(),
+                refresh_token: String::new(),
+                expires_at: 4_102_444_800_000,
+                scopes: Vec::new(),
+                last_refresh: None,
+            },
+        )
+        .unwrap();
+        // Only kept@x.com is claimed; gone@x.com sits in no pool.
+        *app.cfg.write().unwrap() = wire::AppConfig {
+            groups: vec![wire::CloneGroup {
+                name: "team".into(),
+                accounts: vec!["kept@x.com".into()],
+            }],
+            ..Default::default()
+        };
+        crate::clone_ops::sweep_ungrouped_accounts(&app).await.unwrap();
+        assert!(app.claude.get_by_email("kept@x.com").is_some());
+        assert!(app.claude.get_by_email("gone@x.com").is_none());
     }
 
     #[tokio::test]
