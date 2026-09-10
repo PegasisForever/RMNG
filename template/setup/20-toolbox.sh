@@ -138,22 +138,20 @@ log "dev toolbox: Mission Center ${MC_VERSION} (pinned + sha256-verified)"
 curl -fsSL "$MC_URL" -o /tmp/mc.AppImage
 echo "${MC_SHA256}  /tmp/mc.AppImage" | sha256sum -c -
 chmod +x /tmp/mc.AppImage
-( cd /tmp && rm -rf squashfs-root && /tmp/mc.AppImage --appimage-extract >/dev/null 2>&1 )
-[ -d /tmp/squashfs-root ]
-rm -rf /opt/mission-center; mv /tmp/squashfs-root /opt/mission-center; chown -R root:root /opt/mission-center
-printf '#!/bin/sh\nexec /opt/mission-center/AppRun "$@"\n' > /usr/local/bin/mission-center; chmod 755 /usr/local/bin/mission-center
-# Icons: upstream ships a single top-level .svg (themed Icon= name, no icon tree).
-# Install it into hicolor/scalable where the themed lookup finds it.
-mc_icon="$(ls /opt/mission-center/*.svg 2>/dev/null | head -1 || true)"
-if [ -z "$mc_icon" ]; then echo "  !! no top-level .svg; state dump:" >&2; id >&2; ls -lad /opt /tmp /tmp/squashfs-root /opt/mission-center >&2; ls -la /opt/ >&2; mount | grep -E " /opt| /tmp" >&2; exit 1; fi
-install -d /usr/share/icons/hicolor/scalable/apps
-cp "$mc_icon" /usr/share/icons/hicolor/scalable/apps/
-d="$(ls /opt/mission-center/usr/share/applications/*.desktop 2>/dev/null | head -1 || true)"; [ -n "$d" ] || d="$(ls /opt/mission-center/*.desktop 2>/dev/null | head -1 || true)"
-[ -n "$d" ]
-sed -E 's#^Exec=.*#Exec=/usr/local/bin/mission-center#; s#^TryExec=.*#TryExec=/usr/local/bin/mission-center#' "$d" > /usr/share/applications/io.missioncenter.MissionCenter.desktop
-update-desktop-database /usr/share/applications >/dev/null 2>&1
-gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1
-rm -f /tmp/mc.AppImage
+# Extract under a unique dir per run: a fixed `squashfs-root` under /tmp collides with
+# whatever a previous attempt left behind (found live: /opt/mission-center ended up a
+# symlink to ./AppDir after an `mv` onto a stale name — cause never identified, so the
+# extract dir is unique now and every step asserts what it needs instead of assuming it).
+# Plain `--appimage-extract` always creates ./squashfs-root under the CWD — no runtime
+# flags assumed (not every runtime supports --appimage-extract-into).
+mc_work="/tmp/mc-extract-$$"
+rm -rf "$mc_work"; mkdir -p "$mc_work"
+( cd "$mc_work" && rm -rf squashfs-root && /tmp/mc.AppImage --appimage-extract >/dev/null 2>&1 )
+if [ ! -x "$mc_work/squashfs-root/AppRun" ]; then echo "  !! extract produced no AppRun; state dump:" >&2; ls -la "$mc_work"/ /tmp/ >&2; exit 1; fi
+rm -rf /opt/mission-center
+mv "$mc_work/squashfs-root" /opt/mission-center; chown -R root:root /opt/mission-center
+if [ ! -d /opt/mission-center ] || [ -L /opt/mission-center ] || [ ! -x /opt/mission-center/AppRun ]; then echo "  !! /opt/mission-center not a real dir with AppRun; state dump:" >&2; ls -lad /opt/ /opt/mission-center >&2; exit 1; fi
+rm -rf "$mc_work" /tmp/mc.AppImage
 log "Mission Center installed"
 
 # Monaspace fonts (githubnext/monaspace) — full set: static (family "Monaspace Neon"),
