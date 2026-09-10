@@ -298,7 +298,6 @@ export function ServerPane({
       >
         <SettingsSshSection
           authorizedKeys={draft.ssh.authorizedKeys}
-          bastionPort={2222}
           onAuthorizedKeysChange={(keys) =>
             onDraftChange("ssh", { ...draft.ssh, authorizedKeys: keys })
           }

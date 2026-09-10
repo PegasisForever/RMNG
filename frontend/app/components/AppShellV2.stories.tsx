@@ -215,7 +215,6 @@ function makeBoard() {
     operations: [],
     selectedId: cloneWorking.id as string | null,
     sshPublicHost: "rmng.example.com",
-    bastionPort: 2222,
     onSelectClone: fn(),
     onDeleteClone: fn(),
     onChangeAccountClone: toChangeAccount,

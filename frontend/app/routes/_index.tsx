@@ -227,7 +227,6 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       lxcStats={lxcStats}
       forwards={forwards}
       sshPublicHost=""
-      bastionPort={2222}
       groups={cfg.groups}
       presets={cfg.presets}
     />

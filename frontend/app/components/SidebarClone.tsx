@@ -26,7 +26,7 @@ import {
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
 import { formatTokenCount } from "~/lib/format";
-import { buildSshCommand } from "~/lib/ssh";
+import { BASTION_PORT, buildSshCommand } from "~/lib/ssh";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
@@ -288,8 +288,6 @@ export interface SidebarCloneProps {
    *  address (no override exists anymore). The container reads the page's address, so a
    *  card never has to. */
   sshPublicHost: string;
-  /** `listen.bastion` — the bastion `sshd` port the copied command jumps through. */
-  bastionPort: number;
   /** True when this row is a sub clone: it renders indented under its parent and is not
    *  drag-reorderable (nesting is a cosmetic one-level grouping). */
   isChild?: boolean;
@@ -466,7 +464,6 @@ export function SidebarClone({
   onToggleMute,
   forwardRuntime,
   sshPublicHost,
-  bastionPort,
   isChild = false,
   childCount = 0,
   expanded = false,
@@ -485,7 +482,7 @@ export function SidebarClone({
   // Archived clones retain their container but deliberately hide runtime actions until they
   // are restored; unmanaged rows have no container-backed SSH endpoint either.
   const sshCommand = managed && !clone.archived
-    ? buildSshCommand(sshPublicHost, bastionPort, clone.id)
+    ? buildSshCommand(sshPublicHost, BASTION_PORT, clone.id)
     : undefined;
   // Hollow on purpose. Every other dot is a reading; this one is the absence of one, and a
   // filled dot in a fourth colour would read as a fourth thing the agent might be doing.

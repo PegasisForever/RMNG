@@ -75,8 +75,6 @@ export interface BoardProps {
   /** The `-J` jump target for each card's copied SSH command, already resolved by the
    *  container: this page's own address (no override exists anymore). */
   sshPublicHost: string;
-  /** The bastion `sshd` port those commands jump through (hardcoded on the server). */
-  bastionPort: number;
   /** The control rail, drawn first in the strip (see BoardRail). */
   rail: ReactNode;
   /** Unclaimed Linear tickets, drawn as a column between the rail and the operator's own.
@@ -218,7 +216,6 @@ export function Board({
   operations,
   selectedId,
   sshPublicHost,
-  bastionPort,
   rail,
   tickets,
   onNewCloneFromTicket,
@@ -309,7 +306,6 @@ export function Board({
     op: opFor(clone.id),
     selected: selectedId === clone.id,
     sshPublicHost,
-    bastionPort,
     onSelect: () => onSelectClone(clone),
     onDelete: () => onDeleteClone(clone),
     onChangeAccount: () => onChangeAccountClone(clone),

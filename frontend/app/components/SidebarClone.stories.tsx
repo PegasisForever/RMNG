@@ -38,7 +38,6 @@ const meta = {
   ],
   args: {
     sshPublicHost: "rmng.example.com",
-    bastionPort: 2222,
     selected: false,
     onSelect: fn(),
     onDelete: fn(),

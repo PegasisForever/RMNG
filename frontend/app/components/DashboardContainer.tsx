@@ -127,7 +127,6 @@ export function DashboardContainer({
   lxcStats,
   forwards,
   sshPublicHost,
-  bastionPort,
   groups,
   presets,
 }: {
@@ -138,8 +137,6 @@ export function DashboardContainer({
   /** Threaded down to each card's copied SSH command; empty ⇒ falls back to
    *  `window.location.hostname`. (Always empty now — no override exists anymore.) */
   sshPublicHost: string;
-  /** The bastion `sshd` port the copied SSH commands jump through (hardcoded). */
-  bastionPort: number;
   /** The single configured pool list (`config.groups`) — the rail's usage list groups by these. */
   groups: CloneGroup[];
   /** Configured presets (`config.presets`). Their labels are the ticket dialog's team keys. */
@@ -788,7 +785,6 @@ export function DashboardContainer({
           // address whenever no public host is configured. That read is the browser's, so it
           // happens here and the card is handed the answer.
           sshPublicHost: sshPublicHost || window.location.hostname,
-          bastionPort,
           // Picking a clone always closes the ticket, the currently selected clone
           // included: that click means "back to this clone", and there is nothing else it
           // could mean once its own card is already the one activated.

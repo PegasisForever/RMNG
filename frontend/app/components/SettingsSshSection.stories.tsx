@@ -17,7 +17,6 @@ const meta = {
   parameters: { layout: "centered" },
   args: {
     authorizedKeys: draft.ssh.authorizedKeys,
-    bastionPort: 2222,
     onAuthorizedKeysChange: fn(),
   },
   render: (args) => (
