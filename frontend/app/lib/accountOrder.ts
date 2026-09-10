@@ -2,23 +2,19 @@
 // unordered pool, so this order carries NO backend meaning — it is a pure display
 // preference, persisted in localStorage and NEVER sent to the server.
 //
-// It lives in a module-level reactive store (not component state) so that the two places
-// that render accounts — the Settings "Claude accounts" / "Codex accounts" lists and the
-// left sidebar's usage panel — share one order and update together. localStorage's
-// `storage` event only fires in OTHER tabs, so a same-tab reorder must notify subscribers
-// here explicitly.
+// It lives in a module-level reactive store (not component state) so every place that
+// renders accounts shares one order and updates together. localStorage's `storage` event
+// only fires in OTHER tabs, so a same-tab reorder must notify subscribers here explicitly.
 //
-// The order is bucketed per provider because that is the only granularity the operator can
-// drag at: Settings shows one list per provider, and the two pools are independent. The
-// storage key and its `Record<string, string[]>` shape are deliberately carried over from
-// when the buckets were account GROUPS rather than providers, so an older saved value still
-// parses and a user who ordered their accounts before the account model changed keeps that
-// order. Its group-named entries match no provider bucket, so they are inert — read past,
-// never applied, and left in place rather than migrated (a group's internal order has no
-// meaning now that a group is only a membership checklist, not a rendered ordered list).
-// The companion `rmng.settings.groupOrder` key is gone for the same reason: nothing renders
-// an ordered list of groups any more, so a store for it would have no readers.
+// The order is bucketed per provider ("claude" / "codex"). The storage key and its
+// `Record<string, string[]>` shape predate the provider buckets, so entries under any
+// other key are inert — read past, never applied, never migrated.
+//
+// One interface for all of it: `ordered` sorts a single bucket by saved keys, and the two
+// helpers below adapt it to the two mixed shapes callers actually hold (a both-provider
+// row list, either flat or pre-split). Nothing ordering-related lives anywhere else.
 import { useSyncExternalStore } from "react";
+import type { ClaudeUsage } from "~/lib/types";
 
 const ACCT_ORDER_KEY = "rmng.settings.acctOrder";
 
@@ -112,8 +108,31 @@ export function orderedWithinBuckets<T>(
   });
 }
 
-/** Subscribe a component to the shared cosmetic ordering. Re-renders on any reorder, so the
- *  Settings account lists and the sidebar stay in sync within the same tab. */
+/** Split the flat both-provider row list into per-provider lists, each in the
+ *  operator's own saved order.
+ *
+ *  `provider` was added to the row after the fact, so a row that predates it (absent or
+ *  null) is Claude — anything else has to be tagged explicitly. */
+export function orderedAccounts(
+  accounts: ClaudeUsage[],
+  order: AcctOrder,
+): { claude: ClaudeUsage[]; codex: ClaudeUsage[] } {
+  return {
+    claude: ordered(
+      accounts.filter((a) => (a.provider ?? "claude") === "claude"),
+      order.claude ?? [],
+      (a) => a.id,
+    ),
+    codex: ordered(
+      accounts.filter((a) => a.provider === "codex"),
+      order.codex ?? [],
+      (a) => a.id,
+    ),
+  };
+}
+
+/** Subscribe a component to the shared cosmetic ordering. Re-renders on any reorder, so all
+ *  account renderers stay in sync within the same tab. */
 export function useAccountOrder(): {
   acctOrder: AcctOrder;
   setAcctOrder: typeof setAcctOrder;

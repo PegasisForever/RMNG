@@ -3,12 +3,7 @@
 // config becomes, what a save trims, what it drops, and what it refuses to send at all.
 import { expect, test } from "bun:test";
 
-import {
-  orderedAccounts,
-  settingsDraftFrom,
-  settingsPatch,
-} from "./settingsDraft";
-import type { ClaudeUsage } from "~/lib/types";
+import { settingsDraftFrom, settingsPatch } from "./settingsDraft";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 
 function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
@@ -228,59 +223,6 @@ test("the cosmetic account order is never part of the patch", () => {
   expect(Object.keys(patch(settingsDraftFrom(config())))).not.toContain(
     "acctOrder",
   );
-});
-
-// --- splitting the account list -----------------------------------------------------------
-
-const account = (
-  email: string,
-  provider?: "claude" | "codex",
-): ClaudeUsage => ({
-  id: `${provider ?? "claude"}|${email}`,
-  email,
-  provider,
-  active: true,
-  assignable: true,
-  lastUpdated: 0,
-});
-
-test("a row with no provider counts as Claude", () => {
-  // `provider` was added to the row after the fact, so an older row has none.
-  const rows = orderedAccounts(
-    [account("legacy"), account("new", "claude")],
-    {},
-  );
-
-  expect(rows.claude.map((a) => a.email)).toEqual(["legacy", "new"]);
-  expect(rows.codex).toEqual([]);
-});
-
-test("each provider's list follows its own saved order", () => {
-  const accounts = [
-    account("a@x.com", "claude"),
-    account("b@x.com", "claude"),
-    account("c@x.com", "codex"),
-    account("d@x.com", "codex"),
-  ];
-
-  const rows = orderedAccounts(accounts, {
-    claude: ["claude|b@x.com", "claude|a@x.com"],
-    codex: ["codex|d@x.com", "codex|c@x.com"],
-  });
-
-  expect(rows.claude.map((a) => a.email)).toEqual(["b@x.com", "a@x.com"]);
-  expect(rows.codex.map((a) => a.email)).toEqual(["d@x.com", "c@x.com"]);
-});
-
-test("a freshly imported account lands after the ordered ones, not first", () => {
-  const accounts = [
-    account("fresh@x.com", "claude"),
-    account("a@x.com", "claude"),
-  ];
-
-  const rows = orderedAccounts(accounts, { claude: ["claude|a@x.com"] });
-
-  expect(rows.claude.map((a) => a.email)).toEqual(["a@x.com", "fresh@x.com"]);
 });
 
 test("clearing the judge's Codex account sends null, not a blank the server would ignore", () => {

@@ -26,7 +26,8 @@ import {
 } from "~/components/SettingsPanes";
 import type { AcctOrder } from "~/lib/accountOrder";
 import type { BoardColumn } from "~/lib/board";
-import { orderedAccounts, type SettingsDraft } from "~/lib/settingsDraft";
+import type { SettingsDraft } from "~/lib/settingsDraft";
+import { orderedAccounts } from "~/lib/accountOrder";
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import { useModalEscape } from "~/lib/useModalEscape";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";

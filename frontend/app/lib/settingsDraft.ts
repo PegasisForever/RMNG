@@ -11,11 +11,10 @@
 //   - `settingsPatch` decides what a save actually sends: what is trimmed, what is dropped
 //     for being half-typed, what is deduped, and the one field that is only sent before
 //     first-run setup finishes.
-//   - `orderedAccounts` applies the operator's own cosmetic ordering to the two account
-//     lists.
+//
+// (Cosmetic account ordering used to be a third rule here; it moved to `accountOrder`,
+// alongside the store and the sort it belongs with.)
 
-import { ordered, type AcctOrder } from "~/lib/accountOrder";
-import type { ClaudeUsage } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
 import type { SshConfig } from "~/lib/wire/SshConfig";
@@ -234,27 +233,3 @@ export function settingsPatch(
   };
 }
 
-/**
- * Split the flat both-provider account list into the two lists the panel draws, each in the
- * operator's own saved order.
- *
- * `provider` was added to the row after the fact, so a row that predates it (absent or null)
- * is Claude — anything else has to be tagged explicitly.
- */
-export function orderedAccounts(
-  accounts: ClaudeUsage[],
-  order: AcctOrder,
-): { claude: ClaudeUsage[]; codex: ClaudeUsage[] } {
-  return {
-    claude: ordered(
-      accounts.filter((a) => (a.provider ?? "claude") === "claude"),
-      order.claude ?? [],
-      (a) => a.id,
-    ),
-    codex: ordered(
-      accounts.filter((a) => a.provider === "codex"),
-      order.codex ?? [],
-      (a) => a.id,
-    ),
-  };
-}
