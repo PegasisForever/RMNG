@@ -366,7 +366,10 @@ fn best_scored<P: PoolProvider>(app: &App) -> Option<String> {
     let mut pool: Vec<&Scored> = scored.iter().filter(|s| s.eligible).collect();
     if pool.is_empty() {
         let members: Vec<String> = scored.iter().map(|s| s.email.clone()).collect();
-        return best_saturated_email(&rotation_candidates::<P>(app, &members), &clone_loads::<P>(app));
+        return best_saturated_email(
+            &rotation_candidates::<P>(app, &members),
+            &clone_loads::<P>(app),
+        );
     }
     pool.sort_by(|a, b| {
         b.score
@@ -377,7 +380,10 @@ fn best_scored<P: PoolProvider>(app: &App) -> Option<String> {
 }
 
 /// Resolve a clone request's account selection to a concrete account email.
-pub(crate) fn resolve_clone_account<P: PoolProvider>(app: &App, requested: Option<&str>) -> Option<String> {
+pub(crate) fn resolve_clone_account<P: PoolProvider>(
+    app: &App,
+    requested: Option<&str>,
+) -> Option<String> {
     let emails = P::imported_emails(app);
     if emails.is_empty() {
         return None;
@@ -432,7 +438,9 @@ pub(crate) fn resolve_assignment<P: PoolProvider>(
         .map(str::trim)
         .filter(|n| !n.is_empty())
         .or(group)
-        .filter(|_| want.is_empty() || want.eq_ignore_ascii_case(AUTO) || want.starts_with("group:"));
+        .filter(|_| {
+            want.is_empty() || want.eq_ignore_ascii_case(AUTO) || want.starts_with("group:")
+        });
     if let Some(name) = group_name {
         let initial = pick_group_account::<P>(app, name, current)?;
         return Some(Assignment::Group {
@@ -529,7 +537,11 @@ fn eligible_group_accounts<P: PoolProvider>(app: &App, group: &CloneGroup) -> Ve
 /// among eligible members (or any member if none are eligible), fewest assigned clones
 /// first, then lowest spread-window usage, random tiebreak. `None` if the group is
 /// empty / has no imported members.
-pub(crate) fn pick_group_account<P: PoolProvider>(app: &App, group_name: &str, current: Option<&str>) -> Option<String> {
+pub(crate) fn pick_group_account<P: PoolProvider>(
+    app: &App,
+    group_name: &str,
+    current: Option<&str>,
+) -> Option<String> {
     let cfg = app.config();
     let group = cfg.groups.iter().find(|g| g.name == group_name)?;
     let counts = clone_loads::<P>(app);
@@ -739,7 +751,12 @@ pub(crate) fn assign_saturated_rotation<P: PoolProvider>(
 /// that aren't imported. When at least one account is under the hard limits, clones
 /// stick to eligible accounts exactly as before. When every imported candidate is over
 /// a limit, the saturated fallback picks the account that frees up soonest.
-async fn rotate_pool<P: PoolProvider>(app: &App, label: &str, members: &[String], clones: &[RmngClone]) {
+async fn rotate_pool<P: PoolProvider>(
+    app: &App,
+    label: &str,
+    members: &[String],
+    clones: &[RmngClone],
+) {
     let log = P::LOG_LABEL;
     let candidates = rotation_candidates::<P>(app, members);
     if candidates.is_empty() {
@@ -824,7 +841,10 @@ pub(crate) fn auto_pool_clones<P: PoolProvider>(hosts: &[RmngClone]) -> Vec<Rmng
     hosts
         .iter()
         .filter(|h| {
-            h.managed && P::sticky(h).is_none() && h.group.is_none() && P::selection(h) == Some(AUTO)
+            h.managed
+                && P::sticky(h).is_none()
+                && h.group.is_none()
+                && P::selection(h) == Some(AUTO)
         })
         .cloned()
         .collect()
@@ -953,7 +973,11 @@ pub(crate) async fn assign_clone_side<P: PoolProvider>(
                 return Err(e);
             }
             tracing::warn!("push_account_to_clone({host_id}) failed: {e:#}");
-            op_log(app, op_id, format!("{label}: failed to assign {what}: {e:#}"));
+            op_log(
+                app,
+                op_id,
+                format!("{label}: failed to assign {what}: {e:#}"),
+            );
         }
     }
     Ok(Some(SideBinding {
@@ -1000,11 +1024,7 @@ pub(crate) fn repoint_clones<P: PoolProvider>(app: &App, old: &str, new: &str) -
 /// Membership is the whole reason a replacement account is usable at all: an account in no
 /// pool is one the rotator will never hand to a clone. Idempotent on both halves, so an
 /// account already in a pool is not duplicated and a pool without `old` is untouched.
-pub(crate) fn swap_pool_member(
-    pools: &mut [CloneGroup],
-    old: &str,
-    new: &str,
-) -> Vec<String> {
+pub(crate) fn swap_pool_member(pools: &mut [CloneGroup], old: &str, new: &str) -> Vec<String> {
     let mut joined = Vec::new();
     for pool in pools.iter_mut() {
         if !pool.accounts.iter().any(|a| a == old) {

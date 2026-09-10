@@ -127,8 +127,7 @@ pub(crate) fn merge_claude_mcp(
         }
         let mut obj = serde_json::json!({ "type": "http", "url": m.url });
         if let Some(env) = m.bearer_env {
-            obj["headers"] =
-                serde_json::json!({ "Authorization": format!("Bearer ${{{env}}}") });
+            obj["headers"] = serde_json::json!({ "Authorization": format!("Bearer ${{{env}}}") });
         }
         servers.insert(m.name.to_string(), obj);
     }
@@ -616,7 +615,6 @@ fn toml_table_header(line: &str) -> Option<String> {
     }
 }
 
-
 const RMNG_CLI_SKILL_MD: &str = r#"---
 name: rmng-cli
 description: "Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage clone-source images and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool."
@@ -1002,18 +1000,24 @@ pub(crate) fn cursor_hooks_initial() -> String {
 /// assignment, everything else untouched. Pure-Rust port of the old jq merge — assigning
 /// (not deep-merging) is deliberate, so a renamed or dropped event stops firing instead
 /// of lingering. A non-object base is a hard error, matching the old merge.
-pub(crate) fn merge_claude_hooks(
-    base: &serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    set_json_key(base, "~/.claude/settings.json", "hooks", claude_hooks_object())
+pub(crate) fn merge_claude_hooks(base: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    set_json_key(
+        base,
+        "~/.claude/settings.json",
+        "hooks",
+        claude_hooks_object(),
+    )
 }
 
 /// Merge the probe registration into a `~/.cursor/hooks.json` body (`.version = 1` plus
 /// whole-`.hooks` assignment). Same port, same rules.
-pub(crate) fn merge_cursor_hooks(
-    base: &serde_json::Value,
-) -> anyhow::Result<serde_json::Value> {
-    let with_version = set_json_key(base, "~/.cursor/hooks.json", "version", serde_json::json!(1))?;
+pub(crate) fn merge_cursor_hooks(base: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let with_version = set_json_key(
+        base,
+        "~/.cursor/hooks.json",
+        "version",
+        serde_json::json!(1),
+    )?;
     set_json_key(
         &with_version,
         "~/.cursor/hooks.json",
@@ -1174,8 +1178,7 @@ async fn read_json_merge_base(
     if text.trim().is_empty() {
         return Ok(serde_json::json!({}));
     }
-    serde_json::from_str(&text)
-        .with_context(|| format!("{clone_id}: {label} is not valid JSON"))
+    serde_json::from_str(&text).with_context(|| format!("{clone_id}: {label} is not valid JSON"))
 }
 
 /// Write one managed guest file straight into the clone's live home (atomic temp +
@@ -1649,8 +1652,7 @@ async fn ensure_claude_mcp(app: &App, clone_id: &str, headless: bool) -> Result<
     {
         return Ok(false);
     }
-    let base = read_json_merge_base(app, clone_id, ".claude.json", "~/.claude.json")
-        .await?;
+    let base = read_json_merge_base(app, clone_id, ".claude.json", "~/.claude.json").await?;
     let merged = merge_claude_mcp(&base, headless)
         .with_context(|| format!("{clone_id}: merging ~/.claude.json MCP"))?;
     upload_guest_file(
@@ -1687,8 +1689,7 @@ async fn ensure_cursor_mcp(
         return Ok(false);
     }
     let base =
-        read_json_merge_base(app, clone_id, ".cursor/mcp.json", "~/.cursor/mcp.json")
-            .await?;
+        read_json_merge_base(app, clone_id, ".cursor/mcp.json", "~/.cursor/mcp.json").await?;
     let merged = merge_cursor_mcp(&base, headless, linear_key)
         .with_context(|| format!("{clone_id}: merging ~/.cursor/mcp.json MCP"))?;
     upload_guest_file(
@@ -1726,9 +1727,13 @@ async fn ensure_pi_mcp(
     {
         return Ok(false);
     }
-    let base =
-        read_json_merge_base(app, clone_id, ".config/mcp/mcp.json", "~/.config/mcp/mcp.json")
-            .await?;
+    let base = read_json_merge_base(
+        app,
+        clone_id,
+        ".config/mcp/mcp.json",
+        "~/.config/mcp/mcp.json",
+    )
+    .await?;
     let merged = merge_pi_mcp(&base, headless, linear_key)
         .with_context(|| format!("{clone_id}: merging ~/.config/mcp/mcp.json MCP"))?;
     upload_guest_file(
@@ -1740,10 +1745,7 @@ async fn ensure_pi_mcp(
     )
     .await?;
     app.docker
-        .upload_tar(
-            clone_id,
-            vec![pi_mcp_stamp_entry_for(headless, linear_key)],
-        )
+        .upload_tar(clone_id, vec![pi_mcp_stamp_entry_for(headless, linear_key)])
         .await
         .with_context(|| format!("{clone_id}: writing pi mcp stamp"))?;
     Ok(true)
@@ -1765,28 +1767,47 @@ async fn ensure_claude_hook(app: &App, clone_id: &str) -> Result<bool> {
     }
     // Probe straight into the live home (0755: it executes); parents come pre-created
     // from the template, with write_clone_home as backstop.
-    crate::home_overlay::write_clone_home(clone_id, ".rmng/hook.py", RMNG_HOOK_PY.as_bytes(), 0o755)
-        .with_context(|| format!("{clone_id}: writing the activity probe"))?;
+    crate::home_overlay::write_clone_home(
+        clone_id,
+        ".rmng/hook.py",
+        RMNG_HOOK_PY.as_bytes(),
+        0o755,
+    )
+    .with_context(|| format!("{clone_id}: writing the activity probe"))?;
     // Registrations merge into the operator's own settings files (0644, as before).
     for (rel, label, merged) in [
         (
             ".claude/settings.json",
             "~/.claude/settings.json",
             merge_claude_hooks(
-                &read_json_merge_base(app, clone_id, ".claude/settings.json", "~/.claude/settings.json").await?,
+                &read_json_merge_base(
+                    app,
+                    clone_id,
+                    ".claude/settings.json",
+                    "~/.claude/settings.json",
+                )
+                .await?,
             ),
         ),
         (
             ".cursor/hooks.json",
             "~/.cursor/hooks.json",
             merge_cursor_hooks(
-                &read_json_merge_base(app, clone_id, ".cursor/hooks.json", "~/.cursor/hooks.json").await?,
+                &read_json_merge_base(app, clone_id, ".cursor/hooks.json", "~/.cursor/hooks.json")
+                    .await?,
             ),
         ),
     ] {
         let merged = merged.with_context(|| format!("{clone_id}: merging {label} hooks"))?;
-        upload_guest_file_at_mode(app, clone_id, rel, merged.to_string().into_bytes(), 0o644, label)
-            .await?;
+        upload_guest_file_at_mode(
+            app,
+            clone_id,
+            rel,
+            merged.to_string().into_bytes(),
+            0o644,
+            label,
+        )
+        .await?;
     }
     app.docker
         .upload_tar(clone_id, vec![claude_hook_stamp_entry()])
@@ -1958,233 +1979,233 @@ async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSe
         }
     };
 
-        let mut desired_env = control_env.clone();
-        // Per-clone identity key (`RMNG_PROXY_KEY`): recomputed into `/etc/environment` on every
-        // resync so an existing clone picks it up without a recreate. Minted + persisted
-        // server-side; never serialized onto `RmngClone`/state. See `crate::clonekey`.
-        desired_env.extend(crate::provision::clone_key_env_vars(app, id));
-        if let Some(preset) = preset_for_clone(&cfg, h) {
-            desired_env.extend(crate::provision::preset_env_vars(preset));
-        } else if h.preset_name.as_ref().is_some_and(|s| !s.trim().is_empty()) {
-            // Warn-once: stripping the keys would wipe live config on a preset rename, so
-            // preservation is the behavior — the warn only needs saying once per clone.
-            if warned.insert(format!("{}:preset", id)) {
-                tracing::warn!(
-                    target: "clone_reconcile",
-                    "clone {id}: preset {:?} no longer exists; preserving unmanaged /etc/environment keys",
-                    h.preset_name
-                );
-            }
+    let mut desired_env = control_env.clone();
+    // Per-clone identity key (`RMNG_PROXY_KEY`): recomputed into `/etc/environment` on every
+    // resync so an existing clone picks it up without a recreate. Minted + persisted
+    // server-side; never serialized onto `RmngClone`/state. See `crate::clonekey`.
+    desired_env.extend(crate::provision::clone_key_env_vars(app, id));
+    if let Some(preset) = preset_for_clone(&cfg, h) {
+        desired_env.extend(crate::provision::preset_env_vars(preset));
+    } else if h.preset_name.as_ref().is_some_and(|s| !s.trim().is_empty()) {
+        // Warn-once: stripping the keys would wipe live config on a preset rename, so
+        // preservation is the behavior — the warn only needs saying once per clone.
+        if warned.insert(format!("{}:preset", id)) {
+            tracing::warn!(
+                target: "clone_reconcile",
+                "clone {id}: preset {:?} no longer exists; preserving unmanaged /etc/environment keys",
+                h.preset_name
+            );
         }
-        // Claude Code's default model (ANTHROPIC_MODEL). The create path seeds this same var
-        // from the same helper, so a fresh clone already has it and this pass is a no-op
-        // content-compare rather than a 30 s-late rewrite.
-        desired_env.push(claude_model_env_var());
-        // Read before the render below shadows the list: Cursor cannot expand an environment
-        // reference in its MCP config, so its `linear` server needs the value itself.
-        let linear_key = env_value(&desired_env, "LINEAR_API_KEY");
-        let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
-        let env_script = etc_environment_sync_script(&desired_env);
-        match exec_ok_marked(
-            app,
-            id,
-            &env_script,
-            "sync /etc/environment",
-            ENV_CHANGED_MARKER,
-        )
-        .await
-        {
-            Ok(changed) => {
-                warned.remove(&format!("{id}:etc-env"));
-                // Writing /etc/environment does NOT reach the processes already running: PAM
-                // reads it at session start, so the long-lived agent-wrapper keeps whatever it
-                // was launched with. It fronts the chat panel, so on a clone that predates an
-                // env change (the group-proxy split moved ANTHROPIC_BASE_URL) chat would talk
-                // to the old endpoint until something restarted it by hand. Restart it here —
-                // only on a real change, so an in-flight turn isn't interrupted every pass.
-                if changed {
-                    tracing::info!(target: "clone_reconcile", "clone {id}: /etc/environment changed — restarting agent-wrapper to pick it up");
-                    if let Err(e) = exec_ok(
-                        app,
-                        id,
-                        restart_agent_wrapper_script(),
-                        "restart agent-wrapper (env change)",
-                    )
-                    .await
-                    {
-                        tracing::warn!(target: "clone_reconcile", "clone {id}: agent-wrapper restart after env change failed: {e:#}");
-                    }
-                }
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:etc-env")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: /etc/environment reconcile failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: /etc/environment reconcile still failing: {e:#}");
+    }
+    // Claude Code's default model (ANTHROPIC_MODEL). The create path seeds this same var
+    // from the same helper, so a fresh clone already has it and this pass is a no-op
+    // content-compare rather than a 30 s-late rewrite.
+    desired_env.push(claude_model_env_var());
+    // Read before the render below shadows the list: Cursor cannot expand an environment
+    // reference in its MCP config, so its `linear` server needs the value itself.
+    let linear_key = env_value(&desired_env, "LINEAR_API_KEY");
+    let desired_env = crate::provision::clone_etc_environment_conf(&desired_env);
+    let env_script = etc_environment_sync_script(&desired_env);
+    match exec_ok_marked(
+        app,
+        id,
+        &env_script,
+        "sync /etc/environment",
+        ENV_CHANGED_MARKER,
+    )
+    .await
+    {
+        Ok(changed) => {
+            warned.remove(&format!("{id}:etc-env"));
+            // Writing /etc/environment does NOT reach the processes already running: PAM
+            // reads it at session start, so the long-lived agent-wrapper keeps whatever it
+            // was launched with. It fronts the chat panel, so on a clone that predates an
+            // env change (the group-proxy split moved ANTHROPIC_BASE_URL) chat would talk
+            // to the old endpoint until something restarted it by hand. Restart it here —
+            // only on a real change, so an in-flight turn isn't interrupted every pass.
+            if changed {
+                tracing::info!(target: "clone_reconcile", "clone {id}: /etc/environment changed — restarting agent-wrapper to pick it up");
+                if let Err(e) = exec_ok(
+                    app,
+                    id,
+                    restart_agent_wrapper_script(),
+                    "restart agent-wrapper (env change)",
+                )
+                .await
+                {
+                    tracing::warn!(target: "clone_reconcile", "clone {id}: agent-wrapper restart after env change failed: {e:#}");
                 }
             }
         }
+        Err(e) => {
+            if warned.insert(format!("{id}:etc-env")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: /etc/environment reconcile failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: /etc/environment reconcile still failing: {e:#}");
+            }
+        }
+    }
 
-        // Codex CLI is the template's (baked, sole source) — no post-boot install step.
+    // Codex CLI is the template's (baked, sole source) — no post-boot install step.
 
-        // `gpt_models` (this clone's group GPT list, or the FALLBACK_GPT_MODELS safety net) was
-        // resolved once per pass above, alongside the Claude Code default, from the group catalog.
-        // The global agent prompt (layers a+c) is composed from config + this clone's preset, so a
-        // Settings edit re-applies to existing clones on the next pass (content-hash-stamped).
-        let global_prompt = crate::web::compose_global_prompt(&cfg, preset_for_clone(&cfg, h));
-        match ensure_codex_parity(app, id, h.headless, &global_prompt).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:codex"));
-                tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: refreshed agent prompt (CLAUDE.md/AGENTS.md) and MCP config"
-                );
+    // `gpt_models` (this clone's group GPT list, or the FALLBACK_GPT_MODELS safety net) was
+    // resolved once per pass above, alongside the Claude Code default, from the group catalog.
+    // The global agent prompt (layers a+c) is composed from config + this clone's preset, so a
+    // Settings edit re-applies to existing clones on the next pass (content-hash-stamped).
+    let global_prompt = crate::web::compose_global_prompt(&cfg, preset_for_clone(&cfg, h));
+    match ensure_codex_parity(app, id, h.headless, &global_prompt).await {
+        Ok(true) => {
+            warned.remove(&format!("{id}:codex"));
+            tracing::info!(
+                target: "clone_reconcile",
+                "clone {id}: refreshed agent prompt (CLAUDE.md/AGENTS.md) and MCP config"
+            );
+        }
+        Ok(false) => {
+            warned.remove(&format!("{id}:codex"));
+        }
+        Err(e) => {
+            if warned.insert(format!("{id}:codex")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: Codex parity reconcile failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: Codex parity reconcile still failing: {e:#}");
             }
-            Ok(false) => {
-                warned.remove(&format!("{id}:codex"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:codex")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: Codex parity reconcile failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: Codex parity reconcile still failing: {e:#}");
-                }
-                // No gate: later steps own independent stamps and dirs (template-made),
-                // so a parity failure must not hold MCP/hook convergence hostage.
+            // No gate: later steps own independent stamps and dirs (template-made),
+            // so a parity failure must not hold MCP/hook convergence hostage.
+        }
+    }
+
+    // Interactive Claude Code's `~/.claude.json` MCP set (desktop headed-only + linear). jq
+    // merge, stamped on the headless bit. Best-effort — a failure is logged and retried.
+    match ensure_claude_mcp(app, id, h.headless).await {
+        Ok(true) => {
+            warned.remove(&format!("{id}:claude-mcp"));
+            tracing::info!(
+                target: "clone_reconcile",
+                "clone {id}: synced ~/.claude.json MCP servers (headless={})",
+                h.headless
+            );
+        }
+        Ok(false) => {
+            warned.remove(&format!("{id}:claude-mcp"));
+        }
+        Err(e) => {
+            if warned.insert(format!("{id}:claude-mcp")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile still failing: {e:#}");
             }
         }
+    }
 
-        // Interactive Claude Code's `~/.claude.json` MCP set (desktop headed-only + linear). jq
-        // merge, stamped on the headless bit. Best-effort — a failure is logged and retried.
-        match ensure_claude_mcp(app, id, h.headless).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:claude-mcp"));
-                tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: synced ~/.claude.json MCP servers (headless={})",
-                    h.headless
-                );
-            }
-            Ok(false) => {
-                warned.remove(&format!("{id}:claude-mcp"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:claude-mcp")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.claude.json MCP reconcile still failing: {e:#}");
-                }
+    // Cursor's `~/.cursor/mcp.json`, the same managed set the CLI agents get. Merged, not
+    // rewritten: the operator's own servers share that file.
+    match ensure_cursor_mcp(app, id, h.headless, &linear_key).await {
+        Ok(true) => {
+            warned.remove(&format!("{id}:cursor-mcp"));
+            tracing::info!(
+                target: "clone_reconcile",
+                "clone {id}: synced ~/.cursor/mcp.json MCP servers (headless={})",
+                h.headless
+            );
+        }
+        Ok(false) => {
+            warned.remove(&format!("{id}:cursor-mcp"));
+        }
+        Err(e) => {
+            if warned.insert(format!("{id}:cursor-mcp")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile still failing: {e:#}");
             }
         }
+    }
 
-        // Cursor's `~/.cursor/mcp.json`, the same managed set the CLI agents get. Merged, not
-        // rewritten: the operator's own servers share that file.
-        match ensure_cursor_mcp(app, id, h.headless, &linear_key).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:cursor-mcp"));
-                tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: synced ~/.cursor/mcp.json MCP servers (headless={})",
-                    h.headless
-                );
-            }
-            Ok(false) => {
-                warned.remove(&format!("{id}:cursor-mcp"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:cursor-mcp")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.cursor/mcp.json MCP reconcile still failing: {e:#}");
-                }
+    // The pi-mcp-adapter's `~/.config/mcp/mcp.json`: same set, adapter schema.
+    // Merged, not rewritten: the operator's own servers share that file.
+    match ensure_pi_mcp(app, id, h.headless, &linear_key).await {
+        Ok(true) => {
+            warned.remove(&format!("{id}:pi-mcp"));
+            tracing::info!(
+                target: "clone_reconcile",
+                "clone {id}: synced ~/.config/mcp/mcp.json MCP servers (headless={})",
+                h.headless
+            );
+        }
+        Ok(false) => {
+            warned.remove(&format!("{id}:pi-mcp"));
+        }
+        Err(e) => {
+            if warned.insert(format!("{id}:pi-mcp")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.config/mcp/mcp.json MCP reconcile failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.config/mcp/mcp.json MCP reconcile still failing: {e:#}");
             }
         }
+    }
 
-        // The pi-mcp-adapter's `~/.config/mcp/mcp.json`: same set, adapter schema.
-        // Merged, not rewritten: the operator's own servers share that file.
-        match ensure_pi_mcp(app, id, h.headless, &linear_key).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:pi-mcp"));
-                tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: synced ~/.config/mcp/mcp.json MCP servers (headless={})",
-                    h.headless
-                );
-            }
-            Ok(false) => {
-                warned.remove(&format!("{id}:pi-mcp"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:pi-mcp")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.config/mcp/mcp.json MCP reconcile failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.config/mcp/mcp.json MCP reconcile still failing: {e:#}");
-                }
+    // The activity probe: `~/.rmng/hook.py` plus its registration under `.hooks` in
+    // `~/.claude/settings.json`. What tells working from stuck (see `crate::stuck`).
+    // Stamped on a hash of the script, so editing it re-pushes fleet-wide by itself.
+    match ensure_claude_hook(app, id).await {
+        Ok(true) => {
+            warned.remove(&format!("{id}:claude-hook"));
+            tracing::info!(
+                target: "clone_reconcile",
+                "clone {id}: installed the activity probe and registered its hooks"
+            );
+        }
+        Ok(false) => {
+            warned.remove(&format!("{id}:claude-hook"));
+        }
+        Err(e) => {
+            if warned.insert(format!("{id}:claude-hook")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: activity probe install failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: activity probe install still failing: {e:#}");
             }
         }
+    }
 
-        // The activity probe: `~/.rmng/hook.py` plus its registration under `.hooks` in
-        // `~/.claude/settings.json`. What tells working from stuck (see `crate::stuck`).
-        // Stamped on a hash of the script, so editing it re-pushes fleet-wide by itself.
-        match ensure_claude_hook(app, id).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:claude-hook"));
-                tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: installed the activity probe and registered its hooks"
-                );
-            }
-            Ok(false) => {
-                warned.remove(&format!("{id}:claude-hook"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:claude-hook")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: activity probe install failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: activity probe install still failing: {e:#}");
-                }
+    // Codex's `~/.codex/config.toml` MCP tables. A MERGE, not a rewrite: everything else in
+    // that file is the operator's (model, approval_policy, sandbox, their own MCP servers).
+    match ensure_codex_mcp(app, id, h.headless).await {
+        Ok(true) => {
+            warned.remove(&format!("{id}:codex-mcp"));
+            tracing::info!(
+                target: "clone_reconcile",
+                "clone {id}: merged ~/.codex/config.toml MCP servers (headless={})",
+                h.headless
+            );
+        }
+        Ok(false) => {
+            warned.remove(&format!("{id}:codex-mcp"));
+        }
+        Err(e) => {
+            if warned.insert(format!("{id}:codex-mcp")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.codex/config.toml MCP merge failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.codex/config.toml MCP merge still failing: {e:#}");
             }
         }
+    }
 
-        // Codex's `~/.codex/config.toml` MCP tables. A MERGE, not a rewrite: everything else in
-        // that file is the operator's (model, approval_policy, sandbox, their own MCP servers).
-        match ensure_codex_mcp(app, id, h.headless).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:codex-mcp"));
-                tracing::info!(
-                    target: "clone_reconcile",
-                    "clone {id}: merged ~/.codex/config.toml MCP servers (headless={})",
-                    h.headless
-                );
-            }
-            Ok(false) => {
-                warned.remove(&format!("{id}:codex-mcp"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:codex-mcp")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: ~/.codex/config.toml MCP merge failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: ~/.codex/config.toml MCP merge still failing: {e:#}");
-                }
+    match ensure_payload_current(app, id, h.headless).await {
+        Ok(true) => {
+            warned.remove(&format!("{id}:payload"));
+            tracing::info!(target: "clone_reconcile", "clone {id}: refreshed clone binaries and restarted rmng-clone-daemon");
+        }
+        Ok(false) => {
+            warned.remove(&format!("{id}:payload"));
+        }
+        Err(e) => {
+            if warned.insert(format!("{id}:payload")) {
+                tracing::warn!(target: "clone_reconcile", "clone {id}: payload reconcile failed: {e:#}");
+            } else {
+                tracing::debug!(target: "clone_reconcile", "clone {id}: payload reconcile still failing: {e:#}");
             }
         }
-
-        match ensure_payload_current(app, id, h.headless).await {
-            Ok(true) => {
-                warned.remove(&format!("{id}:payload"));
-                tracing::info!(target: "clone_reconcile", "clone {id}: refreshed clone binaries and restarted rmng-clone-daemon");
-            }
-            Ok(false) => {
-                warned.remove(&format!("{id}:payload"));
-            }
-            Err(e) => {
-                if warned.insert(format!("{id}:payload")) {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: payload reconcile failed: {e:#}");
-                } else {
-                    tracing::debug!(target: "clone_reconcile", "clone {id}: payload reconcile still failing: {e:#}");
-                }
-            }
-        }
+    }
 }
 
 /// Post-op convergence: run the full chain for one clone in the background after
@@ -2591,7 +2612,10 @@ mod tests {
     fn claude_mcp_merge_sets_desktop_headed_and_skips_it_headless() {
         let base = serde_json::json!({"projects": {"/x": {}}, "mcpServers": {}});
         let headed = merge_claude_mcp(&base, false).unwrap();
-        assert_eq!(headed["mcpServers"]["linear"]["url"], "https://mcp.linear.app/mcp");
+        assert_eq!(
+            headed["mcpServers"]["linear"]["url"],
+            "https://mcp.linear.app/mcp"
+        );
         assert_eq!(
             headed["mcpServers"]["desktop"]["url"],
             "http://127.0.0.1:9004"
@@ -2605,7 +2629,10 @@ mod tests {
         assert!(headless["mcpServers"].get("desktop").is_none());
         assert!(headless["mcpServers"].get("linear").is_some());
         let untouched = merge_claude_mcp(&headed, true).unwrap();
-        assert_eq!(untouched["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
+        assert_eq!(
+            untouched["mcpServers"]["desktop"]["url"],
+            "http://127.0.0.1:9004"
+        );
 
         // ${LINEAR_API_KEY} must be stored literally so Claude Code expands it from the session
         // env at runtime.
@@ -2688,15 +2715,15 @@ mod tests {
     fn preboot_files_are_the_merges_on_empty_base() {
         // ~/.claude.json: headed gets both servers, headless skips desktop.
         let v = merge_claude_mcp(&serde_json::json!({}), false).unwrap();
-        assert_eq!(v["mcpServers"]["linear"]["url"], "https://mcp.linear.app/mcp");
+        assert_eq!(
+            v["mcpServers"]["linear"]["url"],
+            "https://mcp.linear.app/mcp"
+        );
         assert_eq!(
             v["mcpServers"]["linear"]["headers"]["Authorization"],
             "Bearer ${LINEAR_API_KEY}"
         );
-        assert_eq!(
-            v["mcpServers"]["desktop"]["url"],
-            "http://127.0.0.1:9004"
-        );
+        assert_eq!(v["mcpServers"]["desktop"]["url"], "http://127.0.0.1:9004");
         let v = merge_claude_mcp(&serde_json::json!({}), true).unwrap();
         assert!(v["mcpServers"].get("desktop").is_none());
         assert!(v["mcpServers"].get("linear").is_some());
@@ -2712,7 +2739,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&claude_settings_initial()).unwrap();
         assert_eq!(v["hooks"].as_object().unwrap().len(), HOOK_EVENTS.len());
         for event in HOOK_EVENTS {
-            let cmd = v["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap();
+            let cmd = v["hooks"][event][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap();
             assert_eq!(cmd, HOOK_IN_CLONE, "{event} points at the probe");
         }
         let v: serde_json::Value = serde_json::from_str(&cursor_hooks_initial()).unwrap();
@@ -3350,7 +3379,10 @@ mod hook_tests {
             v["mcpServers"]["linear"]["url"],
             "https://mcp.linear.app/mcp"
         );
-        assert_eq!(v["mcpServers"]["linear"]["bearerTokenEnv"], "LINEAR_API_KEY");
+        assert_eq!(
+            v["mcpServers"]["linear"]["bearerTokenEnv"],
+            "LINEAR_API_KEY"
+        );
         assert!(
             !v.to_string().contains("lin_key"),
             "the key itself must never land in the file"

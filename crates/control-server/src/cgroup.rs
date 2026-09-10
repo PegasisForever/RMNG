@@ -63,7 +63,8 @@ async fn cpu_usage_from_root(root: &Path) -> Result<u64> {
 
 /// Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
 pub fn lxc_disk_used() -> Result<u64> {
-    let stat = statvfs(LXC_ROOT).with_context(|| format!("reading filesystem stats for {LXC_ROOT}"))?;
+    let stat =
+        statvfs(LXC_ROOT).with_context(|| format!("reading filesystem stats for {LXC_ROOT}"))?;
     disk_used(stat.blocks(), stat.blocks_free(), stat.fragment_size())
 }
 
@@ -207,7 +208,10 @@ mod tests {
 
     #[test]
     fn parses_ct_cpu_usage_and_physical_disk_blocks() {
-        assert_eq!(parse_cpu_usage("usage_usec 120\nuser_usec 80\n").unwrap(), 120);
+        assert_eq!(
+            parse_cpu_usage("usage_usec 120\nuser_usec 80\n").unwrap(),
+            120
+        );
         assert!(parse_cpu_usage("user_usec 80\n").is_err());
         assert!(parse_cpu_usage("usage_usec nope\n").is_err());
         assert!(parse_cpu_usage("usage_usec 1 extra\n").is_err());
@@ -222,7 +226,11 @@ mod tests {
         // The per-clone path reads the same `cpu.stat` shape as the CT-wide one, just under a
         // different root — this is what replaced Docker's (wrongly scaled) stats API.
         let root = test_root();
-        write(&root, "cpu.stat", "usage_usec 4200\nuser_usec 1000\nsystem_usec 3200\n");
+        write(
+            &root,
+            "cpu.stat",
+            "usage_usec 4200\nuser_usec 1000\nsystem_usec 3200\n",
+        );
         assert_eq!(cpu_usage_from_root(&root).await.unwrap(), 4200);
 
         // A vanished container (its `/proc/<pid>/root` is gone) is an error, not a zero sample —
@@ -242,7 +250,10 @@ mod tests {
 
         assert_eq!(
             memory_usage_from_root(&root).await.unwrap(),
-            MemoryUsage { used: 90, limit: 192 }
+            MemoryUsage {
+                used: 90,
+                limit: 192
+            }
         );
         std::fs::remove_dir_all(root).unwrap();
     }

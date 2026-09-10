@@ -39,7 +39,10 @@ pub fn payload(name: &str) -> Option<Vec<u8>> {
 /// build. `None` when neither has an `index.html` (the web layer serves a 404 hint;
 /// the API stays up).
 pub fn static_dir() -> Option<PathBuf> {
-    [Path::new(INSTALL_DIR).join("static"), PathBuf::from(DEV_STATIC_DIR)]
-        .into_iter()
-        .find(|p| p.join("index.html").is_file())
+    [
+        Path::new(INSTALL_DIR).join("static"),
+        PathBuf::from(DEV_STATIC_DIR),
+    ]
+    .into_iter()
+    .find(|p| p.join("index.html").is_file())
 }

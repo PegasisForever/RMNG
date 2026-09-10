@@ -53,9 +53,11 @@ impl Drop for PollGuard<'_> {
 
 /// Milliseconds since the Unix epoch (0 if the clock is before the epoch).
 pub(crate) fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
-
 
 /// A short `: <prefix>` of an error body for log lines (empty stays empty).
 ///
@@ -76,7 +78,10 @@ pub(crate) fn snippet(s: &str) -> String {
 pub(crate) fn rand_u64() -> u64 {
     use std::io::Read;
     let mut buf = [0u8; 8];
-    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)).is_ok() {
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .is_ok()
+    {
         u64::from_le_bytes(buf)
     } else {
         now_ms() as u64
@@ -218,10 +223,17 @@ pub(crate) fn replace_provider_views(
     views.sort_by(|a, b| a.email.cmp(&b.email));
     let mut changes = Vec::new();
     app.store.mutate(|s| {
-        let mut merged: Vec<wire::ClaudeUsage> =
-            s.claude_accounts.iter().filter(|u| u.provider != Some(provider)).cloned().collect();
-        let was: Vec<&wire::ClaudeUsage> =
-            s.claude_accounts.iter().filter(|u| u.provider == Some(provider)).collect();
+        let mut merged: Vec<wire::ClaudeUsage> = s
+            .claude_accounts
+            .iter()
+            .filter(|u| u.provider != Some(provider))
+            .cloned()
+            .collect();
+        let was: Vec<&wire::ClaudeUsage> = s
+            .claude_accounts
+            .iter()
+            .filter(|u| u.provider == Some(provider))
+            .collect();
         changes = usability_changes(&was, &views);
         merged.extend(views.iter().cloned());
         merged.sort_by_key(|u| provider_rank(u.provider));
@@ -256,7 +268,11 @@ fn usability_changes(
         match (before, usable(v)) {
             (Some(true) | None, false) => out.push((
                 v.email.clone(),
-                Some(v.error.clone().unwrap_or_else(|| "no reason recorded".into())),
+                Some(
+                    v.error
+                        .clone()
+                        .unwrap_or_else(|| "no reason recorded".into()),
+                ),
             )),
             (Some(false), true) => out.push((v.email.clone(), None)),
             _ => {}
@@ -332,20 +348,12 @@ mod tests {
         assert_eq!(claude.as_deref(), Some("auto"));
         assert_eq!(codex.as_deref(), Some("me@x.com"));
         // Explicit unbind clears even an inherited group.
-        let (g, _, _) = split_group_binding(
-            None,
-            None,
-            Some("old".into()),
-            Some(Some(String::new())),
-        );
+        let (g, _, _) =
+            split_group_binding(None, None, Some("old".into()), Some(Some(String::new())));
         assert_eq!(g, None);
         // Absent key keeps the legacy behavior: prefixes bind, else inherit.
-        let (g, claude, _) = split_group_binding(
-            Some("group:team".into()),
-            None,
-            Some("other".into()),
-            None,
-        );
+        let (g, claude, _) =
+            split_group_binding(Some("group:team".into()), None, Some("other".into()), None);
         assert_eq!(g.as_deref(), Some("team"));
         assert_eq!(claude.as_deref(), Some("auto"));
         let (g, _, _) = split_group_binding(None, None, Some("other".into()), None);
@@ -362,8 +370,15 @@ mod tests {
     fn a_long_error_body_is_cut_on_a_character_boundary() {
         let body = format!("{}\u{201c}invalid_grant\u{201d}", "x".repeat(119));
         let out = snippet(&body);
-        assert_eq!(out.chars().count(), 122, "the `: ` prefix plus 120 characters");
-        assert!(out.ends_with('\u{201c}'), "cut after the quote, not inside it: {out}");
+        assert_eq!(
+            out.chars().count(),
+            122,
+            "the `: ` prefix plus 120 characters"
+        );
+        assert!(
+            out.ends_with('\u{201c}'),
+            "cut after the quote, not inside it: {out}"
+        );
         assert_eq!(snippet(""), "", "an empty body stays empty");
     }
 
@@ -392,12 +407,21 @@ mod tests {
 
         // Falling over reports the reason.
         let out = usability_changes(&[&live], std::slice::from_ref(&dead));
-        assert_eq!(out, vec![("a@x".to_string(), Some("refresh 400: invalid_grant".to_string()))]);
+        assert_eq!(
+            out,
+            vec![(
+                "a@x".to_string(),
+                Some("refresh 400: invalid_grant".to_string())
+            )]
+        );
         // Every pass after that is silent: the poller runs every few minutes, and a line
         // printed every pass is one nobody reads.
         assert!(usability_changes(&[&dead], std::slice::from_ref(&dead)).is_empty());
         // Recovery is one line too.
-        assert_eq!(usability_changes(&[&dead], vec![live.clone()].as_slice()), vec![("a@x".to_string(), None)]);
+        assert_eq!(
+            usability_changes(&[&dead], vec![live.clone()].as_slice()),
+            vec![("a@x".to_string(), None)]
+        );
         assert!(usability_changes(&[&live], std::slice::from_ref(&live)).is_empty());
     }
 
@@ -415,9 +439,15 @@ mod tests {
     fn one_poll_at_a_time() {
         let flag = Mutex::new(false);
         let first = try_poll(&flag).expect("nothing was polling");
-        assert!(try_poll(&flag).is_none(), "a second poll started while the first ran");
+        assert!(
+            try_poll(&flag).is_none(),
+            "a second poll started while the first ran"
+        );
         drop(first);
-        assert!(try_poll(&flag).is_some(), "the flag outlived the poll that set it");
+        assert!(
+            try_poll(&flag).is_some(),
+            "the flag outlived the poll that set it"
+        );
     }
 
     /// The regression. The flag used to be cleared on the line after `poll_inner(app).await`,
@@ -430,7 +460,9 @@ mod tests {
         let (started, mut wait) = tokio::sync::mpsc::channel::<()>(1);
 
         let poll = async {
-            let Some(_guard) = try_poll(&flag) else { return };
+            let Some(_guard) = try_poll(&flag) else {
+                return;
+            };
             started.send(()).await.unwrap();
             // Never finishes, standing in for a poll still awaiting Anthropic when the
             // client goes away.
@@ -444,7 +476,10 @@ mod tests {
         }
 
         assert!(!*flag.lock().unwrap(), "a cancelled poll left the flag set");
-        assert!(try_poll(&flag).is_some(), "the next poll was locked out forever");
+        assert!(
+            try_poll(&flag).is_some(),
+            "the next poll was locked out forever"
+        );
     }
 
     /// A minimal imported Codex account. Only the id and the email are read by anything under
@@ -493,8 +528,11 @@ mod tests {
         }
         // Seed: two claude, one codex.
         app.store.mutate(|s| {
-            s.claude_accounts =
-                vec![view("a@c", Provider::Claude), view("b@c", Provider::Claude), view("z@o", Provider::Codex)];
+            s.claude_accounts = vec![
+                view("a@c", Provider::Claude),
+                view("b@c", Provider::Claude),
+                view("z@o", Provider::Codex),
+            ];
         });
         // A codex poll publishes a new codex set, sorted alphabetical.
         replace_provider_views(
@@ -504,7 +542,13 @@ mod tests {
         );
         let st = app.store.get();
         // Both claude rows still present.
-        assert_eq!(st.claude_accounts.iter().filter(|u| u.provider == Some(Provider::Claude)).count(), 2);
+        assert_eq!(
+            st.claude_accounts
+                .iter()
+                .filter(|u| u.provider == Some(Provider::Claude))
+                .count(),
+            2
+        );
         // Codex rows are the new set, alphabetical.
         let codex: Vec<_> = st
             .claude_accounts
@@ -517,7 +561,11 @@ mod tests {
         replace_provider_views(&app, Provider::Codex, vec![]);
         let st2 = app.store.get();
         assert_eq!(st2.claude_accounts.len(), 2);
-        assert!(st2.claude_accounts.iter().all(|u| u.provider == Some(Provider::Claude)));
+        assert!(
+            st2.claude_accounts
+                .iter()
+                .all(|u| u.provider == Some(Provider::Claude))
+        );
     }
 
     /// A poll snapshots its account list at the top and then spends a 400ms stagger and up to
@@ -564,14 +612,29 @@ mod tests {
         assert_eq!(published, vec!["kept@o".to_string()]);
     }
 
-
     #[test]
     fn b64url_roundtrip_via_standard_encoder() {
         // Derive base64url from the existing standard-base64 encoder (+→-, /→_, drop =).
-        for sample in ["", "f", "fo", "foo", "foob", "fooba", "foobar", "?>? subtle/+bytes"] {
+        for sample in [
+            "",
+            "f",
+            "fo",
+            "foo",
+            "foob",
+            "fooba",
+            "foobar",
+            "?>? subtle/+bytes",
+        ] {
             let std_b64 = B64.encode(sample.as_bytes());
-            let url = std_b64.trim_end_matches('=').replace('+', "-").replace('/', "_");
-            assert_eq!(b64url_decode(&url).unwrap(), sample.as_bytes(), "sample {sample:?}");
+            let url = std_b64
+                .trim_end_matches('=')
+                .replace('+', "-")
+                .replace('/', "_");
+            assert_eq!(
+                b64url_decode(&url).unwrap(),
+                sample.as_bytes(),
+                "sample {sample:?}"
+            );
         }
         // Invalid input rejected.
         assert!(b64url_decode("A").is_none());
@@ -582,12 +645,21 @@ mod tests {
     fn jwt_claims_and_exp() {
         let payload = r#"{"exp":2000000000,"email":"a@openai.com","https://api.openai.com/auth":{"chatgpt_plan_type":"plus","chatgpt_account_id":"acc-1"}}"#;
         let b64 = B64.encode(payload.as_bytes());
-        let url = b64.trim_end_matches('=').replace('+', "-").replace('/', "_");
+        let url = b64
+            .trim_end_matches('=')
+            .replace('+', "-")
+            .replace('/', "_");
         let jwt = format!("eyJhbGciOiJub25lIn0.{url}.sig");
         let claims = jwt_claims(&jwt).unwrap();
         assert_eq!(claims["email"], "a@openai.com");
-        assert_eq!(claims["https://api.openai.com/auth"]["chatgpt_plan_type"], "plus");
-        assert_eq!(claims["https://api.openai.com/auth"]["chatgpt_account_id"], "acc-1");
+        assert_eq!(
+            claims["https://api.openai.com/auth"]["chatgpt_plan_type"],
+            "plus"
+        );
+        assert_eq!(
+            claims["https://api.openai.com/auth"]["chatgpt_account_id"],
+            "acc-1"
+        );
         assert_eq!(jwt_exp_ms(&jwt), Some(2_000_000_000_000));
         // Non-JWT input yields no claims.
         assert!(jwt_claims("not-a-jwt").is_none());

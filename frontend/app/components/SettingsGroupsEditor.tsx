@@ -1,66 +1,49 @@
-// The single account-pool list: groups of mixed Claude/Codex members as a drag tree.
-// Groups reorder vertically; members reorder inside their group and move across groups
-// (a cross-group drag MOVES — nothing is left behind; the per-group "clone" picker copies
-// instead). One account in several groups is allowed; two of the same in one group is
-// refused (the drop is a no-op).
-//
-// Everything here is a draft edit (`onChange`) — including dropping a membership. An
-// account that ends up in no group is deleted by the save (`PUT /api/config` sweeps
-// unclaimed accounts), so the tree warns about those live instead of deleting anything
-// itself. Importing is immediate (a token lands now, not on save), so the per-group
-// import buttons stay callbacks the container owns.
+// A two-level drag tree. Hover only selects an insertion boundary; it never edits
+// the draft. The source stays mounted, and a separate overlay follows the pointer.
 import {
-  closestCenter,
   DndContext,
-  type DragEndEvent,
-  type DragOverEvent,
+  DragOverlay,
   KeyboardSensor,
+  MeasuringStrategy,
   PointerSensor,
+  useDraggable,
   useDroppable,
   useSensor,
   useSensors,
+  type DragEndEvent,
 } from "@dnd-kit/core";
-import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, X } from "lucide-react";
-import { useRef, useState } from "react";
+import { Fragment, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
+import chatgptLogo from "~/assets/chatgpt.svg";
+import claudeLogo from "~/assets/claude.svg";
 import { settingsInput } from "~/components/SettingsFields";
 import {
-  addReference,
-  moveMember,
-  reorderGroups,
-  type TreeGroup,
-} from "~/lib/groupTree";
+  applyTreeDrop,
+  isDuplicateDrop,
+  type EditorGroup,
+  type TreeDragItem,
+  type TreeDropTarget,
+} from "~/lib/groupTreeDrag";
 import { newGroup, type GroupDraft } from "~/lib/settingsDraft";
 import type { ClaudeUsage } from "~/lib/types";
+import {
+  itemId,
+  targetId,
+  treeCollision,
+  treeKeyboardCoordinates,
+} from "./SettingsGroupsEditor.dnd";
 
-/** dnd ids. Group order can change mid-drag only for the active group drag, and members
- *  only move while one is active, so index-based ids stay stable for the drag's lifetime. */
-const groupId = (gi: number) => `g:${gi}`;
-const memberId = (gi: number, email: string) => `m:${gi}:${email}`;
-const emptyId = (gi: number) => `empty:${gi}`;
-
-function parseId(id: string): { kind: "group" | "member" | "empty"; gi: number; email?: string } | null {
-  const [kind, gi, ...rest] = id.split(":");
-  if (kind !== "g" && kind !== "m" && kind !== "empty") return null;
-  const giNum = Number(gi);
-  if (!Number.isInteger(giNum)) return null;
-  return {
-    kind: kind === "g" ? "group" : kind === "m" ? "member" : "empty",
-    gi: giNum,
-    email: rest.join(":") || undefined,
-  };
-}
+const actionClass =
+  "rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800";
+const gripClass =
+  "shrink-0 cursor-grab touch-none rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-2 focus-visible:outline-blue-500 active:cursor-grabbing dark:hover:bg-slate-700 dark:hover:text-slate-200";
 
 function providerOf(accounts: ClaudeUsage[], email: string): string {
-  // A draft can still name an account deleted elsewhere; "unknown" says so honestly.
-  return accounts.find((a) => a.email === email)?.provider ?? "unknown";
+  return (
+    accounts.find((account) => account.email === email)?.provider ?? "unknown"
+  );
 }
 
 export function SettingsGroupsEditor({
@@ -71,327 +54,532 @@ export function SettingsGroupsEditor({
   onImportAccount,
 }: {
   groups: GroupDraft[];
-  /** Every imported account, both providers — provider chips, the clone picker source,
-   *  and the ungrouped warning below. */
+  /** Both providers, including imported accounts not yet in a group. */
   accounts: ClaudeUsage[];
-  /** What the tree says when there is nothing to put in it (no accounts imported at all). */
   noAccountsHint: string;
   onChange: (groups: GroupDraft[]) => void;
-  /** Per-group import buttons: importing lands the account in that group now. */
+  /** Import writes the token immediately; all other changes stay in the draft. */
   onImportAccount: (provider: "claude" | "codex", group: string) => void;
 }) {
+  const prefix = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const nextGroupId = useRef(0);
+  const dragSource = useRef<GroupDraft[] | null>(null);
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: treeKeyboardCoordinates,
+      scrollBehavior: "auto",
+    }),
   );
-  // The tree mid-drag. Props stay the save source; this copy renders while a drag is
-  // active and is the base each drag-over computes from (a state updater would double-apply
-  // under StrictMode, so the ref — never the updater — is the arithmetic source).
-  const [dragging, setDragging] = useState<TreeGroup[] | null>(null);
-  const dragRef = useRef<TreeGroup[] | null>(null);
-  const startRef = useRef<TreeGroup[] | null>(null);
-  const shown = dragging ?? groups;
+  const [editor, setEditor] = useState(() => ({
+    source: groups,
+    nodes: groups.map((group, index) => ({
+      ...group,
+      id: `${prefix}:0:${index}`,
+    })),
+    revision: 0,
+  }));
+  const [active, setActive] = useState<TreeDragItem | null>(null);
+  const [target, setTarget] = useState<TreeDropTarget | null>(null);
 
-  const memberships = (email: string) =>
-    shown.filter((g) => g.accounts.includes(email)).length;
-
-  const rename = (gi: number, name: string) =>
-    onChange(shown.map((g, j) => (j === gi ? { ...g, name } : g)));
-
-  const dropMember = (gi: number, email: string) => {
-    const base = dragRef.current ?? groups;
-    const next = base.map((g, j) =>
-      j === gi ? { ...g, accounts: g.accounts.filter((e) => e !== email) } : g,
-    );
-    dragRef.current = dragging ? next : null;
-    if (dragging) setDragging(next);
-    onChange(next);
+  // Preserve identities across our edits, including rename and reorder. An external
+  // replacement (save, reset, import) starts a new tree and cancels any old sensor.
+  // IDs are editor-only and are never sent through the settings interface.
+  if (editor.source !== groups) {
+    dragSource.current = null;
+    const revision = editor.revision + 1;
+    setEditor({
+      source: groups,
+      nodes: groups.map((group, index) => ({
+        ...group,
+        id: `${prefix}:${revision}:${index}`,
+      })),
+      revision,
+    });
+    setActive(null);
+    setTarget(null);
+  }
+  const nodes = editor.nodes;
+  const publish = (next: EditorGroup[]) => {
+    const value = next.map(({ name, accounts: members }) => ({
+      name,
+      accounts: members,
+    }));
+    setEditor({ ...editor, source: value, nodes: next });
+    onChange(value);
   };
-
-  const onDragStart = () => {
-    startRef.current = groups;
-    dragRef.current = groups;
-    setDragging(groups);
+  const updateGroup = (
+    id: string,
+    update: (group: EditorGroup) => EditorGroup,
+  ) => publish(nodes.map((group) => (group.id === id ? update(group) : group)));
+  const clearDrag = () => {
+    dragSource.current = null;
+    setActive(null);
+    setTarget(null);
   };
-
-  const onDragOver = (e: DragOverEvent) => {
-    const { active, over } = e;
-    if (!over) return;
-    const a = parseId(String(active.id));
-    const o = parseId(String(over.id));
-    if (!a || !o) return;
-    const base = dragRef.current ?? groups;
-    if (a.kind === "group") {
-      if (o.kind !== "group" || a.gi === o.gi) return;
-      applyNext(reorderGroups(base, a.gi, o.gi));
-      return;
+  const onDragEnd = (event: DragEndEvent) => {
+    // A sensor may deliver release after a reset or import replaced its provider.
+    // Never let that old session overwrite the new draft.
+    if (dragSource.current !== groups) return;
+    const item = event.active.data.current?.item as TreeDragItem | undefined;
+    const destination = event.over?.data.current?.target as
+      | TreeDropTarget
+      | undefined;
+    if (item && destination) {
+      const next = applyTreeDrop(nodes, item, destination);
+      if (next) {
+        publish(next);
+        // A cross-group move mounts a new row. dnd-kit's default restoration only
+        // knows the old handle, so explicitly follow the moved membership.
+        if (event.activatorEvent instanceof KeyboardEvent) {
+          const moved =
+            item.kind === "member" && destination.kind === "member"
+              ? { ...item, groupId: destination.groupId }
+              : item;
+          requestAnimationFrame(() =>
+            rootRef.current
+              ?.querySelector<HTMLButtonElement>(
+                `[data-drag-handle="${CSS.escape(itemId(moved))}"]`,
+              )
+              ?.focus(),
+          );
+        }
+      }
     }
-    // A member drag: the target group is the over item's group (or the empty slot's,
-    // or the group header's). Insert before the over member, append otherwise.
-    const fromGi = a.gi;
-    const fromIdx = base[fromGi]?.accounts.indexOf(a.email ?? "") ?? -1;
-    if (fromIdx < 0) return;
-    const toGi = o.gi;
-    const toIdx =
-      o.kind === "member"
-        ? (base[toGi]?.accounts.indexOf(o.email ?? "") ?? 0)
-        : (base[toGi]?.accounts.length ?? 0);
-    if (fromGi === toGi && (toIdx === fromIdx || toIdx === fromIdx + 1)) return;
-    const next = moveMember(base, { group: fromGi, index: fromIdx }, { group: toGi, index: toIdx });
-    if (next) applyNext(next);
-    // A refused drop (duplicate) leaves the tree untouched.
+    clearDrag();
   };
-
-  const applyNext = (next: TreeGroup[]) => {
-    dragRef.current = next;
-    setDragging(next);
-    onChange(next);
-  };
-
-  const endDrag = (revert: boolean) => {
-    // Dropped outside any target: put back what the drag started from.
-    if (revert && startRef.current) onChange(startRef.current);
-    startRef.current = null;
-    dragRef.current = null;
-    setDragging(null);
-  };
-
-  const onDragEnd = (e: DragEndEvent) => endDrag(!e.over);
-
-  // Imported accounts claimed by no group: saving deletes them (the server sweeps
-  // unclaimed accounts on a groups-touching save), so they are listed, not hidden.
-  const claimed = new Set(shown.flatMap((g) => g.accounts));
-  const ungrouped = accounts.filter((a) => !claimed.has(a.email));
+  const duplicate =
+    !!active && !!target && isDuplicateDrop(nodes, active, target);
+  const claimed = new Set(nodes.flatMap((group) => group.accounts));
+  const ungrouped = accounts.filter((account) => !claimed.has(account.email));
+  const sourceGroup = nodes.find((group) => group.id === active?.groupId);
+  const destinationGroup =
+    target?.kind === "member"
+      ? nodes.find((group) => group.id === target.groupId)
+      : null;
+  const status = active
+    ? duplicate
+      ? "This group already contains this account. Release to keep it in its original group."
+      : target
+        ? target.kind === "group"
+          ? `Insert group at position ${target.index + 1}.`
+          : `Move to ${destinationGroup?.name || "unnamed group"}, position ${target.index + 1}.`
+        : "Move over a group to choose a position. Release outside or press Escape to cancel."
+    : "Drag a handle to move. Use Space and arrow keys with the keyboard.";
 
   return (
     <DndContext
+      key={editor.revision}
       sensors={sensors}
-      collisionDetection={closestCenter}
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
+      collisionDetection={treeCollision}
+      measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
+      accessibility={{
+        screenReaderInstructions: {
+          draggable:
+            "Press Space to pick up. Use Up and Down to choose a position, including other groups. Press Space to drop or Escape to cancel.",
+        },
+        announcements: {
+          onDragStart: () => "Picked up. Use Up and Down to choose a position.",
+          onDragOver: () => status,
+          onDragEnd: () => "Drag ended.",
+          onDragCancel: () => "Move cancelled. The groups have not changed.",
+        },
+      }}
+      onDragStart={({ active: drag }) => {
+        dragSource.current = groups;
+        setActive(drag.data.current?.item as TreeDragItem);
+        setTarget(null);
+      }}
+      onDragOver={({ over }) => {
+        if (dragSource.current === groups)
+          setTarget(
+            (over?.data.current?.target as TreeDropTarget | undefined) ?? null,
+          );
+      }}
       onDragEnd={onDragEnd}
-      onDragCancel={() => endDrag(true)}
+      onDragCancel={() => {
+        if (dragSource.current === groups) clearDrag();
+      }}
     >
-      <div className="space-y-3">
-        {shown.length === 0 ? <p className="text-xs text-slate-400 dark:text-slate-500">No groups.</p> : null}
-        <SortableContext items={shown.map((_, gi) => groupId(gi))} strategy={verticalListSortingStrategy}>
-          {shown.map((g, gi) => (
-            <GroupCard
-              key={groupId(gi)}
-              gi={gi}
-              group={g}
-              accounts={accounts}
-              memberships={memberships}
-              onRename={(name) => rename(gi, name)}
-              onRemoveGroup={() => onChange(shown.filter((_, j) => j !== gi))}
-              onDropMember={(email) => dropMember(gi, email)}
-              onReference={(email) => {
-                const next = addReference(dragging ?? groups, gi, email);
-                if (next) onChange(next);
-              }}
-              onImportAccount={(provider) => onImportAccount(provider, g.name)}
-            />
+      <div ref={rootRef} data-groups-editor>
+        <p role="status" className="sr-only">
+          {status}
+        </p>
+        <TreeRegion>
+          <DropSlot
+            target={{ kind: "group", index: 0 }}
+            activeKind={active?.kind}
+          />
+          {nodes.map((group, index) => (
+            <Fragment key={group.id}>
+              <GroupCard
+                group={group}
+                index={index}
+                accounts={accounts}
+                active={active}
+                duplicate={duplicate}
+                memberships={(email) =>
+                  nodes.filter((node) => node.accounts.includes(email)).length
+                }
+                onRename={(name) =>
+                  updateGroup(group.id, (node) => ({ ...node, name }))
+                }
+                onRemove={() =>
+                  publish(nodes.filter((node) => node.id !== group.id))
+                }
+                onRemoveMember={(email) =>
+                  updateGroup(group.id, (node) => ({
+                    ...node,
+                    accounts: node.accounts.filter(
+                      (member) => member !== email,
+                    ),
+                  }))
+                }
+                onReference={(email) => {
+                  if (!group.accounts.includes(email))
+                    updateGroup(group.id, (node) => ({
+                      ...node,
+                      accounts: [...node.accounts, email],
+                    }));
+                }}
+                onImport={(provider) => onImportAccount(provider, group.name)}
+              />
+              <DropSlot
+                target={{ kind: "group", index: index + 1 }}
+                activeKind={active?.kind}
+              />
+            </Fragment>
           ))}
-        </SortableContext>
-        {accounts.length === 0 ? (
-          <p className="text-xs text-slate-400 dark:text-slate-500">{noAccountsHint}</p>
-        ) : null}
-        {ungrouped.length > 0 ? (
-          <p className="text-xs text-amber-600 dark:text-amber-400">
-            Not in any group — saving removes {ungrouped.length === 1 ? "it" : "them"} entirely:{" "}
-            {ungrouped.map((a) => a.email).join(", ")}. Reference {ungrouped.length === 1 ? "it" : "them"} into a
-            group above to keep {ungrouped.length === 1 ? "it" : "them"}.
+          {nodes.length === 0 && (
+            <p className="py-3 text-xs text-slate-400">No groups.</p>
+          )}
+        </TreeRegion>
+        {accounts.length === 0 && (
+          <p className="my-2 text-xs text-slate-400">{noAccountsHint}</p>
+        )}
+        {ungrouped.length > 0 && (
+          <p className="my-2 text-xs text-amber-600 dark:text-amber-400">
+            Not in any group — saving deletes these accounts:{" "}
+            {ungrouped.map((account) => account.email).join(", ")}. Add them to
+            a group to keep them.
           </p>
-        ) : null}
+        )}
         <button
           type="button"
-          onClick={() => onChange([...groups, newGroup()])}
-          className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+          disabled={!!active}
+          onClick={() =>
+            publish([
+              ...nodes,
+              { ...newGroup(), id: `${prefix}:added:${nextGroupId.current++}` },
+            ])
+          }
+          className={`mt-2 ${actionClass}`}
         >
           + Create group
         </button>
       </div>
+      {typeof document !== "undefined" &&
+        createPortal(
+          <DragOverlay
+            dropAnimation={null}
+            className="pointer-events-none"
+            zIndex={10000}
+          >
+            {active && sourceGroup ? (
+              <div
+                data-drag-preview
+                className="rounded border border-blue-400 bg-white p-3 text-sm text-slate-800 shadow-xl dark:bg-slate-800 dark:text-slate-100"
+              >
+                <div className="flex items-center gap-2">
+                  <GripVertical size={16} />
+                  {active.kind === "member" ? (
+                    <AccountLabel
+                      email={active.email}
+                      provider={providerOf(accounts, active.email)}
+                    />
+                  ) : (
+                    <strong>{sourceGroup.name || "Unnamed group"}</strong>
+                  )}
+                </div>
+                {duplicate && (
+                  <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+                    Already in this group
+                  </p>
+                )}
+              </div>
+            ) : null}
+          </DragOverlay>,
+          document.body,
+        )}
     </DndContext>
   );
 }
 
-function GroupCard({
-  gi,
-  group,
-  accounts,
-  memberships,
-  onRename,
-  onRemoveGroup,
-  onDropMember,
-  onReference,
-  onImportAccount,
-}: {
-  gi: number;
-  group: GroupDraft;
-  accounts: ClaudeUsage[];
-  memberships: (email: string) => number;
-  onRename: (name: string) => void;
-  onRemoveGroup: () => void;
-  onDropMember: (email: string) => void;
-  onReference: (email: string) => void;
-  onImportAccount: (provider: "claude" | "codex") => void;
-}) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: groupId(gi),
+function TreeRegion({ children }: { children: React.ReactNode }) {
+  const { setNodeRef } = useDroppable({
+    id: "groups-region",
+    data: { treeRegion: true },
   });
-  const { setNodeRef: setEmptyRef, isOver: emptyOver } = useDroppable({ id: emptyId(gi) });
-  // Accounts this group does not hold yet: members of other groups plus ungrouped ones.
-  // The button copies (references) rather than moves — dragging is what moves.
-  const referenceable = accounts.filter((a) => !group.accounts.includes(a.email));
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    position: "relative",
-    zIndex: isDragging ? 50 : undefined,
-  };
+  return <div ref={setNodeRef}>{children}</div>;
+}
+
+/** Slots occupy fixed space even when inactive. Highlighting one never moves a row. */
+function DropSlot({
+  target,
+  activeKind,
+  blocked = false,
+}: {
+  target: TreeDropTarget;
+  activeKind?: TreeDragItem["kind"];
+  blocked?: boolean;
+}) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: targetId(target),
+    data: { target },
+  });
+  const show = isOver && activeKind === target.kind;
   return (
     <div
       ref={setNodeRef}
-      style={style}
-      className={`rounded border border-slate-200 dark:border-slate-700 p-3 ${isDragging ? "bg-white shadow-md ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600" : ""}`}
+      data-drop-kind={target.kind}
+      data-drop-index={target.index}
+      data-drop-active={show || undefined}
+      className={`relative ${target.kind === "group" ? "h-3" : "h-2"}`}
     >
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          {...attributes}
-          {...listeners}
-          aria-label={`reorder group ${group.name || gi + 1}`}
-          className="shrink-0 cursor-grab touch-none rounded p-0.5 text-slate-300 hover:text-slate-500 active:cursor-grabbing dark:text-slate-600 dark:hover:text-slate-400"
-        >
-          <GripVertical size={14} />
-        </button>
-        <input
-          value={group.name}
-          onChange={(e) => onRename(e.target.value)}
-          placeholder="group name"
-          className={`${settingsInput} flex-1`}
-        />
-        <button
-          type="button"
-          onClick={onRemoveGroup}
-          className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
-        >
-          Remove
-        </button>
-      </div>
-      <SortableContext items={group.accounts.map((email) => memberId(gi, email))} strategy={verticalListSortingStrategy}>
-        <ul className="mt-2 space-y-1">
-          {group.accounts.map((email) => (
-            <MemberRow
-              key={memberId(gi, email)}
-              id={memberId(gi, email)}
-              email={email}
-              provider={providerOf(accounts, email)}
-              lastGroup={memberships(email) <= 1}
-              onDrop={() => onDropMember(email)}
-            />
-          ))}
-        </ul>
-      </SortableContext>
-      {group.accounts.length === 0 ? (
+      {show && (
         <div
-          ref={setEmptyRef}
-          className={`mt-2 rounded border border-dashed px-2 py-3 text-center text-xs ${emptyOver ? "border-emerald-500 text-emerald-600 dark:text-emerald-400" : "border-slate-200 text-slate-400 dark:border-slate-700 dark:text-slate-500"}`}
-        >
-          Drag accounts here
-        </div>
-      ) : null}
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onImportAccount("claude")}
-          className="rounded border border-slate-300 dark:border-slate-600 px-2 py-0.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-        >
-          + Import claude
-        </button>
-        <button
-          type="button"
-          onClick={() => onImportAccount("codex")}
-          className="rounded border border-slate-300 dark:border-slate-600 px-2 py-0.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-        >
-          + Import codex
-        </button>
-        {referenceable.length > 0 ? (
-          <select
-            value=""
-            onChange={(e) => {
-              if (e.target.value) onReference(e.target.value);
-              e.target.value = "";
-            }}
-            className="rounded border border-slate-300 dark:border-slate-600 px-1 py-0.5 text-xs text-slate-600 dark:text-slate-300 dark:bg-slate-800"
-            aria-label={`reference an existing account into ${group.name || "this group"}`}
-          >
-            <option value="">+ Clone an existing account…</option>
-            {referenceable.map((a) => (
-              <option key={a.id} value={a.email}>
-                {a.email}
-              </option>
-            ))}
-          </select>
-        ) : null}
-      </div>
+          className={`pointer-events-none absolute inset-x-0 top-1/2 border-t-2 ${blocked ? "border-dashed border-amber-500" : "border-blue-500"}`}
+        />
+      )}
     </div>
   );
 }
 
-function MemberRow({
-  id,
-  email,
-  provider,
-  lastGroup,
-  onDrop,
+function GroupCard({
+  group,
+  index,
+  accounts,
+  active,
+  duplicate,
+  memberships,
+  onRename,
+  onRemove,
+  onRemoveMember,
+  onReference,
+  onImport,
 }: {
-  id: string;
-  email: string;
-  provider: string;
-  /** This is the account's only group: dropping it routes to account delete on save. */
-  lastGroup: boolean;
-  onDrop: () => void;
+  group: EditorGroup;
+  index: number;
+  accounts: ClaudeUsage[];
+  active: TreeDragItem | null;
+  duplicate: boolean;
+  memberships: (email: string) => number;
+  onRename: (name: string) => void;
+  onRemove: () => void;
+  onRemoveMember: (email: string) => void;
+  onReference: (email: string) => void;
+  onImport: (provider: "claude" | "codex") => void;
 }) {
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
-  const style: React.CSSProperties = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    position: "relative",
-    zIndex: isDragging ? 50 : undefined,
-  };
+  const item: TreeDragItem = { kind: "group", groupId: group.id };
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } =
+    useDraggable({ id: itemId(item), data: { item } });
+  const { setNodeRef: setRegionRef } = useDroppable({
+    id: `region:${group.id}`,
+    data: { groupRegion: group.id },
+  });
+  const referenceable = accounts.filter(
+    (account) => !group.accounts.includes(account.email),
+  );
   return (
-    <li
+    <section
+      ref={setRegionRef}
+      data-group-name={group.name}
+      data-group-id={group.id}
+      aria-label={`Group ${group.name || index + 1}`}
+    >
+      <div
+        ref={setNodeRef}
+        className={`rounded border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900 ${isDragging ? "opacity-40" : ""}`}
+      >
+        <div className="flex items-center gap-2 rounded-t bg-slate-50 p-2 dark:bg-slate-800/60">
+          <button
+            ref={setActivatorNodeRef}
+            data-drag-handle={itemId(item)}
+            type="button"
+            {...attributes}
+            {...listeners}
+            aria-label={`reorder group ${group.name || index + 1}`}
+            className={gripClass}
+          >
+            <GripVertical size={16} />
+          </button>
+          <input
+            aria-label={`Group ${index + 1} name`}
+            disabled={!!active}
+            value={group.name}
+            onChange={(event) => onRename(event.target.value)}
+            placeholder="group name"
+            className={`${settingsInput} min-w-0 flex-1`}
+          />
+          <button
+            type="button"
+            disabled={!!active}
+            onClick={onRemove}
+            aria-label={`Remove group ${group.name || index + 1}`}
+            title="Remove group"
+            className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-200 disabled:opacity-40 dark:hover:bg-slate-700"
+          >
+            <X size={14} />
+          </button>
+        </div>
+        <div className="ml-10 mr-3">
+          <DropSlot
+            target={{ kind: "member", groupId: group.id, index: 0 }}
+            activeKind={active?.kind}
+            blocked={duplicate}
+          />
+          {group.accounts.map((email, memberIndex) => (
+            <Fragment key={email}>
+              <MemberRow
+                item={{ kind: "member", groupId: group.id, email }}
+                provider={providerOf(accounts, email)}
+                disabled={!!active}
+                lastGroup={memberships(email) <= 1}
+                onRemove={() => onRemoveMember(email)}
+              />
+              <DropSlot
+                target={{
+                  kind: "member",
+                  groupId: group.id,
+                  index: memberIndex + 1,
+                }}
+                activeKind={active?.kind}
+                blocked={duplicate}
+              />
+            </Fragment>
+          ))}
+          {group.accounts.length === 0 && (
+            <p className="rounded border border-dashed border-slate-200 px-3 py-4 text-center text-xs text-slate-400 dark:border-slate-700">
+              Drag an account here
+            </p>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2 px-3 pb-3 pt-2 pl-10">
+          <button
+            type="button"
+            disabled={!!active}
+            onClick={() => onImport("claude")}
+            className={actionClass}
+          >
+            + Import claude
+          </button>
+          <button
+            type="button"
+            disabled={!!active}
+            onClick={() => onImport("codex")}
+            className={actionClass}
+          >
+            + Import codex
+          </button>
+          {referenceable.length > 0 && (
+            <select
+              disabled={!!active}
+              value=""
+              onChange={(event) => {
+                if (event.target.value) onReference(event.target.value);
+              }}
+              className={`${actionClass} min-w-0 max-w-full dark:bg-slate-900`}
+              aria-label={`reference an existing account into ${group.name || "this group"}`}
+            >
+              <option value="">+ Clone an existing account…</option>
+              {referenceable.map((account) => (
+                <option key={account.id} value={account.email}>
+                  {account.email}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MemberRow({
+  item,
+  provider,
+  disabled,
+  lastGroup,
+  onRemove,
+}: {
+  item: Extract<TreeDragItem, { kind: "member" }>;
+  provider: string;
+  disabled: boolean;
+  lastGroup: boolean;
+  onRemove: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } =
+    useDraggable({ id: itemId(item), data: { item } });
+  return (
+    <div
       ref={setNodeRef}
-      style={style}
-      className={`flex items-center gap-2 rounded border border-slate-200 dark:border-slate-700 px-2 py-1 text-xs text-slate-700 dark:text-slate-200 ${isDragging ? "bg-white shadow-md ring-1 ring-slate-300 dark:bg-slate-800 dark:ring-slate-600" : ""}`}
+      data-account={item.email}
+      className={`flex min-h-9 items-center gap-2 rounded border border-slate-200 px-2 py-1 text-xs text-slate-700 dark:border-slate-700 dark:text-slate-200 ${isDragging ? "opacity-40" : ""}`}
     >
       <button
+        ref={setActivatorNodeRef}
+        data-drag-handle={itemId(item)}
         type="button"
         {...attributes}
         {...listeners}
-        aria-label={`reorder ${email}`}
-        className="shrink-0 cursor-grab touch-none rounded p-0.5 text-slate-300 hover:text-slate-500 active:cursor-grabbing dark:text-slate-600 dark:hover:text-slate-400"
+        aria-label={`reorder ${item.email}`}
+        className={gripClass}
       >
-        <GripVertical size={12} />
+        <GripVertical size={14} />
       </button>
-      <span className="shrink-0 rounded bg-slate-100 dark:bg-slate-700 px-1.5 py-px text-[10px] uppercase tracking-wide text-slate-500 dark:text-slate-400">
-        {provider}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{email}</span>
+      <AccountLabel email={item.email} provider={provider} />
       <button
         type="button"
-        onClick={onDrop}
+        disabled={disabled}
+        onClick={onRemove}
         title={
           lastGroup
             ? "Remove from its last group — saving deletes this account entirely"
             : "Remove from this group (it stays in its other groups)"
         }
-        aria-label={`remove ${email} from this group`}
-        className="shrink-0 rounded p-0.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+        aria-label={`remove ${item.email} from this group`}
+        className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-100 disabled:opacity-40 dark:hover:bg-slate-800"
       >
-        <X size={12} />
+        <X size={14} />
       </button>
-    </li>
+    </div>
+  );
+}
+
+function AccountLabel({
+  email,
+  provider,
+}: {
+  email: string;
+  provider: string;
+}) {
+  return (
+    <>
+      {provider === "claude" || provider === "codex" ? (
+        <img
+          src={provider === "codex" ? chatgptLogo : claudeLogo}
+          alt={provider === "codex" ? "ChatGPT" : "Claude"}
+          className={`h-4 w-4 shrink-0 object-contain ${provider === "codex" ? "dark:invert" : ""}`}
+        />
+      ) : (
+        <span className="text-slate-400" title="Unknown provider">
+          ?
+        </span>
+      )}
+      <span title={email} className="min-w-0 flex-1 truncate">
+        {email}
+      </span>
+    </>
   );
 }

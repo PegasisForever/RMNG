@@ -132,9 +132,15 @@ pub async fn reconcile_pending(app: &App) {
 
     // Determine the running image digest (best-effort).
     let now_digest = match self_id.as_deref() {
-        Some(id) => app.docker.self_image_info(id, &repo).await.ok().and_then(|i| {
-            i.repo_digest.map(|rd| rd.split_once('@').map(|(_, d)| d.to_string()).unwrap_or(rd))
-        }),
+        Some(id) => app
+            .docker
+            .self_image_info(id, &repo)
+            .await
+            .ok()
+            .and_then(|i| {
+                i.repo_digest
+                    .map(|rd| rd.split_once('@').map(|(_, d)| d.to_string()).unwrap_or(rd))
+            }),
         None => None,
     };
     let (done, msg) = match (&handoff.target_digest, &now_digest) {
@@ -150,7 +156,11 @@ pub async fn reconcile_pending(app: &App) {
 
     app.store.mutate(|s| {
         if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
-            op.status = if done { wire::OperationStatus::Done } else { wire::OperationStatus::Error };
+            op.status = if done {
+                wire::OperationStatus::Done
+            } else {
+                wire::OperationStatus::Error
+            };
             op.step = "done".into();
             op.pct = 100.0;
             op.message = msg.clone();
@@ -160,7 +170,11 @@ pub async fn reconcile_pending(app: &App) {
     });
     // Prune the finalized op like every other terminal op (jobs.rs), so the completed
     // "Updating control-server" card doesn't linger in state.json / the UI forever.
-    let delay = if done { crate::jobs::PRUNE_DONE_MS } else { crate::jobs::PRUNE_ERROR_MS };
+    let delay = if done {
+        crate::jobs::PRUNE_DONE_MS
+    } else {
+        crate::jobs::PRUNE_ERROR_MS
+    };
     crate::jobs::schedule_prune(app.clone(), op_id.clone(), delay);
     tracing::info!(target: "update", "reconciled update op {op_id}: {msg}");
     clear_handoff();
@@ -188,7 +202,11 @@ mod tests {
         }"#;
         let resp: bollard::models::ContainerInspectResponse = serde_json::from_str(json).unwrap();
         let spec = SelfSpec::from_inspect(&resp, "pegasis0/rmng:latest").unwrap();
-        let h = Handoff { spec, op_id: "op_1".into(), target_digest: Some("sha256:new".into()) };
+        let h = Handoff {
+            spec,
+            op_id: "op_1".into(),
+            target_digest: Some("sha256:new".into()),
+        };
         let s = serde_json::to_string(&h).unwrap();
         let back: Handoff = serde_json::from_str(&s).unwrap();
         assert_eq!(back.op_id, "op_1");
@@ -209,7 +227,11 @@ mod tests {
         let spec = SelfSpec::from_inspect(&resp, "pegasis0/rmng:latest").unwrap();
 
         // Round-trip through our own serializer with `None`.
-        let h = Handoff { spec, op_id: "op_2".into(), target_digest: None };
+        let h = Handoff {
+            spec,
+            op_id: "op_2".into(),
+            target_digest: None,
+        };
         let back: Handoff = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
         assert_eq!(back.op_id, "op_2");
         assert_eq!(back.target_digest, None);

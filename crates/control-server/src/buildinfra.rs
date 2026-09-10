@@ -43,7 +43,9 @@ pub fn merge_mirror_daemon_json(existing: &str) -> Result<Option<String>> {
     } else {
         serde_json::from_str(existing).context("parsing existing daemon.json")?
     };
-    let obj = root.as_object_mut().context("daemon.json is not a JSON object")?;
+    let obj = root
+        .as_object_mut()
+        .context("daemon.json is not a JSON object")?;
 
     let has = |obj: &Map<String, Value>, key: &str, val: &str| {
         obj.get(key)
@@ -60,9 +62,15 @@ pub fn merge_mirror_daemon_json(existing: &str) -> Result<Option<String>> {
     Ok(Some(serde_json::to_string_pretty(&root)?))
 }
 
-fn merge_into_string_array(obj: &mut serde_json::Map<String, serde_json::Value>, key: &str, val: &str) {
+fn merge_into_string_array(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    val: &str,
+) {
     use serde_json::Value;
-    let arr = obj.entry(key.to_string()).or_insert_with(|| Value::Array(Vec::new()));
+    let arr = obj
+        .entry(key.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
     match arr.as_array_mut() {
         Some(a) if a.iter().any(|v| v.as_str() == Some(val)) => {}
         Some(a) => a.push(Value::String(val.to_string())),
@@ -101,12 +109,20 @@ pub async fn run(app: App) {
     let mut done: HashSet<String> = HashSet::new();
     loop {
         tokio::time::sleep(RECONCILE_INTERVAL).await;
-        let managed: Vec<_> = app.store.get().hosts.into_iter().filter(|h| h.managed).collect();
+        let managed: Vec<_> = app
+            .store
+            .get()
+            .hosts
+            .into_iter()
+            .filter(|h| h.managed)
+            .collect();
         for host in &managed {
             if done.contains(&host.id) {
                 continue;
             }
-            if app.docker.is_running(&host.id).await.unwrap_or(false) && try_apply(&app, &host.id).await {
+            if app.docker.is_running(&host.id).await.unwrap_or(false)
+                && try_apply(&app, &host.id).await
+            {
                 done.insert(host.id.clone());
             }
         }
@@ -209,12 +225,19 @@ async fn ensure_clone_builder(app: &App, clone_id: &str) -> Result<()> {
          docker buildx create --name {BUILDER_NAME} --driver remote \
          --driver-opt default-load=true --use {BUILDKIT_ENDPOINT}"
     );
-    let script = format!("set -e\nsu - {CLONE_USER} -c '{inner}'\n", CLONE_USER = crate::docker::CLONE_USER);
+    let script = format!(
+        "set -e\nsu - {CLONE_USER} -c '{inner}'\n",
+        CLONE_USER = crate::docker::CLONE_USER
+    );
     let code = app
         .docker
-        .exec_script(clone_id, &script, &[], &[], |_, line| {
-            tracing::debug!(target: "buildinfra", "buildx: {line}")
-        })
+        .exec_script(
+            clone_id,
+            &script,
+            &[],
+            &[],
+            |_, line| tracing::debug!(target: "buildinfra", "buildx: {line}"),
+        )
         .await
         .context("registering clone buildx builder")?;
     if code != 0 {
@@ -230,7 +253,9 @@ mod tests {
 
     #[test]
     fn merge_into_empty_adds_both_keys() {
-        let out = merge_mirror_daemon_json("").unwrap().expect("empty file must produce a write");
+        let out = merge_mirror_daemon_json("")
+            .unwrap()
+            .expect("empty file must produce a write");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["registry-mirrors"][0], "http://rmng-registry:5000");
         assert_eq!(v["insecure-registries"][0], "rmng-registry:5000");
@@ -239,12 +264,20 @@ mod tests {
     #[test]
     fn merge_preserves_unrelated_keys() {
         let existing = r#"{"log-driver":"json-file","registry-mirrors":["http://other:5000"]}"#;
-        let out = merge_mirror_daemon_json(existing).unwrap().expect("must write");
+        let out = merge_mirror_daemon_json(existing)
+            .unwrap()
+            .expect("must write");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["log-driver"], "json-file", "unrelated key preserved");
         let mirrors = v["registry-mirrors"].as_array().unwrap();
-        assert!(mirrors.iter().any(|m| m == "http://other:5000"), "existing mirror kept");
-        assert!(mirrors.iter().any(|m| m == "http://rmng-registry:5000"), "ours appended");
+        assert!(
+            mirrors.iter().any(|m| m == "http://other:5000"),
+            "existing mirror kept"
+        );
+        assert!(
+            mirrors.iter().any(|m| m == "http://rmng-registry:5000"),
+            "ours appended"
+        );
         assert_eq!(v["insecure-registries"][0], "rmng-registry:5000");
     }
 
@@ -262,10 +295,17 @@ mod tests {
         // `registry-mirrors` present but a scalar string (not an array) → the malformed value
         // is replaced by a proper array carrying our mirror.
         let existing = r#"{"registry-mirrors":"http://legacy:5000"}"#;
-        let out = merge_mirror_daemon_json(existing).unwrap().expect("must write");
+        let out = merge_mirror_daemon_json(existing)
+            .unwrap()
+            .expect("must write");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        let mirrors = v["registry-mirrors"].as_array().expect("scalar replaced by array");
-        assert!(mirrors.iter().any(|m| m == "http://rmng-registry:5000"), "ours present");
+        let mirrors = v["registry-mirrors"]
+            .as_array()
+            .expect("scalar replaced by array");
+        assert!(
+            mirrors.iter().any(|m| m == "http://rmng-registry:5000"),
+            "ours present"
+        );
         assert_eq!(v["insecure-registries"][0], "rmng-registry:5000");
     }
 

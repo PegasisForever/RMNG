@@ -553,7 +553,8 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
             // BestEffort never fails; a future error path must not slip by silently.
             tracing::warn!("unexpected assignment failure: {e:#}");
             patch_op(&app, &op_id, |op| {
-                op.log.push(format!("codex account: assignment failed: {e:#}"));
+                op.log
+                    .push(format!("codex account: assignment failed: {e:#}"));
             });
         }
     }
@@ -1137,7 +1138,8 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
                 // BestEffort never fails; a future error path must not slip by silently.
                 tracing::warn!("unexpected assignment failure: {e:#}");
                 patch_op(&app, &op_id, |op| {
-                    op.log.push(format!("codex account: assignment failed: {e:#}"));
+                    op.log
+                        .push(format!("codex account: assignment failed: {e:#}"));
                 });
             }
         }

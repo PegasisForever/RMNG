@@ -129,7 +129,9 @@ impl CloneKeys {
         }
         // Write + chmod via a temp file so a reader never sees a truncated file and the
         // secrets are never briefly world-readable.
-        let tmp = inner.path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp = inner
+            .path
+            .with_extension(format!("tmp.{}", std::process::id()));
         if std::fs::write(&tmp, &body).is_err() {
             return;
         }
@@ -149,7 +151,10 @@ impl CloneKeys {
             return key.clone();
         }
         let key = random_token();
-        inner.file.router_keys.insert(clone_id.to_string(), key.clone());
+        inner
+            .file
+            .router_keys
+            .insert(clone_id.to_string(), key.clone());
         inner.index.insert(key.clone(), clone_id.to_string());
         Self::persist(&inner);
         key
@@ -186,7 +191,11 @@ mod tests {
         let dir = tmp_dir("mint");
         let keys = CloneKeys::load(&dir);
         let a = keys.mint("clone-a");
-        assert_eq!(keys.mint("clone-a"), a, "a clone's key must never change under it");
+        assert_eq!(
+            keys.mint("clone-a"),
+            a,
+            "a clone's key must never change under it"
+        );
         let b = keys.mint("clone-b");
         assert_ne!(a, b, "two clones must not share an identity");
         assert_eq!(keys.clone_for_token(&a).as_deref(), Some("clone-a"));
@@ -201,7 +210,11 @@ mod tests {
         let keys = CloneKeys::load(&dir);
         let a = keys.mint("clone-a");
         keys.forget("clone-a");
-        assert_eq!(keys.clone_for_token(&a), None, "a deleted clone's key must not resolve");
+        assert_eq!(
+            keys.clone_for_token(&a),
+            None,
+            "a deleted clone's key must not resolve"
+        );
         // A same-named clone created later gets a fresh key, not the revoked one.
         assert_ne!(keys.mint("clone-a"), a);
         let _ = std::fs::remove_dir_all(&dir);
@@ -228,15 +241,31 @@ mod tests {
         )
         .unwrap();
         let keys = CloneKeys::load(&dir);
-        assert_eq!(keys.mint("clone-a"), "PREEXISTING", "an existing clone's key was rotated");
-        assert_eq!(keys.clone_for_token("PREEXISTING").as_deref(), Some("clone-a"));
+        assert_eq!(
+            keys.mint("clone-a"),
+            "PREEXISTING",
+            "an existing clone's key was rotated"
+        );
+        assert_eq!(
+            keys.clone_for_token("PREEXISTING").as_deref(),
+            Some("clone-a")
+        );
         // Minting a new clone rewrites the file: existing keys survive, the retired group-proxy
         // fields fall away, and the map lands in the canonical spelling.
         keys.mint("clone-b");
         let body = std::fs::read_to_string(std::path::Path::new(&dir).join(KEY_FILE)).unwrap();
-        assert!(body.contains("PREEXISTING"), "rewrite must not drop existing keys");
-        assert!(!body.contains("another-secret"), "retired secrets must not be rewritten back");
-        assert!(body.contains("routerKeys"), "rewrite should use the canonical spelling");
+        assert!(
+            body.contains("PREEXISTING"),
+            "rewrite must not drop existing keys"
+        );
+        assert!(
+            !body.contains("another-secret"),
+            "retired secrets must not be rewritten back"
+        );
+        assert!(
+            body.contains("routerKeys"),
+            "rewrite should use the canonical spelling"
+        );
         // And the rewritten file still round-trips.
         assert_eq!(CloneKeys::load(&dir).mint("clone-a"), "PREEXISTING");
         let _ = std::fs::remove_dir_all(&dir);
@@ -274,7 +303,11 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "identity bearers must never be world-readable");
         let reloaded = CloneKeys::load(&dir);
-        assert_eq!(reloaded.mint("clone-a"), a, "a restart must not change a clone's identity");
+        assert_eq!(
+            reloaded.mint("clone-a"),
+            a,
+            "a restart must not change a clone's identity"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

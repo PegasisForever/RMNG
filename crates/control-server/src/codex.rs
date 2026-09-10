@@ -1245,8 +1245,8 @@ pub async fn run_poller(app: App) {
 mod tests {
     use super::*;
     use crate::pool::{
-        CodexPool, RotationCandidate, assign_rotation, assign_saturated_rotation,
-        auto_pool_clones, is_exhausted,
+        CodexPool, RotationCandidate, assign_rotation, assign_saturated_rotation, auto_pool_clones,
+        is_exhausted,
     };
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;

@@ -17,10 +17,15 @@ import {
   makeGroups,
 } from "./__fixtures__/accounts";
 import { makeBoardColumn, makeBoardColumns } from "./__fixtures__/board";
-import { chatActivity, chatMessages, chatNow, scheduledMessages } from "./__fixtures__/chat";
+import {
+  chatActivity,
+  chatMessages,
+  chatNow,
+  scheduledMessages,
+} from "./__fixtures__/chat";
 import { cloneWorking, hosts, makeCloneNoToken } from "./__fixtures__/clones";
 import { makeNotesBlocks } from "./__fixtures__/notes";
-import { cloneOperation } from "./__fixtures__/operations";
+import { cloneOperation, deleteOperation } from "./__fixtures__/operations";
 import { cloneTokens, lxcStats, stats } from "./__fixtures__/stats";
 import { makeStoryLink } from "./__fixtures__/storyLinks";
 import {
@@ -80,7 +85,9 @@ function ChatFixture({
       onSend={fn()}
       onSchedule={fn()}
       onStop={fn()}
-      onCancelScheduled={(id) => setScheduled((s) => s.filter((m) => m.id !== id))}
+      onCancelScheduled={(id) =>
+        setScheduled((s) => s.filter((m) => m.id !== id))
+      }
       now={chatNow}
       locale={locale}
     />
@@ -94,7 +101,9 @@ function ChatFixture({
  *  `chat`. It has no business knowing this one component has an arg by that name, so the
  *  clone lives here, next to the stories that build the pane. */
 function withLocale(node: ReactNode, locale: string): ReactNode {
-  return isValidElement<{ locale?: string }>(node) ? cloneElement(node, { locale }) : node;
+  return isValidElement<{ locale?: string }>(node)
+    ? cloneElement(node, { locale })
+    : node;
 }
 
 /** The notes pane on a sample document. Edits go nowhere — no autosave, no upload. */
@@ -111,14 +120,38 @@ function NotesFixture() {
 // Opening an overlay is navigation, so each of these jumps to that overlay's own story rather
 // than rendering it on top of the board. The page story then shows the page, and every state
 // a dialog can be in lives in one place instead of being reachable only through here.
-const toCloneModal = makeStoryLink("Clone/Components/CloneModalView", "Default");
-const toCloneModalFromTicket = makeStoryLink("Clone/Components/CloneModalView", "FromTicket");
-const toSettings = makeStoryLink("Settings/Components/SettingsPanelView", "Default");
-const toImportAccount = makeStoryLink("Settings/Components/ImportAccountModalView", "SignedIn");
-const toChangeAccount = makeStoryLink("Clone/Components/ChangeAccountModalView", "BothProviders");
-const toRebaseModal = makeStoryLink("Clone/Components/RebaseModalView", "Default");
-const toPortForward = makeStoryLink("Modals/Components/PortForwardModal", "Default");
-const toTicketModal = makeStoryLink("Board/Components/TicketModalView", "Default");
+const toCloneModal = makeStoryLink(
+  "Clone/Components/CloneModalView",
+  "Default",
+);
+const toCloneModalFromTicket = makeStoryLink(
+  "Clone/Components/CloneModalView",
+  "FromTicket",
+);
+const toSettings = makeStoryLink(
+  "Settings/Components/SettingsPanelView",
+  "Default",
+);
+const toImportAccount = makeStoryLink(
+  "Settings/Components/ImportAccountModalView",
+  "SignedIn",
+);
+const toChangeAccount = makeStoryLink(
+  "Clone/Components/ChangeAccountModalView",
+  "BothProviders",
+);
+const toRebaseModal = makeStoryLink(
+  "Clone/Components/RebaseModalView",
+  "Default",
+);
+const toPortForward = makeStoryLink(
+  "Modals/Components/PortForwardModal",
+  "Default",
+);
+const toTicketModal = makeStoryLink(
+  "Board/Components/TicketModalView",
+  "Default",
+);
 // A ticket card fills the side panel with the ticket, which is a state of this shell rather
 // than a dialog somewhere else — so it links to this shell's own story for it.
 const toTicketOpen = makeStoryLink("Dashboard/Pages/AppShellV2", "TicketOpen");
@@ -136,7 +169,11 @@ function TicketFixture({
     <TicketPanel
       ticket={ticket}
       description={
-        <TicketDescription key={ticket.id} markdown={ticket.description ?? ""} onSave={fn()} />
+        <TicketDescription
+          key={ticket.id}
+          markdown={ticket.description ?? ""}
+          onSave={fn()}
+        />
       }
       onCopyBranchName={fn(async () => true)}
       onCreateClone={onCreateClone}
@@ -257,7 +294,9 @@ const meta = {
    *
    *  The chat pane is the one thing the locale toolbar cannot reach on its own: it arrives as
    *  a ready-made element, so the render stamps the value into it. */
-  render: (args) => <AppShellV2 {...args} chat={withLocale(args.chat, args.locale)} />,
+  render: (args) => (
+    <AppShellV2 {...args} chat={withLocale(args.chat, args.locale)} />
+  ),
 } satisfies Meta<typeof AppShellV2>;
 
 export default meta;
@@ -266,7 +305,9 @@ type Story = StoryObj<typeof meta>;
 /** The board: control rail, three operator columns, the fixed Archived column, and the
  *  selected clone's notes and chat down the right quarter. The gear, both New clone buttons
  *  and the card menus jump to their own stories. Dragging a card lives in Interactive. */
-export const Default: Story = { args: { rail: makeRail(), board: makeBoard() } };
+export const Default: Story = {
+  args: { rail: makeRail(), board: makeBoard() },
+};
 
 /** The agent is mid-turn, with the chat focused: it holds three quarters of the side panel
  *  and the notes shrink to a quarter. Interactive is where clicking into the notes swaps them. */
@@ -279,6 +320,15 @@ export const AgentWorking: Story = {
   },
 };
 
+/** Two server jobs are running: a clone is being created and another is being deleted.
+ * Activity shows both progress rows; the board shows the affected clone as busy. */
+export const ActiveJobs: Story = {
+  args: {
+    rail: { ...makeRail(), operations: [cloneOperation, deleteOperation] },
+    board: { ...makeBoard(), operations: [cloneOperation, deleteOperation] },
+  },
+};
+
 /** A ticket has the side panel, as one card instead of two. The clone stays selected
  *  underneath and keeps its stream, so the ticket card takes the board's highlight and the
  *  clone's card gives it up. */
@@ -288,9 +338,17 @@ export const TicketOpen: Story = {
     board: {
       ...makeBoard(),
       selectedId: null,
-      tickets: { ...makeTicketColumn(makeBoardClones()), selectedId: ticketDetailed.id },
+      tickets: {
+        ...makeTicketColumn(makeBoardClones()),
+        selectedId: ticketDetailed.id,
+      },
     },
-    ticket: <TicketFixture ticket={ticketDetailed} onCreateClone={toCloneModalFromTicket} />,
+    ticket: (
+      <TicketFixture
+        ticket={ticketDetailed}
+        onCreateClone={toCloneModalFromTicket}
+      />
+    ),
   },
 };
 
@@ -310,7 +368,11 @@ export const TicketInNotesCard: Story = {
 
 /** No clone selected — the side panel holds its empty state. */
 export const NoCloneSelected: Story = {
-  args: { rail: makeRail(), board: { ...makeBoard(), selectedId: null }, selectedClone: null },
+  args: {
+    rail: makeRail(),
+    board: { ...makeBoard(), selectedId: null },
+    selectedClone: null,
+  },
 };
 
 /** A failed action banners above the page while a clone is being provisioned, which the
@@ -362,7 +424,9 @@ export const Interactive: Story = {
     const [openTicket, setOpenTicket] = useState<LinearTicket | null>(null);
 
     const setArchived = (cloneId: string, archived: boolean) =>
-      setClones((prev) => prev.map((c) => (c.id === cloneId ? { ...c, archived } : c)));
+      setClones((prev) =>
+        prev.map((c) => (c.id === cloneId ? { ...c, archived } : c)),
+      );
 
     const selectedClone = clones.find((c) => c.id === selectedId) ?? null;
 
@@ -373,7 +437,10 @@ export const Interactive: Story = {
         selectedClone={selectedClone}
         ticket={
           openTicket ? (
-            <TicketFixture ticket={openTicket} onCreateClone={toCloneModalFromTicket} />
+            <TicketFixture
+              ticket={openTicket}
+              onCreateClone={toCloneModalFromTicket}
+            />
           ) : undefined
         }
         sideFocus={sideFocus}
@@ -387,9 +454,10 @@ export const Interactive: Story = {
           clones,
           tickets: {
             ...args.board.tickets,
-            tickets: orderTickets(openTickets(linearTickets, clones), ticketOrder).filter(
-              (t) => !dropped.includes(t.id),
-            ),
+            tickets: orderTickets(
+              openTickets(linearTickets, clones),
+              ticketOrder,
+            ).filter((t) => !dropped.includes(t.id)),
             selectedId: openTicket?.id ?? null,
             onSelectTicket: setOpenTicket,
             onCancel: (ticket) => {
@@ -426,7 +494,9 @@ export const Interactive: Story = {
             args.board.onUnarchiveClone(clone);
           },
           onRenameColumn: (columnId, title) => {
-            setColumns((prev) => prev.map((c) => (c.id === columnId ? { ...c, title } : c)));
+            setColumns((prev) =>
+              prev.map((c) => (c.id === columnId ? { ...c, title } : c)),
+            );
             args.board.onRenameColumn(columnId, title);
           },
         }}

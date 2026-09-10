@@ -184,7 +184,14 @@ pub fn begin(app: &App, provider: Provider) -> Result<String> {
     if pending.len() >= MAX_PENDING {
         bail!("too many sign-ins already waiting; finish or abandon one and try again");
     }
-    pending.insert(state, Pending { provider, verifier, started_ms: now });
+    pending.insert(
+        state,
+        Pending {
+            provider,
+            verifier,
+            started_ms: now,
+        },
+    );
     Ok(url)
 }
 
@@ -268,12 +275,7 @@ struct TokenResp {
 /// The pool is part of the import because an account nobody put in one is an account no
 /// clone will ever be handed by the rotator: it can still be pinned by name, but the pools
 /// are how clones get accounts without anybody choosing.
-pub async fn complete(
-    app: &App,
-    provider: Provider,
-    pasted: &str,
-    group: &str,
-) -> Result<String> {
+pub async fn complete(app: &App, provider: Provider, pasted: &str, group: &str) -> Result<String> {
     let (code, state) = parse_callback(pasted)?;
     let state = state.context("that URL carries no `state` parameter")?;
 
@@ -374,7 +376,11 @@ async fn exchange(
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        bail!("the provider refused the code: {}{}", status.as_u16(), crate::clone_ops::snippet(&body));
+        bail!(
+            "the provider refused the code: {}{}",
+            status.as_u16(),
+            crate::clone_ops::snippet(&body)
+        );
     }
     serde_json::from_str::<TokenResp>(&body)
         .context("the provider's answer was not a token response")
@@ -421,7 +427,11 @@ async fn store_claude(app: &App, tokens: TokenResp) -> Result<String> {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        bail!("the profile lookup failed: {}{}", status.as_u16(), crate::clone_ops::snippet(&body));
+        bail!(
+            "the profile lookup failed: {}{}",
+            status.as_u16(),
+            crate::clone_ops::snippet(&body)
+        );
     }
     let profile: Profile =
         serde_json::from_str(&body).context("Anthropic's profile answer was not readable")?;
@@ -516,7 +526,10 @@ mod tests {
     #[test]
     fn a_query_value_is_escaped_outside_the_unreserved_set() {
         assert_eq!(enc("a b"), "a%20b");
-        assert_eq!(enc("http://localhost:54545/callback"), "http%3A%2F%2Flocalhost%3A54545%2Fcallback");
+        assert_eq!(
+            enc("http://localhost:54545/callback"),
+            "http%3A%2F%2Flocalhost%3A54545%2Fcallback"
+        );
         assert_eq!(enc("-._~AZaz09"), "-._~AZaz09");
     }
 
@@ -539,14 +552,17 @@ mod tests {
     fn claudes_state_rides_on_the_code_behind_a_hash() {
         // Measured shape: Claude appends its own state to the code rather than sending a
         // separate parameter. Splitting it off is what makes the exchange accept the code.
-        let (code, state) = parse_callback("http://localhost:54545/callback?code=abc%23st8").unwrap();
+        let (code, state) =
+            parse_callback("http://localhost:54545/callback?code=abc%23st8").unwrap();
         assert_eq!(code, "abc");
         assert_eq!(state.as_deref(), Some("st8"));
     }
 
     #[test]
     fn a_refusal_and_a_codeless_paste_each_say_what_is_wrong() {
-        let err = parse_callback("?error=access_denied&state=s").unwrap_err().to_string();
+        let err = parse_callback("?error=access_denied&state=s")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("access_denied"), "{err}");
         assert!(parse_callback("http://localhost:54545/callback").is_err());
         assert!(parse_callback("   ").is_err());
@@ -555,17 +571,28 @@ mod tests {
     #[test]
     fn joining_a_pool_is_idempotent_and_refuses_a_pool_that_is_not_there() {
         let mut pools = vec![
-            wire::CloneGroup { name: "Personal".into(), accounts: vec!["x@y.z".into()] },
-            wire::CloneGroup { name: "Medi".into(), accounts: vec![] },
+            wire::CloneGroup {
+                name: "Personal".into(),
+                accounts: vec!["x@y.z".into()],
+            },
+            wire::CloneGroup {
+                name: "Medi".into(),
+                accounts: vec![],
+            },
         ];
         add_to_pool(&mut pools, "a@b.c", "Personal").unwrap();
         add_to_pool(&mut pools, "a@b.c", "Personal").unwrap();
-        assert_eq!(pools[0].accounts, vec!["x@y.z".to_string(), "a@b.c".to_string()]);
+        assert_eq!(
+            pools[0].accounts,
+            vec!["x@y.z".to_string(), "a@b.c".to_string()]
+        );
         assert!(pools[1].accounts.is_empty(), "no other pool is touched");
 
         // A name that is not a pool is a mistake worth reporting: creating it here would put
         // the account somewhere no clone is bound to.
-        let err = add_to_pool(&mut pools, "a@b.c", "Nope").unwrap_err().to_string();
+        let err = add_to_pool(&mut pools, "a@b.c", "Nope")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Nope"), "{err}");
     }
 

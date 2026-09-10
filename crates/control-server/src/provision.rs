@@ -160,9 +160,10 @@ pub async fn control_env_vars(app: &App) -> Result<Vec<EnvVar>> {
     // (the latter spawning a sub clone) just works. The CLI resolves `--server` >
     // `$RMNG_CONTROL_URL` > `http://localhost:9000`; inside a clone `localhost:9000`
     // is unreachable, so this points it at the `rmng-control` alias.
-    let control = app.docker.control_host().await.with_context(|| {
-        "resolving the control-server host for the in-clone RMNG_CONTROL_URL"
-    })?;
+    let control =
+        app.docker.control_host().await.with_context(
+            || "resolving the control-server host for the in-clone RMNG_CONTROL_URL",
+        )?;
     vars.push(ev(
         "RMNG_CONTROL_URL",
         format!("http://{control}:{}", wire::PORT_WEB),
@@ -399,9 +400,8 @@ async fn clone_container_after_create(
             ".config/systemd/user/gnome-headless.service",
             ".config/systemd/user/rmng-clone-daemon.service",
         ] {
-            crate::home_overlay::symlink_clone_home(hostname, unit, "/dev/null").with_context(
-                || format!("clone {hostname}: masking {unit} failed"),
-            )?;
+            crate::home_overlay::symlink_clone_home(hostname, unit, "/dev/null")
+                .with_context(|| format!("clone {hostname}: masking {unit} failed"))?;
         }
     }
 
@@ -525,14 +525,10 @@ async fn clone_container_after_create(
         ),
         (
             format!("home/{CLONE_USER}/.cursor/mcp.json"),
-            crate::clone_reconcile::merge_cursor_mcp(
-                &serde_json::json!({}),
-                headless,
-                &linear_key,
-            )
-            .with_context(|| format!("clone {hostname}: rendering initial ~/.cursor/mcp.json"))?
-            .to_string()
-            .into_bytes(),
+            crate::clone_reconcile::merge_cursor_mcp(&serde_json::json!({}), headless, &linear_key)
+                .with_context(|| format!("clone {hostname}: rendering initial ~/.cursor/mcp.json"))?
+                .to_string()
+                .into_bytes(),
             0o600,
         ),
         (
@@ -542,14 +538,12 @@ async fn clone_container_after_create(
         ),
         (
             format!("home/{CLONE_USER}/.config/mcp/mcp.json"),
-            crate::clone_reconcile::merge_pi_mcp(
-                &serde_json::json!({}),
-                headless,
-                &linear_key,
-            )
-            .with_context(|| format!("clone {hostname}: rendering initial ~/.config/mcp/mcp.json"))?
-            .to_string()
-            .into_bytes(),
+            crate::clone_reconcile::merge_pi_mcp(&serde_json::json!({}), headless, &linear_key)
+                .with_context(|| {
+                    format!("clone {hostname}: rendering initial ~/.config/mcp/mcp.json")
+                })?
+                .to_string()
+                .into_bytes(),
             0o600,
         ),
         (
@@ -571,12 +565,11 @@ async fn clone_container_after_create(
             gid: CLONE_GID,
         });
     }
-    entries.push(crate::clone_reconcile::claude_mcp_stamp_entry_for(
+    entries.push(crate::clone_reconcile::claude_mcp_stamp_entry_for(headless));
+    entries.push(crate::clone_reconcile::cursor_mcp_stamp_entry_for(
         headless,
+        &linear_key,
     ));
-    entries.push(
-        crate::clone_reconcile::cursor_mcp_stamp_entry_for(headless, &linear_key),
-    );
     entries.push(crate::clone_reconcile::codex_mcp_stamp_entry_for(headless));
     // The activity probe file rides the tar; its registration is rendered above as initial
     // content. Stamp withheld only if this whole upload fails (then the loop retries).
@@ -586,7 +579,10 @@ async fn clone_container_after_create(
     // The single pre-boot tar: binaries + identity + content + stamps in one daemon
     // Post-start injects are down to the headless tmux session and wait-ready: every file
     // (including the bashrc drop-in) already landed in the single pre-boot tar.
-    on_progress("inject", "injecting clone payload: binaries + identity + config (pre-boot)");
+    on_progress(
+        "inject",
+        "injecting clone payload: binaries + identity + config (pre-boot)",
+    );
     bins.extend(entries);
     docker.upload_tar(container, bins).await?;
 

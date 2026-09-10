@@ -109,7 +109,6 @@ export function BoardPane({
           />
         </Section>
       ) : null}
-
     </>
   );
 }
@@ -211,53 +210,49 @@ export function LlmPane({
       {/* One pool list for both providers: members may mix Claude and Codex accounts.
           Each side rotates within its own members (Claude: 80% 5h or 95% 7d exhausts;
           Codex: 95% weekly), keeping its account otherwise to preserve prompt cache. */}
-      <Section
-        title="Groups"
-        effect="immediate"
-        hint="Pools of accounts a clone binds as one — drag to reorder, across pools to move. A bound clone keeps its account until that account exhausts, then moves to the least-used member of its own provider. An account left in no pool is deleted on save."
-      >
+      <Section title="Groups" effect="immediate">
         <SettingsGroupsEditor
           groups={draft.groups}
           accounts={[...rows.claude, ...rows.codex]}
           noAccountsHint="Import some accounts first to add them to a group."
           onChange={(groups) => onDraftChange("groups", groups)}
-          onImportAccount={(provider, group) => onImportAccount(provider, group)}
+          onImportAccount={(provider, group) =>
+            onImportAccount(provider, group)
+          }
         />
         <label className="mt-3 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
           <input
             type="checkbox"
             checked={draft.codex.autoReset}
             onChange={(e) =>
-              onDraftChange("codex", { ...draft.codex, autoReset: e.target.checked })
+              onDraftChange("codex", {
+                ...draft.codex,
+                autoReset: e.target.checked,
+              })
             }
           />
-          Auto-use Codex reset credits (when every account is &gt;95% weekly and none
-          reset within 24h, spend one banked reset to bring an account back)
+          Auto-use Codex reset credits (when every account is &gt;95% weekly and
+          none reset within 24h, spend one banked reset to bring an account
+          back)
         </label>
       </Section>
 
       {/* How RMNG tells a clone that is thinking from one that is waiting on you. The
           undecidable cases are settled by a GPT call on an imported Codex account, so
           this lives with the accounts, not with the Docker settings it used to sit under. */}
-      <Section
-        title="Stuck detection"
-        effect="immediate"
-        hint="RMNG reads each clone's own session registry and agent hooks to tell working from stuck. Most clones are decided from those files alone; the undecidable ones are settled by one GPT call on a Codex account you have imported. Import none and nothing settles them, so no clone reads as working. Per-clone token counting is unaffected either way."
-      >
-        <SettingsStuckSection
-          model={draft.judge.codexModel}
-          email={draft.judge.codexEmail}
-          accounts={rows.codex.map((a) => a.email)}
-          onModelChange={(v) =>
-            onDraftChange("judge", { ...draft.judge, codexModel: v })
-          }
-          onEmailChange={(v) =>
-            onDraftChange("judge", { ...draft.judge, codexEmail: v })
-          }
-          onTest={onTestJudge}
-          testMessage={judgeTestMessage}
-        />
-      </Section>
+      <SettingsStuckSection
+        model={draft.judge.codexModel}
+        email={draft.judge.codexEmail}
+        accounts={rows.codex.map((a) => a.email)}
+        onModelChange={(v) =>
+          onDraftChange("judge", { ...draft.judge, codexModel: v })
+        }
+        onEmailChange={(v) =>
+          onDraftChange("judge", { ...draft.judge, codexEmail: v })
+        }
+        onTest={onTestJudge}
+        testMessage={judgeTestMessage}
+      />
     </>
   );
 }

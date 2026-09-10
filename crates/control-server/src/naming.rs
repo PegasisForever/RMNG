@@ -16,7 +16,9 @@ pub fn pick_preset_by_prefix<'a>(
     presets: &'a [wire::Preset],
     prefix: &str,
 ) -> Option<&'a wire::Preset> {
-    presets.iter().find(|p| p.labels.iter().any(|pl| pl.eq_ignore_ascii_case(prefix)))
+    presets
+        .iter()
+        .find(|p| p.labels.iter().any(|pl| pl.eq_ignore_ascii_case(prefix)))
 }
 
 /// Sanitize the configurable hostname prefix to DNS-label-safe chars: lowercase,
@@ -46,12 +48,20 @@ pub fn plain_hostname_base(prefix: &str, title: &str) -> String {
     let slug = slug.trim_matches('-').chars().take(40).collect::<String>();
     let slug = slug.trim_matches('-').to_string();
     let prefix = clean_prefix(prefix);
-    if slug.is_empty() { format!("{prefix}host") } else { format!("{prefix}{slug}") }
+    if slug.is_empty() {
+        format!("{prefix}host")
+    } else {
+        format!("{prefix}{slug}")
+    }
 }
 
 /// `(pega-, DEV-123)` → `pega-dev-123`.
 pub fn ticket_hostname_base(prefix: &str, identifier: &str) -> String {
-    format!("{}{}", clean_prefix(prefix), identifier.to_ascii_lowercase())
+    format!(
+        "{}{}",
+        clean_prefix(prefix),
+        identifier.to_ascii_lowercase()
+    )
 }
 
 #[cfg(test)]
@@ -65,7 +75,11 @@ mod tests {
             labels: labels.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         };
-        let presets = [p("front", &["WE", "UI"]), p("back", &["DEV"]), p("nolabel", &[])];
+        let presets = [
+            p("front", &["WE", "UI"]),
+            p("back", &["DEV"]),
+            p("nolabel", &[]),
+        ];
         // Case-insensitive match against the (lowercase) ticket-id prefix.
         assert_eq!(pick_preset_by_prefix(&presets, "dev").unwrap().name, "back");
         // Multiple labels on a preset → any of them can match.
@@ -77,7 +91,10 @@ mod tests {
 
     #[test]
     fn plain_slug() {
-        assert_eq!(plain_hostname_base("pega-", "My cool task!"), "pega-my-cool-task");
+        assert_eq!(
+            plain_hostname_base("pega-", "My cool task!"),
+            "pega-my-cool-task"
+        );
         assert_eq!(plain_hostname_base("pega-", "!!!"), "pega-host");
         // custom + sanitized prefixes
         assert_eq!(plain_hostname_base("clone-", "My task"), "clone-my-task");

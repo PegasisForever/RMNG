@@ -35,7 +35,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
         codexAccount: "",
         agentPlaybook: "",
         globalPrompt: "",
-    startupScript: "",
+        startupScript: "",
         dockerfile: "FROM pegasis0/rmng-template:latest",
       },
     ],

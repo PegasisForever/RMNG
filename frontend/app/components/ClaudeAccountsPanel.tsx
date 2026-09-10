@@ -1,11 +1,11 @@
-// Compact, card-less Claude account usage list, driven by
+// Compact account usage, with one container per configured group, driven by
 // ControlState.claudeAccounts (refreshed server-side every ~60s, delivered over
 // SSE). Display-only. Each window's bar carries a vertical "pace" marker = the
 // utilization you'd be at if you spent the quota uniformly across the window
 // (elapsed fraction of [resetsAt - windowLength, resetsAt]); fill past the marker
 // = burning faster than uniform.
-import { RefreshCw } from "lucide-react";
-import { useState } from "react";
+import { Folder, RefreshCw } from "lucide-react";
+import { useId, useState } from "react";
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
@@ -24,7 +24,11 @@ function barColor(pct: number): string {
 }
 
 /** Utilization expected at `now` if the window's quota were spent uniformly. */
-function pacePct(resetsAt: string | null, windowMs: number, now: number): number | null {
+function pacePct(
+  resetsAt: string | null,
+  windowMs: number,
+  now: number,
+): number | null {
   if (!resetsAt) return null;
   const reset = Date.parse(resetsAt);
   if (Number.isNaN(reset)) return null;
@@ -54,25 +58,31 @@ function Bar({
 }) {
   if (!win) return null;
   const pct = Math.min(100, Math.max(0, win.pct));
-  const pace = now != null ? pacePct(win.resetsAt, windowMs, now) : null;
+  const pace = now == null ? null : pacePct(win.resetsAt, windowMs, now);
   // Concrete reset time in the viewer's local zone. Gated on the client clock (`now`, null
   // until the effect runs) for the same reason as the pace marker: the string is rendered in
   // the BROWSER's time zone, which the prerender has no way to know, so computing it during
   // the first render would guarantee a hydration mismatch. Do not "simplify" this to
   // `resetTooltip(win.resetsAt, Date.now(), navigator.language)`.
-  const resetTitle = now != null ? resetTooltip(win.resetsAt, now, locale) : null;
+  const resetTitle =
+    now == null ? null : resetTooltip(win.resetsAt, now, locale);
   return (
     <div className="flex items-center gap-1.5" title={resetTitle ?? undefined}>
-      <span className="w-8 shrink-0 text-[10px] font-medium text-slate-500 dark:text-slate-400">{label}</span>
+      <span className="w-6 shrink-0 text-[10px] font-medium text-slate-500 dark:text-slate-400">
+        {label}
+      </span>
       <div className="relative h-1.5 flex-1 overflow-hidden rounded-sm bg-slate-200 dark:bg-slate-700">
-        <div className={`h-full ${barColor(pct)}`} style={{ width: `${Math.max(1, pct)}%` }} />
-        {pace != null ? (
+        <div
+          className={`h-full ${barColor(pct)}`}
+          style={{ width: `${Math.max(1, pct)}%` }}
+        />
+        {pace == null ? null : (
           <div
             className="absolute top-0 h-full w-px bg-slate-900/70 dark:bg-slate-100/70"
             style={{ left: `${pace}%` }}
             title={`uniform pace ${Math.round(pace)}%`}
           />
-        ) : null}
+        )}
       </div>
       <span className="w-8 shrink-0 text-right text-[11px] font-medium tabular-nums text-slate-700 dark:text-slate-200">
         {pct}%
@@ -144,9 +154,11 @@ function Row({
   onReplace: (account: ClaudeUsage) => void;
 }) {
   const resetCredits =
-    a.provider === "codex" && a.resetCredits != null ? Number(a.resetCredits) : null;
+    a.provider === "codex" && a.resetCredits != null
+      ? Number(a.resetCredits)
+      : null;
   return (
-    <div className="px-1 py-1">
+    <div className="px-2 py-1">
       <div className="flex items-center gap-1.5">
         <img
           src={a.provider === "codex" ? chatgptLogo : claudeLogo}
@@ -158,7 +170,10 @@ function Row({
             a.provider === "codex" ? "dark:invert" : ""
           }`}
         />
-        <span className="min-w-0 flex-1 truncate text-[11px] text-slate-700 dark:text-slate-200">
+        <span
+          title={a.email}
+          className="min-w-0 flex-1 truncate text-[11px] font-medium text-slate-700 dark:text-slate-200"
+        >
           {a.email}
         </span>
         {/* The account holds no token that still works, so the rotator has taken it out and
@@ -184,30 +199,54 @@ function Row({
             {spendLine(a.spend)}
           </span>
         ) : null}
-        {resetCredits != null ? (
+        {resetCredits == null ? null : (
           <span
             className={`shrink-0 text-[10px] tabular-nums ${
-              resetCredits === 0 ? "text-rose-400" : "text-slate-500 dark:text-slate-400"
+              resetCredits === 0
+                ? "text-rose-400"
+                : "text-slate-500 dark:text-slate-400"
             }`}
             title="Banked Codex rate-limit resets left"
           >
             ⟳ {resetCredits}
           </span>
-        ) : null}
+        )}
       </div>
       {!a.fiveHour && !a.sevenDay && !a.fable ? (
-        <div className="text-[10px] text-rose-400" title={a.error}>
+        <div className="ml-[18px] text-[10px] text-rose-400" title={a.error}>
           usage unavailable
         </div>
       ) : (
         <div
-          className={`mt-0.5 space-y-0.5 ${a.stale ? "opacity-60" : ""}`}
-          title={a.stale ? "stale — last refresh failed (showing last known)" : undefined}
+          className={`ml-[18px] mt-0.5 ${a.stale ? "opacity-60" : ""}`}
+          title={
+            a.stale
+              ? "stale — last refresh failed (showing last known)"
+              : undefined
+          }
         >
-          <Bar label="5h" win={a.fiveHour} windowMs={FIVE_H_MS} now={now} locale={locale} />
-          <Bar label="7d" win={a.sevenDay} windowMs={SEVEN_D_MS} now={now} locale={locale} />
+          <Bar
+            label="5h"
+            win={a.fiveHour}
+            windowMs={FIVE_H_MS}
+            now={now}
+            locale={locale}
+          />
+          <Bar
+            label="7d"
+            win={a.sevenDay}
+            windowMs={SEVEN_D_MS}
+            now={now}
+            locale={locale}
+          />
           {/* Claude-only model-scoped weekly cap; a 7d window like sevenDay. Codex has none. */}
-          <Bar label="fable" win={a.fable} windowMs={SEVEN_D_MS} now={now} locale={locale} />
+          <Bar
+            label="fable"
+            win={a.fable}
+            windowMs={SEVEN_D_MS}
+            now={now}
+            locale={locale}
+          />
         </div>
       )}
     </div>
@@ -253,10 +292,8 @@ export function ClaudeAccountsPanel({
     accountOrder,
   );
   // With no pools configured there is nothing to group by, so the list stays flat.
-  const sections =
-    groups.length > 0
-      ? groupAccounts(rows, groups)
-      : [];
+  const sections = groups.length > 0 ? groupAccounts(rows, groups) : [];
+  const headingId = useId();
   const [busy, setBusy] = useState(false);
   const wrap = (fn: () => void | Promise<void>) => async () => {
     setBusy(true);
@@ -268,10 +305,13 @@ export function ClaudeAccountsPanel({
   };
 
   return (
-    <div>
-      <div className="flex items-center justify-between px-1">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-          Usage{accounts.length ? ` (${accounts.length})` : ""}
+    <section aria-labelledby={headingId}>
+      <div className="mb-1 flex items-center justify-between">
+        <h2
+          id={headingId}
+          className="text-xs font-semibold text-slate-700 dark:text-slate-200"
+        >
+          Account usage
         </h2>
         {accounts.length > 0 ? (
           <button
@@ -279,7 +319,8 @@ export function ClaudeAccountsPanel({
             onClick={wrap(onRefresh)}
             disabled={busy}
             title="Refresh usage now"
-            className="rounded px-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+            aria-label="Refresh usage now"
+            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
           >
             {busy ? "…" : <RefreshCw className="size-4" />}
           </button>
@@ -291,24 +332,44 @@ export function ClaudeAccountsPanel({
           No accounts — import one in Settings → LLM.
         </p>
       ) : sections.length === 0 ? (
-        <div className="mt-0.5 divide-y divide-slate-200/70 dark:divide-slate-700/70">
+        <div className="divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-200 bg-white dark:divide-slate-800 dark:border-slate-700 dark:bg-slate-900">
           {rows.map((a) => (
-            <Row key={a.id} a={a} now={now} locale={locale} onReplace={onReplace} />
+            <Row
+              key={a.id}
+              a={a}
+              now={now}
+              locale={locale}
+              onReplace={onReplace}
+            />
           ))}
         </div>
       ) : (
-        <div className="mt-0.5 space-y-1.5">
+        <div className="space-y-1.5">
           {sections.map((section) => (
-            <div key={`${section.provider}|${section.name ?? ""}`}>
-              <h3 className="px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
-                {section.name ?? "No pool"}
+            <section
+              key={`${section.provider}|${section.name ?? ""}`}
+              aria-label={
+                section.name ??
+                `Ungrouped ${section.provider === "codex" ? "Codex" : "Claude"}`
+              }
+              className="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
+            >
+              <h3 className="flex items-center gap-1.5 border-b border-slate-200 bg-slate-100/80 px-2 py-1 text-[11px] font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-800/80 dark:text-slate-300">
+                <Folder
+                  aria-hidden="true"
+                  className="size-3 shrink-0 text-slate-400 dark:text-slate-500"
+                />
+                <span className="min-w-0 break-words">
+                  {section.name ??
+                    `Ungrouped ${section.provider === "codex" ? "Codex" : "Claude"}`}
+                </span>
               </h3>
               {section.accounts.length === 0 ? (
-                <p className="px-1 text-[10px] text-slate-400 dark:text-slate-500">
-                  no accounts
+                <p className="px-2 py-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  No accounts
                 </p>
               ) : (
-                <div className="divide-y divide-slate-200/70 dark:divide-slate-700/70">
+                <div className="divide-y divide-slate-100 dark:divide-slate-800">
                   {section.accounts.map((a) => (
                     // An account in two pools renders in both, so the pool has to be part of
                     // the key.
@@ -322,10 +383,10 @@ export function ClaudeAccountsPanel({
                   ))}
                 </div>
               )}
-            </div>
+            </section>
           ))}
         </div>
       )}
-    </div>
+    </section>
   );
 }

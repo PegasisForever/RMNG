@@ -16,7 +16,6 @@ const row = (email: string, provider?: "claude" | "codex"): ClaudeUsage => ({
   lastUpdated: 0,
 });
 
-
 type Acct = { id: string; provider: string };
 
 const acct = (id: string, provider: string): Acct => ({ id, provider });
@@ -26,7 +25,11 @@ const bucketOf = (a: Acct) => a.provider;
 const keyOf = (a: Acct) => a.id;
 
 test("an account missing from the saved order lands after the ordered ones, not first", () => {
-  const rows = [acct("fresh", "claude"), acct("a", "claude"), acct("b", "claude")];
+  const rows = [
+    acct("fresh", "claude"),
+    acct("a", "claude"),
+    acct("b", "claude"),
+  ];
 
   // "fresh" was imported after the operator last dragged, so it has no saved position.
   expect(ids(ordered(rows, ["b", "a"], keyOf))).toEqual(["b", "a", "fresh"]);
@@ -41,7 +44,9 @@ test("reordering one provider leaves the other provider's rows in place", () => 
     acct("x2", "codex"),
   ];
 
-  const out = orderedWithinBuckets(rows, bucketOf, keyOf, { claude: ["c2", "c1"] });
+  const out = orderedWithinBuckets(rows, bucketOf, keyOf, {
+    claude: ["c2", "c1"],
+  });
 
   // The two claude rows swapped with each other; both codex rows kept their exact slots.
   expect(ids(out)).toEqual(["c2", "x1", "c1", "x2"]);
@@ -52,7 +57,9 @@ test("a saved order naming an unknown bucket is ignored rather than dropping row
   // match no provider bucket.
   const rows = [acct("c1", "claude"), acct("x1", "codex")];
 
-  const out = orderedWithinBuckets(rows, bucketOf, keyOf, { pooled: ["x1", "c1"] });
+  const out = orderedWithinBuckets(rows, bucketOf, keyOf, {
+    pooled: ["x1", "c1"],
+  });
 
   expect(ids(out)).toEqual(["c1", "x1"]);
 });
@@ -66,7 +73,9 @@ test("every input row survives a reorder exactly once", () => {
   ];
 
   // A stale saved order: "gone" was deleted, "c3" was never dragged.
-  const out = orderedWithinBuckets(rows, bucketOf, keyOf, { claude: ["gone", "c2", "c1"] });
+  const out = orderedWithinBuckets(rows, bucketOf, keyOf, {
+    claude: ["gone", "c2", "c1"],
+  });
 
   expect(ids(out).slice().sort()).toEqual(["c1", "c2", "c3", "x1"]);
   expect(ids(out)).toEqual(["c2", "x1", "c1", "c3"]);
@@ -74,10 +83,7 @@ test("every input row survives a reorder exactly once", () => {
 
 test("a row with no provider counts as Claude", () => {
   // `provider` was added to the row after the fact, so an older row has none.
-  const rows = orderedAccounts(
-    [row("legacy"), row("new", "claude")],
-    {},
-  );
+  const rows = orderedAccounts([row("legacy"), row("new", "claude")], {});
 
   expect(rows.claude.map((a) => a.email)).toEqual(["legacy", "new"]);
   expect(rows.codex).toEqual([]);
@@ -101,10 +107,7 @@ test("each provider's list follows its own saved order", () => {
 });
 
 test("a freshly imported account lands after the ordered ones, not first", () => {
-  const accounts = [
-    row("fresh@x.com", "claude"),
-    row("a@x.com", "claude"),
-  ];
+  const accounts = [row("fresh@x.com", "claude"), row("a@x.com", "claude")];
 
   const rows = orderedAccounts(accounts, { claude: ["claude|a@x.com"] });
 

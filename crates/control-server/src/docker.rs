@@ -970,7 +970,8 @@ impl DockerCtl {
             privileged: true,
             files: vec![TarEntry {
                 path: "etc/buildkit/buildkitd.toml".to_string(),
-                data: crate::buildinfra::render_buildkitd_toml(wire::BUILDKIT_CACHE_GB).into_bytes(),
+                data: crate::buildinfra::render_buildkitd_toml(wire::BUILDKIT_CACHE_GB)
+                    .into_bytes(),
                 mode: 0o644,
                 uid: 0,
                 gid: 0,

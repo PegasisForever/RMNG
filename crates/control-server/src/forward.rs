@@ -21,7 +21,11 @@ pub struct ForwardBus {
 impl ForwardBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(16);
-        Self { tx, inner: RwLock::new(HashMap::new()), viewers: AtomicUsize::new(0) }
+        Self {
+            tx,
+            inner: RwLock::new(HashMap::new()),
+            viewers: AtomicUsize::new(0),
+        }
     }
 
     /// Current snapshot (JSON `Record<hostId, ForwardRuntime[]>`) + a live receiver.
@@ -31,8 +35,10 @@ impl ForwardBus {
 
     fn snapshot_json(&self) -> String {
         let inner = self.inner.read().unwrap();
-        let by_clone: HashMap<&String, Vec<&ForwardRuntime>> =
-            inner.iter().map(|(h, m)| (h, m.values().collect())).collect();
+        let by_clone: HashMap<&String, Vec<&ForwardRuntime>> = inner
+            .iter()
+            .map(|(h, m)| (h, m.values().collect()))
+            .collect();
         serde_json::to_string(&by_clone).unwrap_or_else(|_| "{}".to_string())
     }
 
@@ -45,12 +51,14 @@ impl ForwardBus {
         {
             let mut inner = self.inner.write().unwrap();
             let host = inner.entry(msg.host_id).or_default();
-            let e = host.entry(msg.id.clone()).or_insert_with(|| ForwardRuntime {
-                id: msg.id.clone(),
-                state: ForwardState::Offline,
-                error: None,
-                active_conns: 0,
-            });
+            let e = host
+                .entry(msg.id.clone())
+                .or_insert_with(|| ForwardRuntime {
+                    id: msg.id.clone(),
+                    state: ForwardState::Offline,
+                    error: None,
+                    active_conns: 0,
+                });
             e.state = msg.state;
             e.error = msg.error;
         }
@@ -69,12 +77,14 @@ impl ForwardBus {
         {
             let mut inner = self.inner.write().unwrap();
             let host = inner.entry(host_id.to_string()).or_default();
-            let e = host.entry(id.to_string()).or_insert_with(|| ForwardRuntime {
-                id: id.to_string(),
-                state: ForwardState::Listening,
-                error: None,
-                active_conns: 0,
-            });
+            let e = host
+                .entry(id.to_string())
+                .or_insert_with(|| ForwardRuntime {
+                    id: id.to_string(),
+                    state: ForwardState::Listening,
+                    error: None,
+                    active_conns: 0,
+                });
             e.active_conns = (e.active_conns as i64 + delta).max(0) as u32;
         }
         self.broadcast();
@@ -97,7 +107,9 @@ impl ForwardBus {
         // Saturating decrement: never underflow if called spuriously.
         let prev = self
             .viewers
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(1)))
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                Some(v.saturating_sub(1))
+            })
             .unwrap();
         if prev <= 1 {
             self.clear();
@@ -161,11 +173,18 @@ mod tests {
 
         // First viewer leaves — status must persist (another viewer remains).
         bus.viewer_left();
-        assert!(bus.snapshot_json().contains("\"f8080\""), "status cleared too early");
+        assert!(
+            bus.snapshot_json().contains("\"f8080\""),
+            "status cleared too early"
+        );
 
         // Last viewer leaves — status is now cleared.
         bus.viewer_left();
-        assert_eq!(bus.snapshot_json(), "{}", "status not cleared after last viewer left");
+        assert_eq!(
+            bus.snapshot_json(),
+            "{}",
+            "status not cleared after last viewer left"
+        );
 
         // Underflow guard: an extra leave with no viewers must not panic or clear-loop.
         bus.viewer_left();

@@ -49,9 +49,7 @@ fn digest_path(digest: &str) -> String {
 
 /// Exported home of one image (overlay lower).
 pub fn skeleton_dir(homes: &str, digest: &str) -> PathBuf {
-    Path::new(homes)
-        .join(SKEL_DIR)
-        .join(digest_path(digest))
+    Path::new(homes).join(SKEL_DIR).join(digest_path(digest))
 }
 
 /// The clone's read-write delta inside its dataset.
@@ -96,7 +94,9 @@ pub fn write_home_file(homes: &Path, id: &str, rel: &str, data: &[u8], mode: u32
     use std::os::unix::fs::PermissionsExt;
     let root = homes.join(MERGED_DIR).join(id);
     let path = root.join(rel);
-    let parent = path.parent().with_context(|| format!("no parent for home path {rel:?}"))?;
+    let parent = path
+        .parent()
+        .with_context(|| format!("no parent for home path {rel:?}"))?;
     // Own the full chain: only missing components are created, but every component down
     // to the merged root is chowned — deterministic no matter who made the dir.
     let mut dir = root.clone();
@@ -105,8 +105,7 @@ pub fn write_home_file(homes: &Path, id: &str, rel: &str, data: &[u8], mode: u32
         for comp in rel_parent.components() {
             dir.push(comp);
             if !dir.exists() {
-                std::fs::create_dir(&dir)
-                    .with_context(|| format!("creating {}", dir.display()))?;
+                std::fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
             }
             chown(&dir)?;
         }
@@ -168,7 +167,9 @@ pub fn write_home_symlink(homes: &Path, id: &str, rel: &str, target: &str) -> Re
         Ok(_) => std::fs::remove_file(&path)
             .with_context(|| format!("removing {} in {id}'s home", path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(|| format!("stating {} in {id}'s home", path.display())),
+        Err(e) => {
+            return Err(e).with_context(|| format!("stating {} in {id}'s home", path.display()));
+        }
     }
     std::os::unix::fs::symlink(target, &path)
         .with_context(|| format!("linking {} in {id}'s home", path.display()))?;
@@ -216,8 +217,8 @@ pub fn symlink_clone_home(id: &str, rel: &str, target: &str) -> Result<()> {
 /// naming our mountpoint without a parseable lowerdir is an error, not an unmounted
 /// verdict: remounting blind over it risks EBUSY and hides a world we do not understand.
 fn mounted_lower(merged: &Path) -> Result<Option<String>> {
-    let info = std::fs::read_to_string("/proc/self/mountinfo")
-        .context("reading /proc/self/mountinfo")?;
+    let info =
+        std::fs::read_to_string("/proc/self/mountinfo").context("reading /proc/self/mountinfo")?;
     let wanted = merged.to_string_lossy();
     let mut found: Option<&str> = None;
     for line in info.lines() {
@@ -228,7 +229,9 @@ fn mounted_lower(merged: &Path) -> Result<Option<String>> {
             }
         }
     }
-    found.map(|line| lower_of_line_strict(line, &wanted)).transpose()
+    found
+        .map(|line| lower_of_line_strict(line, &wanted))
+        .transpose()
 }
 
 /// Parse one mountinfo line: the mount point is the 5th pre-separator field, the
@@ -311,7 +314,11 @@ pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
         .docker
         .create_reader(
             image_tag,
-            &format!("rmng-skel-{}-{}-{unique}", digest_path(&digest), std::process::id()),
+            &format!(
+                "rmng-skel-{}-{}-{unique}",
+                digest_path(&digest),
+                std::process::id()
+            ),
         )
         .await?;
     let tar = app.docker.download_home_tar(&reader, IMAGE_HOME).await;
@@ -332,8 +339,7 @@ pub fn ensure_layout(dataset: &Path) -> Result<()> {
 }
 
 fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Result<()> {
-    std::fs::create_dir_all(merged)
-        .with_context(|| format!("mkdir {}", merged.display()))?;
+    std::fs::create_dir_all(merged).with_context(|| format!("mkdir {}", merged.display()))?;
     let opts = format!(
         "lowerdir={},upperdir={},workdir={}",
         lower.display(),
@@ -420,9 +426,7 @@ pub async fn remount_all(app: App) {
                 continue;
             }
         };
-        if let Err(e) =
-            ensure_mounted(Path::new(dataset), &digest, &merged_dir(homes, id)).await
-        {
+        if let Err(e) = ensure_mounted(Path::new(dataset), &digest, &merged_dir(homes, id)).await {
             tracing::warn!(target: "overlay", "remount: {id}: {e:#}");
         }
     }
@@ -442,15 +446,23 @@ mod tests {
     #[test]
     fn home_roundtrip_missing_read_and_remove_are_none_and_ok() {
         let homes = scratch_homes("roundtrip");
-        assert_eq!(read_home_file(&homes, "c1", ".codex/auth.json").unwrap(), None);
+        assert_eq!(
+            read_home_file(&homes, "c1", ".codex/auth.json").unwrap(),
+            None
+        );
         remove_home_file(&homes, "c1", ".codex/auth.json").unwrap();
         write_home_file(&homes, "c1", ".codex/auth.json", b"{\"a\":1}", 0o600).unwrap();
         assert_eq!(
-            read_home_file(&homes, "c1", ".codex/auth.json").unwrap().as_deref(),
+            read_home_file(&homes, "c1", ".codex/auth.json")
+                .unwrap()
+                .as_deref(),
             Some(b"{\"a\":1}".as_slice())
         );
         remove_home_file(&homes, "c1", ".codex/auth.json").unwrap();
-        assert_eq!(read_home_file(&homes, "c1", ".codex/auth.json").unwrap(), None);
+        assert_eq!(
+            read_home_file(&homes, "c1", ".codex/auth.json").unwrap(),
+            None
+        );
         let _ = std::fs::remove_dir_all(&homes);
     }
 
@@ -461,7 +473,10 @@ mod tests {
         write_home_file(&homes, "c1", ".pi/agent/auth.json", b"{}", 0o600).unwrap();
         let path = homes.join(".merged").join("c1").join(".pi/agent/auth.json");
         assert_eq!(std::fs::read(&path).unwrap(), b"{}");
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         // No temp droppings beside the installed file.
         assert!(std::fs::read_dir(path.parent().unwrap()).unwrap().count() == 1);
         let _ = std::fs::remove_dir_all(&homes);

@@ -324,8 +324,8 @@ async fn push_keys_to_clones(app: &App, pushed: &mut HashMap<String, u64>) {
         if !crate::home_overlay::clone_home_present(&host.id) {
             continue; // deleted (mount torn down)
         }
-        let write = crate::home_overlay::ensure_clone_home_dir(&host.id, ".ssh", 0o700)
-            .and_then(|()| {
+        let write =
+            crate::home_overlay::ensure_clone_home_dir(&host.id, ".ssh", 0o700).and_then(|()| {
                 crate::home_overlay::write_clone_home(
                     &host.id,
                     ".ssh/authorized_keys",

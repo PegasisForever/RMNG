@@ -116,11 +116,7 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
     // empty). Same-named pools merge members (deduped); either side alone survives.
     if cfg.groups.is_empty() && (!cfg.clone_groups.is_empty() || !cfg.codex_groups.is_empty()) {
         let mut merged: Vec<wire::CloneGroup> = Vec::new();
-        for g in cfg
-            .clone_groups
-            .drain(..)
-            .chain(cfg.codex_groups.drain(..))
-        {
+        for g in cfg.clone_groups.drain(..).chain(cfg.codex_groups.drain(..)) {
             match merged.iter_mut().find(|m| m.name == g.name) {
                 Some(m) => {
                     for email in g.accounts {
@@ -253,8 +249,14 @@ mod tests {
         // Split pool lists fold into one `groups` (same-named merge members, deduped).
         let mut cfg = AppConfig::default();
         cfg.clone_groups = vec![
-            wire::CloneGroup { name: "team".into(), accounts: vec!["a@x.com".into()] },
-            wire::CloneGroup { name: "solo".into(), accounts: vec!["b@x.com".into()] },
+            wire::CloneGroup {
+                name: "team".into(),
+                accounts: vec!["a@x.com".into()],
+            },
+            wire::CloneGroup {
+                name: "solo".into(),
+                accounts: vec!["b@x.com".into()],
+            },
         ];
         cfg.codex_groups = vec![wire::CloneGroup {
             name: "team".into(),
@@ -320,8 +322,11 @@ mod tests {
         assert_eq!(merged.groups.len(), 1);
         assert_eq!(merged.groups[0].name, "team");
         // A codex-only patch leaves the groups untouched.
-        let m2 =
-            merge_update(&merged, serde_json::json!({ "codex": { "autoReset": true } })).unwrap();
+        let m2 = merge_update(
+            &merged,
+            serde_json::json!({ "codex": { "autoReset": true } }),
+        )
+        .unwrap();
         assert!(m2.codex.auto_reset);
         assert_eq!(m2.groups.len(), 1, "codex patch must not disturb pools");
         assert_eq!(m2.groups[0].name, "team");

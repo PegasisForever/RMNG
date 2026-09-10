@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::app::App;
-use crate::mediaplane::{Viewers, broadcast_json, configured_monitors, T_TERM_DATA, T_VIEWSPEC};
+use crate::mediaplane::{T_TERM_DATA, T_VIEWSPEC, Viewers, broadcast_json, configured_monitors};
 
 /// The clone user every session PTY runs as (uid 1000).
 const CLONE_USER: &str = "rmng";
@@ -101,7 +101,13 @@ pub struct TermPlane {
 
 impl TermPlane {
     pub fn new(app: App, viewers: Viewers, rt: tokio::runtime::Handle) -> Self {
-        Self { app, viewers, rt, active: Mutex::new(None), last_size: Mutex::new(None) }
+        Self {
+            app,
+            viewers,
+            rt,
+            active: Mutex::new(None),
+            last_size: Mutex::new(None),
+        }
     }
 
     /// Re-evaluate whether the terminal view should be running: it is active iff the selected
@@ -184,7 +190,12 @@ impl TermPlane {
             init_size,
         ));
         tracing::info!(target: "termplane", "terminal view activated for {clone_id}");
-        Active { clone_id, cmd_tx, sessions, _manager: AbortOnDrop(manager) }
+        Active {
+            clone_id,
+            cmd_tx,
+            sessions,
+            _manager: AbortOnDrop(manager),
+        }
     }
 }
 
@@ -284,7 +295,10 @@ async fn run_manager(
 fn broadcast_view_spec(app: &App, viewers: &Viewers, clone_id: &str, sessions: Vec<String>) {
     let spec = wire::viewer::ViewSpec {
         monitors: configured_monitors(&app.config()),
-        content: wire::viewer::ViewContent::Terminal { clone: clone_id.to_string(), sessions },
+        content: wire::viewer::ViewContent::Terminal {
+            clone: clone_id.to_string(),
+            sessions,
+        },
     };
     broadcast_json(viewers, T_VIEWSPEC, &spec);
 }
@@ -396,14 +410,22 @@ async fn pump_session(
     // against a dead socket starts the server, and that server's env is what every shell in it
     // inherits forever.
     let env = session_env(&app, &clone_id).await;
-    let tty = match app.docker.exec_tty(&clone_id, &cmd, CLONE_USER, &env, size.0, size.1).await {
+    let tty = match app
+        .docker
+        .exec_tty(&clone_id, &cmd, CLONE_USER, &env, size.0, size.1)
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(target: "termplane", "attach {clone_id}/{session} failed: {e:#}");
             return;
         }
     };
-    let crate::docker::TtyExec { id, mut output, mut input } = tty;
+    let crate::docker::TtyExec {
+        id,
+        mut output,
+        mut input,
+    } = tty;
     // Apply the manager's current size once more in case it changed between spawn and attach.
     let _ = app.docker.resize_exec(&id, size.0, size.1).await;
 
@@ -446,8 +468,16 @@ async fn pump_session(
 /// marker so a human's plain `tmux attach` is left alone. Best-effort; `pkill` exits non-zero when
 /// nothing matches, which is fine.
 async fn reap_orphan_clients(app: &App, clone_id: &str) {
-    let cmd = ["pkill".to_string(), "-9".to_string(), "-f".to_string(), PROXY_MARKER.to_string()];
-    let _ = app.docker.exec_capture(clone_id, &cmd, CLONE_USER, None, &[], None).await;
+    let cmd = [
+        "pkill".to_string(),
+        "-9".to_string(),
+        "-f".to_string(),
+        PROXY_MARKER.to_string(),
+    ];
+    let _ = app
+        .docker
+        .exec_capture(clone_id, &cmd, CLONE_USER, None, &[], None)
+        .await;
 }
 
 /// `tmux list-sessions -F '#{session_name}'` → the session names (empty on no server / error).
@@ -458,7 +488,11 @@ async fn list_sessions(app: &App, clone_id: &str) -> Vec<String> {
         "-F".to_string(),
         "#{session_name}".to_string(),
     ];
-    match app.docker.exec_capture(clone_id, &cmd, CLONE_USER, None, &[], None).await {
+    match app
+        .docker
+        .exec_capture(clone_id, &cmd, CLONE_USER, None, &[], None)
+        .await
+    {
         Ok(r) => r
             .stdout
             .lines()
@@ -502,7 +536,10 @@ async fn new_tmux_session(app: &App, clone_id: &str, name: &str) -> anyhow::Resu
     ];
     // Seeded: this is the call that starts the tmux server when none is running (see `session_env`).
     let env = session_env(app, clone_id).await;
-    let r = app.docker.exec_capture(clone_id, &cmd, CLONE_USER, None, &env, None).await?;
+    let r = app
+        .docker
+        .exec_capture(clone_id, &cmd, CLONE_USER, None, &env, None)
+        .await?;
     if r.exit_code != 0 {
         anyhow::bail!("tmux new-session exit {}: {}", r.exit_code, r.stderr.trim());
     }

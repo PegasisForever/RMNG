@@ -276,7 +276,10 @@ mod tests {
 
     #[test]
     fn render_smb_conf_has_load_bearing_lines() {
-        let out = render_smb_conf(Path::new("/data/data/hosts"), Path::new("/data/data/shared"));
+        let out = render_smb_conf(
+            Path::new("/data/data/hosts"),
+            Path::new("/data/data/shared"),
+        );
         for needle in [
             "[global]",
             "server min protocol = SMB2",
@@ -312,7 +315,10 @@ mod tests {
     fn the_shared_share_acts_as_the_clone_user() {
         // `force user = root` would leave every SMB-written file owned by root, and a clone
         // writing through its own mount could then neither edit nor delete it.
-        let out = render_smb_conf(Path::new("/data/data/hosts"), Path::new("/data/data/shared"));
+        let out = render_smb_conf(
+            Path::new("/data/data/hosts"),
+            Path::new("/data/data/shared"),
+        );
         let shared = out.split("[shared]").nth(1).expect("a [shared] section");
         assert!(shared.contains("force user = rmng"), "{shared}");
         assert!(shared.contains("read only = no"), "{shared}");

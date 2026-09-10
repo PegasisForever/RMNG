@@ -199,10 +199,16 @@ fn migrate_clone_groups(mut state: ControlState) -> ControlState {
             (None, None) => None,
         };
         if let Some(g) = group {
-            if h.claude_selection.as_deref().is_some_and(|s| s.starts_with("group:")) {
+            if h.claude_selection
+                .as_deref()
+                .is_some_and(|s| s.starts_with("group:"))
+            {
                 h.claude_selection = Some("auto".to_string());
             }
-            if h.codex_selection.as_deref().is_some_and(|s| s.starts_with("group:")) {
+            if h.codex_selection
+                .as_deref()
+                .is_some_and(|s| s.starts_with("group:"))
+            {
                 h.codex_selection = Some("auto".to_string());
             }
             // A side pinned to an email keeps its pin; the group feeds its `auto` side(s).
@@ -212,7 +218,10 @@ fn migrate_clone_groups(mut state: ControlState) -> ControlState {
         // and resolves in scope. Lossy by design — a side whose scope holds provider
         // accounts gets a token where it previously had none.
         for sel in [&mut h.claude_selection, &mut h.codex_selection] {
-            if sel.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("none")) {
+            if sel
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("none"))
+            {
                 *sel = Some("auto".to_string());
             }
         }

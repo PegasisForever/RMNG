@@ -47,7 +47,9 @@ pub fn ensure_dev_zfs() {
         nix::sys::stat::Mode::from_bits_truncate(0o666),
         dev,
     ) {
-        tracing::warn!("/dev/zfs mknod failed (need privileged CT + devices.allow c 10:249): {e:#}");
+        tracing::warn!(
+            "/dev/zfs mknod failed (need privileged CT + devices.allow c 10:249): {e:#}"
+        );
         return;
     }
     match run(&["list", "-H", "-o", "name"]) {

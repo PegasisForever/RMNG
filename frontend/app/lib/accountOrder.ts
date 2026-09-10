@@ -67,10 +67,16 @@ export function setAcctOrder(update: (prev: AcctOrder) => AcctOrder): void {
 /** Stable-sort `items` by a saved list of keys. Items whose key is in `savedOrderKeys` sort
  *  to that position; items not in it (newly imported accounts) keep their original relative
  *  order at the end. Stable, so an SSE re-render preserves the manual order. */
-export function ordered<T>(items: T[], savedOrderKeys: string[], keyOf: (item: T) => string): T[] {
+export function ordered<T>(
+  items: T[],
+  savedOrderKeys: string[],
+  keyOf: (item: T) => string,
+): T[] {
   const pos = new Map(savedOrderKeys.map((k, i) => [k, i] as const));
   const END = Number.MAX_SAFE_INTEGER;
-  return [...items].sort((a, b) => (pos.get(keyOf(a)) ?? END) - (pos.get(keyOf(b)) ?? END));
+  return [...items].sort(
+    (a, b) => (pos.get(keyOf(a)) ?? END) - (pos.get(keyOf(b)) ?? END),
+  );
 }
 
 /** Apply the per-bucket saved order to a list that MIXES buckets, permuting each bucket's
@@ -97,7 +103,10 @@ export function orderedWithinBuckets<T>(
   }
   // Each bucket becomes a queue drained in its new order as the original slots are walked.
   const queues = new Map(
-    [...byBucket].map(([bucket, group]) => [bucket, ordered(group, order[bucket] ?? [], keyOf)]),
+    [...byBucket].map(([bucket, group]) => [
+      bucket,
+      ordered(group, order[bucket] ?? [], keyOf),
+    ]),
   );
   const taken = new Map<string, number>();
   return items.map((item) => {

@@ -38,11 +38,17 @@ pub struct ChatState {
 }
 
 fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn short_id() -> String {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     format!("{:08x}", (t as u64) & 0xFFFF_FFFF)
 }
 
@@ -53,7 +59,11 @@ async fn base_url(app: &App, host: &RmngClone) -> String {
 // --- chat storage (mirrors notes) ------------------------------------------
 
 fn chat_path(data_dir: &str, id: &str) -> Option<std::path::PathBuf> {
-    is_safe_id(id).then(|| std::path::Path::new(data_dir).join("chats").join(format!("{id}.json")))
+    is_safe_id(id).then(|| {
+        std::path::Path::new(data_dir)
+            .join("chats")
+            .join(format!("{id}.json"))
+    })
 }
 
 pub fn load_chat(data_dir: &str, id: &str) -> Chat {
@@ -64,7 +74,9 @@ pub fn load_chat(data_dir: &str, id: &str) -> Chat {
 }
 
 pub fn save_chat(data_dir: &str, id: &str, chat: &Chat) {
-    let Some(path) = chat_path(data_dir, id) else { return };
+    let Some(path) = chat_path(data_dir, id) else {
+        return;
+    };
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
@@ -100,8 +112,11 @@ pub fn delete_chat(data_dir: &str, id: &str) {
 const SCHEDULE_GRACE: i64 = 60 * 60 * 1000;
 
 fn schedule_path(data_dir: &str, id: &str) -> Option<std::path::PathBuf> {
-    is_safe_id(id)
-        .then(|| std::path::Path::new(data_dir).join("schedules").join(format!("{id}.json")))
+    is_safe_id(id).then(|| {
+        std::path::Path::new(data_dir)
+            .join("schedules")
+            .join(format!("{id}.json"))
+    })
 }
 
 pub fn load_schedules(data_dir: &str, id: &str) -> Vec<ScheduledMessage> {
@@ -114,7 +129,9 @@ pub fn load_schedules(data_dir: &str, id: &str) -> Vec<ScheduledMessage> {
 }
 
 fn save_schedules(data_dir: &str, id: &str, list: &[ScheduledMessage]) {
-    let Some(path) = schedule_path(data_dir, id) else { return };
+    let Some(path) = schedule_path(data_dir, id) else {
+        return;
+    };
     // An empty queue is the common steady state; removing the file keeps `data/schedules/`
     // from filling with `[]` stubs for every clone that ever scheduled anything once.
     if list.is_empty() {
@@ -152,11 +169,21 @@ fn build_scheduled(text: &str, at: i64, now: i64) -> Result<ScheduledMessage, St
     if at <= now {
         return Err("scheduled time must be in the future".into());
     }
-    Ok(ScheduledMessage { id: short_id(), text: text.to_string(), at, created_at: now })
+    Ok(ScheduledMessage {
+        id: short_id(),
+        text: text.to_string(),
+        at,
+        created_at: now,
+    })
 }
 
 /// Queue a message for later delivery to `host_id`. Rejects past times and blank text.
-pub fn schedule_message(app: &App, host_id: &str, text: &str, at: i64) -> Result<ScheduledMessage, String> {
+pub fn schedule_message(
+    app: &App,
+    host_id: &str,
+    text: &str,
+    at: i64,
+) -> Result<ScheduledMessage, String> {
     let mut msg = build_scheduled(text, at, now_ms())?;
     let data_dir = app.data_dir();
     {
@@ -215,7 +242,10 @@ fn expired_notice(m: &ScheduledMessage, now: i64) -> String {
 /// still inside the grace window, and those so far past it that the scheduler should drop
 /// them. Pure — this is the piece the scheduler's correctness hinges on, so it is tested
 /// directly rather than through the tick loop.
-fn due_messages(list: &[ScheduledMessage], now: i64) -> (Vec<ScheduledMessage>, Vec<ScheduledMessage>) {
+fn due_messages(
+    list: &[ScheduledMessage],
+    now: i64,
+) -> (Vec<ScheduledMessage>, Vec<ScheduledMessage>) {
     let mut due = Vec::new();
     let mut expired = Vec::new();
     for m in list.iter().filter(|m| m.at <= now) {
@@ -292,7 +322,11 @@ fn set_activity(app: &App, host_id: &str, activity: String) {
     if !is_busy(app, host_id) {
         return; // late event after the turn ended
     }
-    app.chat.activity.lock().unwrap().insert(host_id.to_string(), activity);
+    app.chat
+        .activity
+        .lock()
+        .unwrap()
+        .insert(host_id.to_string(), activity);
     broadcast(app, host_id);
 }
 
@@ -315,7 +349,12 @@ fn clip_activity(s: &str) -> String {
 fn push_message(app: &App, host_id: &str, role: ChatRole, text: String) {
     let data_dir = app.data_dir();
     let mut chat = load_chat(&data_dir, host_id);
-    chat.messages.push(ChatMessage { id: short_id(), role, text, ts: now_ms() });
+    chat.messages.push(ChatMessage {
+        id: short_id(),
+        role,
+        text,
+        ts: now_ms(),
+    });
     save_chat(&data_dir, host_id, &chat);
 }
 
@@ -340,7 +379,12 @@ struct TurnFrame {
 }
 
 async fn post_abort(app: &App, base: &str) {
-    let _ = app.http.post(format!("{base}/abort")).timeout(Duration::from_secs(5)).send().await;
+    let _ = app
+        .http
+        .post(format!("{base}/abort"))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
 }
 
 /// Persist the user message, kick off the turn detached, return the new chat.
@@ -405,7 +449,9 @@ async fn run_turn_inner(app: &App, host_id: &str, base: &str, text: &str) -> Str
 
         while let Some(pos) = find_subslice(&buf, b"\n\n") {
             let frame: Vec<u8> = buf.drain(..pos + 2).collect();
-            let Some(json) = extract_data_line(&frame[..frame.len() - 2]) else { continue };
+            let Some(json) = extract_data_line(&frame[..frame.len() - 2]) else {
+                continue;
+            };
 
             // Any data frame ⇒ the subscriber is live ⇒ safe to prompt.
             if !prompted {
@@ -414,7 +460,9 @@ async fn run_turn_inner(app: &App, host_id: &str, base: &str, text: &str) -> Str
                     return msg;
                 }
             }
-            let Ok(f) = serde_json::from_str::<TurnFrame>(&json) else { continue };
+            let Ok(f) = serde_json::from_str::<TurnFrame>(&json) else {
+                continue;
+            };
             if let Some(a) = f.activity {
                 set_activity(app, host_id, clip_activity(&a));
             } else if let Some(r) = f.reply {
@@ -422,7 +470,11 @@ async fn run_turn_inner(app: &App, host_id: &str, base: &str, text: &str) -> Str
                     continue; // autonomous → the persistent listener handles it
                 }
                 let r = r.trim();
-                return if r.is_empty() { "(no response)".into() } else { r.to_string() };
+                return if r.is_empty() {
+                    "(no response)".into()
+                } else {
+                    r.to_string()
+                };
             } else if let Some(e) = f.error {
                 return format!("⚠ {e}");
             }
@@ -454,7 +506,10 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// Extract the JSON after the first `data:` line of an SSE frame.
 fn extract_data_line(frame: &[u8]) -> Option<String> {
     let s = std::str::from_utf8(frame).ok()?;
-    s.lines().find_map(|l| l.strip_prefix("data:")).map(|j| j.trim().to_string()).filter(|j| !j.is_empty())
+    s.lines()
+        .find_map(|l| l.strip_prefix("data:"))
+        .map(|j| j.trim().to_string())
+        .filter(|j| !j.is_empty())
 }
 
 /// Interrupt the clone's in-flight turn (best-effort).
@@ -475,7 +530,13 @@ pub struct KickoffOpts {
 /// After a clone, wait for the wrapper to accept its event stream, then send the kickoff
 /// message (ticket URL or plain first message + optional instruction overrides).
 pub async fn kickoff_agent(app: App, host: RmngClone, opts: KickoffOpts) {
-    let mut msg = opts.ticket_url.clone().or(opts.message.clone()).unwrap_or_default().trim().to_string();
+    let mut msg = opts
+        .ticket_url
+        .clone()
+        .or(opts.message.clone())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if msg.is_empty() {
         return;
     }
@@ -498,12 +559,22 @@ pub async fn kickoff_agent(app: App, host: RmngClone, opts: KickoffOpts) {
         }
         tokio::time::sleep(Duration::from_secs(4)).await;
     }
-    if let Some(a) = opts.agent_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(a) = opts
+        .agent_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         msg += &format!(
             "\n\nAdditional clone-agent instructions (these take precedence — merge them with your procedure):\n{a}"
         );
     }
-    if let Some(c) = opts.claude_instructions.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(c) = opts
+        .claude_instructions
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         msg += &format!(
             "\n\nAdditional Claude Code instructions (these take precedence — merge them into the prompt you give Claude Code):\n{c}"
         );
@@ -562,7 +633,9 @@ pub async fn run_scheduler(app: App) {
 fn tick_schedules(app: &App) {
     let data_dir = app.data_dir();
     let dir = std::path::Path::new(&data_dir).join("schedules");
-    let Ok(entries) = std::fs::read_dir(&dir) else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
     let ids: Vec<String> = entries
         .flatten()
         .filter_map(|e| {
@@ -600,11 +673,17 @@ fn tick_schedules(app: &App) {
 
         match host {
             None => {
-                tracing::warn!("dropping {} scheduled message(s) for unknown clone {id}", due.len());
+                tracing::warn!(
+                    "dropping {} scheduled message(s) for unknown clone {id}",
+                    due.len()
+                );
                 fired.extend(due.iter().map(|m| m.id.clone()));
             }
             Some(host) if host.archived => {
-                tracing::debug!("clone {id} is archived; {} scheduled message(s) wait", due.len());
+                tracing::debug!(
+                    "clone {id} is archived; {} scheduled message(s) wait",
+                    due.len()
+                );
             }
             Some(host) => {
                 // One per tick: `send_chat` refuses while a turn is in flight, so the rest of
@@ -652,8 +731,12 @@ async fn run_autonomous_listener(app: &App, host: &RmngClone) -> Result<(), ()> 
         buf.extend_from_slice(&chunk);
         while let Some(pos) = find_subslice(&buf, b"\n\n") {
             let frame: Vec<u8> = buf.drain(..pos + 2).collect();
-            let Some(json) = extract_data_line(&frame[..frame.len() - 2]) else { continue };
-            let Ok(f) = serde_json::from_str::<TurnFrame>(&json) else { continue };
+            let Some(json) = extract_data_line(&frame[..frame.len() - 2]) else {
+                continue;
+            };
+            let Ok(f) = serde_json::from_str::<TurnFrame>(&json) else {
+                continue;
+            };
             // Turn liveness → the monitor's working/idle signal.
             //
             // `busy: true` marks a turn STARTING and `activity` lines stream throughout it, so
@@ -684,7 +767,12 @@ mod tests {
     use super::*;
 
     fn msg(id: &str, at: i64) -> ScheduledMessage {
-        ScheduledMessage { id: id.into(), text: "hi".into(), at, created_at: 0 }
+        ScheduledMessage {
+            id: id.into(),
+            text: "hi".into(),
+            at,
+            created_at: 0,
+        }
     }
 
     #[test]
@@ -715,7 +803,10 @@ mod tests {
         let (due, expired) = due_messages(&list, now);
         let due_ids: Vec<&str> = due.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(due_ids, vec!["exactly-now", "late"]);
-        assert_eq!(expired.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["expired"]);
+        assert_eq!(
+            expired.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["expired"]
+        );
         // A message right on the grace boundary is still deliverable.
         let (due, expired) = due_messages(&[msg("edge", now - SCHEDULE_GRACE)], now);
         assert_eq!(due.len(), 1);
@@ -733,7 +824,10 @@ mod tests {
 
         // Reloaded from disk (not from memory) and ordered soonest-first.
         let loaded = load_schedules(&dd, "c1");
-        assert_eq!(loaded.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec![&b.id, &a.id]);
+        assert_eq!(
+            loaded.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec![&b.id, &a.id]
+        );
         assert_eq!(loaded[0].text, "sooner");
         assert_eq!(loaded[1].at, now + 3_600_000);
 
@@ -741,11 +835,23 @@ mod tests {
         let snap: serde_json::Value = serde_json::from_str(&snapshot_json(&app, "c1")).unwrap();
         assert_eq!(snap["scheduled"].as_array().unwrap().len(), 2);
         assert_eq!(snap["scheduled"][0]["text"], "sooner");
-        assert!(snap["scheduled"][0]["createdAt"].is_i64(), "createdAt must be camelCase");
+        assert!(
+            snap["scheduled"][0]["createdAt"].is_i64(),
+            "createdAt must be camelCase"
+        );
 
         assert!(cancel_schedule(&app, "c1", &b.id));
-        assert!(!cancel_schedule(&app, "c1", &b.id), "second cancel is a no-op");
-        assert_eq!(load_schedules(&dd, "c1").iter().map(|m| m.id.clone()).collect::<Vec<_>>(), vec![a.id.clone()]);
+        assert!(
+            !cancel_schedule(&app, "c1", &b.id),
+            "second cancel is a no-op"
+        );
+        assert_eq!(
+            load_schedules(&dd, "c1")
+                .iter()
+                .map(|m| m.id.clone())
+                .collect::<Vec<_>>(),
+            vec![a.id.clone()]
+        );
 
         // Emptying the queue removes the file rather than leaving an `[]` stub.
         assert!(cancel_schedule(&app, "c1", &a.id));
@@ -785,8 +891,15 @@ mod tests {
         }
 
         tick_schedules(&app);
-        assert!(load_schedules(&dd, "ghost").is_empty(), "unknown clone → dropped");
-        assert_eq!(load_schedules(&dd, "sleeping").len(), 1, "archived clone → still queued");
+        assert!(
+            load_schedules(&dd, "ghost").is_empty(),
+            "unknown clone → dropped"
+        );
+        assert_eq!(
+            load_schedules(&dd, "sleeping").len(),
+            1,
+            "archived clone → still queued"
+        );
     }
 
     #[tokio::test]
@@ -794,7 +907,11 @@ mod tests {
         let app = App::test_app();
         let dd = app.data_dir();
         app.store.mutate(|s| {
-            s.hosts.push(RmngClone { id: "wedged".into(), host: "wedged".into(), ..Default::default() });
+            s.hosts.push(RmngClone {
+                id: "wedged".into(),
+                host: "wedged".into(),
+                ..Default::default()
+            });
         });
         schedule_message(&app, "wedged", "deploy the thing", now_ms() + 1_000).unwrap();
         // Push it well past the grace window, as a clone that was down all day would be.
@@ -804,13 +921,26 @@ mod tests {
 
         tick_schedules(&app);
 
-        assert!(load_schedules(&dd, "wedged").is_empty(), "expired message is dropped");
+        assert!(
+            load_schedules(&dd, "wedged").is_empty(),
+            "expired message is dropped"
+        );
         // ...but the operator finds out where they'd actually look, with their text intact.
         let msgs = load_chat(&dd, "wedged").messages;
-        let notice = msgs.last().expect("an expiry notice must be written to the transcript");
+        let notice = msgs
+            .last()
+            .expect("an expiry notice must be written to the transcript");
         assert_eq!(notice.role, ChatRole::Assistant);
-        assert!(notice.text.contains("deploy the thing"), "quotes the undelivered text: {}", notice.text);
-        assert!(notice.text.contains("NOT sent"), "says plainly it did not go: {}", notice.text);
+        assert!(
+            notice.text.contains("deploy the thing"),
+            "quotes the undelivered text: {}",
+            notice.text
+        );
+        assert!(
+            notice.text.contains("NOT sent"),
+            "says plainly it did not go: {}",
+            notice.text
+        );
     }
 
     #[tokio::test]
@@ -818,7 +948,11 @@ mod tests {
         let app = App::test_app();
         let dd = app.data_dir();
         app.store.mutate(|s| {
-            s.hosts.push(RmngClone { id: "worker".into(), host: "worker".into(), ..Default::default() });
+            s.hosts.push(RmngClone {
+                id: "worker".into(),
+                host: "worker".into(),
+                ..Default::default()
+            });
         });
         schedule_message(&app, "worker", "queued", now_ms() + 1_000).unwrap();
         let mut list = load_schedules(&dd, "worker");
@@ -827,6 +961,10 @@ mod tests {
 
         app.chat.busy.lock().unwrap().insert("worker".into());
         tick_schedules(&app);
-        assert_eq!(load_schedules(&dd, "worker").len(), 1, "busy clone must not lose the message");
+        assert_eq!(
+            load_schedules(&dd, "worker").len(),
+            1,
+            "busy clone must not lose the message"
+        );
     }
 }

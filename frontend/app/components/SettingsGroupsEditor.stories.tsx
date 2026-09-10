@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { useState } from "react";
+import { StrictMode, useState, type ComponentProps } from "react";
 import { fn } from "storybook/test";
 
 import { SettingsGroupsEditor } from "./SettingsGroupsEditor";
@@ -8,7 +8,7 @@ import { makeSettingsDraft } from "./__fixtures__/appConfig";
 
 /** The editor sits in the panel's body, so the story gives it the same width. */
 function Frame({ children }: { children: React.ReactNode }) {
-  return <div className="w-[38rem] p-4">{children}</div>;
+  return <div className="w-[38rem] max-w-full p-4">{children}</div>;
 }
 
 /** Both providers' rows, the way the panel hands them to the editor. */
@@ -17,6 +17,22 @@ function allAccounts() {
 }
 
 const CLAUDE_HINT = "Import some accounts first to add them to a group.";
+
+function InteractiveEditor(args: ComponentProps<typeof SettingsGroupsEditor>) {
+  const [groups, setGroups] = useState(args.groups);
+  return (
+    <Frame>
+      <SettingsGroupsEditor
+        {...args}
+        groups={groups}
+        onChange={(next) => {
+          setGroups(next);
+          args.onChange(next);
+        }}
+      />
+    </Frame>
+  );
+}
 
 const meta = {
   title: "Settings/Components/SettingsGroupsEditor",
@@ -29,11 +45,7 @@ const meta = {
     onChange: fn(),
     onImportAccount: fn(),
   },
-  render: (args) => (
-    <Frame>
-      <SettingsGroupsEditor {...args} />
-    </Frame>
-  ),
+  render: (args) => <InteractiveEditor {...args} />,
 } satisfies Meta<typeof SettingsGroupsEditor>;
 
 export default meta;
@@ -74,22 +86,59 @@ export const UnnamedRow: Story = {
   args: { groups: [{ name: "", accounts: [] }] },
 };
 
-/** Wired to local state: renaming, ticking a member and adding a pool all take effect. */
+/** All stories accept edits; this is the standard populated example. */
 export const Interactive: Story = {
   args: { groups: makeSettingsDraft().groups },
+};
+
+/** Regression fixture: shared membership, an empty destination, and a scrollable body.
+ * The visible draft counter makes it easy to check that hover never writes a change. */
+export const DragAndDrop: Story = {
+  args: {
+    groups: [
+      { name: "pooled", accounts: ["alex@example.com", "sam@example.com"] },
+      { name: "team", accounts: ["alex@openai.com"] },
+      { name: "shared", accounts: ["alex@example.com"] },
+      { name: "empty", accounts: [] },
+    ],
+  },
   render: function Render(args) {
     const [groups, setGroups] = useState(args.groups);
+    const [changes, setChanges] = useState(0);
+    const reset = () => {
+      setGroups(structuredClone(args.groups));
+      setChanges(0);
+    };
     return (
-      <Frame>
-        <SettingsGroupsEditor
-          {...args}
-          groups={groups}
-          onChange={(next) => {
-            setGroups(next);
-            args.onChange(next);
-          }}
-        />
-      </Frame>
+      <StrictMode>
+        <Frame>
+          <div
+            className="h-[32rem] overflow-y-auto border p-2"
+            data-editor-scroll
+          >
+            <SettingsGroupsEditor
+              {...args}
+              groups={groups}
+              onChange={(next) => {
+                setGroups(next);
+                setChanges((count) => count + 1);
+                args.onChange(next);
+              }}
+            />
+          </div>
+          <p className="mt-2 text-xs">
+            Draft changes: <output data-draft-changes>{changes}</output>
+          </p>
+          {/* Pointer-down also permits an external replacement while a drag suppresses clicks. */}
+          <button type="button" onPointerDown={reset} onClick={reset}>
+            Reset example
+          </button>
+          <details>
+            <summary>Draft</summary>
+            <pre data-draft-value>{JSON.stringify(groups, null, 2)}</pre>
+          </details>
+        </Frame>
+      </StrictMode>
     );
   },
 };

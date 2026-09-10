@@ -183,7 +183,10 @@ export function DashboardContainer({
   const [importOpen, setImportOpen] = useState(false);
   // Preselected provider tab + pool for the import modal (the settings group tree's
   // per-group buttons). Nulls mean the modal's own defaults.
-  const [importSeed, setImportSeed] = useState<{ provider?: "claude" | "codex"; group?: string }>({});
+  const [importSeed, setImportSeed] = useState<{
+    provider?: "claude" | "codex";
+    group?: string;
+  }>({});
   // The dead account the sign-in modal is standing in for, or null for a plain import.
   // One modal serves both: a replacement IS a sign-in, it just knows what it takes over.
   const [replacing, setReplacing] = useState<ClaudeUsage | null>(null);
@@ -959,7 +962,9 @@ export function DashboardContainer({
           updateServer={updateServer}
           operations={state.operations}
           restartServer={restartServer}
-          onImportAccount={(provider, group) => openImport(null, { provider, group })}
+          onImportAccount={(provider, group) =>
+            openImport(null, { provider, group })
+          }
           boardColumns={columns}
           boardColumnCounts={columnCounts}
           onAddBoardColumn={(title) =>
