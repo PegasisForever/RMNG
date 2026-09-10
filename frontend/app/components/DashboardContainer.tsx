@@ -53,8 +53,6 @@ import {
   activateLayout,
   archiveClone,
   forkClone,
-  deleteClaudeAccount,
-  deleteCodexAccount,
   deleteClone,
   duplicateClone,
   getConfig,
@@ -572,19 +570,6 @@ export function DashboardContainer({
     setImportOpen(true);
   };
 
-  const onDeleteAccount = (email: string) =>
-    run(
-      deleteClaudeAccount(email).then(
-        () => void refreshClaudeUsage().catch(() => {}),
-      ),
-    );
-  const onDeleteCodexAccount = (email: string) =>
-    run(
-      deleteCodexAccount(email).then(
-        () => void refreshCodexUsage().catch(() => {}),
-      ),
-    );
-
   // Archiving rides a drag into the Archived column, and that column's contents come from
   // the server's `archived` flag rather than from the column list. So when the call fails
   // the card has to go back where it was: `before` is the layout from before the drop, the
@@ -979,9 +964,6 @@ export function DashboardContainer({
           operations={state.operations}
           restartServer={restartServer}
           onImportAccount={(provider, group) => openImport(null, { provider, group })}
-          onReplaceAccount={(account) => openImport(account)}
-          onDeleteAccount={onDeleteAccount}
-          onDeleteCodexAccount={onDeleteCodexAccount}
           boardColumns={columns}
           boardColumnCounts={columnCounts}
           onAddBoardColumn={(title) =>

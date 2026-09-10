@@ -54,15 +54,10 @@ export interface SettingsPanelContainerProps {
   operations: Operation[];
   /** Restart the control-server container in place (applies changed startup settings). */
   restartServer: () => Promise<{ ok: boolean }>;
-  /** Delete an imported Claude account by email (removes its stored token; reassigns clones). */
-  onDeleteAccount: (email: string) => void;
-  /** Delete an imported Codex account by email. */
-  onDeleteCodexAccount: (email: string) => void;
   /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
    *  control-server harvests the tokens off a clone that's already signed in. Takes the
    *  provider tab + preselected group for the group tree's per-group import buttons. */
   onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
-  onReplaceAccount: (account: ClaudeUsage) => void;
   // --- board columns ---
   /** The dashboard board's columns, left to right. Omit to hide the section entirely,
    *  which is what a page without a board does. */
@@ -86,10 +81,7 @@ export function SettingsPanelContainer({
   updateServer,
   operations,
   restartServer,
-  onDeleteAccount,
-  onDeleteCodexAccount,
   onImportAccount,
-  onReplaceAccount,
   boardColumns,
   boardColumnCounts,
   onAddBoardColumn,
@@ -208,17 +200,6 @@ export function SettingsPanelContainer({
     }
   }
 
-  /** Deleting an account removes its stored token, so it is confirmed before it is asked for. */
-  function confirmDelete(email: string, remove: (email: string) => void) {
-    if (
-      window.confirm(
-        `Delete ${email}?\n\nThis removes its stored token (re-adding needs a fresh import). Clones running it are reassigned to another account; a clone pinned to it must be reassigned first.`,
-      )
-    ) {
-      remove(email);
-    }
-  }
-
   async function save() {
     if (!draft) return;
     setSaving(true);
@@ -273,15 +254,7 @@ export function SettingsPanelContainer({
       onCategoryChange={setCategory}
       accounts={accounts}
       accountOrder={acctOrder}
-      onReorderAccounts={(provider, ids) =>
-        setAcctOrder((prev) => ({ ...prev, [provider]: ids }))
-      }
-      onDeleteAccount={(email) => confirmDelete(email, onDeleteAccount)}
-      onDeleteCodexAccount={(email) =>
-        confirmDelete(email, onDeleteCodexAccount)
-      }
       onImportAccount={onImportAccount}
-      onReplaceAccount={onReplaceAccount}
       error={error}
       restartRequired={restartRequired}
       saving={saving}

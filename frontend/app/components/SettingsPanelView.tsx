@@ -19,7 +19,6 @@ import {
 } from "~/components/SettingsNav";
 import {
   BoardPane,
-  ClonesPane,
   LayoutPane,
   LlmPane,
   PresetsPane,
@@ -55,24 +54,14 @@ export interface SettingsPanelViewProps {
    *  by that tag. The preset pickers take the list unordered, the way a dropdown of options
    *  rather than a list of rows wants it. */
   accounts: ClaudeUsage[];
-  /** The operator's own cosmetic ordering of those rows, per provider. It orders the two
-   *  account lists and their group checkboxes. */
+  /** The operator's own cosmetic ordering of those rows, per provider. It orders the
+   *  group tree's account source and the stuck-judge email options. */
   accountOrder: AcctOrder;
-  /** The new order for one provider's rows, after a drag. */
-  onReorderAccounts: (
-    provider: "claude" | "codex",
-    orderedIds: string[],
-  ) => void;
-  /** Delete an imported Claude account by email (removes its stored token; reassigns clones). */
-  onDeleteAccount: (email: string) => void;
-  /** Delete an imported Codex account by email. */
-  onDeleteCodexAccount: (email: string) => void;
-  /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
-   *  control-server harvests the tokens off a clone that's already signed in. */
   /** Open the import modal, optionally on one provider tab with a group preselected
-   *  (the settings group tree's per-group import buttons). */
+   *  (the settings group tree's per-group import buttons). Accounts are never OAuth'd
+   *  in the browser — the control-server harvests the tokens off a clone that's
+   *  already signed in. */
   onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
-  onReplaceAccount: (account: ClaudeUsage) => void;
 
   /** The last failed load or save, in the panel's own banner. */
   error: string | null;
@@ -127,7 +116,6 @@ const PANES: Record<
   layout: LayoutPane,
   presets: PresetsPane,
   llm: LlmPane,
-  clones: ClonesPane,
   server: ServerPane,
 };
 

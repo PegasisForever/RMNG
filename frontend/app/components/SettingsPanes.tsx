@@ -8,7 +8,6 @@
 // would have to be updated in step with the panel's.
 
 import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
-import { SettingsAccountList } from "~/components/SettingsAccountList";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
 import { Field, Section, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
@@ -145,63 +144,24 @@ export function PresetsPane({
   );
 }
 
-/** LLM: both providers' accounts plus the one shared pool list in a single pane. A pool
+/** LLM: the one shared pool list plus the Codex-wide reset-credit switch. A pool
  *  may mix Claude and Codex accounts; each side's rotator only sees its own members, and
- *  a clone binds at most one pool, which feeds both sides. */
+ *  a clone binds at most one pool, which feeds both sides.
+ *
+ *  There are no per-provider account sections anymore: importing happens per-pool in the
+ *  group tree (every import lands in a pool directly), deleting happens by dropping the
+ *  last membership and saving (the server sweeps unclaimed accounts), and token health
+ *  ("sign in again") lives in the dashboard Usage column. */
 export function LlmPane({
   draft,
   onDraftChange,
   rows,
-  onReorderAccounts,
-  onDeleteAccount,
-  onDeleteCodexAccount,
   onImportAccount,
-  onReplaceAccount,
+  onTestJudge,
+  judgeTestMessage,
 }: SettingsPaneProps) {
   return (
     <>
-      {/* There is no in-browser login: the control-server harvests an account's tokens off a
-          clone that is already signed in. Importing happens per-pool in the group tree below,
-          so every import lands in a pool directly. */}
-      <Section
-        title="Claude accounts"
-        effect="immediate"
-        hint="Imported accounts available to clones and groups. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
-      >
-        <SettingsAccountList
-          accounts={rows.claude}
-          onDelete={onDeleteAccount}
-          onReorder={(ids) => onReorderAccounts("claude", ids)}
-          onReplace={onReplaceAccount}
-        />
-      </Section>
-
-      {/* Importing is provider-picked inside the same modal the Claude list opens, so this
-          list has no entry point of its own. */}
-      <Section
-        title="Codex accounts"
-        effect="immediate"
-        hint="Imported Codex accounts. Deleting one removes its stored token and reassigns clones running it (a clone pinned to it must be reassigned first)."
-      >
-        <SettingsAccountList
-          accounts={rows.codex}
-          onDelete={onDeleteCodexAccount}
-          onReorder={(ids) => onReorderAccounts("codex", ids)}
-          onReplace={onReplaceAccount}
-        />
-        <label className="mt-3 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-          <input
-            type="checkbox"
-            checked={draft.codex.autoReset}
-            onChange={(e) =>
-              onDraftChange("codex", { ...draft.codex, autoReset: e.target.checked })
-            }
-          />
-          Auto-use Codex reset credits (when every account is &gt;95% weekly and none
-          reset within 24h, spend one banked reset to bring an account back)
-        </label>
-      </Section>
-
       {/* One pool list for both providers: members may mix Claude and Codex accounts.
           Each side rotates within its own members (Claude: 80% 5h or 95% 7d exhausts;
           Codex: 95% weekly), keeping its account otherwise to preserve prompt cache. */}
@@ -217,53 +177,41 @@ export function LlmPane({
           onChange={(groups) => onDraftChange("groups", groups)}
           onImportAccount={(provider, group) => onImportAccount(provider, group)}
         />
+        <label className="mt-3 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+          <input
+            type="checkbox"
+            checked={draft.codex.autoReset}
+            onChange={(e) =>
+              onDraftChange("codex", { ...draft.codex, autoReset: e.target.checked })
+            }
+          />
+          Auto-use Codex reset credits (when every account is &gt;95% weekly and none
+          reset within 24h, spend one banked reset to bring an account back)
+        </label>
       </Section>
-    </>
-  );
-}
 
-/** Clones: the Docker settings every new clone is created with, plus how RMNG tells a
- *  clone that is thinking from one that is waiting on you. Clone images are gen-2 preset
- *  builds: each preset's Dockerfile builds into a hash tag on demand, so there is no image
- *  list to manage here. */
-export function ClonesPane({
-  draft,
-  onDraftChange,
-  testMessage,
-  onTestDocker,
-  onTestJudge,
-  judgeTestMessage,
-  rows,
-}: SettingsPaneProps) {
-  return (
-    <>
-      <Section title="Docker / Clones">
-        <SettingsDockerSection
-          hostnamePrefix={draft.hostnamePrefix}
-          cloneCpus={draft.cloneCpus}
-          cloneMemoryMb={draft.cloneMemoryMb}
-          testMessage={testMessage}
-          onHostnamePrefixChange={(v) => onDraftChange("hostnamePrefix", v)}
-          onCloneCpusChange={(v) => onDraftChange("cloneCpus", v)}
-          onCloneMemoryMbChange={(v) => onDraftChange("cloneMemoryMb", v)}
-          onTest={onTestDocker}
+      {/* How RMNG tells a clone that is thinking from one that is waiting on you. The
+          undecidable cases are settled by a GPT call on an imported Codex account, so
+          this lives with the accounts, not with the Docker settings it used to sit under. */}
+      <Section
+        title="Stuck detection"
+        effect="immediate"
+        hint="RMNG reads each clone's own session registry and agent hooks to tell working from stuck. Most clones are decided from those files alone; the undecidable ones are settled by one GPT call on a Codex account you have imported. Import none and nothing settles them, so no clone reads as working. Per-clone token counting is unaffected either way."
+      >
+        <SettingsStuckSection
+          model={draft.judge.codexModel}
+          email={draft.judge.codexEmail}
+          accounts={rows.codex.map((a) => a.email)}
+          onModelChange={(v) =>
+            onDraftChange("judge", { ...draft.judge, codexModel: v })
+          }
+          onEmailChange={(v) =>
+            onDraftChange("judge", { ...draft.judge, codexEmail: v })
+          }
+          onTest={onTestJudge}
+          testMessage={judgeTestMessage}
         />
       </Section>
-
-      {/* How RMNG tells a clone that is thinking from one that is waiting on you. */}
-      <SettingsStuckSection
-        model={draft.judge.codexModel}
-        email={draft.judge.codexEmail}
-        accounts={rows.codex.map((a) => a.email)}
-        onModelChange={(v) =>
-          onDraftChange("judge", { ...draft.judge, codexModel: v })
-        }
-        onEmailChange={(v) =>
-          onDraftChange("judge", { ...draft.judge, codexEmail: v })
-        }
-        onTest={onTestJudge}
-        testMessage={judgeTestMessage}
-      />
     </>
   );
 }
@@ -280,6 +228,8 @@ export function ServerPane({
   onCheckUpdate,
   onUpdateServer,
   onRestartServer,
+  testMessage,
+  onTestDocker,
 }: SettingsPaneProps) {
   // Whether the ports-and-directories block is expanded. Ephemeral: it is not part of the
   // form, nothing outside this pane reads it, and it resets every time the pane is left.
@@ -320,6 +270,22 @@ export function ServerPane({
             <option value="yuv444">4:4:4 (AVC444, ≤1440p/monitor)</option>
           </select>
         </Field>
+      </Section>
+
+      {/* The Docker settings every new clone is created with. Clone images are gen-2 preset
+          builds: each preset's Dockerfile builds into a hash tag on demand, so there is no image
+          list to manage here. */}
+      <Section title="Docker / Clones">
+        <SettingsDockerSection
+          hostnamePrefix={draft.hostnamePrefix}
+          cloneCpus={draft.cloneCpus}
+          cloneMemoryMb={draft.cloneMemoryMb}
+          testMessage={testMessage}
+          onHostnamePrefixChange={(v) => onDraftChange("hostnamePrefix", v)}
+          onCloneCpusChange={(v) => onDraftChange("cloneCpus", v)}
+          onCloneMemoryMbChange={(v) => onDraftChange("cloneMemoryMb", v)}
+          onTest={onTestDocker}
+        />
       </Section>
 
       {/* Public keys installed on the bastion + every clone, so "Copy SSH command" (per-clone)

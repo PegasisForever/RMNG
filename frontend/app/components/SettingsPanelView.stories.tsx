@@ -92,20 +92,13 @@ const meta = {
     // this is the starting point rather than a fixed one.
     category: "board" as const,
     onCategoryChange: fn(),
-    // Nothing dragged, so the two account lists keep the order the rows arrive in.
+    // The group tree reads pool order, not this; it orders the tree's account source.
     accountOrder: {},
-    onReorderAccounts: fn(),
-    onDeleteAccount: fn(),
-    onDeleteCodexAccount: fn(),
     // Importing an account opens a modal ON TOP of this panel, which is navigation: the
     // story jumps to that modal's own story rather than stacking it here.
     onImportAccount: makeStoryLink(
       "Settings/Components/ImportAccountModalView",
       "SignedIn",
-    ),
-    onReplaceAccount: makeStoryLink(
-      "Settings/Components/ImportAccountModalView",
-      "Replacing",
     ),
     error: null,
     restartRequired: false,
@@ -159,14 +152,11 @@ export const Default: Story = { args: { ...base() } };
 /** Presets: the two prompt layers on top, then one section per workspace. */
 export const Presets: Story = { args: { ...base(), category: "presets" } };
 
-/** LLM: both providers' accounts and pools in one pane — Claude's three sections, then
- *  Codex's three. */
+/** LLM: the shared pool list, the Codex reset-credit switch, and stuck detection. */
 export const Llm: Story = { args: { ...base(), category: "llm" } };
 
-/** Clones: the Docker settings every new clone is created with. */
-export const Clones: Story = { args: { ...base(), category: "clones" } };
-
-/** Server: the control-server's own version and the settings it reads at startup. */
+/** Server: the control-server's own version, the Docker settings new clones are created
+ *  with, and the settings it reads at startup. */
 export const Server: Story = { args: { ...base(), category: "server" } };
 
 /** A page with no board (the setup wizard's reuse of this panel). The rail drops the Board
@@ -187,9 +177,9 @@ export const RestartRequired: Story = {
   args: { ...base(), restartRequired: true, category: "server" },
 };
 
-/** First-run setup: the clones pane before any clone exists. */
+/** First-run setup: the server pane (Docker settings) before any clone exists. */
 export const PreSetup: Story = {
-  args: { ...base(), category: "clones" },
+  args: { ...base(), category: "server" },
 };
 
 /** Nothing imported and no groups configured. The account list and the group editor both
@@ -218,14 +208,14 @@ export const UpdateInProgress: Story = {
 };
 
 /** The load or the save failed. The banner sits above the rail and the form stays exactly as
- *  it was, so the attempt can be retried as it stands. Opened on Clones, where the failed
+ *  it was, so the attempt can be retried as it stands. Opened on Server, where the failed
  *  Docker probe reports too. */
 export const WithError: Story = {
   args: {
     ...base(),
     error: "PUT /api/config: 400 subnet is fixed after first-run setup",
     testMessage: "✗ docker: permission denied on /var/run/docker.sock",
-    category: "clones",
+    category: "server",
   },
 };
 
@@ -245,7 +235,7 @@ export const Interactive: Story = {
     const [draft, setDraft] = useState(args.draft);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
-    const [accountOrder, setAccountOrder] = useState(args.accountOrder);
+    const [accountOrder] = useState(args.accountOrder);
     const [category, setCategory] = useState(args.category);
     return (
       <SettingsPanelView
@@ -262,10 +252,6 @@ export const Interactive: Story = {
           args.onDraftChange(key, value);
         }}
         accountOrder={accountOrder}
-        onReorderAccounts={(provider, ids) => {
-          setAccountOrder((prev) => ({ ...prev, [provider]: ids }));
-          args.onReorderAccounts(provider, ids);
-        }}
         saving={saving}
         saved={saved}
         onSave={() => {
