@@ -146,10 +146,16 @@ chmod +x /tmp/mc.AppImage
 # flags assumed (not every runtime supports --appimage-extract-into).
 mc_work="/tmp/mc-extract-$$"
 rm -rf "$mc_work"; mkdir -p "$mc_work"
-( cd "$mc_work" && rm -rf squashfs-root && /tmp/mc.AppImage --appimage-extract >/dev/null 2>&1 )
-if [ ! -x "$mc_work/squashfs-root/AppRun" ]; then echo "  !! extract produced no AppRun; state dump:" >&2; ls -la "$mc_work"/ /tmp/ >&2; exit 1; fi
+( cd "$mc_work" && rm -rf squashfs-root AppDir && /tmp/mc.AppImage --appimage-extract >/dev/null 2>&1 )
+# This runtime extracts the real tree into ./AppDir and leaves ./squashfs-root as a
+# SYMLINK to it (classic runtimes produce a real ./squashfs-root dir). Moving the link
+# would install a dangling link, so resolve to the real dir first — whichever shape the
+# runtime produced — then require the resolved path to be a real dir with AppRun.
+mc_src="$mc_work/squashfs-root"
+if [ -L "$mc_src" ]; then mc_src="$(readlink -f "$mc_src")"; fi
+if [ ! -d "$mc_src" ] || [ -L "$mc_src" ] || [ ! -x "$mc_src/AppRun" ]; then echo "  !! extract produced no real AppRun dir; state dump:" >&2; ls -la "$mc_work"/ /tmp/ >&2; exit 1; fi
 rm -rf /opt/mission-center
-mv "$mc_work/squashfs-root" /opt/mission-center; chown -R root:root /opt/mission-center
+mv "$mc_src" /opt/mission-center; chown -R root:root /opt/mission-center
 if [ ! -d /opt/mission-center ] || [ -L /opt/mission-center ] || [ ! -x /opt/mission-center/AppRun ]; then echo "  !! /opt/mission-center not a real dir with AppRun; state dump:" >&2; ls -lad /opt/ /opt/mission-center >&2; exit 1; fi
 rm -rf "$mc_work" /tmp/mc.AppImage
 log "Mission Center installed"
