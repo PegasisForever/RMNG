@@ -124,35 +124,35 @@ ZED_MISSING="$(ldd /opt/zed.app/libexec/zed-editor 2>/dev/null | sed -n 's/^[[:s
 if [ -n "$ZED_MISSING" ]; then echo "  !! Zed missing system libs:$ZED_MISSING" >&2; exit 1; fi
 log "Zed installed: /opt/zed.app/bin/zed + dev.zed.Zed.desktop"
 
-# Mission Center (system monitor) — no apt/deb upstream, only Flatpak + AppImage. Pull the
-# latest x86_64 AppImage, --appimage-extract it (no FUSE needed), install the raw tree under
-# /opt, and wire up a PATH wrapper + desktop entry (Exec rewritten to the wrapper). Every
-# failure inside aborts the build (strict): the `[ -d … ] || return 1` gates and the final
-# `mc_install` call below carry no `|| warn` anymore.
-mc_install(){
-  local url d
-  url="$(curl -fsSL 'https://gitlab.com/api/v4/projects/mission-center-devs%2Fmission-center/releases' 2>/dev/null | grep -oE 'https://[^"]+x86_64\.AppImage' | head -1 || true)"
-  [ -n "$url" ] || return 1
-  curl -fsSL "$url" -o /tmp/mc.AppImage || return 1
-  chmod +x /tmp/mc.AppImage
-  ( cd /tmp && rm -rf squashfs-root && /tmp/mc.AppImage --appimage-extract >/dev/null 2>&1 )
-  [ -d /tmp/squashfs-root ] || return 1
-  rm -rf /opt/mission-center; mv /tmp/squashfs-root /opt/mission-center; chown -R root:root /opt/mission-center
-  printf '#!/bin/sh\nexec /opt/mission-center/AppRun "$@"\n' > /usr/local/bin/mission-center; chmod 755 /usr/local/bin/mission-center
-  # Icons: upstream ships a single top-level .svg (themed Icon= name, no icon tree).
-  # Install it into hicolor/scalable where the themed lookup finds it.
-  mc_icon="$(ls /opt/mission-center/*.svg 2>/dev/null | head -1 || true)"; [ -n "$mc_icon" ]
-  install -d /usr/share/icons/hicolor/scalable/apps
-  cp "$mc_icon" /usr/share/icons/hicolor/scalable/apps/
-  d="$(ls /opt/mission-center/usr/share/applications/*.desktop 2>/dev/null | head -1 || true)"; [ -n "$d" ] || d="$(ls /opt/mission-center/*.desktop 2>/dev/null | head -1 || true)"
-  [ -n "$d" ] || return 1
-  sed -E 's#^Exec=.*#Exec=/usr/local/bin/mission-center#; s#^TryExec=.*#TryExec=/usr/local/bin/mission-center#' "$d" > /usr/share/applications/io.missioncenter.MissionCenter.desktop
-  update-desktop-database /usr/share/applications >/dev/null 2>&1
-  gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1
-  rm -f /tmp/mc.AppImage
-}
-log "dev toolbox: Mission Center (AppImage → extract → /opt + desktop entry)"
-mc_install
+# Mission Center (system monitor) — no apt/deb upstream, only Flatpak + AppImage. Pull
+# the PINNED x86_64 AppImage, --appimage-extract it (no FUSE needed), install the raw
+# tree under /opt, and wire up a PATH wrapper + desktop entry (Exec rewritten to the
+# wrapper). Pinned, not `latest`: upstream restructured the AppImage between releases
+# (icon tree → single top .svg), so floating on latest ships whatever layout breaks the
+# assumptions below. Re-pin deliberately: bump version + URL + sha256 together, and
+# re-verify the asserted layout (top-level .svg + .desktop + AppRun).
+MC_VERSION=1.2.0
+MC_URL="https://gitlab.com/mission-center-devs/mission-center/-/jobs/15536631699/artifacts/raw/MissionCenter-${MC_VERSION}-x86_64.AppImage"
+MC_SHA256=b3b5c84470a927d189c251039d223464125f7068b3164fda43acb9100384576d
+log "dev toolbox: Mission Center ${MC_VERSION} (pinned + sha256-verified)"
+curl -fsSL "$MC_URL" -o /tmp/mc.AppImage
+echo "${MC_SHA256}  /tmp/mc.AppImage" | sha256sum -c -
+chmod +x /tmp/mc.AppImage
+( cd /tmp && rm -rf squashfs-root && /tmp/mc.AppImage --appimage-extract >/dev/null 2>&1 )
+[ -d /tmp/squashfs-root ]
+rm -rf /opt/mission-center; mv /tmp/squashfs-root /opt/mission-center; chown -R root:root /opt/mission-center
+printf '#!/bin/sh\nexec /opt/mission-center/AppRun "$@"\n' > /usr/local/bin/mission-center; chmod 755 /usr/local/bin/mission-center
+# Icons: upstream ships a single top-level .svg (themed Icon= name, no icon tree).
+# Install it into hicolor/scalable where the themed lookup finds it.
+mc_icon="$(ls /opt/mission-center/*.svg 2>/dev/null | head -1 || true)"; [ -n "$mc_icon" ]
+install -d /usr/share/icons/hicolor/scalable/apps
+cp "$mc_icon" /usr/share/icons/hicolor/scalable/apps/
+d="$(ls /opt/mission-center/usr/share/applications/*.desktop 2>/dev/null | head -1 || true)"; [ -n "$d" ] || d="$(ls /opt/mission-center/*.desktop 2>/dev/null | head -1 || true)"
+[ -n "$d" ]
+sed -E 's#^Exec=.*#Exec=/usr/local/bin/mission-center#; s#^TryExec=.*#TryExec=/usr/local/bin/mission-center#' "$d" > /usr/share/applications/io.missioncenter.MissionCenter.desktop
+update-desktop-database /usr/share/applications >/dev/null 2>&1
+gtk-update-icon-cache -f /usr/share/icons/hicolor >/dev/null 2>&1
+rm -f /tmp/mc.AppImage
 log "Mission Center installed"
 
 # Monaspace fonts (githubnext/monaspace) — full set: static (family "Monaspace Neon"),
