@@ -96,6 +96,67 @@ impl Runner {
         }
     }
 
+    /// Poll the clone-daemon's `screenshot` tool until it returns a real frame: valid
+    /// JPEG, at least 800x600, with real pixel variance (a black/dead session decodes
+    /// to near-zero). No agent turn involved — this calls the desktop MCP directly,
+    /// headlessly. A session that never paints fails here, not green.
+    async fn wait_frames(&self, id: &str, what: &str) -> Result<()> {
+        println!("e2e: waiting for {id} frames ...");
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > self.budget {
+                bail!("{what}: clone '{id}' produced no real frames");
+            }
+            match self.try_frame(id).await {
+                Ok((w, h, sd)) => {
+                    println!("e2e: {id} frame {w}x{h} stddev {sd:.1}");
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("e2e: {id} no frame yet ({e:#}), retrying ...");
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+
+    async fn try_frame(&self, id: &str) -> Result<(u32, u32, f64)> {
+        let content = self
+            .client
+            .desktop(id, "screenshot", serde_json::json!({}))
+            .await
+            .with_context(|| format!("clone '{id}' screenshot tool"))?;
+        let data = content
+            .as_array()
+            .context("screenshot content is not an array")?
+            .iter()
+            .find(|i| i.get("type").and_then(|t| t.as_str()) == Some("image"))
+            .context("screenshot content has no image item")?;
+        let b64 = data
+            .get("data")
+            .and_then(|d| d.as_str())
+            .context("image item has no data")?;
+        use base64::Engine;
+        let jpeg = base64::engine::general_purpose::STANDARD.decode(b64)?;
+        if jpeg.len() < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8 {
+            bail!("not a JPEG ({} bytes)", jpeg.len());
+        }
+        let img = image::load_from_memory(&jpeg).context("decoding frame JPEG")?;
+        let gray = img.to_luma8();
+        let (w, h) = gray.dimensions();
+        if w < 800 || h < 600 {
+            bail!("frame too small ({w}x{h})");
+        }
+        let n = (w as f64) * (h as f64);
+        let mean = gray.pixels().map(|p| p[0] as f64).sum::<f64>() / n;
+        let var = gray.pixels().map(|p| (p[0] as f64 - mean).powi(2)).sum::<f64>() / n;
+        let sd = var.sqrt();
+        if sd < 5.0 {
+            bail!("frame has no variance (stddev {sd:.1} — dead session?)");
+        }
+        Ok((w, h, sd))
+    }
+
     async fn cleanup(&self) {
         for id in &self.made {
             if !self.hosts_contain(id).await.unwrap_or(true) {
@@ -192,6 +253,9 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     // Hello, which is what makes the clone actually usable (and what an earlier
     // version of this test never checked — brain-dead clones passed green).
     r.wait_connected(&id, "create").await?;
+    // Frames, not just a Hello: a registered daemon with a dead session (black
+    // output, no dmabuf) used to pass green. Screenshot directly, headlessly.
+    r.wait_frames(&id, "create").await?;
 
     // 2. Fork it with a first message.
     println!("e2e: fork '{id}' ...");
@@ -214,6 +278,7 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     }
     println!("e2e: forked '{fork}'");
     r.wait_connected(&fork, "fork").await?;
+    r.wait_frames(&fork, "fork").await?;
 
     // 3. Archive the fork.
     println!("e2e: archive '{fork}' ...");
