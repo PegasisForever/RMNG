@@ -2,6 +2,7 @@
 import type { BoardColumn } from "./BoardColumn";
 import type { ClaudeUsage } from "./ClaudeUsage";
 import type { Clone } from "./Clone";
+import type { CloneGroup } from "./CloneGroup";
 import type { CloneTokens } from "./CloneTokens";
 import type { CodexResetMark } from "./CodexResetMark";
 import type { MonitorSpec } from "./MonitorSpec";
@@ -55,6 +56,12 @@ ticketOrder: Array<string>,
  * [`Self::ticket_order`].
  */
 mutedClones: Array<string>, operations: Array<Operation>, 
+/**
+ * The single configured account-pool list, mirrored from config so pool membership
+ * renders + regroups over the live `/events` SSE. Idempotent; refreshed by
+ * `mirror_groups_to_state` after any pool change and once at boot.
+ */
+groups: Array<CloneGroup>, 
 /**
  * Per-account usage view (no tokens). Despite the name it holds **both** providers'
  * rows, distinguished by [`ClaudeUsage::provider`]; `clone_ops::replace_provider_views`

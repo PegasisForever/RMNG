@@ -1941,6 +1941,17 @@ pub(crate) fn mirror_layout_to_state(app: &App) {
     });
 }
 
+/// Copy the config's account pools into ControlState so the sidebar usage list groups
+/// by them over the live `/events` SSE. Idempotent; call after any change to `groups`
+/// and once at boot. Without this the sidebar renders the page-load pool list against
+/// live accounts, and an account a fresh pool claims still reads as ungrouped.
+pub(crate) fn mirror_groups_to_state(app: &App) {
+    let groups = app.config().groups.clone();
+    app.store.mutate(|s| {
+        s.groups = groups.clone();
+    });
+}
+
 /// Repoint every clone whose group is blank or dangling at the first configured group.
 
 /// `GET /api/config` — the redacted view, each preset's Linear key included verbatim.
@@ -2033,6 +2044,9 @@ async fn config_put(
     }
     // Keep the sidebar's live layout list/active marker in sync with the just-saved presets.
     mirror_layout_to_state(&app);
+    // Same for the sidebar's pool sections: a fresh/renamed pool must regroup the live
+    // accounts on the next SSE frame, not after a page reload.
+    mirror_groups_to_state(&app);
     // Fan out content convergence: prompts, presets, and keys changed above reach running
     // clones now — env, parity, and MCP merges re-resolve from the saved config. Detached:
     // the PUT must not wait on Docker calls to a wedged clone (same reasoning as the SSH
@@ -2721,6 +2735,23 @@ mod tests {
         // Deleting the last column is legal; the frontend falls back to a default column so
         // no clone is ever left without one.
         assert!(app.store.get().board_columns.is_empty());
+    }
+
+    #[test]
+    fn mirror_groups_to_state_publishes_pool_list() {
+        // The sidebar groups by the pools in the live state: a pool change must reach
+        // the next SSE frame, not wait for a page reload.
+        let app = test_app();
+        assert!(app.store.get().groups.is_empty());
+        app.cfg.write().unwrap().groups = vec![wire::CloneGroup {
+            name: "demo".into(),
+            accounts: vec!["a@example.com".into()],
+        }];
+        mirror_groups_to_state(&app);
+        let groups = app.store.get().groups;
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "demo");
+        assert_eq!(groups[0].accounts, vec!["a@example.com"]);
     }
 
     // --- POST /api/activate (selection, and the layout that follows it) ---

@@ -92,6 +92,9 @@ async fn main() -> Result<()> {
     // switcher renders correctly on a fresh boot, before any `/api/config` PUT or
     // `/api/layout/activate` call runs.
     web::mirror_layout_to_state(&app);
+    // Same for the sidebar's pool sections: seed the configured pools so accounts
+    // group correctly from the first frame.
+    web::mirror_groups_to_state(&app);
 
     // Probe the Docker environment (daemon reachable, self-container detection, sock mount,
     // render node) and cache the report so `GET /api/setup/env` + the wizard can render it.
@@ -244,6 +247,9 @@ async fn main() -> Result<()> {
     })) {
         tracing::error!("group-proxy token reverse-migration panicked (booting anyway): {e:?}");
     }
+    // The migration above can rebuild the pool list: re-mirror so the boot snapshot
+    // carries the migrated pools, not the pre-migration ones.
+    web::mirror_groups_to_state(&app);
 
     // GStreamer init MUST finish before smb/ssh (and any other child
     // spawners). Those supervisors otherwise inherit gst-plugin-scanner pipes and

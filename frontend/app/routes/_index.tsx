@@ -214,7 +214,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       <div className="h-dvh">
         <MobileDashboardContainer
           state={state}
-          groups={cfg.groups}
+          groups={state.groups}
           presets={cfg.presets}
         />
       </div>
@@ -227,7 +227,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       lxcStats={lxcStats}
       forwards={forwards}
       sshPublicHost=""
-      groups={cfg.groups}
+      groups={state.groups}
       presets={cfg.presets}
     />
   );

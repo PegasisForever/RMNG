@@ -319,6 +319,9 @@ fn join_group(app: &App, _provider: Provider, email: &str, group: &str) -> Resul
     add_to_pool(&mut cfg.groups, email, group)?;
     crate::config::save(&cfg).context("saving the pool membership")?;
     *app.cfg.write().unwrap() = cfg;
+    // The sidebar groups by the pools in the live state: mirror the new membership so
+    // the imported account lands in its pool on the next SSE frame.
+    crate::web::mirror_groups_to_state(app);
     tracing::info!("added {email} to the {group} pool");
     Ok(())
 }

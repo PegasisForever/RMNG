@@ -9,6 +9,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use super::config::CloneGroup;
+
 fn default_rdp_port() -> u16 {
     3389
 }
@@ -581,6 +583,11 @@ pub struct ControlState {
     pub muted_clones: Vec<String>,
     #[serde(default)]
     pub operations: Vec<Operation>,
+    /// The single configured account-pool list, mirrored from config so pool membership
+    /// renders + regroups over the live `/events` SSE. Idempotent; refreshed by
+    /// `mirror_groups_to_state` after any pool change and once at boot.
+    #[serde(default)]
+    pub groups: Vec<CloneGroup>,
     /// Per-account usage view (no tokens). Despite the name it holds **both** providers'
     /// rows, distinguished by [`ClaudeUsage::provider`]; `clone_ops::replace_provider_views`
     /// is what lets the Claude and Codex pollers publish here without clobbering each other.
