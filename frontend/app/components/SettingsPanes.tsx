@@ -61,7 +61,7 @@ export interface LlmPaneProps extends PaneDraftProps {
   judgeTestMessage: string | null;
 }
 
-/** Server: the form, the control-server's own version and update state, and the Docker probe. */
+/** Server: the form, the control-server's own version and update state. */
 export interface ServerPaneProps extends PaneDraftProps {
   serverStatus: UpdateStatus | null;
   serverMessage: string | null;
@@ -70,8 +70,6 @@ export interface ServerPaneProps extends PaneDraftProps {
   onCheckUpdate: () => void;
   onUpdateServer: () => void;
   onRestartServer: () => void;
-  testMessage: string | null;
-  onTestDocker: () => void;
 }
 
 /** Board: the dashboard's swim lanes. Applies the moment it is saved. */
@@ -269,8 +267,6 @@ export function ServerPane({
   onCheckUpdate,
   onUpdateServer,
   onRestartServer,
-  testMessage,
-  onTestDocker,
 }: ServerPaneProps) {
   // Whether the ports-and-directories block is expanded. Ephemeral: it is not part of the
   // form, nothing outside this pane reads it, and it resets every time the pane is left.
@@ -321,11 +317,9 @@ export function ServerPane({
           hostnamePrefix={draft.hostnamePrefix}
           cloneCpus={draft.cloneCpus}
           cloneMemoryMb={draft.cloneMemoryMb}
-          testMessage={testMessage}
           onHostnamePrefixChange={(v) => onDraftChange("hostnamePrefix", v)}
           onCloneCpusChange={(v) => onDraftChange("cloneCpus", v)}
           onCloneMemoryMbChange={(v) => onDraftChange("cloneMemoryMb", v)}
-          onTest={onTestDocker}
         />
       </Section>
 

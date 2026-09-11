@@ -1,4 +1,4 @@
-// The Docker / Clones section's body: the Docker probe, the clone naming setting,
+// The Docker / Clones section's body: the clone naming setting,
 // and the per-clone resource limits. (The clone subnet used to be editable here during
 // first-run setup; it is hardcoded on the server now.)
 //
@@ -14,38 +14,19 @@ export function SettingsDockerSection({
   hostnamePrefix,
   cloneCpus,
   cloneMemoryMb,
-  testMessage,
   onHostnamePrefixChange,
   onCloneCpusChange,
   onCloneMemoryMbChange,
-  onTest,
 }: {
   hostnamePrefix: string;
   cloneCpus: number;
   cloneMemoryMb: number;
-  /** The result of the last Docker probe, in the panel's own words. */
-  testMessage: string | null;
   onHostnamePrefixChange: (value: string) => void;
   onCloneCpusChange: (value: number) => void;
   onCloneMemoryMbChange: (value: number) => void;
-  onTest: () => void;
 }) {
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onTest}
-          className="rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
-        >
-          Test Docker
-        </button>
-        {testMessage ? (
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            {testMessage}
-          </p>
-        ) : null}
-      </div>
       <div>
         <FieldHeading label="Clone hostname prefix" effect="immediate" />
         <input

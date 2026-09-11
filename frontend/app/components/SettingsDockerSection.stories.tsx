@@ -25,11 +25,9 @@ const meta = {
   parameters: { layout: "centered" },
   args: {
     ...base(),
-    testMessage: null,
     onHostnamePrefixChange: fn(),
     onCloneCpusChange: fn(),
     onCloneMemoryMbChange: fn(),
-    onTest: fn(),
   },
   render: (args) => (
     <Frame>
@@ -43,11 +41,6 @@ type Story = StoryObj<typeof meta>;
 
 /** The fleet's Docker defaults: hostname prefix plus per-clone sizing. */
 export const Default: Story = {};
-
-/** The Docker probe answered. The same line carries the failure, prefixed with ✗ instead. */
-export const Probed: Story = {
-  args: { testMessage: "✓ Docker reachable (Engine 27.1.1)" },
-};
 
 /** Nothing typed into the prefix, so the example hostnames fall back to the default the
  *  server would use. */

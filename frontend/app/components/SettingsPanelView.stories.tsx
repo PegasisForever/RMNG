@@ -113,8 +113,6 @@ const meta = {
     onCheckUpdate: fn(),
     onUpdateServer: fn(),
     onRestartServer: fn(),
-    testMessage: null,
-    onTestDocker: fn(),
     judgeTestMessage: null,
     onTestJudge: fn(),
     onAddBoardColumn: fn(),
@@ -208,13 +206,11 @@ export const UpdateInProgress: Story = {
 };
 
 /** The load or the save failed. The banner sits above the rail and the form stays exactly as
- *  it was, so the attempt can be retried as it stands. Opened on Server, where the failed
- *  Docker probe reports too. */
+ *  it was, so the attempt can be retried as it stands. Opened on Server. */
 export const WithError: Story = {
   args: {
     ...base(),
     error: "PUT /api/config: 400 subnet is fixed after first-run setup",
-    testMessage: "✗ docker: permission denied on /var/run/docker.sock",
     category: "server",
   },
 };

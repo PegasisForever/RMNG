@@ -5,8 +5,8 @@
 //
 // The form is one editable model (`SettingsDraft`) plus a single `onDraftChange`, rather than
 // forty value/onChange pairs. What is NOT in the draft is everything the server decides:
-// whether first-run setup has finished, what the last save said about needing a restart, the
-// control-server's own version, and the result of the Docker probe.
+// whether first-run setup has finished, what the last save said about needing a restart, and
+// the control-server's own version.
 //
 // This file owns the panel's frame: the header, the two banners, the rail, and the footer.
 // Which sections make up a category is `SettingsPanes`, and the rail's list is `SettingsNav`.
@@ -85,9 +85,6 @@ export interface SettingsPanelViewProps {
   onUpdateServer: () => void;
   onRestartServer: () => void;
 
-  /** The result of the last Docker probe. */
-  testMessage: string | null;
-  onTestDocker: () => void;
   /** A second slot rather than one shared string: the two tests live in different
    *  categories, and one verdict overwriting the other reads as the wrong answer. */
   judgeTestMessage: string | null;
@@ -129,8 +126,6 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
     onCheckUpdate,
     onUpdateServer,
     onRestartServer,
-    testMessage,
-    onTestDocker,
     judgeTestMessage,
     onTestJudge,
     boardColumns,
@@ -204,8 +199,6 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
             onCheckUpdate={onCheckUpdate}
             onUpdateServer={onUpdateServer}
             onRestartServer={onRestartServer}
-            testMessage={testMessage}
-            onTestDocker={onTestDocker}
           />
         );
     }

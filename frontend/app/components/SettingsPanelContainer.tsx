@@ -1,5 +1,5 @@
 // Settings panel, impure half. Everything the overlay is not allowed to do lives here: the
-// config read that seeds the form, the save that sends it back, the Docker probe, the
+// config read that seeds the form, the save that sends it back, the stuck-judge probe, the
 // control-server's version check and its two self-directed actions, the shared account-order
 // store, and the confirms that guard destructive clicks.
 //
@@ -36,7 +36,7 @@ export interface SettingsPanelContainerProps {
   putConfig: (
     patch: unknown,
   ) => Promise<ConfigPutResponse & { networkWarning?: string }>;
-  /** Validate a setting (e.g. `"docker"` — re-runs the Docker self-setup probe). */
+  /** Validate a setting (e.g. `"judge"` — puts one real question to GPT). */
   /** `value` and `model` test unsaved fields the operator has just typed. */
   testConfig: (
     what: string,
@@ -100,7 +100,6 @@ export function SettingsPanelContainer({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [testMsg, setTestMsg] = useState<string | null>(null);
   const [judgeTestMsg, setJudgeTestMsg] = useState<string | null>(null);
   // True after a save that touched a restart-required setting (docker socket /
   // chroma) — surfaces a persistent banner until a later save clears it.
@@ -220,16 +219,6 @@ export function SettingsPanelContainer({
     }
   }
 
-  async function runTest() {
-    setTestMsg("testing…");
-    try {
-      const r = await testConfig("docker");
-      setTestMsg(`${r.ok ? "✓" : "✗"} ${r.message}`);
-    } catch (e) {
-      setTestMsg(`✗ ${(e as Error).message}`);
-    }
-  }
-
   // Tests what is typed rather than what is stored, so the verdict is about the fields the
   // operator is looking at. There is no key to check, so it puts one real question to GPT.
   async function runJudgeTest() {
@@ -268,8 +257,6 @@ export function SettingsPanelContainer({
       onCheckUpdate={checkUpdate}
       onUpdateServer={doUpdate}
       onRestartServer={doRestart}
-      testMessage={testMsg}
-      onTestDocker={runTest}
       judgeTestMessage={judgeTestMsg}
       onTestJudge={runJudgeTest}
       boardColumns={boardColumns}
