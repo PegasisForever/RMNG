@@ -100,7 +100,11 @@ test("the fork source follows the preset's default clone, else the oldest", () =
 });
 
 test("a source picked by hand sticks until it stops being forkable", () => {
-  const picked = dialog(sources("a", "b"), edit("ticket", "WE-142"), edit("source", "b"));
+  const picked = dialog(
+    sources("a", "b"),
+    edit("ticket", "WE-142"),
+    edit("source", "b"),
+  );
   expect(picked.draft.source).toBe("b");
   expect(cloneDialogReducer(picked, sources("a", "b")).draft.source).toBe("b");
   // "b" was deleted or archived: the pick goes back to following the preset.
@@ -115,13 +119,13 @@ test("the pool and both accounts follow the preset until touched", () => {
     "auto",
   ]);
   // A preset naming no pool reads as every pool, which is what `none` sends.
-  expect(dialog(edit("mode", "plain"), edit("plainPreset", "side")).draft.group).toBe(
-    "none",
-  );
+  expect(
+    dialog(edit("mode", "plain"), edit("plainPreset", "side")).draft.group,
+  ).toBe("none");
   const byHand = cloneDialogReducer(s, edit("group", "other"));
-  expect(cloneDialogReducer(byHand, edit("plainPreset", "side")).draft.group).toBe(
-    "other",
-  );
+  expect(
+    cloneDialogReducer(byHand, edit("plainPreset", "side")).draft.group,
+  ).toBe("other");
 });
 
 test("with nothing to fork, the template tab is the only one left", () => {
@@ -130,12 +134,12 @@ test("with nothing to fork, the template tab is the only one left", () => {
 
 test("a missing Linear key blocks the tabs that need one", () => {
   // `create` opens the issue with the resolved preset's own key, so another's is no help.
-  expect(linearKeyMissing(dialog(edit("mode", "create"), edit("team", "aw")))).toBe(
-    true,
-  );
-  expect(linearKeyMissing(dialog(edit("mode", "create"), edit("team", "we")))).toBe(
-    false,
-  );
+  expect(
+    linearKeyMissing(dialog(edit("mode", "create"), edit("team", "aw"))),
+  ).toBe(true);
+  expect(
+    linearKeyMissing(dialog(edit("mode", "create"), edit("team", "we"))),
+  ).toBe(false);
   // `existing` only looks one up, and every configured key is tried in turn.
   expect(linearKeyMissing(dialog(edit("ticket", "WE-142")))).toBe(false);
   expect(linearKeyMissing(dialogOf([presets[1]], edit("ticket", "AW-1")))).toBe(
@@ -146,39 +150,45 @@ test("a missing Linear key blocks the tabs that need one", () => {
 });
 
 test("the Create button waits for what the open tab needs", () => {
-  expect(cloneDialogValid(dialog(sources("pega-we-142"), edit("ticket", "WE-142")))).toBe(
-    true,
-  );
+  expect(
+    cloneDialogValid(dialog(sources("pega-we-142"), edit("ticket", "WE-142"))),
+  ).toBe(true);
   // A prefix no preset claims is a request the server would refuse.
-  expect(cloneDialogValid(dialog(sources("pega-we-142"), edit("ticket", "ZZ-1")))).toBe(
-    false,
-  );
+  expect(
+    cloneDialogValid(dialog(sources("pega-we-142"), edit("ticket", "ZZ-1"))),
+  ).toBe(false);
   const newTicket = dialog(
     sources("pega-we-142"),
     edit("mode", "create"),
     edit("team", "we"),
   );
   expect(cloneDialogValid(newTicket)).toBe(false);
-  expect(cloneDialogValid(cloneDialogReducer(newTicket, edit("title", "x")))).toBe(
-    true,
-  );
+  expect(
+    cloneDialogValid(cloneDialogReducer(newTicket, edit("title", "x"))),
+  ).toBe(true);
   // Only the template tab may go without a source clone.
-  expect(cloneDialogValid(dialog(edit("mode", "plain"), edit("title", "x")))).toBe(
-    false,
-  );
-  expect(cloneDialogValid(dialog(edit("mode", "template"), edit("title", "x")))).toBe(
-    true,
-  );
+  expect(
+    cloneDialogValid(dialog(edit("mode", "plain"), edit("title", "x"))),
+  ).toBe(false);
+  expect(
+    cloneDialogValid(dialog(edit("mode", "template"), edit("title", "x"))),
+  ).toBe(true);
 });
 
 test("the dialog follows its operation and closes only when it settles", () => {
-  const started = dialog({ type: "starting" }, { type: "started", opId: "op1" });
+  const started = dialog(
+    { type: "starting" },
+    { type: "started", opId: "op1" },
+  );
   expect(cloneDialogBusy(started)).toBe(true);
   // Between the POST and the first frame the op is not in the list yet.
   expect(cloneDialogReducer(started, { type: "op", op: undefined }).done).toBe(
     false,
   );
-  const running = cloneDialogReducer(started, { type: "op", op: op("running") });
+  const running = cloneDialogReducer(started, {
+    type: "op",
+    op: op("running"),
+  });
   expect(running.done).toBe(false);
   expect(cloneDialogReducer(running, { type: "op", op: op("done") }).done).toBe(
     true,

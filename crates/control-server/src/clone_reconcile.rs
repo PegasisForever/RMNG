@@ -616,182 +616,17 @@ fn toml_table_header(line: &str) -> Option<String> {
     }
 }
 
-const RMNG_CLI_SKILL_MD: &str = r#"---
+/// The in-clone `rmng-cli` skill: the repo's own CLI reference under skill frontmatter.
+/// One document, so a clone's copy cannot drift from what the CLI actually takes.
+const RMNG_CLI_SKILL_MD: &str = concat!(
+    r#"---
 name: rmng-cli
 description: "Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage clone-source images and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool."
 ---
 
-# Managing the fleet with `rmng`
-
-`rmng` is the RMNG fleet CLI, pre-installed at `/usr/local/bin/rmng` in every clone. Inside a
-clone it auto-resolves the control-server (via `$RMNG_CONTROL_URL`), so commands work with no
-setup. It talks to the control-server's web API — it does NOT need Docker or root.
-
-The surface is **noun → verb**: `rmng <noun> <verb> [<clone>] [flags]`. Every command takes
-`--json` for machine-readable output (tables/prose go to stdout, progress/prompts to stderr;
-under `--json` even errors are JSON). The target is always the **clone id** — the first column
-of `rmng clone ls`.
-
-## Headed vs headless clones
-
-Every clone is one of two kinds, fixed at creation:
-- **headed** (the default) — a full GUI desktop. Supports computer use via `rmng desktop`
-  (screenshot/click/type/…) and a video stream in the viewer. Heavier.
-- **headless** (`rmng clone create … --headless`) — no desktop; a terminal/tmux view only.
-  Lighter and faster to boot. `rmng desktop` does NOT work on a headless clone (it has no
-  desktop MCP) — use `rmng clone exec` / `rmng clone ssh` instead.
-
-Pick **headless** for pure coding/CLI work; pick **headed** only when the task needs a browser
-or GUI. The kind can't be changed after creation.
-
-## Inspect the fleet
-
-- `rmng clone ls` — list clones with live CPU, RAM, status, the board column each sits in, and
-  each provider's bound account. Sub clones are indented under their parent. `--json` gives one
-  object per clone with `stats` nested.
-- `rmng op ls` — list recent operations (clone / delete / archive / restore / pull / commit /
-  update).
-- `rmng op wait <op-id> [--timeout <secs>]` — block until an operation reaches a terminal state.
-
-## The board
-
-The dashboard arranges clones in columns, and the CLI reads and writes the same board.
-
-- `rmng board ls` — the columns left to right, with what is in each. A clone nobody filed is
-  still reported in the column the board draws it in.
-- `rmng board move <clone> "<column>"` — put a clone at the **top** of a column. Name it the
-  way it reads on the board (`"In Progress"`); the stored id works too, and case and spacing
-  do not matter.
-- Every create verb takes `--column "<name>"`, which files the new clone at the top of it.
-
-**Moving into an archive column archives the clone**, and moving it back out restores it,
-exactly as dropping a card there does on the dashboard. Add `--wait` to block on that.
-A sub clone cannot be filed: it is drawn under its parent's card, so move the parent.
-
-## Reach another clone
-
-- `rmng clone ssh <clone>` — print a ready-to-paste `ssh` command for a clone.
-- `rmng clone self` — this clone's own record (its id, image, address and accounts).
-- `rmng clone fork [source]` — copy a live clone's whole home into a new clone. Whole-home
-  only; there is no partial-dir copy.
-- Every clone sees every home at `~/clones/<id>` — read or copy straight across, no
-  server round-trip.
-- `rmng clone exec <clone> -- <argv…>` — run one non-interactive command inside another clone
-  (docker-exec style). Flags: `-u <user>`, `-w <dir>`, `-e KEY=VAL` (repeatable), `-d`/`--detach`
-  (fire-and-forget: return immediately, no captured output). Passes through the command's exit
-  code. As the agent user it inherits the clone's live desktop session env (`WAYLAND_DISPLAY`,
-  `DISPLAY`, the session `PATH`, …), so **`-d` launches a GUI app on a headed clone's desktop**:
-  `rmng clone exec -d pega-we-142 -- gnome-text-editor`. Example:
-  `rmng clone exec pega-we-142 -- ls -la /home/rmng`.
-- `rmng desktop <clone> <verb>` — drive another clone's desktop for computer use (**headed
-  clones only** — see above; each action returns a fresh screenshot; add `--json` for
-  `{screenshot, text}`). Verbs: `screenshot`,
-  `monitors`, `windows`, `move X Y`, `click [X Y]`, `right-click`, `middle-click`,
-  `double-click`, `scroll`, `key <chord>`, `type <text>`, `move-window <id>`.
-  Example: `rmng desktop pega-we-142 screenshot`. To *open* an app, use `rmng clone exec -d`
-  (above), not `desktop`. Read "Desktop coordinates" below before you send any click.
-
-## Desktop coordinates
-
-The screenshot you get back and the `x`/`y` you send share one coordinate space. **That space
-is not the monitor's native resolution by default.** The daemon scales both to 1080p height,
-so 1920x1080 on a 16:9 monitor. A screenshot captured at native resolution by some other tool
-will not line up with these coordinates.
-
-- No flag: the 1080p-height space. Read the returned screenshot, click in those same numbers.
-- `--native`: use the monitor's real resolution for this call.
-- `--resolution <W>x<H>`: use an explicit space, for example `--resolution 1280x720`.
-
-Pass the same choice to every call in a sequence. Because one flag sets both the image and
-the coordinates, the two can never disagree within a call. They do disagree if you screenshot
-with `--native` and then click without it.
-
-These two flags work on `screenshot`, `move`, `click`, `right-click`, `middle-click`,
-`double-click`, and `scroll`. The other desktop flags:
-
-- `--monitor <n>`: target one monitor. `rmng desktop <clone> monitors` lists the ids. Works on
-  the seven verbs above plus `move-window`.
-- `--out <path>`: also write the returned screenshot to a file. Works on the seven verbs above
-  plus `key` and `type`.
-- `--mode <mode>`: placement for `move-window <id>`, for example `maximize` or `center-half`.
-
-## Create clones
-
-Two verbs. The image comes from the preset's Dockerfile, and the server names the clone.
-
-- `rmng clone create-plain --title <t>` — a clone built from a preset image onto a fresh
-  home, named after the title. `--preset <name>` is required when any presets are configured.
-- `rmng clone fork [source]` — copy a live clone's home instead. An omitted source is the
-  preset's default fork clone where it is still forkable, else the oldest forkable clone.
-  Takes `--preset <name>` (omitted keeps the source's; naming one moves the fork to that
-  preset's account pool), `--claude-account <sel>` / `--codex-account <sel>`, and `--headless`.
-
-### Common create flags
-
-- `--message <m>` / `--message-file <path>` (`-` reads stdin) — the first message auto-sent
-  to the agent. Omitted, nothing is sent.
-- `--column "<name>"` — file the new clone at the top of that board column.
-- `--no-startup-script` — skip the preset's startup script, which otherwise runs as the
-  clone user once the clone is up.
-- `--wait` (with `--timeout <secs>`, default 600) — block until the clone is fully created,
-  streaming progress. **Without it the command returns as soon as the operation starts**, so
-  use `--wait` whenever the next step needs the clone to exist.
-- An account selection is an email (pin it), `auto` (the server picks), `none` (no token at
-  all), or `group:<pool>` (bind to a named pool and let the rotator balance it).
-
-## Retire clones
-
-- `rmng clone rm <clone> [-y]` — destroy a clone (prompts unless `-y`; also removes its sub clones).
-  Non-interactive callers MUST pass `-y`.
-- `rmng clone archive <clone>` / `rmng clone restore <clone>` — stop-and-retain, then bring back.
-- `rmng account swap <clone> <sel> [--codex]` — change a clone's account for one provider.
-  Takes the same selection forms as the create flags. The token is written into the clone's
-  credential file immediately; nothing restarts.
-
-## Search what other clones have already done
-
-The control-server keeps a greppable copy of every clone's Claude Code, Cursor and Codex
-transcripts, and keeps it after the clone is gone. Subagent turns are in there too, which on a
-session that delegates heavily is most of it. Search it before solving something from scratch:
-the odds are good that another clone hit the same wall, and its reasoning is still there.
-
-- `rmng ledger search <pattern> [--clone <id>] [--since <when>] [--until <when>] [--limit <N>]`
-  — case-insensitive substring over whole ledger lines, so it matches the text, the tool name
-  and the record kind alike. `--since`/`--until` take a duration ago (`90m`, `6h`, `2d`, `3w`)
-  or epoch milliseconds. Newest first, capped at `--limit` (default 50, server maximum 500).
-  Columns are `CLONE WHEN KIND SESSION OFFSET TEXT`, and the session and offset are the two
-  arguments the next command takes, so a hit worth following up is already a command.
-  Example: `rmng ledger search "va-api" --since 2d`.
-- Three flags split a session in two. `--sidechain` keeps only subagent turns, `--no-sidechain`
-  only the conversation somebody had, and `--agent <id>` reads back one subagent's whole run.
-  Reach for `--no-sidechain` when a fan-out is burying the answer, and `--sidechain` when the
-  thing you want is a reviewer's or researcher's report rather than the chat around it. The id
-  `--agent` takes is the `agentId` on a hit, which `--json` shows:
-  `rmng ledger search "Here is my review" --sidechain --json | jq -r '.hits[].line | fromjson.agentId'`.
-- `rmng ledger read <clone> <session> [--offset <N>] [--len <N>]` — the conversation around a
-  hit. Pass the hit's own offset to re-read that line, or less to read what led up to it. The
-  range snaps outward to line boundaries, so stdout is always whole NDJSON lines. Default
-  `--len 65536`, server maximum 1 MiB. The `bytes A..B of C` envelope goes to stderr, so
-  piping needs no flag:
-  `rmng ledger read pega-we-142 793f5eac-… --offset 4096 | jq -r '.kind + ": " + .text'`.
-
-## Preset images & accounts
-
-- Clone images build on demand from each preset's Dockerfile into a hash tag; unused tags are purged automatically on delete.
-- `rmng account ls [--provider claude|codex]` — list imported accounts + usage windows.
-- `rmng account rm <email> [--codex]` — delete an imported account, moving any clones off it.
-
-## Tips
-
-- Prefer `rmng clone exec <clone> -- …` over hand-rolled SSH when you just need to run one
-  command elsewhere.
-- Everything is addressed by **clone id** (the first column of `rmng clone ls`).
-- `rmng clone select <clone>` points the operator's *viewer* at a clone — it does NOT change
-  which clone your other commands target. `rmng clone select --none` clears the selection.
-- `--wait` and `--timeout <secs>` are not create-only. Both also work on `rmng clone rm`,
-  `rmng clone archive`, and `rmng clone restore`.
-  Use `--wait` on a pull, which can run for many minutes.
-"#;
+"#,
+    include_str!("../../../docs/CLI.md")
+);
 
 /// The `rmng-cli` skill TarEntries: the same SKILL.md at both skill locations.
 /// The activity probe, written to `~/.rmng/hook.py` and registered in Claude Code's
@@ -3265,7 +3100,6 @@ mod hook_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
     #[test]
     fn pi_adapter_file_carries_the_managed_set_in_adapter_schema() {
         // Headed with a key: both servers, linear by env reference (no secret in the file).

@@ -29,7 +29,10 @@ import { parseTicketInput } from "~/lib/workspace";
  *  open tab resolves to, whether the request needs a Linear key nobody configured, and
  *  whether the button may fire. The container reads these from the same functions, so a
  *  story cannot claim a state the dialog could not be in. */
-function form(draft: CloneDraft, presets: PresetRedacted[] = makeClonePresets()) {
+function form(
+  draft: CloneDraft,
+  presets: PresetRedacted[] = makeClonePresets(),
+) {
   const state: CloneDialog = {
     ...emptyCloneDialog(),
     draft,
@@ -109,7 +112,13 @@ export const FromTicket: Story = {
 export const NewTicket: Story = {
   args: {
     ...sources(),
-    ...form(makeCloneDraft({ mode: "create", team: "we", title: "Tighten the metric row" })),
+    ...form(
+      makeCloneDraft({
+        mode: "create",
+        team: "we",
+        title: "Tighten the metric row",
+      }),
+    ),
   },
 };
 
@@ -136,7 +145,9 @@ export const NoTicket: Story = {
 export const MissingLinearKey: Story = {
   args: {
     ...sources(),
-    ...form(makeCloneDraft({ mode: "create", team: "ops", title: "Encoder spike" })),
+    ...form(
+      makeCloneDraft({ mode: "create", team: "ops", title: "Encoder spike" }),
+    ),
   },
 };
 
@@ -158,7 +169,11 @@ export const Template: Story = {
   args: {
     ...sources(),
     ...form(
-      makeCloneDraft({ mode: "template", title: "encoder-scratch", templatePreset: "webapp" }),
+      makeCloneDraft({
+        mode: "template",
+        title: "encoder-scratch",
+        templatePreset: "webapp",
+      }),
     ),
   },
 };

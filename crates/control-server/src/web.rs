@@ -956,7 +956,9 @@ fn start_clone(
     let retired = crate::ledger::reserved_names(&app.data_dir());
     let plan = crate::clone_plan::plan(&app.config(), &app.store.get(), &retired, fork, req)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
-    Ok(Json(json!({ "ok": true, "op": jobs::start_clone(app, plan) })))
+    Ok(Json(
+        json!({ "ok": true, "op": jobs::start_clone(app, plan) }),
+    ))
 }
 
 /// The effective agent playbook for a clone: the global `agentPlaybook` plus the preset's

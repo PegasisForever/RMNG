@@ -1,37 +1,26 @@
-# `rmng` CLI reference — fleet management over the web port
+# `rmng` — managing the clone fleet from the command line
 
-The `rmng` binary ([crates/cli](../crates/cli/README.md), package `rmng-cli`) is the fleet
-management surface: clones, imported accounts and their pools, and operations, all over
-the control-server's **port-2 web API** (via [control-client](../crates/control-client/README.md)).
-It also carries the **operator/fleet desktop control** (`rmng desktop`, folded in from the
-retired global MCP) and a docker-exec-style **`rmng clone exec`** — both reach clones through the
-same web API, which proxies to the clone's daemon MCP / Docker exec. What stays elsewhere:
-the **in-clone** agent's own desktop automation is the daemon MCP's job ([MCP.md](MCP.md)),
-clone-agent chat is the web API's (`/api/chat/:id`, [API.md](API.md#per-clone-agent-chat)), and
-code moves via git.
+`rmng` manages clones, imported accounts and their pools, operations, the board, the
+transcript ledger, and any clone's desktop. Everything goes over the control-server's web
+API, so it needs neither Docker nor root.
 
-- **Source files:** command tree in [crates/cli/src/args.rs](../crates/cli/src/args.rs);
-  handlers in [commands.rs](../crates/cli/src/commands.rs); wait machinery in
-  [wait.rs](../crates/cli/src/wait.rs).
-- **Build:** `cargo build -p rmng-cli` → `target/debug/rmng`.
+**Inside a clone it is already there**, at `/usr/local/bin/rmng` and on PATH in every shell,
+resolving the server from `$RMNG_CONTROL_URL` — a bare `rmng …` just works. The control-server
+injects the binary at create time and refreshes it on running clones after a server update.
 
-## Where it lives
+What is not here: the in-clone agent's own desktop automation is the daemon MCP's job
+([MCP.md](MCP.md)), clone-agent chat is the web API's
+([API.md](API.md#per-clone-agent-chat)), and code moves via git. Source:
+[args.rs](../crates/cli/src/args.rs), [commands.rs](../crates/cli/src/commands.rs). Build:
+`cargo build -p rmng-cli`.
 
-The control-server injects the CLI into **every clone at create time** as
-`/usr/local/bin/rmng` — on PATH in every shell (`/opt/rmng/bin`, where the service binaries
-go, is not). The Dockerfile builds `-p rmng-cli` and ships the payload at
-`/usr/local/share/rmng/rmng-cli`; [`provision.rs`](../crates/control-server/src/provision.rs)'s
-`CLONE_BINARIES` copies it in before the container boots. The clone reconciler also refreshes
-this binary on already-running managed clones after a control-server update.
+## Headed vs headless clones
 
-Codex itself is template-installed under the clone user, and the control-server retries a
-missing standalone Codex CLI install at clone creation and from the clone reconciler for old
-running clones. RMNG gives Codex parity with Claude's shared clone context by managing
-`~/.codex/AGENTS.md` and the MCP tables in `~/.codex/config.toml`: Codex gets the same disposable-sandbox
-guidance, the local desktop daemon MCP (`desktop`), and Linear (`linear`, using
-`LINEAR_API_KEY`). Codex authenticates from `~/.codex/auth.json`, which the control-server
-writes with the short-lived access token of the account the clone is assigned. The clone
-reconciler refreshes those files on old running clones.
+Every clone is one of two kinds, fixed at creation. A **headed** clone (the default) has a
+full GUI desktop: `rmng desktop` drives it and the viewer streams it. A **headless** clone
+(`--headless` at create) has no desktop, only a terminal — lighter and faster to boot, and
+`rmng desktop` does not work on it. Pick headless for pure coding or CLI work, headed only
+when the task needs a browser or a GUI.
 
 ## Server resolution
 
@@ -208,15 +197,8 @@ the rclone Ubuntu ships has no directory metadata and would otherwise leave ever
 owned by the server's root: a tree whose files are writable but whose directories are not
 lets an agent edit code and fail to create a single new file.
 
-Measured clone to clone on CT 101: 266 MB over 23,470 files takes **2.1s** out of band
-against **5.8s** streamed, and 4 GB in five files **1.4s** against **10.0s**. Bulk data is
-dominated by the transport and a large file count by per-file work, so the out-of-band form
-wins on both, for different reasons.
-
-ZFS block cloning does not help here even where the pool supports it. `FICLONE` returns
-`EPERM` inside an unprivileged LXC, on a plain dataset as much as through overlayfs, though
-the same `cp --reflink=always` succeeds on the Proxmox host. Where the pool runs dedup, a
-duplicated tree still costs little space; it costs the write.
+Reading needs none of this: every clone already sees every other clone's home at
+`~/clones/<id>`, so copy straight across.
 
 The destination is created if missing. Nothing is deleted there and nothing is copied back:
 an existing directory receives these files on top of what it already holds.
@@ -256,11 +238,6 @@ exits 1.
 
 Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears it. **Operator-only
 — it does not change which clone your other commands target.** Unknown id errors (exit 1).
-
-### `rmng image …` (removed)
-
-Gen-1 image commands (`image ls|pull|rm`) are gone: gen-2 clones build their image from the
-preset Dockerfile on demand, and unused tags are purged automatically on delete.
 
 ### `rmng account ls [--provider claude|codex]`
 
@@ -452,18 +429,3 @@ printed to stderr whenever the step or whole-percent changes.
   already pruned before the first frame, or the SSE stream ending under a server restart):
   reported as a **warning + exit 0** — overwhelmingly the Done-prune corner.
 - **Timeout** → exit 4 (the op may still be running — check `rmng op ls`).
-
-## Seed a new clone
-
-`rmng clone create-plain --title worker --wait`
-
-Repeat `--seed` to copy more directories from the calling clone into the same paths.
-The server finishes the copies before the create operation reports success.
-Seed directories must sit below `/home/rmng` and must not overlap.
-The copy preserves git metadata, uncommitted files, symbolic links, modes, and ownership.
-Large trees use up to eight copy workers.
-Trees with hardlinks use one worker to preserve links across directories.
-The operation log reports the time spent copying seed directories separately from total clone creation time.
-The server keeps replaced template directories as `.rmng-seed-backup-N` in the new clone's home.
-A failed copy fails the create operation and retains the clone for inspection.
-The copy reads live files and does not freeze the source clone.

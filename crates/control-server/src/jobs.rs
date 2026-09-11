@@ -16,9 +16,8 @@ use wire::{Operation, OperationKind, OperationStatus, RmngClone};
 use crate::app::App;
 use crate::clone_plan::{ClonePlan, Side};
 use crate::provision::{
-    self, HomeSource, clone_container_gen2, clone_key_env_vars, compose_clone_env,
-    control_env_vars, delete_clone, fork_clone, migrate_one, preset_env_vars,
-    rebase_clone,
+    self, HomeSource, clone_container_gen2_from_tag, clone_key_env_vars, compose_clone_env,
+    control_env_vars, delete_clone, fork_clone, migrate_one, preset_env_vars, rebase_clone,
 };
 
 const LOG_LIMIT: usize = 200;
@@ -272,7 +271,7 @@ pub fn start_clone(app: &App, plan: ClonePlan) -> Operation {
 async fn run_clone(app: App, op_id: String, plan: ClonePlan) {
     let id = plan.id.as_str();
     let preset = plan.preset_name.as_deref();
-    let progress = op_progress(&app, &op_id, OperationKind::Clone);
+    let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
     let env = match gen2_create_env(&app, preset, id).await {
         Ok(env) => env,
         Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
@@ -282,23 +281,34 @@ async fn run_clone(app: App, op_id: String, plan: ClonePlan) {
         // Image: a hash tag built on demand from the preset's Dockerfile. Home: a fresh
         // dataset, or a clone of the template seed snapshot where the template carries one.
         None => {
-            let home = match app.config().docker.seed_snapshot.clone().unwrap_or_default() {
+            let home = match app
+                .config()
+                .docker
+                .seed_snapshot
+                .clone()
+                .unwrap_or_default()
+            {
                 s if !s.trim().is_empty() => HomeSource::CloneFromSnapshot(s),
                 _ => HomeSource::Create,
             };
             let dockerfile = crate::provision::preset_dockerfile(&app, preset);
-            clone_container_gen2(
-                &app,
-                &dockerfile,
-                id,
-                home,
-                &env,
-                &playbook,
-                &prompt,
-                plan.headless,
-                plan.rebuild,
-                progress,
-            )
+            async {
+                let tag =
+                    crate::derived::ensure_image(&app, &dockerfile, plan.rebuild, &mut progress)
+                        .await?;
+                clone_container_gen2_from_tag(
+                    &app,
+                    &tag,
+                    id,
+                    home,
+                    &env,
+                    &playbook,
+                    &prompt,
+                    plan.headless,
+                    progress,
+                )
+                .await
+            }
             .await
         }
         Some(src) => {
@@ -1100,7 +1110,7 @@ pub fn start_prebuild(app: &App, dockerfile: String) -> Result<Operation, JobErr
 }
 
 async fn run_prebuild(app: App, op_id: String, dockerfile: String) {
-    let res = crate::derived::prebuild(&app, &dockerfile, |step, msg| {
+    let res = crate::derived::ensure_image(&app, &dockerfile, true, |step, msg| {
         patch_op(&app, &op_id, |op| {
             op.step = step.to_string();
             op.message = msg.to_string();

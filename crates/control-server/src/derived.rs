@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use tokio::sync::Mutex;
 
 use crate::app::App;
@@ -71,25 +71,8 @@ pub async fn ensure_image(
     Ok(tag)
 }
 
-/// Warm a preset image, always rebuilding: ensure + build, discarding the tag.
-/// The preset card's rebuild button calls this so the next create finds a fresh
-/// image. Takes the editor's current text (which may be unsaved); saving is
-/// separate.
-pub async fn prebuild(
-    app: &App,
-    dockerfile: &str,
-    mut on_progress: impl FnMut(&str, &str),
-) -> Result<String> {
-    if dockerfile.trim().is_empty() {
-        bail!("a Dockerfile is required to prebuild");
-    }
-    ensure_image(app, dockerfile, true, &mut on_progress).await
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn tag_is_stable_for_same_text() {
         assert_eq!(

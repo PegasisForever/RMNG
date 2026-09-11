@@ -1,7 +1,9 @@
 // The clone dialog's model: the form, the config it draws from, the operation it started,
 // and every rule that reads them. No React and no network here — the container feeds it
-// events and renders what comes back, so each rule is a test.
+// events and renders what comes back, so each rule is a test. The one thing read from outside
+// is the team a new ticket starts on, which is remembered in storage.
 
+import { startingTeam } from "~/lib/linear/intake";
 import type { Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { CloneRequest } from "~/lib/wire/CloneRequest";
@@ -157,7 +159,7 @@ export type CloneDialogEvent =
  | { type: "config"; presets: PresetRedacted[]; groups: CloneGroup[] }
  | { type: "sources"; ids: string[] }
  | {
-   [K in keyof CloneDraft]: { type: "edit"; key: K; value: CloneDraft[K] };
+    [K in keyof CloneDraft]: { type: "edit"; key: K; value: CloneDraft[K] };
    }[keyof CloneDraft]
  | { type: "starting" }
  | { type: "started"; opId: string }
@@ -202,8 +204,7 @@ export function cloneDialogReducer(
    return follow({
     ...s,
     sources: e.ids,
-    draft:
-     e.ids.length === 0 ? { ...s.draft, mode: "template" } : s.draft,
+    draft: e.ids.length === 0 ? { ...s.draft, mode: "template" } : s.draft,
    });
   case "edit":
    return follow({
@@ -238,9 +239,7 @@ export function cloneDialogReducer(
     seen,
     failed,
     error:
-     failed && !s.failed
-      ? e.op?.message || `the ${kind} failed`
-      : s.error,
+     failed && !s.failed ? e.op?.message || `the ${kind} failed` : s.error,
     done: opPhase(e.op, seen, failed) === "done",
    };
   }
@@ -258,7 +257,7 @@ function follow(s: CloneDialog): CloneDialog {
  if (d.mode === "template" && d.templatePreset === "")
   d = { ...d, templatePreset: first };
  if (d.mode === "create" && d.team === "")
-  d = { ...d, team: teamKeysOf(s.presets)[0]?.key ?? "" };
+  d = { ...d, team: startingTeam(teamKeysOf(s.presets)) };
 
  let touched = s.touched;
  const preset = presetOf({ ...s, draft: d });
@@ -275,8 +274,8 @@ function follow(s: CloneDialog): CloneDialog {
      !preset && s.presets.length > 0
       ? null
       : wanted && s.sources.includes(wanted)
-       ? wanted
-       : s.sources[0],
+        ? wanted
+        : s.sources[0],
    };
   }
  }
@@ -322,8 +321,8 @@ export function cloneDialogValid(s: CloneDialog): boolean {
   d.mode === "existing"
    ? !!parseTicketInput(d.ticket) && picked
    : d.mode === "create"
-    ? titled && d.team.trim().length > 0
-    : titled && picked;
+     ? titled && d.team.trim().length > 0
+     : titled && picked;
  return ok && (d.mode === "template" || !!d.source) && !linearKeyMissing(s);
 }
 
@@ -334,7 +333,10 @@ export function cloneDialogBusy(s: CloneDialog): boolean {
 
 /** What this tab would send. `linear` is Linear's own answer on the ticket tabs; the other
  *  two carry the typed title, which is what names the clone. */
-export function cloneRequest(s: CloneDialog, linear?: LinearMeta): CloneRequest {
+export function cloneRequest(
+ s: CloneDialog,
+ linear?: LinearMeta,
+): CloneRequest {
  const d = s.draft;
  const ticketTab = d.mode === "existing" || d.mode === "create";
  return {

@@ -28,8 +28,10 @@ crates/control-server/embedded-bin/
 .gitignore
 .dockerignore
 
-# Docs / agent scaffolding — none of it is compiled or COPY'd
+# Docs / agent scaffolding. CLI.md is the exception: it is `include_str!`'d as the in-clone
+# `rmng-cli` skill, so it MUST be in context.
 docs/
+!docs/CLI.md
 .superpowers/
 .claude/
 

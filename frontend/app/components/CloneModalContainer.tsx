@@ -3,20 +3,18 @@
 // answers with. The dialog stays open on that operation and closes when it settles, which is
 // why the op list is a prop. The form model is `~/lib/cloneDraft`; the markup is
 // CloneModalView.
-import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+} from "react";
 
 import { CloneModalView } from "~/components/CloneModalView";
 import { getConfig } from "~/lib/api";
-import { keysForTeam, issueCreate } from "~/lib/linear/mutations";
-import {
-  cloneLinearMeta,
-  ensureInProgress,
-  fetchIssueAny,
-  issueRefOf,
-  resolvedFromTicket,
-  type ResolvedIssue,
-} from "~/lib/linear/issues";
-import { toLinearMarkdown } from "~/lib/linear/assets";
+import { keyFor, ticketForClone, useAssignee } from "~/lib/linear/intake";
 import {
   cloneDialogBusy,
   cloneDialogReducer,
@@ -103,56 +101,36 @@ export function CloneModalContainer({
   }, [state.done]);
 
   const busy = cloneDialogBusy(state);
-  // Which key stores an image pasted into the new-ticket body: the one belonging to the
-  // preset that claims the chosen team, so its images land in the issue's own workspace.
-  const uploadKey = keysForTeam(state.presets, state.draft.team)[0] ?? "";
+  // Which key claims the chosen team: it stores an image pasted into the new-ticket body, so
+  // the images land in the issue's own workspace, and it answers who can hold the ticket.
+  const key = keyFor(state.presets, state.draft.team);
+  const { assigneeId } = useAssignee(key, state.draft.team);
   const editorLoading = (
     <p className="px-3 text-xs text-slate-400 dark:text-slate-500">
       Loading editor…
     </p>
   );
 
-  /** The issue this clone is for, and the key proven to reach it: looked up by identifier
-   *  across every configured key, or opened with the key of the preset claiming the team. */
-  async function findIssue(): Promise<{ issue: ResolvedIssue; key: string }> {
+  /** Linear's own answer for the ticket tabs. The other two reach no network here at all. */
+  function ticket(): Promise<LinearMeta | undefined> {
     const d = state.draft;
-    if (d.mode === "existing") {
-      const ref = issueRefOf(d.ticket);
-      if (!ref)
-        throw new Error(
-          `could not find a ticket id (like WE-142) in "${d.ticket}"`,
-        );
-      return fetchIssueAny(keysForTeam(state.presets, ref.prefix), ref);
-    }
-    const team = d.team.trim();
-    const key = keysForTeam(state.presets, team)[0] ?? "";
-    const ticket = await issueCreate(key, {
-      team,
-      title: d.title.trim(),
-      description: toLinearMarkdown(d.description),
-      ...(d.priority > 0 ? { priority: d.priority } : {}),
-    });
-    return { issue: resolvedFromTicket(ticket), key };
-  }
-
-  /** Linear's own answer for the ticket tabs, moved to In Progress on the way (best effort).
-   *  The other two tabs reach no network here at all. */
-  async function resolveTicket(): Promise<LinearMeta | undefined> {
-    const mode = state.draft.mode;
-    if (mode !== "existing" && mode !== "create") return undefined;
-    const { issue, key } = await findIssue();
-    try {
-      await ensureInProgress(key, issue);
-    } catch (e) {
-      console.warn(`could not move ${issue.identifier} to In Progress:`, e);
-    }
-    return cloneLinearMeta(issue);
+    if (d.mode === "existing")
+      return ticketForClone(state.presets, { ticket: d.ticket });
+    if (d.mode === "create")
+      return ticketForClone(state.presets, {
+        team: d.team.trim(),
+        title: d.title.trim(),
+        description: d.description,
+        ...(d.priority > 0 ? { priority: d.priority } : {}),
+        ...(assigneeId !== "" ? { assigneeId } : {}),
+      });
+    return Promise.resolve(undefined);
   }
 
   function submit() {
     if (!cloneDialogValid(state) || busy) return;
     dispatch({ type: "starting" });
-    resolveTicket()
+    ticket()
       .then((linear) =>
         onStart(state.draft.mode !== "template", cloneRequest(state, linear)),
       )
@@ -181,7 +159,7 @@ export function CloneModalContainer({
           <Suspense fallback={editorLoading}>
             <MarkdownEditorContainer
               onChange={(markdown) => onDraftChange("description", markdown)}
-              linearKey={uploadKey}
+              linearKey={key}
               placeholder="What needs doing — paste images, format freely"
             />
           </Suspense>

@@ -804,59 +804,9 @@ async fn destroy_half_built_clone(app: &App, hostname: &str, created_dataset: bo
     }
 }
 
-/// Create + start a gen-2 clone: home on its own dataset, image = preset Dockerfile.
-///
-/// Steps: ensure the preset image (hash-tag build of the preset's full Dockerfile
-/// text; `rebuild` forces a fresh build with a fresh base pull even when the tag
-/// exists) → `zfs create` (or clone from the template seed snapshot) → `docker create`
-/// with the dataset bind → identity/dynamic-env inject → ensure the empty
-/// `/home/rmng/clones` mountpoint → start → wait-ready (the [`clone_container_after_create`]
-/// tail). Returns the resolved tag for the caller to record as `base_tag`. On failure
-/// the container, volumes, AND a dataset this call created are destroyed; a reused
-/// dataset is never touched.
-///
-/// `env` is the composed create-time list (control keys, `LINEAR_API_KEY`, dynamic
-/// per-clone keys); everything static lives in the Dockerfile, never here.
-#[allow(clippy::too_many_arguments)]
-pub async fn clone_container_gen2(
-    app: &App,
-    dockerfile: &str,
-    hostname: &str,
-    home: HomeSource,
-    env: &[EnvVar],
-    agent_playbook: &str,
-    global_prompt: &str,
-    headless: bool,
-    rebuild: bool,
-    mut on_progress: impl FnMut(&str, &str),
-) -> Result<String> {
-    if !is_dns_label(hostname) {
-        bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
-    }
-    let _docker = &app.docker;
-    // The preset Dockerfile decides the image: same text twice means one build, and the
-    // tag is recorded below as `base_tag`. No label gate: FROM may name any image.
-    let tag = crate::derived::ensure_image(app, dockerfile, rebuild, &mut on_progress).await?;
-    if tag.is_empty() {
-        bail!("a Dockerfile is required for a gen-2 clone");
-    }
-    clone_container_gen2_from_tag(
-        app,
-        &tag,
-        hostname,
-        home,
-        env,
-        agent_playbook,
-        global_prompt,
-        headless,
-        &mut on_progress,
-    )
-    .await
-}
-
 /// Create + start a gen-2 clone on an EXPLICIT local image tag (rebase + rollback).
-/// Same tail as [`clone_container_gen2`] minus the Dockerfile build: the tag must
-/// already exist locally (the preset rebuild button warms it).
+/// The tag must already exist locally: callers build it first with
+/// [`crate::derived::ensure_image`], and the preset rebuild button warms it.
 #[allow(clippy::too_many_arguments)]
 pub async fn clone_container_gen2_from_tag(
     app: &App,
@@ -869,6 +819,9 @@ pub async fn clone_container_gen2_from_tag(
     headless: bool,
     mut on_progress: impl FnMut(&str, &str),
 ) -> Result<String> {
+    if !is_dns_label(hostname) {
+        bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
+    }
     let docker = &app.docker;
     let tag = tag.to_string();
     let cfg = app.config();
@@ -987,7 +940,7 @@ pub async fn fork_clone(
         gen2_row(app, source_id).ok_or_else(|| anyhow::anyhow!("unknown clone '{source_id}'"))?;
     let dockerfile = preset_dockerfile(app, preset_name);
     // The fork's image comes from the TARGET preset's Dockerfile (built lazily inside
-    // `clone_container_gen2`); the source contributes only its home dataset, snapshotted
+    // `clone_container_gen2_from_tag`); the source contributes only its home dataset, snapshotted
     // and cloned below. Same preset reuses the source tag with zero rebuild, because the
     // text hashes the same — unless `rebuild` forces a fresh build.
 
@@ -1006,20 +959,24 @@ pub async fn fork_clone(
         let _ = crate::zfs::destroy_snapshot_if_unreferenced(&homes_parent(app), &snap);
         return Err(e);
     }
-    match clone_container_gen2(
-        app,
-        &dockerfile,
-        new_id,
-        HomeSource::Reuse,
-        env,
-        agent_playbook,
-        global_prompt,
-        headless,
-        rebuild,
-        &mut on_progress,
-    )
-    .await
-    {
+    let built = async {
+        let tag =
+            crate::derived::ensure_image(app, &dockerfile, rebuild, &mut on_progress).await?;
+        clone_container_gen2_from_tag(
+            app,
+            &tag,
+            new_id,
+            HomeSource::Reuse,
+            env,
+            agent_playbook,
+            global_prompt,
+            headless,
+            &mut on_progress,
+        )
+        .await
+    }
+    .await;
+    match built {
         Ok(tag) => Ok(tag),
         Err(e) => {
             destroy_half_built_clone(app, new_id, true).await;
@@ -1212,16 +1169,16 @@ async fn migrate_one_inner(
             .as_ref()
             .and_then(|r| r.preset_name.as_deref()),
     );
-    let tag = clone_container_gen2(
+    let image = crate::derived::ensure_image(app, &dockerfile, false, &mut *on_progress).await?;
+    let tag = clone_container_gen2_from_tag(
         app,
-        &dockerfile,
+        &image,
         host_id,
         HomeSource::Reuse,
         env,
         agent_playbook,
         global_prompt,
         headless,
-        false,
         &mut *on_progress,
     )
     .await?;

@@ -252,7 +252,9 @@ export function CloneModalView({
                   className={cloneField}
                 >
                   <option value="" disabled>
-                    {clones.length === 0 ? "No forkable clones" : "Pick a clone"}
+                    {clones.length === 0
+                      ? "No forkable clones"
+                      : "Pick a clone"}
                   </option>
                   {clones.map((c) => (
                     <option key={c.id} value={c.id}>

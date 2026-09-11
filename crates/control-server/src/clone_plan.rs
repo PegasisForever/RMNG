@@ -62,9 +62,9 @@ pub(crate) fn plan(
     };
     let asked_name = named(&req.preset);
     let asked_preset = match &asked_name {
-        Some(name) => Some(
-            preset_named(cfg, name).ok_or_else(|| format!("unknown preset '{name}'"))?,
-        ),
+        Some(name) => {
+            Some(preset_named(cfg, name).ok_or_else(|| format!("unknown preset '{name}'"))?)
+        }
         None => None,
     };
     let source = match (fork, named(&req.source)) {
@@ -167,9 +167,7 @@ pub(crate) fn plan(
     let linear = match req.linear {
         Some(mut l) => {
             if !suffix.is_empty() {
-                l.display_name = l
-                    .display_name
-                    .map(|t| format!("{} ({suffix})", t.trim()));
+                l.display_name = l.display_name.map(|t| format!("{} ({suffix})", t.trim()));
             }
             Some(l)
         }
@@ -608,7 +606,14 @@ mod tests {
         assert!(no_preset.contains("preset is required"), "{no_preset}");
 
         // A fork needs neither: both come from the clone it copies.
-        assert!(plan_of(&state(vec![source("pega-we-1")]), true, CloneRequest::default()).is_ok());
+        assert!(
+            plan_of(
+                &state(vec![source("pega-we-1")]),
+                true,
+                CloneRequest::default()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
