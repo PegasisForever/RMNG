@@ -30,7 +30,10 @@ export function CloneOptionsRow({
         />
         Headless (no desktop)
       </label>
-      <label className="flex cursor-pointer items-center gap-2" title="Runs the preset's startup script as the clone user when the clone is created">
+      <label
+        className="flex cursor-pointer items-center gap-2"
+        title="Runs the preset's startup script as the clone user when the clone is created"
+      >
         <input
           type="checkbox"
           checked={runStartupScript}
@@ -39,7 +42,10 @@ export function CloneOptionsRow({
         />
         Run startup script
       </label>
-      <label className="flex cursor-pointer items-center gap-2" title="Pulls the latest base image and rebuilds the preset image before the clone is created">
+      <label
+        className="flex cursor-pointer items-center gap-2"
+        title="Pulls the latest base image and rebuilds the preset image before the clone is created"
+      >
         <input
           type="checkbox"
           checked={rebuild}

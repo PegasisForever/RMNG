@@ -5,7 +5,12 @@
 // test pins the wrapped shape on both sides of each call.
 import { afterEach, expect, mock, test } from "bun:test";
 
-import { duplicateClone, forkClone, prebuildDockerfile, rebaseClone } from "./api";
+import {
+  duplicateClone,
+  forkClone,
+  prebuildDockerfile,
+  rebaseClone,
+} from "./api";
 
 const op = {
   id: "op-1",

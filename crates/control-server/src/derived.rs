@@ -57,9 +57,10 @@ pub async fn ensure_image(
         return Ok(tag);
     }
     // One build per tag: a parallel create waits here, then finds the image present.
+    // A forced rebuild skips that shortcut too: force means build, even for a waiter.
     let lock = lock_for(&tag);
     let _guard = lock.lock().await;
-    if app.docker.image_exists(&tag).await? {
+    if !force && app.docker.image_exists(&tag).await? {
         return Ok(tag);
     }
     on_progress("build", &format!("building preset image {tag}"));

@@ -250,9 +250,7 @@ export function CloneModalView({
                   onDraftChange("runStartupScript", run)
                 }
                 rebuild={draft.rebuild}
-                onRebuildChange={(rebuild) =>
-                  onDraftChange("rebuild", rebuild)
-                }
+                onRebuildChange={(rebuild) => onDraftChange("rebuild", rebuild)}
               />
             </>
           ) : null}
@@ -366,9 +364,7 @@ export function CloneModalView({
                 onDraftChange("runStartupScript", run)
               }
               rebuild={draft.rebuild}
-              onRebuildChange={(rebuild) =>
-                onDraftChange("rebuild", rebuild)
-              }
+              onRebuildChange={(rebuild) => onDraftChange("rebuild", rebuild)}
             />
           )}
         </div>

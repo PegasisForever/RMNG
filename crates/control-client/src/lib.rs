@@ -340,11 +340,8 @@ impl Client {
     /// rebuilding even when its tag exists. Returns the driving Operation; progress
     /// streams over /events.
     pub async fn prebuild(&self, dockerfile: &str) -> Result<Operation> {
-        self.post_op(
-            "/api/images/prebuild",
-            &json!({ "dockerfile": dockerfile }),
-        )
-        .await
+        self.post_op("/api/images/prebuild", &json!({ "dockerfile": dockerfile }))
+            .await
     }
     /// Rebase a gen-2 clone onto a preset's image (dataset + id kept). `rebuild`
     /// forces a fresh image build even when the tag exists.
