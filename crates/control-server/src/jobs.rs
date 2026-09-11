@@ -14,9 +14,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use wire::{Operation, OperationKind, OperationStatus, RmngClone};
 
 use crate::app::App;
+use crate::clone_plan::{ClonePlan, Side};
 use crate::provision::{
     self, HomeSource, clone_container_gen2, clone_key_env_vars, compose_clone_env,
-    control_env_vars, delete_clone, fork_clone, is_dns_label, migrate_one, preset_env_vars,
+    control_env_vars, delete_clone, fork_clone, migrate_one, preset_env_vars,
     rebase_clone,
 };
 
@@ -32,62 +33,6 @@ impl std::fmt::Display for JobError {
     }
 }
 impl std::error::Error for JobError {}
-
-/// Linear ticket metadata stamped onto a cloned `RmngClone`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LinearMeta {
-    /// Lowercase Linear workspace name / ticket prefix (e.g. `"we"`).
-    pub workspace: Option<String>,
-    pub ticket: Option<String>,
-    pub ticket_url: Option<String>,
-    pub branch: Option<String>,
-    pub display_name: Option<String>,
-    pub label: Option<String>,
-}
-
-/// Everything the API hands to `start_clone`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CloneSpec {
-    /// Retired: the image used to come from the caller's picked base. The effective
-    /// preset's Dockerfile decides now; kept for payload compat and ignored.
-    pub source_image: String,
-    pub new_hostname: String,
-    pub linear: Option<LinearMeta>,
-    /// Requested Claude account: an email (pin), `"auto"`, legacy `"group:<name>"`
-    /// (binds the pool), or `None` (= auto).
-    pub claude_account: Option<String>,
-    /// Requested Codex account, same forms. Independent of `claude_account` — a clone can
-    /// hold both.
-    pub codex_account: Option<String>,
-    pub first_message: Option<String>,
-    pub agent_instructions: Option<String>,
-    pub claude_instructions: Option<String>,
-    /// Clone preset name used to derive env/playbook, persisted for future reconciliation.
-    pub preset_name: Option<String>,
-    /// Resolved env-preset vars to write into the clone's `/etc/environment` at creation.
-    pub env: Vec<wire::EnvVar>,
-    /// Composed agent playbook (global + preset append) injected into the clone at creation
-    /// as ~/.config/rmng/agent-instructions.md. Empty ⇒ no file injected. (Layers b + d.)
-    pub agent_playbook: String,
-    /// Composed global agent prompt (global + preset append) written to every agent's native
-    /// rules file (CLAUDE.md / AGENTS.md) at creation. (Layers a + c.)
-    pub global_prompt: String,
-    /// Create a **headless clone**: same template, but the desktop (`gnome-headless`) and
-    /// capture daemon (`rmng-clone-daemon`) user units are disabled at provision and a default
-    /// tmux session is started. Persisted on `RmngClone.headless`; drives the viewer tmux view.
-    pub headless: bool,
-    /// Parent clone id when this clone should be created as a sub clone (one level deep). Already
-    /// validated by the caller (`web::clone`): the parent exists, is managed, and is itself
-    /// top-level. `None` = top-level clone. Persisted on `RmngClone.parent`; purely cosmetic.
-    pub parent: Option<String>,
-    /// Run the preset's startup script as the clone user as the last settle step.
-    /// Every caller defaults this on; opt out per request, never per preset.
-    pub run_startup_script: bool,
-    /// Force a fresh image build with a fresh base pull even when the preset's tag
-    /// already exists. The New clone dialog's rebuild checkbox sets this.
-    pub rebuild: bool,
-}
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -229,38 +174,6 @@ pub fn fail_stale_ops(app: &App) {
     }
 }
 
-/// Pick a free clone id for a ticket base name (`base`, then `base a..z`). Race-free
-/// when called immediately before `start_clone` (single state snapshot).
-///
-/// A name is taken if a clone holds it, if a clone is being created under it, or if a clone that
-/// no longer exists left a transcript ledger under it. That last one is why cloning the same
-/// ticket twice keeps walking the alphabet after the first clone is deleted: the ledger is filed
-/// by clone name and outlives the clone (see [`crate::ledger`]).
-pub fn next_free_hostname(app: &App, base: &str) -> String {
-    let st = app.store.get();
-    let mut taken: std::collections::HashSet<String> =
-        st.hosts.iter().map(|h| h.id.clone()).collect();
-    for o in &st.operations {
-        if o.status == OperationStatus::Running {
-            taken.insert(o.target.clone());
-        }
-    }
-    taken.extend(crate::ledger::reserved_names(&app.data_dir()));
-    if !taken.contains(base) {
-        return base.to_string();
-    }
-    for i in 0..26u8 {
-        let candidate = format!("{base}{}", (b'a' + i) as char);
-        if !taken.contains(&candidate) {
-            return candidate;
-        }
-    }
-    base.to_string()
-}
-
-/// Validate + register a clone op, then drive it in the background. Images clone
-/// concurrently (nothing on the source to lock), so there is no source-busy check — only the
-/// hostname's validity + uniqueness are gated.
 /// How long the preset startup script may run before the create/fork op stops waiting.
 /// Best-effort: on timeout the script keeps running in the clone, the op just moves on.
 const STARTUP_SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
@@ -339,350 +252,231 @@ async fn run_startup_script(app: &App, op_id: &str, clone_id: &str, preset_name:
     }
 }
 
-pub fn start_clone(app: &App, spec: CloneSpec) -> Result<Operation, JobError> {
-    // The preset Dockerfile decides the image; no caller-supplied base is needed.
-    let _ = spec.source_image.as_str();
-    if !is_dns_label(&spec.new_hostname) {
-        return Err(JobError(
-            "new hostname must be a DNS label (lowercase letters, digits, hyphens)".into(),
-        ));
-    }
-    // Fail fast on a pool that does not exist (the rotator would otherwise leave the
-    // clone tokenless with no error anywhere).
-    let (pre_group, _, _) = crate::clone_ops::split_group_binding(
-        spec.claude_account.clone(),
-        spec.codex_account.clone(),
-        None,
-        None,
-    );
-    crate::clone_ops::validate_group(app, pre_group.as_deref())
-        .map_err(|e| JobError(e.to_string()))?;
-    let st = app.store.get();
-    if st.hosts.iter().any(|h| h.id == spec.new_hostname) {
-        return Err(JobError(format!(
-            "a clone named '{}' already exists",
-            spec.new_hostname
-        )));
-    }
-    if st
-        .operations
-        .iter()
-        .any(|o| o.status == OperationStatus::Running && o.target == spec.new_hostname)
-    {
-        return Err(JobError(format!(
-            "'{}' is already being created",
-            spec.new_hostname
-        )));
-    }
-    // A retired clone keeps its transcript ledger, and the ledger is filed by clone name. Handing
-    // the name to a new clone would file two unrelated histories in one bucket, so the name stays
-    // spent until the operator says otherwise. `next_free_hostname` skips these, so only an
-    // exact-hostname create (the fleet CLI's `clone create <hostname>`) reaches this rejection.
-    let data_dir = app.data_dir();
-    if crate::ledger::reserved_names(&data_dir).contains(&spec.new_hostname) {
-        return Err(JobError(format!(
-            "a retired clone was named '{name}'; its transcript ledger still holds that history. \
-             Pick another name, or remove {}/{name} to release it.",
-            crate::ledger::ledger_root(&data_dir).display(),
-            name = spec.new_hostname
-        )));
-    }
-    // Sub-clone invariant (defense in depth; `web::resolve_parent` already validated): the parent
-    // must exist, be a managed clone, and be top-level — nesting is one level deep.
-    if let Some(parent) = &spec.parent {
-        match st.hosts.iter().find(|h| &h.id == parent) {
-            None => return Err(JobError(format!("parent clone '{parent}' not found"))),
-            Some(h) if !h.managed => {
-                return Err(JobError(format!(
-                    "parent clone '{parent}' is not a managed clone"
-                )));
-            }
-            Some(h) if h.parent.is_some() => {
-                return Err(JobError(format!(
-                    "parent clone '{parent}' is itself a sub clone; sub clones are one level deep"
-                )));
-            }
-            Some(_) => {}
-        }
-    }
-
+pub fn start_clone(app: &App, plan: ClonePlan) -> Operation {
     let op = make_op(
         OperationKind::Clone,
-        &spec.new_hostname,
-        Some(&spec.source_image),
+        &plan.id,
+        plan.source.as_ref().map(|s| s.id.as_str()),
     );
     let op_for_return = op.clone();
     let op_id = op.id.clone();
     app.store.mutate(|s| s.operations.push(op));
-
     let app2 = app.clone();
-    tokio::spawn(async move { run_clone(app2, op_id, spec).await });
-    Ok(op_for_return)
+    tokio::spawn(async move { run_clone(app2, op_id, plan).await });
+    op_for_return
 }
 
-async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
+/// Build the planned clone: image and home, accounts, then the settle steps that live
+/// outside the container. The clone is added to `s.hosts` only at the very end, because a
+/// clone's presence there is the client's "ready to connect" signal.
+async fn run_clone(app: App, op_id: String, plan: ClonePlan) {
+    let id = plan.id.as_str();
+    let preset = plan.preset_name.as_deref();
     let progress = op_progress(&app, &op_id, OperationKind::Clone);
-
-    // The clone's full session env, composed in the same precedence order the per-clone resync
-    // uses (`provision::compose_clone_env`): the control URL, the per-clone identity key
-    // (RMNG_PROXY_KEY — minted server-side, never serialized onto `RmngClone`/state), the
-    // operator's preset, then Claude Code's default model. An unresolvable control host
-    // fails the op: booting the clone into a degraded URL helps nobody (see control_env_vars).
-    let control = match control_env_vars(&app).await {
-        Ok(vars) => vars,
+    let env = match gen2_create_env(&app, preset, id).await {
+        Ok(env) => env,
         Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
     };
-    let env = crate::provision::compose_clone_env(
-        control,
-        crate::provision::clone_key_env_vars(&app, &spec.new_hostname),
-        &spec.env,
-    );
-    // Gen-2 create: image = hash-tag built lazily from the effective preset's FULL
-    // Dockerfile text (verbatim, no FROM rewrite); home = fresh dataset, or a clone of
-    // the template seed snapshot when the template carries default home content.
-    // Returns the resolved tag, recorded below as the clone's `base_tag`. The backing
-    // container's name is the clone id — that's how every later call addresses it.
-    let cfg = app.config();
-    let dockerfile = crate::provision::preset_dockerfile(&app, spec.preset_name.as_deref());
-    let home = match cfg.docker.seed_snapshot.clone().unwrap_or_default() {
-        s if !s.trim().is_empty() => HomeSource::CloneFromSnapshot(s),
-        _ => HomeSource::Create,
+    let (playbook, prompt) = gen2_playbook_prompt(&app, preset);
+    let built = match &plan.source {
+        // Image: a hash tag built on demand from the preset's Dockerfile. Home: a fresh
+        // dataset, or a clone of the template seed snapshot where the template carries one.
+        None => {
+            let home = match app.config().docker.seed_snapshot.clone().unwrap_or_default() {
+                s if !s.trim().is_empty() => HomeSource::CloneFromSnapshot(s),
+                _ => HomeSource::Create,
+            };
+            let dockerfile = crate::provision::preset_dockerfile(&app, preset);
+            clone_container_gen2(
+                &app,
+                &dockerfile,
+                id,
+                home,
+                &env,
+                &playbook,
+                &prompt,
+                plan.headless,
+                plan.rebuild,
+                progress,
+            )
+            .await
+        }
+        Some(src) => {
+            fork_clone(
+                &app,
+                &src.id,
+                id,
+                &env,
+                &playbook,
+                &prompt,
+                plan.headless,
+                preset,
+                plan.rebuild,
+                progress,
+            )
+            .await
+        }
     };
-    let image_ref = match clone_container_gen2(
-        &app,
-        &dockerfile,
-        &spec.new_hostname,
-        home,
-        &env,
-        &spec.agent_playbook,
-        &spec.global_prompt,
-        spec.headless,
-        spec.rebuild,
-        progress,
-    )
-    .await
-    {
+    let image_ref = match built {
         Ok(v) => v,
         Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
     };
-
-    // The container is up and its daemon has registered (or timed out still-booting) — the op
-    // now sits at the `ready` step (~80%). The clone is NOT connectable yet: the account tokens
-    // still have to be pushed. The client treats a clone's PRESENCE in `s.hosts` as "ready to
-    // connect", so we keep the clone OUT of state and the op RUNNING until this whole tail
-    // settles — otherwise a viewer connecting at "100%" hits a not-yet-provisioned clone. The
-    // clone is registered + the op marked `done` at the very end, below, once the clone is
-    // genuinely streamable.
-    //
-    // A new clone boots on the template's baked `RMNG_MONITORS`, a single monitor nobody chose.
-    // Bring it to the active layout preset as soon as its daemon registers, which is usually
-    // already true here. Only new clones get this: every existing one keeps the layout it was
-    // last viewed with until the operator switches to it. Headless clones run no session.
-    if !spec.headless {
-        crate::mediaplane::apply_active_layout_when_ready(app.clone(), spec.new_hostname.clone());
+    // A clone built from an image boots on the template's baked `RMNG_MONITORS`, one monitor
+    // nobody chose; bring it to the active layout preset. A fork's home remembers its own.
+    if plan.source.is_none() && !plan.headless {
+        crate::mediaplane::apply_active_layout_when_ready(app.clone(), plan.id.clone());
     }
 
-    // (`progress` at the top of this fn was moved into `clone_container`; make a fresh one for
-    // the remaining `accounts` step.)
     let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
-
     progress("accounts", "assigning agent accounts");
+    let claude = bind_side::<crate::pool::ClaudePool>(&app, &op_id, &plan, &plan.claude).await;
+    let codex = bind_side::<crate::pool::CodexPool>(&app, &op_id, &plan, &plan.codex).await;
 
-    // Assign a Claude account/group (or explicitly none). The operator's selection + the
-    // resolved account are COLLECTED into locals here and baked into the Host at the terminal
-    // add below (there is no host in `s.hosts` yet); the token itself is installed into the
-    // clone's ~/.claude/.credentials.json now (the server refreshes + re-pushes it thereafter).
-    // A group-bound clone records its group; the rotator re-balances it. A side that
-    // resolves to nothing (pending auto) strips any credentials the image carried.
-    // One group for both sides: legacy `group:<name>` picks in either account field bind
-    // the clone once (see `split_group_binding`); both `auto` sides then resolve inside it.
-    let (bound_group, claude_req, codex_req) = crate::clone_ops::split_group_binding(
-        spec.claude_account.clone(),
-        spec.codex_account.clone(),
-        None,
-        None,
-    );
-    let mut claude_selection: Option<String> = None;
-    let mut claude_account_email: Option<String> = None;
-    let mut claude_group: Option<String> = None;
-    match crate::pool::assign_clone_side::<crate::pool::ClaudePool>(
-        &app,
-        Some(&op_id),
-        &spec.new_hostname,
-        claude_req.as_deref(),
-        None,
-        bound_group.as_deref(),
-        crate::pool::AssignStrictness::BestEffort,
-    )
-    .await
-    {
-        Ok(Some(b)) => {
-            claude_selection = Some(b.selection);
-            claude_account_email = b.email;
-            claude_group = b.group;
-        }
-        Ok(None) => {}
-        Err(e) => {
-            // BestEffort never fails; a future error path must not slip by silently.
-            tracing::warn!("unexpected assignment failure: {e:#}");
-            patch_op(&app, &op_id, |op| {
-                op.log.push(format!("account: assignment failed: {e:#}"));
-            });
-        }
-    }
-
-    // Assign a Codex account/group, independently of Claude — a clone can hold both.
-    // Collected into locals + baked into the Host at the terminal add below.
-    let mut codex_selection: Option<String> = None;
-    let mut codex_account_email: Option<String> = None;
-    let mut codex_group: Option<String> = None;
-    match crate::pool::assign_clone_side::<crate::pool::CodexPool>(
-        &app,
-        Some(&op_id),
-        &spec.new_hostname,
-        codex_req.as_deref(),
-        None,
-        bound_group.as_deref(),
-        crate::pool::AssignStrictness::BestEffort,
-    )
-    .await
-    {
-        Ok(Some(b)) => {
-            codex_selection = Some(b.selection);
-            codex_account_email = b.email;
-            codex_group = b.group;
-        }
-        Ok(None) => {}
-        Err(e) => {
-            // BestEffort never fails; a future error path must not slip by silently.
-            tracing::warn!("unexpected assignment failure: {e:#}");
-            patch_op(&app, &op_id, |op| {
-                op.log
-                    .push(format!("codex account: assignment failed: {e:#}"));
-            });
-        }
-    }
-    // Everything a clone needs that lives OUTSIDE its container. Each of the three has a
-    // reconcile loop that would apply it 10 to 15 s after the clone lands in `s.hosts`, and
-    // those loops read `s.hosts`, so the wait would start only once the op says ready. That is
-    // exactly when the operator opens the clone and finds the shared folder missing.
-    //
-    // The home symlink is the one with reach: SMB browsing, the file API, token accounting, the
-    // transcript ledger and activity detection all read a clone through it.
+    // Everything the clone needs that lives outside its container. Each has a reconcile loop
+    // that would do this 10 to 15 s after the clone lands in `s.hosts` — which is exactly
+    // when the operator opens it and finds the shared folder missing.
     progress(
         "settle",
         "attaching the shared folder, home link and SSH access",
     );
-    crate::homes::ensure_now(&app, &spec.new_hostname).await;
-    // Before the store write below, so the bastion's forward allowlist and the clone's own
-    // "ready" signal land together. It takes the id explicitly for that reason.
-    crate::ssh::allow_clone_now(&app, &spec.new_hostname).await;
+    crate::homes::ensure_now(&app, id).await;
+    crate::ssh::allow_clone_now(&app, id).await;
 
-    // Last settle step: the preset's startup script as the clone user (best-effort).
-    if spec.run_startup_script {
+    if plan.run_startup_script {
         progress("settle", "running the preset startup script");
-        run_startup_script(
-            &app,
-            &op_id,
-            &spec.new_hostname,
-            spec.preset_name.as_deref(),
-        )
-        .await;
+        run_startup_script(&app, &op_id, id, preset).await;
     } else {
         patch_op(&app, &op_id, |op| {
             op.log.push("startup script: skipped by request".into())
         });
     }
 
-    // Register the fully-provisioned clone and mark the op done — the clone is now genuinely
-    // connectable. A clone's PRESENCE in `s.hosts` is the client's "ready to connect" signal, so
-    // it is added HERE, at the same instant the bar reaches 100%. `host` is display-only for
-    // managed clones (dials go by container name == id); clones ship with fixed `rmng`/`rmng`
-    // credentials baked into the base image. RDP port stays 3389 for the media path. The
-    // group binding resolved above is baked in so the UI shows it the moment the clone appears.
-    // `daemon_up` reflects whether the clone's daemon has registered (vs. still booting).
-    let daemon_up = app.media.is_connected(&spec.new_hostname);
+    let daemon_up = app.media.is_connected(id);
+    let dataset = match &plan.source {
+        None => plan.id.clone(),
+        Some(_) => crate::zfs::dataset_name(&app.config().docker.homes_parent, id),
+    };
+    let linear = plan.linear.clone().unwrap_or_default();
+    let ticket_url = linear.ticket_url.clone();
     app.store.mutate(|s| {
-        let mut host = RmngClone {
-            id: spec.new_hostname.clone(),
-            host: spec.new_hostname.clone(),
-            port: 3389,
-            username: "rmng".into(),
-            password: "rmng".into(),
-            managed: true,
-            source: Some(image_ref.clone()),
-            dataset: Some(spec.new_hostname.clone()),
-            base_tag: Some(image_ref.clone()),
-            claude_selection: claude_selection.clone(),
-            claude_account_email: claude_account_email.clone(),
-            claude_group: claude_group.clone(),
-            codex_selection: codex_selection.clone(),
-            codex_account_email: codex_account_email.clone(),
-            codex_group: codex_group.clone(),
-            group: bound_group.clone(),
-            preset_name: spec.preset_name.clone(),
-            headless: spec.headless,
-            parent: spec.parent.clone(),
-            ..Default::default()
-        };
-        if let Some(m) = &spec.linear {
-            host.linear_workspace = m.workspace.clone();
-            host.linear_ticket = m.ticket.clone();
-            host.linear_ticket_url = m.ticket_url.clone();
-            host.linear_branch = m.branch.clone();
-            host.display_name = m.display_name.clone();
-            host.linear_label = m.label.clone();
-        }
-        s.hosts.insert(0, host);
+        s.hosts.insert(
+            0,
+            RmngClone {
+                id: plan.id.clone(),
+                host: plan.id.clone(),
+                port: 3389,
+                username: "rmng".into(),
+                password: "rmng".into(),
+                managed: true,
+                source: Some(image_ref.clone()),
+                dataset: Some(dataset),
+                base_tag: Some(image_ref),
+                claude_selection: claude.0,
+                claude_account_email: claude.1,
+                claude_group: claude.2,
+                codex_selection: codex.0,
+                codex_account_email: codex.1,
+                codex_group: codex.2,
+                group: plan.group.clone(),
+                preset_name: plan.preset_name.clone(),
+                headless: plan.headless,
+                linear_workspace: linear.workspace,
+                linear_ticket: linear.ticket,
+                linear_ticket_url: linear.ticket_url,
+                linear_branch: linear.branch,
+                display_name: linear.display_name,
+                linear_label: linear.label,
+                ..Default::default()
+            },
+        );
         if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
             op.status = OperationStatus::Done;
             op.step = "done".into();
             op.pct = 100.0;
-            op.message = if spec.headless {
-                // Headless clones run no clone-daemon by design — never expect a media Hello.
-                format!("headless clone {} ready", spec.new_hostname)
-            } else if daemon_up {
-                format!("clone {} ready", spec.new_hostname)
-            } else {
-                format!(
-                    "clone {} created but its daemon hasn't registered yet (still booting; \
-                     check it in the UI)",
-                    spec.new_hostname
-                )
+            op.message = match (plan.headless, daemon_up) {
+                (true, _) => format!("headless clone {id} ready"),
+                (false, true) => format!("clone {id} ready"),
+                (false, false) => format!(
+                    "clone {id} created but its daemon hasn't registered yet (still booting; \
+                     check it in the UI)"
+                ),
             };
             op.finished_at = Some(now_ms());
         }
     });
-
     schedule_prune(app.clone(), op_id.clone(), PRUNE_DONE_MS);
+    // A forked home carries the source's files with a fresh /etc (no stamps): converge it.
+    if plan.source.is_some() {
+        crate::clone_reconcile::spawn_converge_after_start(&app, id, "fork");
+    }
 
-    // Kick off the agent: hand it the ticket URL (ticket clones) or the plain
-    // first message, plus any instruction overrides. Detached; it waits for the
-    // wrapper to come up.
-    let ticket_url = spec.linear.as_ref().and_then(|m| m.ticket_url.clone());
-    let has_msg = spec
-        .first_message
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty());
-    if ticket_url.is_some() || has_msg {
-        if let Some(host) = app
-            .store
-            .get()
-            .hosts
-            .into_iter()
-            .find(|h| h.id == spec.new_hostname)
-        {
+    // Start the agent on its ticket or first message; a clone with neither stays quiet.
+    if ticket_url.is_some() || plan.first_message.is_some() {
+        if let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == plan.id) {
             tokio::spawn(crate::chat::kickoff_agent(
                 app.clone(),
                 host,
                 crate::chat::KickoffOpts {
                     ticket_url,
-                    message: spec.first_message.clone(),
-                    agent_instructions: spec.agent_instructions.clone(),
-                    claude_instructions: spec.claude_instructions.clone(),
+                    message: plan.first_message.clone(),
+                    agent_instructions: plan.agent_instructions.clone(),
+                    claude_instructions: plan.claude_instructions.clone(),
                 },
             ));
+        }
+    }
+}
+
+/// Settle one provider's account and answer the row's (selection, email, pool). A fork that
+/// keeps its source's account still gets the token pushed fresh — never copied from the
+/// source's files. Best-effort: a failure is logged into the op, never fatal.
+async fn bind_side<P: crate::pool::PoolProvider>(
+    app: &App,
+    op_id: &str,
+    plan: &ClonePlan,
+    side: &Side,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let src = plan.source.as_ref();
+    let inherited = (
+        src.and_then(|s| P::selection(s).map(str::to_string)),
+        src.and_then(|s| P::host_email(s).map(str::to_string)),
+        src.and_then(|s| P::sticky(s).map(str::to_string)),
+    );
+    let requested = match side {
+        Side::Inherit => {
+            if let Some(email) = inherited.1.clone() {
+                let pushed = P::push(app, &plan.id, &email).await;
+                patch_op(app, op_id, |op| {
+                    op.log.push(match pushed {
+                        Ok(()) => format!("{}: inherited {email}", P::OP_LABEL),
+                        Err(e) => format!("{}: failed to inherit {email}: {e}", P::OP_LABEL),
+                    })
+                });
+            }
+            return inherited;
+        }
+        Side::Assign(sel) => sel.clone(),
+    };
+    match crate::pool::assign_clone_side::<P>(
+        app,
+        Some(op_id),
+        &plan.id,
+        requested.as_deref(),
+        inherited.1.as_deref(),
+        plan.group.as_deref(),
+        crate::pool::AssignStrictness::BestEffort,
+    )
+    .await
+    {
+        Ok(Some(b)) => (Some(b.selection), b.email, b.group),
+        Ok(None) => inherited,
+        Err(e) => {
+            tracing::warn!("unexpected assignment failure: {e:#}");
+            patch_op(app, op_id, |op| {
+                op.log
+                    .push(format!("{}: assignment failed: {e:#}", P::OP_LABEL))
+            });
+            inherited
         }
     }
 }
@@ -933,362 +727,6 @@ fn gen2_playbook_prompt(app: &App, preset_name: Option<&str>) -> (String, String
         crate::web::compose_playbook(&cfg, preset.as_ref()),
         crate::web::compose_global_prompt(&cfg, preset.as_ref()),
     )
-}
-
-/// Everything the API hands to `start_fork`. Every payload field is optional:
-/// `None` inherits the source clone's binding (preset, ticket context, accounts).
-/// Mirrors the matching `CloneSpec` fields without touching the create path.
-#[derive(Debug, Clone, Default)]
-pub struct ForkSpec {
-    pub source_id: String,
-    pub new_hostname: String,
-    pub headless: bool,
-    /// Same as [`CloneSpec::run_startup_script`]: run the preset's startup script as the
-    /// clone user as the last settle step. Defaults on; opt out per request.
-    pub run_startup_script: bool,
-    pub preset_name: Option<String>,
-    pub linear: Option<LinearMeta>,
-    pub claude_account: Option<String>,
-    pub codex_account: Option<String>,
-    /// Clone-level pool binding: `Some(Some(name))` binds, `Some(None)` unbinds,
-    /// `None` inherits the source's group. New writers use this; legacy `group:<name>`
-    /// account picks still bind (see `split_group_binding`).
-    pub group: Option<Option<String>>,
-    /// Force a fresh image build with a fresh base pull even when the preset's tag
-    /// already exists. The New clone dialog's rebuild checkbox sets this.
-    pub rebuild: bool,
-    pub first_message: Option<String>,
-    pub agent_instructions: Option<String>,
-    pub claude_instructions: Option<String>,
-}
-
-/// Fork a gen-2 clone: snapshot + clone the source home, create from the target
-/// preset's Dockerfile (rebuilt fresh when `rebuild` is set). The fork inherits the source's preset, accounts, and ticket context; guard: no
-/// Running op on either end, and the new hostname is valid + unused.
-pub fn start_fork(app: &App, spec: ForkSpec) -> Result<Operation, JobError> {
-    let st = app.store.get();
-    let source_id = spec.source_id.as_str();
-    let new_id = spec.new_hostname.as_str();
-    let src = st.hosts.iter().find(|h| h.id == source_id).cloned();
-    let Some(src) = src else {
-        return Err(JobError(format!("unknown clone '{source_id}'")));
-    };
-    if !src.managed {
-        return Err(JobError(format!("'{source_id}' is not a managed clone")));
-    }
-    if src.base_tag.is_none() {
-        return Err(JobError(format!(
-            "'{source_id}' is not a gen-2 clone (no base tag)"
-        )));
-    }
-    // Fail fast on a pool that does not exist (see the create path).
-    let (pre_group, _, _) = crate::clone_ops::split_group_binding(
-        spec.claude_account.clone(),
-        spec.codex_account.clone(),
-        src.group.clone(),
-        spec.group.clone(),
-    );
-    crate::clone_ops::validate_group(app, pre_group.as_deref())
-        .map_err(|e| JobError(e.to_string()))?;
-    if !is_dns_label(new_id) {
-        return Err(JobError(
-            "new hostname must be a DNS label (lowercase letters, digits, hyphens)".into(),
-        ));
-    }
-    if st.hosts.iter().any(|h| h.id == new_id) {
-        return Err(JobError(format!("a clone named '{new_id}' already exists")));
-    }
-    if st.operations.iter().any(|o| {
-        o.status == OperationStatus::Running && (o.target == new_id || o.target == source_id)
-    }) {
-        return Err(JobError(format!(
-            "'{source_id}' or '{new_id}' already has an operation in flight"
-        )));
-    }
-    if let Some(name) = spec.preset_name.as_deref() {
-        if !app.config().presets.iter().any(|p| p.name == name) {
-            return Err(JobError(format!("unknown preset '{name}'")));
-        }
-    }
-    let op = make_op(OperationKind::Clone, new_id, Some(source_id));
-    let op_for_return = op.clone();
-    let op_id = op.id.clone();
-    app.store.mutate(|s| s.operations.push(op));
-    let app2 = app.clone();
-    tokio::spawn(async move { run_fork(app2, op_id, spec).await });
-    Ok(op_for_return)
-}
-
-async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
-    let source_id = spec.source_id.clone();
-    let new_id = spec.new_hostname.clone();
-    let headless = spec.headless;
-    let progress = op_progress(&app, &op_id, OperationKind::Clone);
-    let src = match app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .find(|h| h.id == source_id)
-    {
-        Some(h) => h,
-        None => return fail_op(&app, &op_id, format!("unknown clone '{source_id}'")),
-    };
-    // Payload wins, source fills the gaps: an explicit preset re-derives env/playbook,
-    // otherwise the source's preset drives the fork (unchanged legacy behavior).
-    let preset_name = spec.preset_name.clone().or(src.preset_name.clone());
-    let env = match gen2_create_env(&app, preset_name.as_deref(), &new_id).await {
-        Ok(env) => env,
-        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
-    };
-    let (playbook, prompt) = gen2_playbook_prompt(&app, preset_name.as_deref());
-    let base_tag = match fork_clone(
-        &app,
-        &source_id,
-        &new_id,
-        &env,
-        &playbook,
-        &prompt,
-        headless,
-        preset_name.as_deref(),
-        spec.rebuild,
-        progress,
-    )
-    .await
-    {
-        Ok(t) => t,
-        Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
-    };
-
-    let mut progress = op_progress(&app, &op_id, OperationKind::Clone);
-    progress("accounts", "assigning agent accounts");
-    // Explicit payload selections are resolved exactly like the create path (group /
-    // account / auto-pending / none, token pushed or credentials cleared). Omitted
-    // fields inherit the source's bindings with the tokens pushed fresh (short-lived —
-    // never copied from the source's files). Best-effort per provider: logged, not fatal.
-    // Fork inherits the source's group; an override naming another `group:<name>`
-    // rebinds the fork (both `auto` sides resolve inside the new group below).
-    let (bound_group, claude_req, codex_req) = crate::clone_ops::split_group_binding(
-        spec.claude_account.clone().or(src.claude_selection.clone()),
-        spec.codex_account.clone().or(src.codex_selection.clone()),
-        src.group.clone(),
-        spec.group.clone(),
-    );
-    let group_changed = bound_group != src.group;
-    let mut claude_selection = src.claude_selection.clone();
-    let mut claude_account_email = src.claude_account_email.clone();
-    let mut claude_group = src.claude_group.clone();
-    if spec.claude_account.is_some() || group_changed {
-        match crate::pool::assign_clone_side::<crate::pool::ClaudePool>(
-            &app,
-            Some(&op_id),
-            &new_id,
-            claude_req.as_deref(),
-            src.claude_account_email.as_deref(),
-            bound_group.as_deref(),
-            crate::pool::AssignStrictness::BestEffort,
-        )
-        .await
-        {
-            Ok(Some(b)) => {
-                claude_selection = Some(b.selection);
-                claude_account_email = b.email;
-                claude_group = b.group;
-            }
-            // No resolution: keep the inherited locals above.
-            Ok(None) => {}
-            Err(e) => {
-                // BestEffort never fails; a future error path must not slip by silently.
-                tracing::warn!("unexpected assignment failure: {e:#}");
-                patch_op(&app, &op_id, |op| {
-                    op.log.push(format!("account: assignment failed: {e:#}"));
-                });
-            }
-        }
-    } else if let Some(email) = src.claude_account_email.clone() {
-        match crate::claude::push_account_to_clone(&app, &new_id, &email).await {
-            Ok(()) => patch_op(&app, &op_id, |op| {
-                op.log
-                    .push(format!("account: inherited {email} from {source_id}"))
-            }),
-            Err(e) => {
-                tracing::warn!("fork {new_id}: inheriting Claude account failed: {e}");
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push(format!("account: failed to inherit {email}: {e}"))
-                });
-            }
-        }
-    }
-    let mut codex_selection = src.codex_selection.clone();
-    let mut codex_account_email = src.codex_account_email.clone();
-    let mut codex_group = src.codex_group.clone();
-    if spec.codex_account.is_some() || group_changed {
-        match crate::pool::assign_clone_side::<crate::pool::CodexPool>(
-            &app,
-            Some(&op_id),
-            &new_id,
-            codex_req.as_deref(),
-            src.codex_account_email.as_deref(),
-            bound_group.as_deref(),
-            crate::pool::AssignStrictness::BestEffort,
-        )
-        .await
-        {
-            Ok(Some(b)) => {
-                codex_selection = Some(b.selection);
-                codex_account_email = b.email;
-                codex_group = b.group;
-            }
-            // No resolution: keep the inherited locals above.
-            Ok(None) => {}
-            Err(e) => {
-                // BestEffort never fails; a future error path must not slip by silently.
-                tracing::warn!("unexpected assignment failure: {e:#}");
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push(format!("codex account: assignment failed: {e:#}"));
-                });
-            }
-        }
-    } else if let Some(email) = src.codex_account_email.clone() {
-        match crate::codex::push_account_to_clone(&app, &new_id, &email).await {
-            Ok(()) => patch_op(&app, &op_id, |op| {
-                op.log
-                    .push(format!("codex account: inherited {email} from {source_id}"))
-            }),
-            Err(e) => {
-                tracing::warn!("fork {new_id}: inheriting Codex account failed: {e}");
-                patch_op(&app, &op_id, |op| {
-                    op.log
-                        .push(format!("codex account: failed to inherit {email}: {e}"))
-                });
-            }
-        }
-    }
-
-    progress(
-        "settle",
-        "attaching the shared folder, home link and SSH access",
-    );
-    crate::homes::ensure_now(&app, &new_id).await;
-    crate::ssh::allow_clone_now(&app, &new_id).await;
-
-    // Last settle step, mirroring create: the preset's startup script (best-effort).
-    if spec.run_startup_script {
-        progress("settle", "running the preset startup script");
-        run_startup_script(&app, &op_id, &new_id, preset_name.as_deref()).await;
-    } else {
-        patch_op(&app, &op_id, |op| {
-            op.log.push("startup script: skipped by request".into())
-        });
-    }
-
-    let daemon_up = app.media.is_connected(&new_id);
-    let dataset = crate::zfs::dataset_name(&app.config().docker.homes_parent, &new_id);
-    // Payload linear metadata replaces the source's ticket context wholesale when
-    // present (a plain-mode fork clears the source ticket); without it the source
-    // context carries over field for field.
-    let linear = spec.linear.clone();
-    let first_message = spec.first_message.clone();
-    let agent_instructions = spec.agent_instructions.clone();
-    let claude_instructions = spec.claude_instructions.clone();
-    let (
-        linear_workspace,
-        linear_ticket,
-        linear_ticket_url,
-        linear_branch,
-        display_name,
-        linear_label,
-    ) = match &linear {
-        Some(m) => (
-            m.workspace.clone(),
-            m.ticket.clone(),
-            m.ticket_url.clone(),
-            m.branch.clone(),
-            m.display_name.clone(),
-            m.label.clone(),
-        ),
-        None => (
-            src.linear_workspace.clone(),
-            src.linear_ticket.clone(),
-            src.linear_ticket_url.clone(),
-            src.linear_branch.clone(),
-            src.display_name.clone(),
-            src.linear_label.clone(),
-        ),
-    };
-    // Cloned before the row write below moves the tuple fields into the closure.
-    let ticket_url = linear_ticket_url.clone();
-    app.store.mutate(|s| {
-        let host = RmngClone {
-            id: new_id.clone(),
-            host: new_id.clone(),
-            port: 3389,
-            username: "rmng".into(),
-            password: "rmng".into(),
-            managed: true,
-            source: Some(base_tag.clone()),
-            dataset: Some(dataset),
-            base_tag: Some(base_tag.clone()),
-            claude_selection: claude_selection.clone(),
-            claude_account_email: claude_account_email.clone(),
-            claude_group: claude_group.clone(),
-            codex_selection: codex_selection.clone(),
-            codex_account_email: codex_account_email.clone(),
-            codex_group: codex_group.clone(),
-            group: bound_group.clone(),
-            preset_name: preset_name.clone(),
-            headless,
-            linear_workspace,
-            linear_ticket,
-            linear_ticket_url,
-            linear_branch,
-            display_name,
-            linear_label,
-            ..Default::default()
-        };
-        s.hosts.insert(0, host);
-        if let Some(op) = s.operations.iter_mut().find(|o| o.id == op_id) {
-            op.status = OperationStatus::Done;
-            op.step = "done".into();
-            op.pct = 100.0;
-            op.message = if daemon_up {
-                format!("clone {new_id} forked from {source_id}")
-            } else {
-                format!(
-                    "clone {new_id} forked but its daemon hasn't registered yet (still booting; \
-                     check it in the UI)"
-                )
-            };
-            op.finished_at = Some(now_ms());
-        }
-    });
-    schedule_prune(app.clone(), op_id.clone(), PRUNE_DONE_MS);
-    // Forked home carries the source's files with a fresh /etc (no stamps): converge it.
-    crate::clone_reconcile::spawn_converge_after_start(&app, &new_id, "fork");
-
-    // Kick off the agent, mirroring the create tail: an explicit ticket URL or first
-    // message starts work on the fork; a pure inherit (no payload, no source ticket)
-    // stays quiet.
-    let has_msg = first_message
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|s| !s.is_empty());
-    if ticket_url.is_some() || has_msg {
-        if let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == new_id) {
-            tokio::spawn(crate::chat::kickoff_agent(
-                app.clone(),
-                host,
-                crate::chat::KickoffOpts {
-                    ticket_url,
-                    message: first_message.clone(),
-                    agent_instructions: agent_instructions.clone(),
-                    claude_instructions: claude_instructions.clone(),
-                },
-            ));
-        }
-    }
 }
 
 /// Rebase a gen-2 clone onto a preset's image, keeping its dataset and id. Guard: the
@@ -1913,60 +1351,6 @@ mod tests {
             started_at: now_ms(),
             finished_at: None,
         }
-    }
-
-    /// Stand in for a clone that has been deleted: its ledger directory is all that is left.
-    fn retire(app: &App, id: &str) {
-        let dir = crate::ledger::ledger_root(&app.data_dir()).join(id);
-        std::fs::create_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn a_retired_clones_name_is_not_handed_out_again() {
-        let app = test_app();
-        assert_eq!(next_free_hostname(&app, "pega-we-142"), "pega-we-142");
-
-        // The clone came and went. Its transcripts are filed under that name, so the next clone
-        // for the same ticket takes the next letter rather than inheriting the history.
-        retire(&app, "pega-we-142");
-        assert_eq!(next_free_hostname(&app, "pega-we-142"), "pega-we-142a");
-        retire(&app, "pega-we-142a");
-        assert_eq!(next_free_hostname(&app, "pega-we-142"), "pega-we-142b");
-    }
-
-    #[tokio::test]
-    async fn an_exact_hostname_that_a_retired_clone_used_is_rejected() {
-        let app = test_app();
-        retire(&app, "worker-7");
-        let spec = CloneSpec {
-            source_image: "img:latest".into(),
-            new_hostname: "worker-7".into(),
-            ..Default::default()
-        };
-        let err = start_clone(&app, spec).unwrap_err().0;
-        assert!(err.contains("retired"), "{err}");
-        // The message names the directory to remove, so the rejection is actionable.
-        assert!(err.contains("ledger/worker-7"), "{err}");
-
-        // A name nobody has used is untouched by the check.
-        let ok = CloneSpec {
-            source_image: "img:latest".into(),
-            new_hostname: "worker-8".into(),
-            ..Default::default()
-        };
-        assert!(start_clone(&app, ok).is_ok());
-    }
-
-    #[test]
-    fn clonespec_default_requests_no_account() {
-        // `Default` leaves both selections absent, which the account layer reads as "auto".
-        // A clone created with no explicit account still gets one (when accounts exist).
-        let spec = CloneSpec {
-            new_hostname: "x".into(),
-            ..Default::default()
-        };
-        assert!(spec.claude_account.is_none());
-        assert!(spec.codex_account.is_none());
     }
 
     #[tokio::test]

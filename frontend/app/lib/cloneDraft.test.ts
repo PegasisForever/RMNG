@@ -1,356 +1,250 @@
 import { expect, test } from "bun:test";
 
 import {
-  cloneDraftValid,
-  emptyCloneDraft,
+  cloneDialogBusy,
+  cloneDialogReducer,
+  cloneDialogValid,
+  cloneRequest,
+  emptyCloneDialog,
   linearKeyMissing,
-  opPhase,
-  resolveForkSource,
-  resolvePreset,
+  presetOf,
   teamKeysOf,
+  type CloneDialog,
+  type CloneDialogEvent,
   type CloneDraft,
 } from "./cloneDraft";
 import type { Operation } from "~/lib/types";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
-const op = (status: Operation["status"]): Operation => ({
+const preset = (over: Partial<PresetRedacted>): PresetRedacted => ({
+  name: "work",
+  labels: ["WE", "DEV"],
+  linearKey: "lin_api_fixture",
+  group: "pooled",
+  defaultForkClone: "",
+  agentPlaybook: "",
+  globalPrompt: "",
+  startupScript: "",
+  dockerfile: "FROM pegasis0/rmng-template:latest",
+  ...over,
+});
+
+const presets = [
+  preset({}),
+  preset({ name: "side", labels: ["AW"], linearKey: "", group: "" }),
+  preset({ name: "bare", labels: [], linearKey: "", group: "" }),
+];
+
+/** A dialog with the config already in, then whatever the events say. */
+function dialogOf(
+  ps: PresetRedacted[],
+  ...events: CloneDialogEvent[]
+): CloneDialog {
+  const config: CloneDialogEvent = { type: "config", presets: ps, groups: [] };
+  return [config, ...events].reduce(cloneDialogReducer, emptyCloneDialog());
+}
+const dialog = (...events: CloneDialogEvent[]) => dialogOf(presets, ...events);
+
+const edit = <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>
+  ({ type: "edit", key, value }) as CloneDialogEvent;
+const sources = (...ids: string[]): CloneDialogEvent => ({
+  type: "sources",
+  ids,
+});
+const op = (status: Operation["status"], message = ""): Operation => ({
   id: "op1",
   kind: "clone",
   target: "pega-we-142",
   status,
   step: "start",
   pct: 55,
-  message: "starting the container",
+  message,
   log: [],
   startedAt: 0,
 });
 
-test("a running op keeps the dialog open", () => {
-  expect(opPhase(op("running"), true, false)).toBe("running");
-});
-
-test("the dialog waits for the FIRST frame rather than closing immediately", () => {
-  // Between the POST returning and the next SSE frame, the op isn't in the list yet. Closing
-  // here would defeat the whole point of the progress bar.
-  expect(opPhase(undefined, false, false)).toBe("running");
-});
-
-test("a done op closes the dialog", () => {
-  expect(opPhase(op("done"), true, false)).toBe("done");
-});
-
-test("an op that vanished after being seen counts as done", () => {
-  // Finished ops are pruned from state ~8s after they settle, so a missed terminal frame
-  // must not strand the dialog open.
-  expect(opPhase(undefined, true, false)).toBe("done");
-});
-
-test("an error keeps the dialog open with its message", () => {
-  expect(opPhase(op("error"), true, false)).toBe("failed");
-});
-
-test("a pruned FAILED op stays failed rather than reading as done", () => {
-  // The sticky flag exists for exactly this: without it, the vanish-means-done rule would
-  // fire 60s later and close the dialog over its own error message.
-  expect(opPhase(undefined, true, true)).toBe("failed");
-});
-
-// --- preset resolution (mirrors the server, per tab) ---------------------------------
-
-const presets: PresetRedacted[] = [
-  {
-    name: "work",
-    labels: ["WE", "DEV"],
-    linearKey: "lin_api_fixture",
-    group: "pooled",
-    defaultForkClone: "",
-    agentPlaybook: "",
-    globalPrompt: "",
-    startupScript: "",
-    dockerfile: "FROM pegasis0/rmng-template:latest",
-  },
-  {
-    name: "side",
-    labels: ["AW"],
-    linearKey: "",
-    group: "",
-    defaultForkClone: "",
-    agentPlaybook: "",
-    globalPrompt: "",
-    startupScript: "",
-    dockerfile: "FROM pegasis0/rmng-template:latest",
-  },
-  {
-    name: "bare",
-    labels: [],
-    linearKey: "",
-    group: "",
-    defaultForkClone: "",
-    agentPlaybook: "",
-    globalPrompt: "",
-    startupScript: "",
-    dockerfile: "FROM pegasis0/rmng-template:latest",
-  },
-];
-
-test("the no-ticket tab uses the hand-picked preset", () => {
-  expect(resolvePreset("plain", presets, { plainPreset: "side" })?.name).toBe(
-    "side",
-  );
-});
-
-test("the template tab uses its own hand-picked preset", () => {
+test("each tab resolves its own preset", () => {
+  expect(presetOf(dialog(edit("mode", "plain")))?.name).toBe("work");
   expect(
-    resolvePreset("template", presets, { templatePreset: "side" })?.name,
+    presetOf(dialog(edit("mode", "create"), edit("team", "aw")))?.name,
   ).toBe("side");
-  expect(resolvePreset("template", presets, {})).toBeUndefined();
+  // Picking a team IS picking a preset, and a ticket prefix picks one on its own.
+  expect(presetOf(dialog(edit("ticket", "we-142")))?.name).toBe("work");
+  expect(presetOf(dialog(edit("ticket", "nonsense")))).toBeUndefined();
 });
 
-test("the new-ticket tab derives the preset from the team key", () => {
-  // Picking a team IS picking a preset — which is why that tab has no preset dropdown.
-  expect(resolvePreset("create", presets, { team: "aw" })?.name).toBe("side");
-  expect(resolvePreset("create", presets, { team: "dev" })?.name).toBe("work");
-});
-
-test("the existing-ticket tab auto-selects by the ticket prefix, case-insensitively", () => {
-  expect(resolvePreset("existing", presets, { ticketPrefix: "we" })?.name).toBe(
-    "work",
-  );
-});
-
-test("nothing resolves until there is something to resolve from", () => {
-  // Both ticket tabs read undefined before input, which is what leaves the resolved-preset
-  // line blank rather than naming a preset the clone might not get.
-  expect(resolvePreset("existing", presets, {})).toBeUndefined();
-  expect(resolvePreset("create", presets, {})).toBeUndefined();
-});
-
-test("a preset with no labels never auto-matches", () => {
-  // Matches `pick_preset_by_prefix`: an unlabelled preset is opt-in only.
-  expect(
-    resolvePreset("existing", presets, { ticketPrefix: "" }),
-  ).toBeUndefined();
-  expect(resolvePreset("create", presets, { team: "" })).toBeUndefined();
-});
-
-// --- team keys (the New-ticket tab's dropdown, which is also its preset selector) --------
-
-test("every label becomes a team key, lowercased", () => {
+test("every label becomes a team key, and a shared key goes to the first preset", () => {
   expect(teamKeysOf(presets).map((t) => t.key)).toEqual(["we", "dev", "aw"]);
-});
-
-test("a key claimed by two presets goes to the first in config order", () => {
-  // Mirrors `pick_preset_by_prefix`. Picking the team has to pick the same preset the server
-  // would, or the dialog names one preset and the clone gets another.
-  const shadowed: PresetRedacted[] = [
-    ...presets,
-    {
-      name: "late",
-      labels: ["WE"],
-      linearKey: "lin_api_fixture",
-      group: "",
-      defaultForkClone: "",
-      agentPlaybook: "",
-      globalPrompt: "",
-      startupScript: "",
-      dockerfile: "FROM pegasis0/rmng-template:latest",
-    },
-  ];
-
+  const shadowed = [...presets, preset({ name: "late", labels: ["WE"] })];
   expect(teamKeysOf(shadowed).find((t) => t.key === "we")?.preset.name).toBe(
     "work",
   );
-  expect(teamKeysOf(shadowed)).toHaveLength(3);
 });
 
-test("an unlabelled preset contributes no team key", () => {
-  // `bare` has no labels, so the dropdown cannot offer it and nothing auto-selects it.
-  expect(teamKeysOf(presets).map((t) => t.preset.name)).not.toContain("bare");
+test("the hand-picked tabs open on the first preset, the new-ticket tab on its first team", () => {
+  expect(dialog(edit("mode", "plain")).draft.plainPreset).toBe("work");
+  expect(dialog(edit("mode", "template")).draft.templatePreset).toBe("work");
+  expect(dialog(edit("mode", "create")).draft.team).toBe("we");
 });
 
-// --- fork source resolution (mirrors the server) ------------------------------------------
-
-test("the preset default wins where still forkable", () => {
-  expect(resolveForkSource("b", ["a", "b"])).toBe("b");
+test("the fork source follows the preset's default clone, else the oldest", () => {
+  const ticket = edit("ticket", "WE-142");
+  expect(dialog(sources("a", "b"), ticket).draft.source).toBe("a");
+  const pinned = [preset({ defaultForkClone: "b" }), ...presets.slice(1)];
+  expect(dialogOf(pinned, sources("a", "b"), ticket).draft.source).toBe("b");
+  // A default naming no forkable clone falls back to the oldest.
+  const stale = [preset({ defaultForkClone: "gone" }), ...presets.slice(1)];
+  expect(dialogOf(stale, sources("a", "b"), ticket).draft.source).toBe("a");
+  // Blank until a preset resolves: nothing is forked from a guess.
+  expect(dialog(sources("a", "b")).draft.source).toBeNull();
 });
 
-test("a stale or blank default falls back to the oldest", () => {
-  expect(resolveForkSource("gone", ["a", "b"])).toBe("a");
-  expect(resolveForkSource("", ["a", "b"])).toBe("a");
-  expect(resolveForkSource(undefined, ["a", "b"])).toBe("a");
+test("a source picked by hand sticks until it stops being forkable", () => {
+  const picked = dialog(sources("a", "b"), edit("ticket", "WE-142"), edit("source", "b"));
+  expect(picked.draft.source).toBe("b");
+  expect(cloneDialogReducer(picked, sources("a", "b")).draft.source).toBe("b");
+  // "b" was deleted or archived: the pick goes back to following the preset.
+  expect(cloneDialogReducer(picked, sources("a")).draft.source).toBe("a");
 });
 
-test("no forkable clone resolves to null", () => {
-  expect(resolveForkSource("a", [])).toBeNull();
+test("the pool and both accounts follow the preset until touched", () => {
+  const s = dialog(edit("mode", "plain"));
+  expect([s.draft.group, s.draft.claudeAccount, s.draft.codexAccount]).toEqual([
+    "pooled",
+    "auto",
+    "auto",
+  ]);
+  // A preset naming no pool reads as every pool, which is what `none` sends.
+  expect(dialog(edit("mode", "plain"), edit("plainPreset", "side")).draft.group).toBe(
+    "none",
+  );
+  const byHand = cloneDialogReducer(s, edit("group", "other"));
+  expect(cloneDialogReducer(byHand, edit("plainPreset", "side")).draft.group).toBe(
+    "other",
+  );
 });
 
-// --- the missing-Linear-key rule (mirrors the server, per tab) ---------------------------
-
-const work = presets[0];
-const side = presets[1];
-
-test("the warning stays down until the config has landed", () => {
-  // `presets` is empty for one round trip, which is indistinguishable from "none configured".
-  // Without the gate the warning flashes on every open.
-  expect(linearKeyMissing("existing", [], undefined, false)).toBe(false);
-  expect(linearKeyMissing("create", [], undefined, false)).toBe(false);
+test("with nothing to fork, the template tab is the only one left", () => {
+  expect(dialog(sources()).draft.mode).toBe("template");
 });
 
-test("creating a ticket needs the RESOLVED preset's own key", () => {
-  // `resolve_issue` opens the issue with one preset's key, so another preset having one is
-  // no help.
-  expect(linearKeyMissing("create", presets, work, true)).toBe(false);
-  expect(linearKeyMissing("create", presets, side, true)).toBe(true);
-  expect(linearKeyMissing("create", presets, undefined, true)).toBe(true);
+test("a missing Linear key blocks the tabs that need one", () => {
+  // `create` opens the issue with the resolved preset's own key, so another's is no help.
+  expect(linearKeyMissing(dialog(edit("mode", "create"), edit("team", "aw")))).toBe(
+    true,
+  );
+  expect(linearKeyMissing(dialog(edit("mode", "create"), edit("team", "we")))).toBe(
+    false,
+  );
+  // `existing` only looks one up, and every configured key is tried in turn.
+  expect(linearKeyMissing(dialog(edit("ticket", "WE-142")))).toBe(false);
+  expect(linearKeyMissing(dialogOf([presets[1]], edit("ticket", "AW-1")))).toBe(
+    true,
+  );
+  // Before the config lands there is nothing to warn about.
+  expect(linearKeyMissing(emptyCloneDialog("WE-142"))).toBe(false);
 });
 
-test("the fork-free tabs never need a Linear key", () => {
-  expect(linearKeyMissing("plain", presets, undefined, true)).toBe(false);
-  expect(linearKeyMissing("template", presets, undefined, true)).toBe(false);
+test("the Create button waits for what the open tab needs", () => {
+  expect(cloneDialogValid(dialog(sources("pega-we-142"), edit("ticket", "WE-142")))).toBe(
+    true,
+  );
+  // A prefix no preset claims is a request the server would refuse.
+  expect(cloneDialogValid(dialog(sources("pega-we-142"), edit("ticket", "ZZ-1")))).toBe(
+    false,
+  );
+  const newTicket = dialog(
+    sources("pega-we-142"),
+    edit("mode", "create"),
+    edit("team", "we"),
+  );
+  expect(cloneDialogValid(newTicket)).toBe(false);
+  expect(cloneDialogValid(cloneDialogReducer(newTicket, edit("title", "x")))).toBe(
+    true,
+  );
+  // Only the template tab may go without a source clone.
+  expect(cloneDialogValid(dialog(edit("mode", "plain"), edit("title", "x")))).toBe(
+    false,
+  );
+  expect(cloneDialogValid(dialog(edit("mode", "template"), edit("title", "x")))).toBe(
+    true,
+  );
 });
 
-test("looking a ticket up needs ANY preset's key", () => {
-  // `fetch_issue_any` tries every configured key in turn, so the resolved preset is beside
-  // the point — including when nothing has resolved yet.
-  expect(linearKeyMissing("existing", presets, undefined, true)).toBe(false);
-  expect(linearKeyMissing("existing", [side], side, true)).toBe(true);
-  expect(linearKeyMissing("existing", [], undefined, true)).toBe(true);
-});
-
-// --- whether the Clone button may fire ---------------------------------------------------
-
-const draft = (overrides: Partial<CloneDraft> = {}): CloneDraft => ({
-  ...emptyCloneDraft(),
-  source: "pega-we-142",
-  ...overrides,
-});
-
-const check = (
-  d: CloneDraft,
-  overrides: Partial<{
-    presets: PresetRedacted[];
-    preset: PresetRedacted | undefined;
-    ticketParsed: boolean;
-    keyMissing: boolean;
-    needsSource: boolean;
-  }> = {},
-) =>
-  cloneDraftValid(d, {
-    presets,
-    preset: undefined,
-    ticketParsed: false,
-    keyMissing: false,
-    ...overrides,
+test("the dialog follows its operation and closes only when it settles", () => {
+  const started = dialog({ type: "starting" }, { type: "started", opId: "op1" });
+  expect(cloneDialogBusy(started)).toBe(true);
+  // Between the POST and the first frame the op is not in the list yet.
+  expect(cloneDialogReducer(started, { type: "op", op: undefined }).done).toBe(
+    false,
+  );
+  const running = cloneDialogReducer(started, { type: "op", op: op("running") });
+  expect(running.done).toBe(false);
+  expect(cloneDialogReducer(running, { type: "op", op: op("done") }).done).toBe(
+    true,
+  );
+  // Finished ops are pruned seconds later, so one that vanished counts as done.
+  expect(cloneDialogReducer(running, { type: "op", op: undefined }).done).toBe(
+    true,
+  );
+  // A failed op stays failed when it is pruned, rather than closing over its own message.
+  const failed = cloneDialogReducer(running, {
+    type: "op",
+    op: op("error", "no such preset"),
   });
+  expect(failed.error).toBe("no such preset");
+  const pruned = cloneDialogReducer(failed, { type: "op", op: undefined });
+  expect([pruned.done, cloneDialogBusy(pruned)]).toEqual([false, false]);
+});
 
-test("no source clone blocks every tab", () => {
-  // The source is the one field shared by all three requests, and the picker can be empty.
-  expect(
-    check(draft({ source: null }), { ticketParsed: true, preset: work }),
-  ).toBe(false);
-  expect(
-    check(draft({ source: null, mode: "create", team: "we", title: "x" })),
-  ).toBe(false);
-  expect(
-    check(
-      draft({ source: null, mode: "plain", title: "x", plainPreset: "work" }),
+test("the request carries the open tab's own fields", () => {
+  const plain = cloneRequest(
+    dialog(
+      sources("pega-we-142"),
+      edit("mode", "plain"),
+      edit("title", "scratch"),
+      edit("message", "go"),
+      edit("rebuild", true),
     ),
-  ).toBe(false);
-});
-
-test("an existing ticket needs both a parse and a preset that claims its prefix", () => {
-  // With the preset dropdown gone there is no way to override the auto-selection, so a prefix
-  // nothing claims is a request the server would 400.
-  expect(
-    check(draft({ ticket: "WE-142" }), { ticketParsed: true, preset: work }),
-  ).toBe(true);
-  expect(
-    check(draft({ ticket: "WE-142" }), {
-      ticketParsed: true,
-      preset: undefined,
-    }),
-  ).toBe(false);
-  expect(
-    check(draft({ ticket: "nonsense" }), { ticketParsed: false, preset: work }),
-  ).toBe(false);
-});
-
-test("with no presets configured at all, a parseable ticket is enough", () => {
-  expect(
-    check(draft({ ticket: "WE-142" }), { presets: [], ticketParsed: true }),
-  ).toBe(true);
-});
-
-test("a new ticket needs a team key and a title", () => {
-  expect(
-    check(draft({ mode: "create", team: "we", title: "Tighten the row" })),
-  ).toBe(true);
-  expect(check(draft({ mode: "create", team: "we", title: "   " }))).toBe(
-    false,
   );
+  expect(plain).toMatchObject({
+    source: "pega-we-142",
+    preset: "work",
+    group: "pooled",
+    claudeAccount: "auto",
+    linear: { displayName: "scratch" },
+    firstMessage: "go",
+    rebuild: true,
+    runStartupScript: true,
+    headless: false,
+  });
+  // The template tab forks nothing.
   expect(
-    check(draft({ mode: "create", team: "", title: "Tighten the row" })),
-  ).toBe(false);
-});
-
-test("a no-ticket clone needs a title, and a preset whenever any are configured", () => {
-  expect(
-    check(draft({ mode: "plain", title: "scratch", plainPreset: "work" })),
-  ).toBe(true);
-  expect(
-    check(draft({ mode: "plain", title: "scratch", plainPreset: "" })),
-  ).toBe(false);
-  expect(check(draft({ mode: "plain", title: "", plainPreset: "work" }))).toBe(
-    false,
-  );
-  // Nothing configured, so there is no preset to pick and the title carries the form.
-  expect(
-    check(draft({ mode: "plain", title: "scratch" }), { presets: [] }),
-  ).toBe(true);
-});
-
-test("a template clone needs a title, and a preset whenever any are configured", () => {
-  const t = (o: object) =>
-    check(draft({ mode: "template", source: null, ...o }), {
-      needsSource: false,
-    });
-  expect(t({ title: "scratch", templatePreset: "work" })).toBe(true);
-  expect(t({ title: "scratch", templatePreset: "" })).toBe(false);
-  expect(t({ title: "", templatePreset: "work" })).toBe(false);
-  // Nothing configured, so there is no preset to pick and the title carries the form.
-  expect(
-    check(draft({ mode: "template", source: null, title: "scratch" }), {
-      presets: [],
-      needsSource: false,
-    }),
-  ).toBe(true);
-  // …but without the template opt-out a missing source still blocks, like every tab.
-  expect(
-    check(
-      draft({
-        mode: "template",
-        source: null,
-        title: "x",
-        templatePreset: "work",
-      }),
+    cloneRequest(dialog(edit("mode", "template"), edit("title", "x"))).source,
+  ).toBeUndefined();
+  // A ticket tab sends Linear's own answer instead of the typed title.
+  const ticket = cloneRequest(
+    dialog(
+      sources("pega-we-142"),
+      edit("ticket", "WE-142"),
+      edit("agentInstructions", " read the notes "),
     ),
-  ).toBe(false);
-});
-
-test("a missing Linear key blocks an otherwise complete form", () => {
-  // The warning and the dead button are the same rule seen twice, which is why the button
-  // cannot go live while the message is up.
+    { ticket: "WE-142", displayName: "Encoder drops frames" },
+  );
+  expect(ticket.linear).toEqual({
+    ticket: "WE-142",
+    displayName: "Encoder drops frames",
+  });
+  expect(ticket.agentInstructions).toBe("read the notes");
+  // Instruction overrides belong to the ticket tabs only.
   expect(
-    check(draft({ mode: "create", team: "aw", title: "Encoder spike" }), {
-      preset: side,
-      keyMissing: true,
-    }),
-  ).toBe(false);
-  expect(
-    check(draft({ ticket: "WE-142" }), {
-      ticketParsed: true,
-      preset: work,
-      keyMissing: true,
-    }),
-  ).toBe(false);
+    cloneRequest(
+      dialog(
+        sources("pega-we-142"),
+        edit("mode", "plain"),
+        edit("title", "x"),
+        edit("agentInstructions", "nope"),
+      ),
+    ).agentInstructions,
+  ).toBeUndefined();
 });

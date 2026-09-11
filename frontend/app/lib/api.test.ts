@@ -5,12 +5,7 @@
 // test pins the wrapped shape on both sides of each call.
 import { afterEach, expect, mock, test } from "bun:test";
 
-import {
-  duplicateClone,
-  forkClone,
-  prebuildDockerfile,
-  rebaseClone,
-} from "./api";
+import { prebuildDockerfile, rebaseClone, startClone } from "./api";
 
 const op = {
   id: "op-1",
@@ -41,25 +36,30 @@ afterEach(() => {
   globalThis.fetch = undefined;
 });
 
-test("duplicateClone resolves the wrapped op", async () => {
+test("startClone posts the request and resolves the wrapped op", async () => {
   const seen: { url: string; init?: RequestInit }[] = [];
   stubFetch(seen);
-  const got = await duplicateClone({
-    plain: { title: "x", message: "" },
+  const req = {
+    linear: { displayName: "x" },
+    headless: false,
     runStartupScript: true,
-  });
+    rebuild: false,
+  };
+  const got = await startClone(false, req);
   expect(got.id).toBe("op-1");
   expect(seen[0].url).toBe("/api/clone");
+  expect(JSON.parse(seen[0].init?.body as string)).toEqual(req);
 });
 
-test("forkClone resolves the wrapped op", async () => {
+test("a fork of a live clone goes to the fork route", async () => {
   const seen: { url: string; init?: RequestInit }[] = [];
   stubFetch(seen);
-  const got = await forkClone("src-id", true, {
-    preset: "webapp",
+  await startClone(true, {
+    source: "src-id",
+    headless: false,
     runStartupScript: true,
+    rebuild: false,
   });
-  expect(got.id).toBe("op-1");
   expect(seen[0].url).toBe("/api/fork");
 });
 
@@ -84,23 +84,4 @@ test("rebaseClone posts preset plus rebuild and resolves the wrapped op", async 
     preset: "webapp",
     rebuild: true,
   });
-});
-
-test("forkClone sends rebuild only when checked", async () => {
-  const seen: { url: string; init?: RequestInit }[] = [];
-  stubFetch(seen);
-  await forkClone("src-id", false, {
-    preset: "webapp",
-    runStartupScript: true,
-    rebuild: true,
-  });
-  expect(JSON.parse(seen[0].init?.body as string).rebuild).toBe(true);
-
-  const seen2: { url: string; init?: RequestInit }[] = [];
-  stubFetch(seen2);
-  await forkClone("src-id", false, {
-    preset: "webapp",
-    runStartupScript: true,
-  });
-  expect("rebuild" in JSON.parse(seen2[0].init?.body as string)).toBe(false);
 });

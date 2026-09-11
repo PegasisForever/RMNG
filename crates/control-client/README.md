@@ -13,8 +13,8 @@ never its own schema.
   the SPA's `index.html`).
 - `Client::events()` — `/events` as a typed `Stream<Item = Result<ControlState>>`: default
   (unnamed) frames only; named `stats`/`forwards` events and keep-alive comments are skipped.
-- Typed wrappers for the fleet actions: `activate`, `clone_host` (the raw-hostname
-  `POST /api/clone` mode), `delete`, `images`/`image_pull`/`image_commit`/`image_delete`,
+- Typed wrappers for the fleet actions: `activate`, `start_clone` (`POST /api/clone` and
+  `POST /api/fork`, both taking a `wire::CloneRequest`), `delete`, `images`/`image_pull`/`image_commit`/`image_delete`,
   `claude_swap`/`codex_swap`, `config` (redacted).
 - `SseParser` — incremental SSE frame parser (`event:`/`data:` fields, `:` comment
   keep-alives, blank-line terminators, chunk-split reassembly incl. multi-byte UTF-8).

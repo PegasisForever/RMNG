@@ -228,8 +228,7 @@ creating). The stock base those Dockerfiles build `FROM` is published as
 [Publishing the template](#publishing-the-template) for how it's built. Unused tags are
 purged automatically when the last clone on them is deleted.
 
-- **Clone from a preset**: `POST /api/clone` takes a task mode (Linear ticket / new
-  ticket / plain) plus a preset. The clone joins the `rmng` bridge (addressed by container
+- **Clone from a preset**: `POST /api/clone` takes a preset and a title (or a ticket). The clone joins the `rmng` bridge (addressed by container
   name — Docker DNS; its IP is plain Docker IPAM) with fixed `rmng`/`rmng` credentials,
   its `/etc/environment` preset env, and the Claude and/or Codex account its selections
   resolve to (defaulting to `auto` for both, so a new clone gets an account rather than
@@ -644,7 +643,8 @@ inherits it (there's no per-install control-server payload any more; see
 
 ## Day-2 operations (from the dashboard / API / `rmng` CLI)
 
-- **Clone**: `POST /api/clone` — Linear ticket / new ticket / plain, from a chosen image. The
+- **Clone**: `POST /api/clone` — a preset's image onto a fresh home (`/api/fork` copies a
+  live clone's home instead). The
   new clone is brought to `config.effective_monitors()` (the active layout preset, or the
   built-in default when no presets exist) as soon as its clone-daemon registers, which
   corrects the template's baked-in `RMNG_MONITORS` boot value before anyone opens the clone.

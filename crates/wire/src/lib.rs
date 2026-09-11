@@ -40,9 +40,9 @@ pub use config::{
 };
 pub use control::{
     BoardColumn, Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
-    CloneTokens, CodexResetMark, ContainerStats, ControlState, LayoutPreset, LxcStats, MonitorSpec,
-    MonitorState, Operation, OperationKind, OperationStatus, PortForward, Provider, RmngClone,
-    ScheduledMessage, UpdateStatus,
+    CloneRequest, CloneTokens, CodexResetMark, ContainerStats, ControlState, LayoutPreset,
+    LinearMeta, LxcStats, MonitorSpec, MonitorState, Operation, OperationKind, OperationStatus,
+    PortForward, Provider, RmngClone, ScheduledMessage, UpdateStatus,
 };
 pub use exec::{ExecRequest, ExecResult};
 pub use ledger::{LedgerHit, LedgerRange, LedgerRecord, LedgerSearch};

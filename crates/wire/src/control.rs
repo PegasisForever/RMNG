@@ -671,6 +671,106 @@ pub struct Chat {
     pub messages: Vec<ChatMessage>,
 }
 
+/// The Linear ticket a clone was made for: what its row stores, what the board draws, and
+/// what the agent is started on. `display_name` is the clone's title — the issue's own for a
+/// ticket clone, whatever was typed for one without.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct LinearMeta {
+    /// Lowercase workspace / ticket prefix, e.g. `we`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace: Option<String>,
+    /// Ticket identifier, e.g. `WE-142`. Names the clone when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ticket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub ticket_url: Option<String>,
+    /// Linear's own `branchName`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub branch: Option<String>,
+    /// The clone's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_name: Option<String>,
+    /// The issue's first label, which is the only one a clone carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub label: Option<String>,
+}
+
+/// The body of `POST /api/clone` (a clone built from a preset image onto a fresh home) and
+/// of `POST /api/fork` (a copy of a live clone's home). One type: the two requests differ
+/// only in where the home comes from, which is the route.
+///
+/// What an omitted field becomes is decided in one place, the control-server's `clone_plan`:
+/// the preset, the pool and both accounts, and the clone's own name — which no client can
+/// pick, because a free name needs the live clone list. `Default` leaves every flag off, so
+/// a caller building one by hand states `run_startup_script` itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct CloneRequest {
+    /// Fork only: the clone whose home is copied. Omitted, the preset's default fork clone
+    /// where it is still forkable, else the oldest forkable clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<String>,
+    /// Preset name: its Dockerfile builds the image and its vars are the clone's
+    /// environment. Required while any presets exist, except on a fork, which keeps its
+    /// source's preset when this is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub preset: Option<String>,
+    /// The ticket this clone is for, `displayName` carrying its title. A clone built from a
+    /// preset image needs a title; a fork without this keeps its source's ticket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub linear: Option<LinearMeta>,
+    /// This side's account: an email pins it, `auto` rotates inside the pool, `none` leaves
+    /// the clone tokenless, and a legacy `group:<pool>` binds that pool. Omitted, a fork
+    /// keeps its source's account and every other clone takes `auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub claude_account: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub codex_account: Option<String>,
+    /// The pool both sides draw their accounts from: a name binds, `none` unbinds to every
+    /// pool. Omitted, the named preset's pool, else (on a fork) the source's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub group: Option<String>,
+    /// Sent to the agent as its first turn once the clone is up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_message: Option<String>,
+    /// Appended to the clone agent's and to Claude Code's default instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub claude_instructions: Option<String>,
+    /// No desktop: the viewer shows a tmux tab view instead of a video stream.
+    #[serde(default)]
+    pub headless: bool,
+    /// Run the preset's startup script as the clone user, as the last step of the build.
+    #[serde(default = "default_true")]
+    pub run_startup_script: bool,
+    /// Build the preset's image fresh, with a fresh base pull, even when its tag exists.
+    #[serde(default)]
+    pub rebuild: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

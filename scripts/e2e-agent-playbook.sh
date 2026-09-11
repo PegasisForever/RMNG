@@ -56,7 +56,7 @@ CAP=$!
 
 say "7. create a clone using the 'e2e' preset (no Claude account needed)"
 curl -fsS -X POST $API/api/clone -H 'content-type: application/json' \
-  -d "$(jq -n --arg img "$IMG" '{image:$img, plain:{title:"e2e", message:""}, preset:"e2e", claudeAccount:"none"}')" \
+  -d '{"linear":{"displayName":"e2e"}, "preset":"e2e", "claudeAccount":"none"}' \
   | jq -c '{ok:.ok, op:.op.id}' || echo "clone POST failed"
 
 wait $CAP

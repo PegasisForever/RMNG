@@ -106,12 +106,6 @@ fn provider_rank(p: Option<wire::Provider>) -> u8 {
     }
 }
 
-/// Publish `views` (all of `provider`) into `ControlState.claude_accounts`, replacing
-/// exactly this provider's existing rows and leaving every other provider's rows intact.
-/// `views` are sorted alphabetical; the combined list is then
-/// stable-sorted by provider rank so grouping is deterministic. This is what lets the
-/// Claude and Codex pollers coexist without clobbering each other (each poller previously
-/// did `s.claude_accounts = views`, which would erase the other provider).
 /// Resolve the clone-level group from an explicit `group` request field plus legacy
 /// `group:<name>` per-side selections. `explicit` is the request's `group` key:
 /// `Some(name)` binds, `Some("")` unbinds, `None` (key absent) keeps the legacy behavior
@@ -162,39 +156,24 @@ pub(crate) fn split_group_binding(
     (group, rewrite(claude_sel), rewrite(codex_sel))
 }
 
-/// The fork source both the clone modal and `POST /api/fork` resolve the same way: the
-/// preset's default fork clone where it still exists and is forkable (managed, not
-/// archived), else the oldest forkable clone (first in store order — clones append on
-/// creation, so the head is the oldest survivor).
-pub(crate) fn resolve_fork_source(app: &App, preset_default: Option<&str>) -> Option<String> {
-    let st = app.store.get();
-    let mut forkable = st.hosts.iter().filter(|h| h.managed && !h.archived);
-    if let Some(def) = preset_default.map(str::trim).filter(|s| !s.is_empty()) {
-        if forkable.clone().any(|h| h.id == def) {
-            return Some(def.to_string());
-        }
-    }
-    forkable.next().map(|h| h.id.clone())
-}
-
-/// Delete every imported account the merged pool list leaves unclaimed. An account in
-/// zero groups is removed (the group tree's rule) — the existing per-provider delete path
-/// settles clones onto surviving accounts, and refuses (Err) when a clone pins the account,
-/// which fails the save with that reason instead of stranding the pin.
 /// Reject a binding to a pool that does not exist. Without this a typo'd group would
 /// resolve to nothing and the clone would sit tokenless with no error anywhere — the
 /// rotator skips unknown groups silently by design (it cannot tell a deleted pool from a
 /// config that failed to load).
-pub(crate) fn validate_group(app: &App, group: Option<&str>) -> anyhow::Result<()> {
+pub(crate) fn validate_group(cfg: &wire::AppConfig, group: Option<&str>) -> anyhow::Result<()> {
     if let Some(name) = group {
         anyhow::ensure!(
-            app.config().groups.iter().any(|g| g.name == name),
+            cfg.groups.iter().any(|g| g.name == name),
             "unknown account pool {name:?}"
         );
     }
     Ok(())
 }
 
+/// Delete every imported account the merged pool list leaves unclaimed. An account in
+/// zero groups is removed (the group tree's rule) — the existing per-provider delete path
+/// settles clones onto surviving accounts, and refuses (Err) when a clone pins the account,
+/// which fails the save with that reason instead of stranding the pin.
 pub(crate) async fn sweep_ungrouped_accounts(app: &App) -> anyhow::Result<()> {
     use std::collections::HashSet;
     let claimed: HashSet<String> = app
@@ -218,6 +197,12 @@ pub(crate) async fn sweep_ungrouped_accounts(app: &App) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Publish `views` (all of `provider`) into `ControlState.claude_accounts`, replacing
+/// exactly this provider's existing rows and leaving every other provider's rows intact.
+/// `views` are sorted alphabetical; the combined list is then
+/// stable-sorted by provider rank so grouping is deterministic. This is what lets the
+/// Claude and Codex pollers coexist without clobbering each other (each poller previously
+/// did `s.claude_accounts = views`, which would erase the other provider).
 pub(crate) fn replace_provider_views(
     app: &App,
     provider: wire::Provider,

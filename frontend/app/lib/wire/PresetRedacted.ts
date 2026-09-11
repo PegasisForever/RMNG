@@ -8,26 +8,19 @@
  * redaction is a direction: `PUT /api/config` treats `linear_key` as write-only, so a blank
  * submission keeps the stored key rather than clearing it.
  */
-export type PresetRedacted = {
- name: string;
- labels: Array<string>;
- /**
-  * The preset's Linear personal API key, verbatim. Empty when none is configured, which
-  * is the whole test the settings panel runs to decide whether its write-only key input
-  * reads as already set.
-  */
- linearKey: string;
- /**
-  * Default account pool: a pool name, or `"none"` for any group (rmng picks whichever
-  * account is free in any pool) — not secret, shown verbatim.
-  */
- group: string;
- /**
-  * Default fork source: a clone id, or empty for the oldest forkable clone.
-  */
- defaultForkClone: string;
- agentPlaybook: string;
- globalPrompt: string;
- startupScript: string;
- dockerfile: string;
-};
+export type PresetRedacted = { name: string, labels: Array<string>, 
+/**
+ * The preset's Linear personal API key, verbatim. Empty when none is configured, which
+ * is the whole test the settings panel runs to decide whether its write-only key input
+ * reads as already set.
+ */
+linearKey: string, 
+/**
+ * Default account pool: a pool name, or `"none"` for any group (rmng picks whichever
+ * account is free in any pool) — not secret, shown verbatim.
+ */
+group: string, 
+/**
+ * Default fork source: a clone id, or empty for the oldest forkable clone.
+ */
+defaultForkClone: string, agentPlaybook: string, globalPrompt: string, startupScript: string, dockerfile: string, };

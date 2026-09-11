@@ -672,8 +672,8 @@ A sub clone cannot be filed: it is drawn under its parent's card, so move the pa
 
 - `rmng clone ssh <clone>` — print a ready-to-paste `ssh` command for a clone.
 - `rmng clone self` — this clone's own record (its id, image, address and accounts).
-- `rmng clone fork <source> <new-id>` — snapshot + clone the source home, create from its
-  recorded base tag. Whole-home only; there is no partial-dir copy.
+- `rmng clone fork [source]` — copy a live clone's whole home into a new clone. Whole-home
+  only; there is no partial-dir copy.
 - Every clone sees every home at `~/clones/<id>` — read or copy straight across, no
   server round-trip.
 - `rmng clone exec <clone> -- <argv…>` — run one non-interactive command inside another clone
@@ -717,41 +717,27 @@ These two flags work on `screenshot`, `move`, `click`, `right-click`, `middle-cl
 
 ## Create clones
 
-Four create verbs. They share the flags in "Common create flags" below; clone images come from the preset Dockerfile (gen-2), so there is no image flag.
+Two verbs. The image comes from the preset's Dockerfile, and the server names the clone.
 
-- `rmng clone create <hostname>` — exact hostname (a DNS label), no ticket.
-  Takes `--preset <name>` / `--no-preset`.
-- `rmng clone create-from-ticket <link-or-id>` — clone for an EXISTING Linear ticket. The
-  hostname derives from the ticket id (`WE-142` → `<prefix>we-142`) and **the preset is
-  auto-selected from the ticket's team prefix** — there is deliberately no `--preset` here.
-  Also takes `--agent-instructions` / `--claude-instructions` (appended to the defaults,
-  taking precedence).
-- `rmng clone create-with-new-ticket --team <key> --title <t>` — CREATE a Linear ticket,
-  then clone for it. `--team` is a Linear team key like `we`, and it must be a label on some
-  preset: that preset is the one used, and its Linear API key opens the issue. Description via
-  `--description <markdown>` or `--description-file <path>` (`-` = stdin, which is the sane
-  way to pass a multi-line body). Same instruction flags as `create-from-ticket`.
-- `rmng clone create-plain --title <t>` — no-ticket clone with a title-derived
-  hostname. `--message`/`--message-file` is auto-sent to the agent as its first message;
-  `--preset <name>` is required when any presets are configured.
+- `rmng clone create-plain --title <t>` — a clone built from a preset image onto a fresh
+  home, named after the title. `--preset <name>` is required when any presets are configured.
+- `rmng clone fork [source]` — copy a live clone's home instead. An omitted source is the
+  preset's default fork clone where it is still forkable, else the oldest forkable clone.
+  Takes `--preset <name>` (omitted keeps the source's; naming one moves the fork to that
+  preset's account pool), `--claude-account <sel>` / `--codex-account <sel>`, and `--headless`.
 
 ### Common create flags
 
+- `--message <m>` / `--message-file <path>` (`-` reads stdin) — the first message auto-sent
+  to the agent. Omitted, nothing is sent.
+- `--column "<name>"` — file the new clone at the top of that board column.
+- `--no-startup-script` — skip the preset's startup script, which otherwise runs as the
+  clone user once the clone is up.
 - `--wait` (with `--timeout <secs>`, default 600) — block until the clone is fully created,
   streaming progress. **Without it the command returns as soon as the operation starts**, so
   use `--wait` whenever the next step needs the clone to exist.
-- `--claude-account <sel>` / `--codex-account <sel>` — the account for each provider,
-  independently. A selection is an email (pin it), `auto` (the server picks), `none` (no
-  token at all), or `group:<pool>` (bind to a named pool and let the rotator balance it).
-  Omitting one walks parent → the preset's default → `auto`.
-- `--headless` — no desktop (see "Headed vs headless" above). Default is headed.
-- `--parent <clone>` — nest under a specific top-level clone. `--top-level` forces a
-  top-level clone instead.
-
-**Run from inside a clone, a new clone auto-nests as a sub clone under you AND inherits your
-account selections and env preset by default** — a helper you spin up shares your accounts and
-preset with no flags. What it inherits is the *selection*, not the account you happen to be
-running: if you are on `auto`, so is it, and it gets its own pick. `--top-level` skips both.
+- An account selection is an email (pin it), `auto` (the server picks), `none` (no token at
+  all), or `group:<pool>` (bind to a named pool and let the rotator balance it).
 
 ## Retire clones
 

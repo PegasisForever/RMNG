@@ -163,9 +163,8 @@ fn clone_dir(data_dir: &str, clone: &str) -> Option<PathBuf> {
 
 /// Every clone name the ledger has a directory for, live clones included.
 ///
-/// This is the registry of names already used. It is read by [`crate::jobs::next_free_hostname`]
-/// and by [`crate::jobs::start_clone`], so a retired clone's name is never handed to a new clone
-/// whose history would then be filed under it.
+/// This is the registry of names already used. [`crate::clone_plan::plan`] reads it, so a
+/// retired clone's name is never handed to a new clone whose history would be filed under it.
 pub fn reserved_names(data_dir: &str) -> HashSet<String> {
     let Ok(rd) = std::fs::read_dir(ledger_root(data_dir)) else {
         return HashSet::new();

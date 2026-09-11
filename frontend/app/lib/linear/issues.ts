@@ -26,6 +26,7 @@
 import { gql } from "~/lib/linear/client";
 import { OPEN_ISSUE_FIELDS, ticketFromNode } from "~/lib/linear/queries";
 import type { LinearTicket, TicketState } from "~/lib/linear/types";
+import type { LinearMeta } from "~/lib/wire/LinearMeta";
 import { parseTicketInput } from "~/lib/workspace";
 
 /** A Linear issue as the clone route needs it: what a clone stores, plus the workflow state
@@ -309,28 +310,11 @@ export async function ensureInProgress(
 
 // --- handing it to the clone route -------------------------------------------
 
-/** A Linear issue distilled for a clone request, off a resolved issue.
- *
- *  Every field is Linear's own answer rather than anything the operator typed, which is what
- *  makes the clone's stored title, url and branch match the ticket they name. `label` is the
- *  first label only, because that is the single one a clone carries. Carried by the fork
- *  payload's `linear` object (the New clone dialog). */
-export interface CloneLinearMeta {
- /** Lowercase team key, e.g. `we`. */
- workspace: string;
- /** Linear identifier, e.g. `WE-142`. */
- ticket: string;
- ticketUrl: string;
- /** Linear's own `branchName`. */
- branch: string;
- /** The issue title, which becomes the clone's display name. Named for the
-  *  fork endpoint's `displayName` field, which is the only name it reads. */
- displayName: string;
- /** The issue's first Linear label. Omitted when it has none. */
- label?: string;
-}
-export function cloneLinearMeta(issue: ResolvedIssue): CloneLinearMeta {
- const meta: CloneLinearMeta = {
+/** A Linear issue distilled for a clone request. Every field is Linear's own answer rather
+ *  than anything the operator typed, which is what makes the clone's stored title, url and
+ *  branch match the ticket they name. `label` is the first label only, the one a clone carries. */
+export function cloneLinearMeta(issue: ResolvedIssue): LinearMeta {
+ const meta: LinearMeta = {
   workspace: issue.prefix,
   ticket: issue.identifier,
   ticketUrl: issue.url,

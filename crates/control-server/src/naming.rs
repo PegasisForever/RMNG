@@ -1,7 +1,7 @@
 //! Hostname derivation for new clones, plus the preset lookup that goes with it.
 //!
 //! A clone's hostname is built here and nowhere else, because uniqueness needs the live clone
-//! list ([`crate::jobs::next_free_hostname`]) and no client can see it. Two bases exist: one
+//! list ([`crate::clone_plan::plan`]) and no client can see it. Two bases exist: one
 //! slugged from a plain title, one from a ticket identifier. Both run through
 //! [`clean_prefix`], which is what keeps `config.docker.hostnamePrefix` a legal DNS label.
 //!

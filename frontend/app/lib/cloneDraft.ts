@@ -1,69 +1,59 @@
-// The clone dialog's form model, and every rule that reads it. No React, no network: the
-// container holds a `CloneDraft` in state and the View renders one, so both sides agree on
-// what "the form" is, and a story can build one with `makeCloneDraft`.
-//
-// The rules here mirror the server, which is why they are worth keeping in one place: the
-// dialog blocks exactly the requests the server would reject, and says which of them it is.
+// The clone dialog's model: the form, the config it draws from, the operation it started,
+// and every rule that reads them. No React and no network here — the container feeds it
+// events and renders what comes back, so each rule is a test.
 
 import type { Operation } from "~/lib/types";
+import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import type { CloneRequest } from "~/lib/wire/CloneRequest";
+import type { LinearMeta } from "~/lib/wire/LinearMeta";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
+import { parseTicketInput } from "~/lib/workspace";
 
-/** Which of the dialog's four tabs is open. Each one builds a different clone request:
- *  the first three fork a live source clone, the fourth creates from a template image
- *  onto a fresh empty home dataset. */
+/** Which of the dialog's four tabs is open. The first three fork a live clone; the fourth
+ *  builds one from a preset image onto a fresh home. */
 export type CloneMode = "existing" | "create" | "plain" | "template";
 
-/** Everything the operator can type or pick in the dialog. One editable model, edited through
- *  a single `updateField`, so the View takes two props for the form instead of thirty. */
+/** Everything the operator can type or pick. */
 export interface CloneDraft {
- /** Source clone id to fork; null until the picker settles on one. Only the first
-  *  three tabs fork — the template tab creates from an image and leaves this null. */
+ /** Source clone to fork; null until the picker settles. The template tab forks nothing. */
  source: string | null;
  mode: CloneMode;
  /** Existing-ticket tab: a Linear link or a bare `WE-142`. */
  ticket: string;
- /** New-ticket tab: the Linear team key, lowercase. Picked from the presets' own labels. */
+ /** New-ticket tab: the Linear team key, lowercase. */
  team: string;
- /** New-ticket and no-ticket tabs. */
+ /** The clone's title. */
  title: string;
- /** New-ticket tab: the ticket body, as markdown. Written by the editor in the description
-  *  slot rather than by a field of the form. */
+ /** New-ticket tab: the ticket body, as markdown, written by the editor slot. */
  description: string;
- /** New-ticket tab: Linear's own priority, 0 unranked through 4 low. There is no assignee
-  *  beside it: a clone is work you are about to start, so the issue is yours. */
+ /** New-ticket tab: Linear's own priority, 0 unranked through 4 low. */
  priority: number;
  /** No-ticket tab: an optional first message to the agent. */
  message: string;
- /** Ticket tabs only: appended to the clone agent's and Claude Code's default instructions. */
+ /** Ticket tabs only: appended to the agent's and Claude Code's default instructions. */
  agentInstructions: string;
  claudeInstructions: string;
- /** Account-pool OVERRIDES. "" = follow the resolved preset's default (the server resolves
-  *  it). A non-empty value pins the clone to that pool regardless of preset.
-  *
-  *  Seeding these to `auto` would put the preset's configured default out of reach: the
-  *  server's chain takes an explicit request over the preset, and `auto` IS explicit, so
-  *  every clone made here would silently override the preset. */
+ /** Account picks: an email pins, `auto` rotates inside the pool. The resolved preset
+  *  fills both until the operator picks one by hand. */
  claudeAccount: string;
  codexAccount: string;
- /** Pool OVERRIDE, same shape as the account overrides: "" follows the source (omit),
-  *  "none" unbinds to any-group scope (send null), a name binds. Groups are offered but
-  *  never required. */
+ /** The account pool: a name binds, `none` unbinds to every pool. Filled from the preset
+  *  the same way; blank only before one resolves, where the server decides. */
  group: string;
- /** No-ticket tab: the hand-picked preset. The ticket tabs never pick one by hand. */
+ /** No-ticket tab: the hand-picked preset. */
  plainPreset: string;
  /** Template tab: the hand-picked preset whose Dockerfile builds the image. */
  templatePreset: string;
- /** Headless clone: no desktop, so the viewer shows a tmux tab view instead of a stream. */
+ /** Headless clone: no desktop, so the viewer shows a tmux tab view. */
  headless: boolean;
- /** Rebuild image: force a fresh build with a fresh base pull even when the preset's
-  *  tag already exists. Off unless checked. */
+ /** Force a fresh image build with a fresh base pull. Off unless checked. */
  rebuild: boolean;
  /** Run the preset's startup script as the clone user. On unless unchecked. */
  runStartupScript: boolean;
 }
 
-/** The form as the dialog opens it. `ticket` is seeded when something opened the dialog with
- *  a ticket in hand (a card dragged onto a column, or a ticket's own menu). */
+/** The form as the dialog opens it. `ticket` is seeded when something opened it with a
+ *  ticket in hand (a card dragged onto a column, or a ticket's own menu). */
 export function emptyCloneDraft(ticket = ""): CloneDraft {
  return {
   source: null,
@@ -94,8 +84,8 @@ export interface TeamKey {
 }
 
 /** Every distinct team key across the presets' labels, each mapped to the preset that claims
- *  it — the first one in config order, mirroring the server's `pick_preset_by_prefix`. This is
- *  the new-ticket tab's team dropdown AND its preset selector: they are the same choice. */
+ *  it — the first in config order, mirroring the server's `pick_preset_by_prefix`. This is the
+ *  new-ticket tab's team dropdown AND its preset selector: they are the same choice. */
 export function teamKeysOf(presets: PresetRedacted[]): TeamKey[] {
  const seen = new Map<string, PresetRedacted>();
  for (const p of presets) {
@@ -108,15 +98,11 @@ export function teamKeysOf(presets: PresetRedacted[]): TeamKey[] {
 }
 
 /**
- * The preset that will actually drive the clone, per tab — mirroring what the server does so
- * the dialog shows the truth rather than a guess.
+ * The preset that will drive the clone, per tab.
  *
  * - `plain` / `template`: whatever the operator picked by hand.
- * - `create`: implied by the chosen team key. The key comes from the presets' own labels, so
- *   picking a team IS picking a preset — which is why that tab has no preset dropdown.
- * - `existing`: auto-selected from the ticket-id prefix, mirroring the server's
- *   `pick_preset_by_prefix` (first preset in config order with a case-insensitively matching
- *   label). Undefined until a ticket parses, so the group control reads blank until then.
+ * - `create`: implied by the chosen team key, which is why that tab has no preset dropdown.
+ * - `existing`: the first preset whose label matches the ticket-id prefix.
  */
 export function resolvePreset(
  mode: CloneMode,
@@ -135,109 +121,250 @@ export function resolvePreset(
 ): PresetRedacted | undefined {
  if (mode === "plain") return presets.find((p) => p.name === plainPreset);
  if (mode === "template") return presets.find((p) => p.name === templatePreset);
- if (mode === "create") {
-  return team
-   ? presets.find((p) =>
-      p.labels.some((l) => l.toLowerCase() === team.toLowerCase()),
-     )
-   : undefined;
- }
- return ticketPrefix
-  ? presets.find((p) => p.labels.some((l) => l.toLowerCase() === ticketPrefix))
+ const wanted = mode === "create" ? team?.toLowerCase() : ticketPrefix;
+ return wanted
+  ? presets.find((p) => p.labels.some((l) => l.toLowerCase() === wanted))
   : undefined;
 }
 
-/**
- * The fork source a tab with this preset should open on — mirroring the server
- * (`clone_ops::resolve_fork_source`): the preset's default fork clone where it is still
- * among the forkable ids, else the oldest forkable id (first in server order).
- * Null when nothing is forkable.
- */
-export function resolveForkSource(
- presetDefault: string | undefined,
- sourceIds: string[],
-): string | null {
- const def = presetDefault?.trim();
- if (def && sourceIds.includes(def)) return def;
- return sourceIds[0] ?? null;
+// --- the dialog, as one model -------------------------------------------------------------
+
+/** The picks the follow rules below leave alone once made by hand. */
+const FOLLOWED = ["source", "group", "claudeAccount", "codexAccount"] as const;
+type Followed = (typeof FOLLOWED)[number];
+
+export interface CloneDialog {
+ draft: CloneDraft;
+ touched: ReadonlySet<Followed>;
+ presets: PresetRedacted[];
+ groups: CloneGroup[];
+ /** Config settled (loaded or failed). Empty presets before that are indistinguishable
+  *  from none configured, which would flash the missing-key warning on every open. */
+ configLoaded: boolean;
+ /** Forkable clone ids, oldest first. */
+ sources: string[];
+ /** The started operation, once the POST answers. */
+ opId: string | null;
+ starting: boolean;
+ seen: boolean;
+ failed: boolean;
+ /** The operation settled well: the dialog may close. */
+ done: boolean;
+ error: string | null;
 }
 
-/**
- * Whether the request this tab would send needs a Linear API key nobody has configured.
- *
- * Both ticket modes need one, but not the same one — mirror the server so the dialog blocks
- * exactly the requests it would reject. `create` opens the issue with the *resolved* preset's
- * key (`resolve_issue`), so that one preset must have it; `existing` only fetches, and the
- * server tries every preset's key in turn (`fetch_issue_any`), so any one of them will do.
- * `plain` and `template` never touch Linear.
- *
- * `configLoaded` is separate from "no presets": `presets` starts empty while the config is in
- * flight, which is indistinguishable from "none configured", and without the gate the warning
- * flashes on every open.
- */
-export function linearKeyMissing(
- mode: CloneMode,
- presets: PresetRedacted[],
- preset: PresetRedacted | undefined,
- configLoaded: boolean,
-): boolean {
- if (!configLoaded || mode === "plain" || mode === "template") return false;
- if (mode === "create") return !preset?.linearKey;
- return !presets.some((p) => p.linearKey !== "");
+export type CloneDialogEvent =
+ | { type: "config"; presets: PresetRedacted[]; groups: CloneGroup[] }
+ | { type: "sources"; ids: string[] }
+ | {
+   [K in keyof CloneDraft]: { type: "edit"; key: K; value: CloneDraft[K] };
+   }[keyof CloneDraft]
+ | { type: "starting" }
+ | { type: "started"; opId: string }
+ | { type: "failed"; message: string }
+ | { type: "op"; op: Operation | undefined };
+
+export function emptyCloneDialog(
+ ticket = "",
+ source: string | null = null,
+): CloneDialog {
+ return {
+  draft: { ...emptyCloneDraft(ticket), source },
+  // A source handed in (from a clone's own menu) counts as the operator's own pick.
+  touched: new Set(source ? (["source"] as Followed[]) : []),
+  presets: [],
+  groups: [],
+  configLoaded: false,
+  sources: [],
+  opId: null,
+  starting: false,
+  seen: false,
+  failed: false,
+  done: false,
+  error: null,
+ };
 }
 
-/**
- * Whether the Fork button may fire.
- *
- * A source clone is always required; then: `existing` needs a parseable ticket AND a preset
- * that claims its prefix — with the preset dropdown gone there is no way to override the
- * auto-selection, so a prefix nothing claims is a request the server would 400; `create` needs
- * a team key + title; `plain` and `template` a title + a preset whenever any are
- * configured.
- */
-export function cloneDraftValid(
- draft: CloneDraft,
- {
-  presets,
-  preset,
-  ticketParsed,
-  keyMissing,
-  needsSource = true,
- }: {
-  presets: PresetRedacted[];
-  preset: PresetRedacted | undefined;
-  /** Whether `parseTicketInput` found an id in `draft.ticket`. */
-  ticketParsed: boolean;
-  keyMissing: boolean;
-  /** False for template create, which picks an image instead of a source clone. */
-  needsSource?: boolean;
- },
-): boolean {
- const modeValid =
-  draft.mode === "existing"
-   ? ticketParsed && (presets.length === 0 || !!preset)
-   : draft.mode === "create"
-     ? draft.title.trim().length > 0 && draft.team.trim().length > 0
-     : draft.mode === "template"
-       ? draft.title.trim().length > 0 &&
-         (presets.length === 0 || !!draft.templatePreset)
-       : draft.title.trim().length > 0 &&
-         (presets.length === 0 || !!draft.plainPreset);
- return (!needsSource || !!draft.source) && modeValid && !keyMissing;
+export function cloneDialogReducer(
+ s: CloneDialog,
+ e: CloneDialogEvent,
+): CloneDialog {
+ switch (e.type) {
+  case "config":
+   return follow({
+    ...s,
+    presets: e.presets,
+    groups: e.groups,
+    configLoaded: true,
+   });
+  case "sources":
+   // Nothing to fork: the template tab is the only one that can still make a clone.
+   return follow({
+    ...s,
+    sources: e.ids,
+    draft:
+     e.ids.length === 0 ? { ...s.draft, mode: "template" } : s.draft,
+   });
+  case "edit":
+   return follow({
+    ...s,
+    draft: { ...s.draft, [e.key]: e.value },
+    touched: (FOLLOWED as readonly string[]).includes(e.key)
+     ? new Set([...s.touched, e.key as Followed])
+     : s.touched,
+   });
+  case "starting":
+   // Clear the last attempt so a retry tracks the new op, not the failed one still
+   // sitting in the list for another minute.
+   return {
+    ...s,
+    starting: true,
+    opId: null,
+    seen: false,
+    failed: false,
+    done: false,
+    error: null,
+   };
+  case "started":
+   return { ...s, starting: false, opId: e.opId };
+  case "failed":
+   return { ...s, starting: false, error: e.message };
+  case "op": {
+   const seen = s.seen || !!e.op;
+   const failed = s.failed || e.op?.status === "error";
+   const kind = s.draft.mode === "template" ? "clone" : "fork";
+   return {
+    ...s,
+    seen,
+    failed,
+    error:
+     failed && !s.failed
+      ? e.op?.message || `the ${kind} failed`
+      : s.error,
+    done: opPhase(e.op, seen, failed) === "done",
+   };
+  }
+ }
 }
 
-/** What the dialog should do about the clone operation it started. */
+/** Fill in what the operator has not: the tab's preset and team, the fork source, and the
+ *  pool and both accounts the resolved preset names. A pick made by hand stays put — unless
+ *  it stopped qualifying, as a source clone does when it is deleted or archived. */
+function follow(s: CloneDialog): CloneDialog {
+ let d = s.draft;
+ const first = s.presets[0]?.name ?? "";
+ if (d.mode === "plain" && d.plainPreset === "")
+  d = { ...d, plainPreset: first };
+ if (d.mode === "template" && d.templatePreset === "")
+  d = { ...d, templatePreset: first };
+ if (d.mode === "create" && d.team === "")
+  d = { ...d, team: teamKeysOf(s.presets)[0]?.key ?? "" };
+
+ let touched = s.touched;
+ const preset = presetOf({ ...s, draft: d });
+ if (s.configLoaded && s.sources.length > 0 && d.mode !== "template") {
+  if (touched.has("source") && !(d.source && s.sources.includes(d.source))) {
+   touched = new Set([...touched].filter((k) => k !== "source"));
+  }
+  if (!touched.has("source")) {
+   const wanted = preset?.defaultForkClone.trim();
+   // Blank until a preset resolves; with none configured there is nothing to wait for.
+   d = {
+    ...d,
+    source:
+     !preset && s.presets.length > 0
+      ? null
+      : wanted && s.sources.includes(wanted)
+       ? wanted
+       : s.sources[0],
+   };
+  }
+ }
+ if (s.configLoaded && preset) {
+  if (!touched.has("group")) {
+   const g = preset.group.trim();
+   d = { ...d, group: g === "" || g.toLowerCase() === "none" ? "none" : g };
+  }
+  if (!touched.has("claudeAccount")) d = { ...d, claudeAccount: "auto" };
+  if (!touched.has("codexAccount")) d = { ...d, codexAccount: "auto" };
+ }
+ return { ...s, draft: d, touched };
+}
+
+/** The preset the open tab will actually use. */
+export function presetOf(s: CloneDialog): PresetRedacted | undefined {
+ const d = s.draft;
+ return resolvePreset(d.mode, s.presets, {
+  plainPreset: d.plainPreset,
+  templatePreset: d.templatePreset,
+  team: d.team,
+  ticketPrefix: parseTicketInput(d.ticket)?.prefix,
+ });
+}
+
+/** This tab needs a Linear key nobody configured. `create` opens the issue with the resolved
+ *  preset's own key; `existing` only looks one up, and every key is tried in turn. */
+export function linearKeyMissing(s: CloneDialog): boolean {
+ const mode = s.draft.mode;
+ if (!s.configLoaded || mode === "plain" || mode === "template") return false;
+ if (mode === "create") return !presetOf(s)?.linearKey;
+ return !s.presets.some((p) => p.linearKey !== "");
+}
+
+/** Whether the Create button may fire. */
+export function cloneDialogValid(s: CloneDialog): boolean {
+ const d = s.draft;
+ const titled = d.title.trim().length > 0;
+ // With the preset dropdown gone from the ticket tabs, a prefix no preset claims is a
+ // request the server would refuse.
+ const picked = s.presets.length === 0 || !!presetOf(s);
+ const ok =
+  d.mode === "existing"
+   ? !!parseTicketInput(d.ticket) && picked
+   : d.mode === "create"
+    ? titled && d.team.trim().length > 0
+    : titled && picked;
+ return ok && (d.mode === "template" || !!d.source) && !linearKeyMissing(s);
+}
+
+/** A clone is being started, or one is running: the form and both buttons lock. */
+export function cloneDialogBusy(s: CloneDialog): boolean {
+ return s.starting || (!!s.opId && !s.failed);
+}
+
+/** What this tab would send. `linear` is Linear's own answer on the ticket tabs; the other
+ *  two carry the typed title, which is what names the clone. */
+export function cloneRequest(s: CloneDialog, linear?: LinearMeta): CloneRequest {
+ const d = s.draft;
+ const ticketTab = d.mode === "existing" || d.mode === "create";
+ return {
+  source: d.mode === "template" ? undefined : (d.source ?? undefined),
+  preset: presetOf(s)?.name,
+  linear: linear ?? { displayName: d.title.trim() },
+  group: d.group || undefined,
+  claudeAccount: d.claudeAccount || undefined,
+  codexAccount: d.codexAccount || undefined,
+  firstMessage: d.mode === "plain" ? d.message.trim() || undefined : undefined,
+  agentInstructions: ticketTab
+   ? d.agentInstructions.trim() || undefined
+   : undefined,
+  claudeInstructions: ticketTab
+   ? d.claudeInstructions.trim() || undefined
+   : undefined,
+  headless: d.headless,
+  runStartupScript: d.runStartupScript,
+  rebuild: d.rebuild,
+ };
+}
+
+/** What a dialog should do about the operation it started. */
 export type OpPhase = "running" | "done" | "failed";
 
 /**
- * Classify the started operation from the live op list. This is the rule that decides when
- * the dialog closes, and it has one non-obvious case.
- *
- * Finished operations are PRUNED from `ControlState` shortly after they settle (8s after
- * Done, 60s after Error). A poll of the list can therefore miss the terminal frame entirely,
- * so **an op that has vanished after being seen counts as done** — the same rule the CLI's
- * waiter uses. `failed` is passed in as sticky state by the caller, because that vanish rule
- * would otherwise fire when a FAILED op is pruned and close the dialog over its own error.
+ * Finished operations are pruned from state shortly after they settle (8s after Done, 60s
+ * after Error), so a poll can miss the terminal frame: **an op that vanished after being
+ * seen counts as done**, the same rule the CLI's waiter uses. `alreadyFailed` is sticky,
+ * because that rule would otherwise close a dialog over its own error message.
  */
 export function opPhase(
  op: Operation | undefined,

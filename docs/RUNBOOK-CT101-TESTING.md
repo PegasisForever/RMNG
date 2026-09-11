@@ -136,7 +136,7 @@ their units, with no clone recreate needed.
 
 ```sh
 curl -s -XPOST http://10.0.0.182:9000/api/clone -H 'content-type: application/json' \
-  -d '{"image":"pegasis0/rmng-template:latest","hostname":"pi-probe",
+  -d '{"linear":{"displayName":"pi probe"},"preset":"work",
        "codexAccount":"hello@talktomedi.com","headless":false}'
 ```
 

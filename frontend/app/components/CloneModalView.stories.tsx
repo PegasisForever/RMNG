@@ -14,10 +14,12 @@ import { makeCloneWorking } from "./__fixtures__/clones";
 import { makeOperation } from "./__fixtures__/operations";
 import { makeClonePresets } from "./__fixtures__/presets";
 import {
-  cloneDraftValid,
+  cloneDialogValid,
+  emptyCloneDialog,
   linearKeyMissing,
-  resolvePreset,
+  presetOf,
   teamKeysOf,
+  type CloneDialog,
   type CloneDraft,
 } from "~/lib/cloneDraft";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
@@ -25,38 +27,24 @@ import { parseTicketInput } from "~/lib/workspace";
 
 /** Everything the dialog is TOLD rather than asked to work out: the parse, the preset the
  *  open tab resolves to, whether the request needs a Linear key nobody configured, and
- *  whether the button may fire. The container derives these from exactly these functions, so
- *  deriving them here keeps a story from claiming a combination the dialog cannot be in.
- *
- *  `configLoaded` is true throughout: the pre-config flicker lasts one round trip and is not
- *  a state anyone reviews. */
-function derive(draft: CloneDraft, presets: PresetRedacted[]) {
-  const parsedTicket = parseTicketInput(draft.ticket);
-  const preset = resolvePreset(draft.mode, presets, {
-    plainPreset: draft.plainPreset,
-    templatePreset: draft.templatePreset,
-    team: draft.team,
-    ticketPrefix: parsedTicket?.prefix,
-  });
-  const keyMissing = linearKeyMissing(draft.mode, presets, preset, true);
+ *  whether the button may fire. The container reads these from the same functions, so a
+ *  story cannot claim a state the dialog could not be in. */
+function form(draft: CloneDraft, presets: PresetRedacted[] = makeClonePresets()) {
+  const state: CloneDialog = {
+    ...emptyCloneDialog(),
+    draft,
+    presets,
+    configLoaded: true,
+  };
   return {
+    draft,
     presets,
     teamKeys: teamKeysOf(presets),
-    parsedTicket,
-    preset,
-    linearKeyMissing: keyMissing,
-    valid: cloneDraftValid(draft, {
-      presets,
-      preset,
-      ticketParsed: !!parsedTicket,
-      keyMissing,
-    }),
+    parsedTicket: parseTicketInput(draft.ticket),
+    preset: presetOf(state),
+    linearKeyMissing: linearKeyMissing(state),
+    valid: cloneDialogValid(state),
   };
-}
-
-/** One story's worth of form: the draft plus everything that follows from it. */
-function form(draft: CloneDraft, presets: PresetRedacted[] = makeClonePresets()) {
-  return { draft, ...derive(draft, presets) };
 }
 
 /** The server-side lists the dialog draws from, rebuilt per story. Nothing below copies them
@@ -91,7 +79,6 @@ const meta = {
   parameters: { layout: "fullscreen" },
   args: {
     ...sources(),
-    clonesLoading: false,
     descriptionEditor,
     busy: false,
     error: null,
@@ -203,7 +190,7 @@ export const Interactive: Story = {
     return (
       <CloneModalView
         {...args}
-        {...derive(draft, presets)}
+        {...form(draft, presets)}
         draft={draft}
         onDraftChange={(key, value) => {
           update(key, value);

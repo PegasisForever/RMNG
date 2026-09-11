@@ -1,5 +1,6 @@
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
+import type { CloneRequest } from "~/lib/wire/CloneRequest";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 // The hand-maintained `Operation`, not the generated `wire/Operation`: ts-rs maps the
 // Rust `u64` timestamps to `bigint`, but `JSON.parse` yields plain numbers, so the
@@ -55,33 +56,13 @@ function getJson(url: string): Promise<unknown> {
  return request(url);
 }
 
-/** Template-clone payload: a container title plus an optional first agent message.
- *  The ticket/hostname modes are gone from `POST /api/clone` — forking a live clone lives
- *  in the New clone dialog (`POST /api/fork`). `preset` picks the clone preset (env vars +
- *  Linear key); omitted means the server requires one only while any presets exist. */
-export type ClonePayload = {
- plain: { title: string; message: string };
- preset?: string;
- /** Run the preset's startup script. Always sent explicitly; the server defaults on. */
- runStartupScript: boolean;
- /** No desktop: the viewer shows a tmux tab view instead of a video stream. */
- headless?: boolean;
- /** Force a fresh image build with a fresh base pull even when the preset's tag
-  *  already exists. The New clone dialog's rebuild checkbox sets this. */
- rebuild?: boolean;
- /** Pool binding: name binds, null unbinds, omitted takes the preset default. */
- group?: string | null;
- /** Per-side account overrides; omitted sides follow the binding. */
- claudeAccount?: string;
- codexAccount?: string;
-};
-
-/** Start a template clone (title + preset in `payload`). The server builds the
- *  effective preset's Dockerfile into the clone image — no caller-supplied base.
- *  Returns the driving Operation so the caller can follow it; progress streams
- *  over /events. */
-export const duplicateClone = (payload: ClonePayload) =>
- postJson("/api/clone", payload).then((r) => (r as { op: Operation }).op);
+/** Start a clone: a fork of a live clone's home when `fork`, else one built from the
+ *  preset's image. The server names it and fills in whatever the request leaves open.
+ *  Returns the driving Operation; progress streams over /events. */
+export const startClone = (fork: boolean, req: CloneRequest) =>
+ postJson(fork ? "/api/fork" : "/api/clone", req).then(
+  (r) => (r as { op: Operation }).op,
+ );
 export const activate = (id: string | null) =>
  postJson("/api/activate", { id });
 export const deleteClone = (id: string) => postJson("/api/delete", { id });
@@ -93,57 +74,6 @@ export const prebuildDockerfile = (dockerfile: string) =>
  postJson("/api/images/prebuild", { dockerfile }).then(
   (r) => (r as { op: Operation }).op,
  );
-/** Fork a gen-2 clone from a live source clone. The server snapshots + clones the
- *  source home, derives the new clone id from the ticket identifier or title (like
- *  create does), and creates from the source's recorded base tag. Returns
- *  the driving Operation so the caller can follow it; progress streams over /events. */
-export interface ForkPayload {
- preset?: string;
- linear?: {
-  workspace?: string;
-  ticket?: string;
-  ticketUrl?: string;
-  branch?: string;
-  displayName?: string;
-  label?: string;
- };
- claudeAccount?: string;
- codexAccount?: string;
- /** Pool binding: name binds, null unbinds, omitted inherits the source's group. */
- group?: string | null;
- firstMessage?: string;
- agentInstructions?: string;
- claudeInstructions?: string;
- /** Run the preset's startup script. Always sent explicitly; the server defaults on. */
- runStartupScript: boolean;
- /** Force a fresh image build with a fresh base pull even when the preset's tag
-  *  already exists. The New clone dialog's rebuild checkbox sets this. */
- rebuild?: boolean;
-}
-
-export const forkClone = (
- source: string,
- headless?: boolean,
- payload?: ForkPayload,
-) =>
- postJson("/api/fork", {
-  source,
-  ...(headless ? { headless } : {}),
-  runStartupScript: payload?.runStartupScript ?? true,
-  ...(payload?.rebuild ? { rebuild: true } : {}),
-  ...(payload?.preset ? { preset: payload.preset } : {}),
-  ...(payload?.linear ? { linear: payload.linear } : {}),
-  ...(payload?.claudeAccount ? { claudeAccount: payload.claudeAccount } : {}),
-  ...(payload?.codexAccount ? { codexAccount: payload.codexAccount } : {}),
-  ...("group" in (payload ?? {}) ? { group: payload?.group ?? null } : {}),
-  ...(payload?.firstMessage ? { firstMessage: payload.firstMessage } : {}),
-  ...(payload?.agentInstructions
-   ? { agentInstructions: payload.agentInstructions }
-   : {}),
-  ...(payload?.claudeInstructions
-   ? { claudeInstructions: payload.claudeInstructions }
-   : {}),
- }).then((r) => (r as { op: Operation }).op);
 /** Rebase a gen-2 clone onto a preset's image (`preset`), keeping dataset + id and the
  *  clone's own preset bindings. `rebuild` forces a fresh image build even when the tag
  *  exists. Returns the driving Operation; progress streams over /events. */

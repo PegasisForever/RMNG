@@ -12,6 +12,7 @@ mod cgroup;
 mod chat;
 mod claude;
 mod clone_ops;
+mod clone_plan;
 mod clone_reconcile;
 mod clonekey;
 mod codex;

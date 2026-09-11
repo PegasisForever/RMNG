@@ -49,27 +49,6 @@ pub struct LedgerFilter<'a> {
     pub limit: Option<usize>,
 }
 
-/// Optional ticket/preset/account overrides for a gen-2 fork. Every field is
-/// `None` = inherit the source clone's binding.
-#[derive(Debug, Clone, Default)]
-pub struct ForkOpts<'a> {
-    pub preset: Option<&'a str>,
-    /// Ticket metadata override as a ready JSON object (camelCase keys:
-    /// workspace, ticket, ticketUrl, branch, displayName, label).
-    pub linear: Option<Value>,
-    pub claude_account: Option<&'a str>,
-    pub codex_account: Option<&'a str>,
-    pub first_message: Option<&'a str>,
-    pub agent_instructions: Option<&'a str>,
-    pub claude_instructions: Option<&'a str>,
-    pub headless: bool,
-    /// Run the preset's startup script (default true: pass false only to opt out).
-    pub run_startup_script: bool,
-    /// Force a fresh image build with a fresh base pull even when the preset's tag
-    /// already exists.
-    pub rebuild: bool,
-}
-
 impl Client {
     /// `base` is the web-API origin, e.g. `http://rmng-control:9000` (no trailing slash).
     pub fn new(base: impl Into<String>) -> Self {
@@ -260,80 +239,12 @@ impl Client {
         self.post_json("/api/activate", &json!({ "id": id })).await
     }
 
-    /// Start a template clone: `{ plain: { title, message } }` plus an optional preset
-    /// name. The hostname derives server-side and the image builds on demand from the
-    /// preset's Dockerfile. `rebuild` forces a fresh build with a fresh base pull even
-    /// when the preset's tag already exists.
-    pub async fn clone_create_plain(
-        &self,
-        title: &str,
-        message: &str,
-        preset: Option<&str>,
-        run_startup_script: bool,
-        rebuild: bool,
-    ) -> Result<Operation> {
-        let mut body = json!({ "plain": { "title": title.trim(), "message": message.trim() } });
-        if let Some(p) = preset.map(str::trim).filter(|p| !p.is_empty()) {
-            body.as_object_mut()
-                .unwrap()
-                .insert("preset".into(), json!(p));
-        }
-        // Always explicit: the server defaults on, but the wire should say what the
-        // operator asked so a default change can never silently flip old callers.
-        body.as_object_mut()
-            .unwrap()
-            .insert("runStartupScript".into(), json!(run_startup_script));
-        if rebuild {
-            body.as_object_mut()
-                .unwrap()
-                .insert("rebuild".into(), json!(true));
-        }
-        self.post_op("/api/clone", &body).await
-    }
-
-    /// Fork a gen-2 clone (snapshot + clone the source home). The new hostname
-    /// always derives server-side from the ticket or title.
-    pub async fn fork(&self, source: &str, headless: bool) -> Result<Operation> {
-        self.post_op(
-            "/api/fork",
-            &json!({ "source": source, "headless": headless }),
-        )
-        .await
-    }
-
-    /// Fork with optional ticket/preset/account overrides (`None` = inherit the source).
-    /// Keys are camelCase to match the server's `ForkReq`. A `None` source lets the
-    /// server pick the preset's default fork clone, else the oldest forkable clone.
-    pub async fn fork_with(&self, source: Option<&str>, opts: &ForkOpts<'_>) -> Result<Operation> {
-        let mut body = json!({});
-        let obj = body.as_object_mut().unwrap();
-        if let Some(source) = source.map(str::trim).filter(|v| !v.is_empty()) {
-            obj.insert("source".into(), json!(source));
-        }
-        if opts.headless {
-            obj.insert("headless".into(), json!(true));
-        }
-        for (k, v) in [
-            ("preset", opts.preset),
-            ("claudeAccount", opts.claude_account),
-            ("codexAccount", opts.codex_account),
-            ("firstMessage", opts.first_message),
-            ("agentInstructions", opts.agent_instructions),
-            ("claudeInstructions", opts.claude_instructions),
-        ] {
-            if let Some(v) = v.map(str::trim).filter(|v| !v.is_empty()) {
-                obj.insert(k.into(), json!(v));
-            }
-        }
-        if let Some(linear) = &opts.linear {
-            obj.insert("linear".into(), linear.clone());
-        }
-        if opts.rebuild {
-            obj.insert("rebuild".into(), json!(true));
-        }
-        // Always explicit, same reasoning as create (see above).
-        obj.insert("runStartupScript".into(), json!(opts.run_startup_script));
-        self.post_op("/api/fork", &body).await
+    /// Start a clone: `POST /api/fork` copies a live clone's home when `fork`, else
+    /// `POST /api/clone` builds one from the preset's image. The server names it and fills
+    /// in whatever the request leaves open.
+    pub async fn start_clone(&self, fork: bool, req: &wire::CloneRequest) -> Result<Operation> {
+        let path = if fork { "/api/fork" } else { "/api/clone" };
+        self.post_op(path, &serde_json::to_value(req)?).await
     }
 
     /// Rebuild a preset image from its Dockerfile text, always pulling fresh base and

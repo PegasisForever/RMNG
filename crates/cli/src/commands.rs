@@ -214,13 +214,11 @@ pub async fn select(client: &Client, clone: Option<&str>, none: bool, json: bool
     Ok(0)
 }
 
-/// `rmng clone create-plain --title <t>` — template clone with a title-derived hostname.
-/// The image builds on demand from the preset's Dockerfile.
-pub async fn clone_create_plain(
+/// `rmng clone create-plain` / `rmng clone fork` — start a clone and follow it.
+pub async fn start_clone(
     client: &Client,
-    title: &str,
-    message: &str,
-    preset: Option<&str>,
+    fork: bool,
+    req: wire::CloneRequest,
     common: &CreateArgs,
     json: bool,
 ) -> Result<u8> {
@@ -228,11 +226,10 @@ pub async fn clone_create_plain(
         Some(name) => Some(resolve_column(client, name).await?),
         None => None,
     };
-    let op = client
-        .clone_create_plain(title, message, preset, !common.no_startup_script, false)
-        .await?;
+    let op = client.start_clone(fork, &req).await?;
     file_started_clone(client, &op, column.as_deref()).await?;
-    started(client, op, &common.wait, json, "clone", true).await
+    let verb = if fork { "fork" } else { "clone" };
+    started(client, op, &common.wait, json, verb, true).await
 }
 
 /// `rmng clone self` — the calling clone's own record.
@@ -280,43 +277,6 @@ pub async fn clone_rm(
     }
     let op = client.delete(clone).await?;
     started(client, op, wait, json, "delete", false).await
-}
-
-/// `rmng clone fork [source]` — snapshot + clone the source home, create from
-/// its recorded base tag. Omitted source = the preset's default fork clone,
-/// else the oldest forkable clone (resolved server-side). The new hostname
-/// derives server-side.
-pub async fn fork(
-    client: &Client,
-    source: Option<&str>,
-    headless: bool,
-    preset: Option<String>,
-    claude_account: Option<String>,
-    codex_account: Option<String>,
-    message: Option<String>,
-    common: &CreateArgs,
-    json: bool,
-) -> Result<u8> {
-    let column = match common.column.as_deref() {
-        Some(name) => Some(resolve_column(client, name).await?),
-        None => None,
-    };
-    let op = client
-        .fork_with(
-            source,
-            &control_client::ForkOpts {
-                preset: preset.as_deref(),
-                claude_account: claude_account.as_deref(),
-                codex_account: codex_account.as_deref(),
-                first_message: message.as_deref(),
-                headless,
-                run_startup_script: !common.no_startup_script,
-                ..Default::default()
-            },
-        )
-        .await?;
-    file_started_clone(client, &op, column.as_deref()).await?;
-    started(client, op, &common.wait, json, "fork", false).await
 }
 
 /// `rmng clone rebase <clone> --tag <tag>` — new system image under the kept home.

@@ -26,8 +26,21 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use control_client::{Client, ForkOpts};
+use control_client::Client;
 use wire::{Operation, OperationStatus};
+
+/// A request for a clone named `title`, built from `preset`.
+fn from_preset(title: &str, preset: &str) -> wire::CloneRequest {
+    wire::CloneRequest {
+        preset: Some(preset.into()),
+        linear: Some(wire::LinearMeta {
+            display_name: Some(title.into()),
+            ..Default::default()
+        }),
+        run_startup_script: true,
+        ..Default::default()
+    }
+}
 
 fn env(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
@@ -305,7 +318,7 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     println!("e2e: create '{title}' ...");
     let op = r
         .client
-        .clone_create_plain(&title, "", Some(preset), true, false)
+        .start_clone(false, &from_preset(&title, preset))
         .await
         .context("POST /api/clone")?;
     r.wait_op(&op, "create").await?;
@@ -345,10 +358,11 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     println!("e2e: fork '{id}' ...");
     let op = r
         .client
-        .fork_with(
-            Some(id.as_str()),
-            &ForkOpts {
-                first_message: Some("e2e fork"),
+        .start_clone(
+            true,
+            &wire::CloneRequest {
+                source: Some(id.clone()),
+                first_message: Some("e2e fork".into()),
                 run_startup_script: true,
                 rebuild: true,
                 ..Default::default()
@@ -373,7 +387,13 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     println!("e2e: create-with-rebuild '{title}-rb' ...");
     let op_rb = r
         .client
-        .clone_create_plain(&format!("{title}-rb"), "", Some(preset), true, true)
+        .start_clone(
+            false,
+            &wire::CloneRequest {
+                rebuild: true,
+                ..from_preset(&format!("{title}-rb"), preset)
+            },
+        )
         .await
         .context("POST /api/clone (rebuild)")?;
     r.wait_op(&op_rb, "create-rebuild").await?;

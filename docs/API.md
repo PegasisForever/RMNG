@@ -11,7 +11,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
   [files.rs](../crates/control-server/src/files.rs); wire types in
   [crates/wire/src/control.rs](../crates/wire/src/control.rs) and [config.rs](../crates/wire/src/config.rs).
 - All request/response bodies are JSON unless noted (`/api/upload` is `multipart/form-data`).
-- **Caller identity** (`GET /api/self`, and the sub-clone nesting on `POST /api/clone`) is the
+- **Caller identity** (`GET /api/self`) is the
   address the request arrived on. A clone reaches the server container-to-container over the
   rmng bridge, so the peer address is the one Docker gave that container, and it is matched
   against each clone's `localIp` (refreshed by the monitor poller every 4 s). Nothing inside a
@@ -35,8 +35,8 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | PUT | `/api/board` | Replace the board's columns | 200 `ControlState` |
 | PUT | `/api/tickets/order` | Replace the ticket column's arrangement | 200 `ControlState` |
 | PUT | `/api/clones/muted` | Replace the set of clones whose notifications are silenced | 200 `ControlState` |
-| POST | `/api/clone` | Start a template clone from a preset (`{ plain: { title, message } }` + `preset`) | 200 `{ok, op}` |
-| POST | `/api/fork` | Fork a live gen-2 clone (snapshot + copy its home; name derives server-side) | 200 `{ok, op}` |
+| POST | `/api/clone` | Start a clone from a preset's image (one `CloneRequest`; name derives server-side) | 200 `{ok, op}` |
+| POST | `/api/fork` | The same request, copying a live gen-2 clone's home instead | 200 `{ok, op}` |
 | POST | `/api/hosts/:id/rebase` | Swap a clone's system image to a preset's image (dataset + id kept) | 200 `{ok, op}` |
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
@@ -583,30 +583,50 @@ because new work should land where somebody looks rather than at the bottom of a
 
 ## Clone lifecycle
 
-### `POST /api/clone`
+### `POST /api/clone` and `POST /api/fork`
 
-Start a template clone from a preset. Runs async — returns an `Operation` id
-immediately; progress flows over `/events`. After the clone is up the server kicks off the
-agent's first message ([chat::kickoff_agent](../crates/control-server/src/chat.rs)).
-
-Body:
+Start a clone. `/api/clone` builds it from a preset's image onto a fresh home; `/api/fork`
+copies a live clone's home instead, leaving the source running. Both take the same body, a
+[`wire::CloneRequest`](../crates/wire/src/control.rs), and both run async — they return an
+`Operation` at once and progress flows over `/events`. After the clone is up the server kicks
+off the agent's first message ([chat::kickoff_agent](../crates/control-server/src/chat.rs)).
 
 ```jsonc
 {
-  "plain":  { "title": "quick task", "message": "do X" },
-  "preset": "<name>",  // REQUIRED while any presets exist.
-  "headless": false,    // opt in: no desktop, viewer shows tmux instead.
-  "group": "<pool>",   // optional: name binds, null/blank unbinds to fleet-wide
-                         // auto; omitted takes the preset default.
-  "claudeAccount": "<email|auto>",  // optional per-side overrides; omitted
-  "codexAccount": "<email|auto>"    // sides follow the binding.
+  "source": "pega-we-1",      // fork only; omitted = the preset's default fork clone
+                              // where it is still forkable, else the oldest one.
+  "preset": "<name>",         // required while any presets exist; a fork without one
+                              // keeps its source's preset.
+  "linear": {                 // the ticket this clone is for
+    "workspace": "we",        // lowercase team key
+    "ticket": "WE-142",       // names the clone when present
+    "ticketUrl": "https://…",
+    "branch": "…",
+    "displayName": "…",       // the clone's title; names it when there is no ticket
+    "label": "…"
+  },
+  "claudeAccount": "<email|auto|none>",  // per-side account; a legacy "group:<pool>"
+  "codexAccount": "<email|auto|none>",   // binds that pool
+  "group": "<pool|none>",     // the pool both sides draw from; omitted takes the named
+                              // preset's pool, else (a fork) the source's.
+  "firstMessage": "do X",
+  "agentInstructions": "…",   // appended to the agent's defaults
+  "claudeInstructions": "…",
+  "headless": false,          // no desktop: the viewer shows tmux instead
+  "runStartupScript": true,   // the preset's startup script, as the clone user
+  "rebuild": false            // build the image fresh, with a fresh base pull
 }
 ```
 
-The selected preset's vars are written into the clone's `/etc/environment`, plus `LINEAR_API_KEY=<preset
-key>` (auths the clone's `linear` MCP). Hostname is derived (a slug of the
-plain title, with a numeric suffix on collision). Unknown fields are ignored.
-Returns `{ "ok": true, "op": Operation }` or `400 {error}`.
+Whatever the request leaves open is decided in one place server-side
+([clone_plan](../crates/control-server/src/clone_plan.rs)), including the clone's name: a
+slug of the ticket or title, plus the first free letter (`pega-we-142a`, titled `… (a)`),
+because a free name needs the live clone list. The preset's vars are written into the clone's
+`/etc/environment`, plus `LINEAR_API_KEY=<preset key>` (auths the clone's `linear` MCP).
+
+Unknown fields are refused. Returns `{ "ok": true, "op": Operation }`, or `400` with the
+reason (an unknown preset, pool or source, a missing title, a source that is not a gen-2
+clone, or one already in an operation).
 
 Every clone also receives Codex parity files: `~/.codex/AGENTS.md` with the same
 disposable-sandbox guidance as Claude's shared `CLAUDE.md`, and the managed MCP tables **merged
@@ -717,45 +737,6 @@ shared folder and the home symlink are all gone even though the clone itself is 
 operation re-applies those three plus the bastion allowlist entry before it finishes, the same
 set the create job settles (see
 [Nothing is still pending](#nothing-is-still-pending-when-the-operation-reaches-100)).
-
-### `POST /api/fork`
-
-Fork a live gen-2 clone: snapshot its home dataset, copy it, and create from the source's
-recorded base tag. The source keeps running. Runs async — returns `{ "ok": true, "op":
-Operation }`; progress over `/events`.
-
-Body (`source` optional — omitted means the preset's default fork clone where it still
-exists and is forkable, else the oldest forkable clone; everything else an override —
- each omitted field inherits the source value, except `linear`, which when present replaces
- the source ticket context wholesale):
-
-```jsonc
-{
-  "source": "pega-we-1",
-  "headless": false,          // no desktop
-  "preset": "<name>",         // preset override
-  "linear": {                 // ticket metadata override
-    "workspace": "we",       // lowercase team key
-    "ticket": "WE-142",      // drives the derived hostname when present
-    "ticketUrl": "https://…",
-    "branch": "…",
-    "displayName": "…",      // the only name field; plain forks send just this
-    "label": "…"
-  },
-  "claudeAccount": "a@b.com", // account selection override: email (pin) or "auto";
-                                // legacy "group:<pool>" rebinds the pool
-  "codexAccount": "a@b.com",  // the Codex twin, same forms
-  "group": "team",          // pool binding override: name binds, null unbinds to
-                                // any-group scope, omitted inherits the source
-  "firstMessage": "do X",     // first agent message; omitted ⇒ none sent
-  "agentInstructions": "...",
-  "claudeInstructions": "..."
-}
-```
-
-The new hostname always derives server-side (ticket id, else title, else empty stem —
-uniqueness needs the live clone list, which no client can see). Unknown or unmanaged
-sources, non-gen-2 sources, and unknown preset overrides return `400`.
 
 ### `POST /api/hosts/:id/rebase`
 
@@ -913,9 +894,8 @@ Measured on one three-day session: 132,486,201 raw bytes distil to 2,875,456, wh
 percent, in 3,879 records.
 
 **Names are spent for good.** A ledger directory outlives its clone, so `data/ledger/` is the
-registry of every clone name ever used. A derived hostname skips those names, and `POST
-/api/clone` with an exact `hostname` rejects one with a 400 naming the directory to remove.
-Reusing a name would file two unrelated histories in one bucket.
+registry of every clone name ever used. A new clone's name skips those names, taking the next
+free letter instead. Reusing one would file two unrelated histories in one bucket.
 
 ### `GET /api/ledger/search` → `{ hits, scannedBytes, truncated }`
 

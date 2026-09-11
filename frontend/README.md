@@ -58,7 +58,7 @@ from the Rust backend.
 - `POST /api/{activate,reorder,clone,delete}`, `/api/claude/{import,refresh,recommended}`,
   `/api/notes/:id`, `/api/upload`, `/api/chat/:id` (+ `/events`, `/abort`).
 - **New**: `/api/config` (GET/PUT), `/api/config/test`, `/api/setup/env`, `/api/images/*`,
-  `/api/claude/swap` (hot-swap a clone's token); `/api/clone` takes an `image` reference.
+  `/api/claude/swap` (hot-swap a clone's token); `/api/clone` and `/api/fork` take a `CloneRequest`.
 
 ## Tests
 

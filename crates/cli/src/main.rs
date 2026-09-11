@@ -50,6 +50,15 @@ async fn main() {
     std::process::exit(code as i32);
 }
 
+/// `--message` / `--message-file`, as the request carries it: absent when neither was given.
+fn first_message(
+    inline: Option<&String>,
+    file: Option<&std::path::PathBuf>,
+) -> anyhow::Result<Option<String>> {
+    let body = args::read_text(inline, file)?;
+    Ok(Some(body).filter(|b| !b.trim().is_empty()))
+}
+
 async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
     let json = cli.json;
     match &cli.cmd {
@@ -62,9 +71,17 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 preset,
                 common,
             } => {
-                let body = args::read_text(message.as_ref(), message_file.as_ref())?;
-                commands::clone_create_plain(client, title, &body, preset.as_deref(), common, json)
-                    .await
+                let req = wire::CloneRequest {
+                    preset: preset.clone(),
+                    linear: Some(wire::LinearMeta {
+                        display_name: Some(title.clone()),
+                        ..Default::default()
+                    }),
+                    first_message: first_message(message.as_ref(), message_file.as_ref())?,
+                    run_startup_script: !common.no_startup_script,
+                    ..Default::default()
+                };
+                commands::start_clone(client, false, req, common, json).await
             }
             CloneCmd::Rm { clone, yes, wait } => {
                 commands::clone_rm(client, clone, *yes, wait, json).await
@@ -81,19 +98,17 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 message_file,
                 common,
             } => {
-                let body = args::read_text(message.as_ref(), message_file.as_ref())?;
-                commands::fork(
-                    client,
-                    source.as_deref(),
-                    *headless,
-                    preset.clone(),
-                    claude_account.clone(),
-                    codex_account.clone(),
-                    (!body.is_empty()).then_some(body),
-                    common,
-                    json,
-                )
-                .await
+                let req = wire::CloneRequest {
+                    source: source.clone(),
+                    preset: preset.clone(),
+                    claude_account: claude_account.clone(),
+                    codex_account: codex_account.clone(),
+                    first_message: first_message(message.as_ref(), message_file.as_ref())?,
+                    headless: *headless,
+                    run_startup_script: !common.no_startup_script,
+                    ..Default::default()
+                };
+                commands::start_clone(client, true, req, common, json).await
             }
             CloneCmd::Rebase {
                 clone,

@@ -56,7 +56,7 @@ $RMNG_CONTROL_URL` hint.
 | `board move` | the resolved `BoardColumn[]` after the move |
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
-| `clone create-plain` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
+| `clone create-plain`, `clone fork` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
 | `clone rm`, `clone archive`, `clone restore` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
 | `clone cp` | `{ bytes, dst }` |
 | `clone self` | the caller's `Clone` record, or exit 1 outside a clone |
@@ -110,15 +110,23 @@ still move at the next rotation, whereas a pinned one cannot. The same six field
 present flat on the clone object (`claudeSelection`, `claudeAccountEmail`, `claudeGroup`, and
 the Codex twins); `accounts` is a convenience view over them, not extra data.
 
-### Creating clones — one verb
+### Creating clones — two verbs
 
-`create-plain` is the CLI mirror of the template dialog: a title-derived hostname, with the
-image building on demand from `--preset`. It prints the started op id (follow with
-`rmng op wait <op-id>`), or blocks with `--wait`.
+Both build from a preset image: `create-plain` onto a fresh home, `fork` onto a copy of a
+live clone's home. The server names the clone and picks up whatever the flags leave open.
+Each prints the started op id (follow with `rmng op wait <op-id>`), or blocks with `--wait`.
 
-**Flags:** `--title <T>` (required), `--message <M>` | `--message-file <PATH>` (first message
-auto-sent to the agent; omitted ⇒ nothing is sent), `--preset <P>` (required when any presets
-are configured), `--column <NAME>`, `--wait` `[--timeout <N>]`.
+- `rmng clone create-plain --title <T> [--preset <P>]` — `--preset` is required when any
+  presets are configured.
+- `rmng clone fork [SOURCE] [--preset <P>] [--claude-account <SEL>] [--codex-account <SEL>]
+  [--headless]` — an omitted source is the preset's default fork clone where it is still
+  forkable, else the oldest forkable clone. An omitted preset keeps the source's; naming one
+  moves the fork to that preset's account pool. A selection is an email (pin), `auto`, `none`
+  (no token), or `group:<pool>`.
+
+**Shared flags:** `--message <M>` | `--message-file <PATH>` (first message auto-sent to the
+agent; omitted ⇒ nothing is sent), `--column <NAME>`, `--no-startup-script`, `--wait`
+`[--timeout <N>]`.
 
 `--column` files the new clone at the **top** of that column, by title or id. The name is
 resolved before anything is created, so a typo costs no clone. The id is written to the board
@@ -129,6 +137,7 @@ still being created would race its own creation.
 
 ```sh
 rmng clone create-plain --title 'Fix the flaky login test' --preset work --wait
+rmng clone fork --preset work --message 'carry on from here'
 ```
 
 ### `rmng clone rm <CLONE> [-y|--yes] [--wait] [--timeout <N>]`

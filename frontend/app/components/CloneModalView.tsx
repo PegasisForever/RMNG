@@ -42,7 +42,6 @@ export interface CloneModalViewProps {
   /** Live clones to fork from. The container passes only forkable rows (managed, not
    *  archived); an empty list is the empty state, not an error. */
   clones: Clone[];
-  clonesLoading: boolean;
   /** Imported accounts, both providers in one flat list, so the two pickers can label each
    *  option with its usage. */
   accounts: ClaudeUsage[];
@@ -79,7 +78,6 @@ export function CloneModalView({
   draft,
   onDraftChange,
   clones,
-  clonesLoading,
   accounts,
   groups,
   presets,
@@ -247,18 +245,14 @@ export function CloneModalView({
                 Source clone to fork
                 <select
                   value={draft.source ?? ""}
-                  disabled={busy || clonesLoading}
+                  disabled={busy}
                   onChange={(e) =>
                     onDraftChange("source", e.target.value || null)
                   }
                   className={cloneField}
                 >
                   <option value="" disabled>
-                    {clonesLoading
-                      ? "Loading clones…"
-                      : clones.length === 0
-                        ? "No forkable clones"
-                        : "Pick a clone"}
+                    {clones.length === 0 ? "No forkable clones" : "Pick a clone"}
                   </option>
                   {clones.map((c) => (
                     <option key={c.id} value={c.id}>

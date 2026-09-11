@@ -52,9 +52,7 @@ import {
   activate,
   activateLayout,
   archiveClone,
-  forkClone,
   deleteClone,
-  duplicateClone,
   getConfig,
   getUpdateStatus,
   putBoardColumns,
@@ -66,6 +64,7 @@ import {
   refreshClaudeUsage,
   refreshCodexUsage,
   restartServer,
+  startClone,
   swapClaudeAccount,
   swapCodexAccount,
   testConfig,
@@ -900,7 +899,6 @@ export function DashboardContainer({
       {cloneOpen ? (
         <CloneModalContainer
           clones={state.hosts}
-          clonesLoading={false}
           operations={state.operations}
           accounts={accounts}
           initialTicket={ticketPrefill}
@@ -916,13 +914,11 @@ export function DashboardContainer({
             if (made) selectClone(made);
             setNewClone(null);
           }}
-          // The dialog owns the whole lifecycle now: it keeps itself open, renders the op's
-          // progress, and closes when the op settles. So this just starts it and hands the
+          // The dialog owns the whole lifecycle: it keeps itself open, renders the op's
+          // progress, and closes when the op settles. This just starts it and hands the
           // Operation back — errors surface inside the dialog, not in the page banner.
-          // The op's target is the new clone's id, which is how it reaches the column
-          // whose button opened this.
-          onFork={(source, headless, payload) =>
-            forkClone(source, headless, payload).then((op) => {
+          onStart={(fork, req) =>
+            startClone(fork, req).then((op) => {
               if (newCloneColumn) {
                 setPendingColumn({
                   columnId: newCloneColumn,
@@ -931,19 +927,6 @@ export function DashboardContainer({
               }
               // The op's target is the new clone's id; `onClose` selects it once the
               // dialog settles, so making a clone leaves the operator looking at it.
-              setNewClone(op.target);
-              return op;
-            })
-          }
-          // Template tab: same lifecycle as a fork, through the clone route instead.
-          onClone={(payload) =>
-            duplicateClone(payload).then((op) => {
-              if (newCloneColumn) {
-                setPendingColumn({
-                  columnId: newCloneColumn,
-                  target: op.target,
-                });
-              }
               setNewClone(op.target);
               return op;
             })

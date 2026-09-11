@@ -59,9 +59,8 @@ pub enum Cmd {
     },
 }
 
-/// Flags shared by the clone-creating verbs. The template dialog's only controls are the
-/// preset picker and the board column, so that is all there is here: the server derives the
-/// hostname and the image, and applies the preset's own account defaults.
+/// Flags shared by the clone-creating verbs: the server names the clone, builds the image,
+/// and applies the preset's own pool and account defaults.
 #[derive(Args, Debug)]
 pub struct CreateArgs {
     /// Board column to file the new clone in, by title (`"In Progress"`) or id. It goes to

@@ -40,8 +40,7 @@ use wire::{AppConfigRedacted, ConfigPutResponse, ControlState, Operation};
 use crate::app::App;
 use crate::config;
 use crate::files;
-use crate::jobs::{self, CloneSpec, LinearMeta};
-use crate::naming;
+use crate::jobs;
 
 pub fn router(app: App) -> Router {
     let routes = Router::new()
@@ -932,160 +931,32 @@ fn heal_dangling_pool_bindings(app: &App, old: &wire::AppConfig, merged: &wire::
     }
 }
 
-/// The hostname for a new clone, plus the display name that goes with it: a duplicate ticket
-/// gets the next free hostname and its suffix in the name ("title (a)").
-fn derive_hostname(app: &App, base: &str, title: &str) -> (String, String) {
-    let hostname = jobs::next_free_hostname(app, base);
-    let suffix = hostname.strip_prefix(base).unwrap_or("").to_string();
-    let display = if suffix.is_empty() {
-        title.to_string()
-    } else {
-        format!("{title} ({suffix})")
-    };
-    (hostname, display)
-}
-
-/// `POST /api/clone` — start a template clone: `{ plain: { title, message } }` plus an
-/// optional `preset` name. The hostname derives server-side from the title, and the image
-/// builds on demand from the preset's Dockerfile. Async — returns `{ ok: true, op }`;
-/// progress streams over `/events`. Unknown fields are ignored.
+/// `POST /api/clone` builds a clone from a preset image onto a fresh home; `POST /api/fork`
+/// copies a live clone's home instead. Both take a [`wire::CloneRequest`] and answer
+/// `{ ok: true, op }` at once; progress streams over `/events`.
 async fn clone(
     State(app): State<App>,
-    Json(body): Json<serde_json::Value>,
+    Json(req): Json<wire::CloneRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let bad = |m: String| (StatusCode::BAD_REQUEST, m);
-    let str_field = |k: &str| body.get(k).and_then(|v| v.as_str()).map(str::to_string);
-    let cfg = app.config();
-    let prefix = cfg.docker.hostname_prefix.clone();
-
-    // An explicitly chosen preset (by name); "auto"/"none"/empty means none. Unknown → 400.
-    let explicit = match str_field("preset")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && s != "auto" && !s.eq_ignore_ascii_case("none"))
-    {
-        Some(name) => Some(
-            cfg.presets
-                .iter()
-                .find(|p| p.name == name)
-                .ok_or_else(|| bad(format!("unknown preset '{name}'")))?,
-        ),
-        None => None,
-    };
-    let plain = body
-        .get("plain")
-        .filter(|v| v.is_object())
-        .ok_or_else(|| bad("body must include { plain: { title } }".into()))?;
-    let title = plain
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let message = plain
-        .get("message")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if title.is_empty() {
-        return Err(bad("plain.title is required".into()));
-    }
-    // A preset must be picked whenever any are configured.
-    let env = match explicit {
-        Some(p) => crate::provision::preset_env_vars(p),
-        None if cfg.presets.is_empty() => Vec::new(),
-        None => {
-            return Err(bad(format!(
-                "a preset is required (configured: {})",
-                preset_names(&cfg)
-            )));
-        }
-    };
-    // The preset's own pool default, if it names one; `None` reads as `auto` downstream.
-    // One pool feeds both sides: both selections name it, and `split_group_binding`
-    // binds the clone once with both sides resolving inside it. `"none"` (any group)
-    // and a blank both mean fleet-wide auto.
-    let preset_group = explicit
-        .map(|p| p.group.trim().to_string())
-        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
-        .map(|g| format!("group:{g}"));
-    // Optional per-request account overrides; absent = the preset default above.
-    // `group` present binds (name) or unbinds (null/blank) fleet-wide auto; per-side
-    // `claudeAccount`/`codexAccount` picks win over the binding on their side.
-    // Unknown pools fail fast here (mirroring fork) rather than stranding the clone
-    // tokenless. Blank per-side picks fall back to the binding.
-    let has_group = body.get("group").is_some();
-    let group_val = body
-        .get("group")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let (bind_claude, bind_codex) = if !has_group {
-        (preset_group.clone(), preset_group)
-    } else if group_val.is_empty() {
-        (None, None)
-    } else {
-        let b = Some(format!("group:{group_val}"));
-        (b.clone(), b)
-    };
-    let str_opt = |k: &str| {
-        body.get(k)
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    };
-    let claude_account = str_opt("claudeAccount").or(bind_claude);
-    let codex_account = str_opt("codexAccount").or(bind_codex);
-    // Startup script: default on everywhere, opt out per request.
-    let run_startup_script = body
-        .get("runStartupScript")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    // Headless (no desktop): opt in per request, default headed.
-    let headless = body
-        .get("headless")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    // Rebuild image: force a fresh build with a fresh base pull even when the
-    // preset's tag already exists. The New clone dialog's rebuild checkbox sets this.
-    let rebuild = body
-        .get("rebuild")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let (hostname, display) =
-        derive_hostname(&app, &naming::plain_hostname_base(&prefix, &title), &title);
-    let spec = CloneSpec {
-        source_image: String::new(),
-        new_hostname: hostname,
-        linear: Some(LinearMeta {
-            display_name: Some(display),
-            ..Default::default()
-        }),
-        claude_account,
-        codex_account,
-        first_message: Some(message).filter(|m| !m.is_empty()),
-        agent_instructions: None,
-        claude_instructions: None,
-        preset_name: explicit.map(|p| p.name.clone()),
-        env,
-        agent_playbook: compose_playbook(&cfg, explicit),
-        global_prompt: compose_global_prompt(&cfg, explicit),
-        headless,
-        parent: None,
-        run_startup_script,
-        rebuild,
-    };
-    let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
-    Ok(Json(json!({ "ok": true, "op": op })))
+    start_clone(&app, false, req)
 }
 
-fn preset_names(cfg: &wire::AppConfig) -> String {
-    cfg.presets
-        .iter()
-        .map(|p| p.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
+async fn fork(
+    State(app): State<App>,
+    Json(req): Json<wire::CloneRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    start_clone(&app, true, req)
+}
+
+fn start_clone(
+    app: &App,
+    fork: bool,
+    req: wire::CloneRequest,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let retired = crate::ledger::reserved_names(&app.data_dir());
+    let plan = crate::clone_plan::plan(&app.config(), &app.store.get(), &retired, fork, req)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(json!({ "ok": true, "op": jobs::start_clone(app, plan) })))
 }
 
 /// The effective agent playbook for a clone: the global `agentPlaybook` plus the preset's
@@ -1164,130 +1035,6 @@ async fn unarchive(
     jobs::start_unarchive(&app, &id)
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ForkReq {
-    /// Source gen-2 clone id. Omitted/blank = the preset's default fork clone where it
-    /// still exists and is forkable, else the oldest forkable clone.
-    #[serde(default)]
-    source: Option<String>,
-    /// Headless (no desktop) fork.
-    #[serde(default)]
-    headless: bool,
-    /// Preset name override (`None` = inherit the source preset).
-    #[serde(default)]
-    preset: Option<String>,
-    /// Ticket metadata override (`None` = inherit the source ticket context).
-    #[serde(default)]
-    linear: Option<jobs::LinearMeta>,
-    /// Claude account selection override (`None` = inherit).
-    #[serde(default)]
-    claude_account: Option<String>,
-    /// Codex account selection override (`None` = inherit).
-    #[serde(default)]
-    codex_account: Option<String>,
-    /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent inherits.
-    #[serde(default)]
-    group: Option<Option<String>>,
-    /// First message override for the agent kickoff.
-    #[serde(default)]
-    first_message: Option<String>,
-    /// Instruction overrides for the agent kickoff.
-    #[serde(default)]
-    agent_instructions: Option<String>,
-    #[serde(default)]
-    claude_instructions: Option<String>,
-    /// Run the preset's startup script as the clone user. Default on; opt out per request.
-    #[serde(default = "default_true")]
-    run_startup_script: bool,
-    /// Force a fresh image build with a fresh base pull even when the preset's tag
-    /// already exists. The New clone dialog's rebuild checkbox sets this.
-    #[serde(default)]
-    rebuild: bool,
-}
-
-/// `POST /api/fork` — fork a gen-2 clone (`{ source }` plus the optional
-/// ticket/preset/account overrides above): snapshot + clone the source home, create
-/// from its recorded base tag. Returns the driving Operation.
-async fn fork(
-    State(app): State<App>,
-    Json(req): Json<ForkReq>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let cfg = app.config();
-    let prefix = cfg.docker.hostname_prefix.as_str();
-    // The hostname always derives server-side from the ticket identifier or title,
-    // like create does (uniqueness needs the live clone list, which no client
-    // can see). No caller names the fork itself.
-    let base = match req
-        .linear
-        .as_ref()
-        .and_then(|l| l.ticket.clone())
-        .filter(|t| !t.is_empty())
-    {
-        Some(ticket) => naming::ticket_hostname_base(prefix, &ticket),
-        None => {
-            let title = req
-                .linear
-                .as_ref()
-                .and_then(|l| l.display_name.clone())
-                .unwrap_or_default();
-            naming::plain_hostname_base(prefix, &title)
-        }
-    };
-    let hostname = derive_hostname(&app, &base, "").0;
-    // No source named: the preset override's default fork clone where it still exists
-    // and is forkable, else the oldest forkable clone (first in store order), mirroring
-    // the clone modal. An explicit source skips this and validates in `start_fork`.
-    let source_id = match req
-        .source
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(source) => source.to_string(),
-        None => {
-            let preset_default = req
-                .preset
-                .as_deref()
-                .and_then(|name| cfg.presets.iter().find(|p| p.name == *name))
-                .map(|p| p.default_fork_clone.trim().to_string())
-                .filter(|s| !s.is_empty());
-            crate::clone_ops::resolve_fork_source(&app, preset_default.as_deref()).ok_or_else(
-                || {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        "no forkable clones: create one from the template tab first".to_string(),
-                    )
-                },
-            )?
-        }
-    };
-    jobs::start_fork(
-        &app,
-        jobs::ForkSpec {
-            source_id,
-            new_hostname: hostname,
-            headless: req.headless,
-            preset_name: req.preset,
-            linear: req.linear,
-            claude_account: req.claude_account,
-            codex_account: req.codex_account,
-            group: req.group,
-            first_message: req.first_message,
-            agent_instructions: req.agent_instructions,
-            claude_instructions: req.claude_instructions,
-            run_startup_script: req.run_startup_script,
-            rebuild: req.rebuild,
-        },
-    )
-    .map(|op| Json(json!({ "ok": true, "op": op })))
-    .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -2488,7 +2235,7 @@ async fn claude_swap(
         host.group.clone(),
         req.group.clone(),
     );
-    crate::clone_ops::validate_group(&app, bound_group.as_deref())
+    crate::clone_ops::validate_group(&app.config(), bound_group.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let binding = crate::pool::assign_clone_side::<crate::pool::ClaudePool>(
         &app,
@@ -2605,7 +2352,7 @@ async fn codex_swap(
         host.group.clone(),
         req.group.clone(),
     );
-    crate::clone_ops::validate_group(&app, bound_group.as_deref())
+    crate::clone_ops::validate_group(&app.config(), bound_group.as_deref())
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let binding = crate::pool::assign_clone_side::<crate::pool::CodexPool>(
         &app,
@@ -2808,81 +2555,7 @@ mod tests {
 
     // --- GET /api/state (single-shot snapshot for the rmng CLI) ---
 
-    // --- POST /api/clone (template clone: title + preset) ---
-
-    #[tokio::test]
-    async fn clone_plain_mode_registers_clone_op() {
-        let app = test_app();
-        let body = json!({ "plain": { "title": "encoder scratch", "message": "hi" } });
-        let resp = clone(State(app.clone()), Json(body)).await.unwrap().0;
-        assert_eq!(resp["ok"], true);
-        let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
-        assert_eq!(op.kind, wire::OperationKind::Clone);
-        assert!(app.store.get().operations.iter().any(|o| o.id == op.id));
-    }
-
-    #[tokio::test]
-    async fn clone_plain_mode_rejects_unknown_preset() {
-        let app = test_app();
-        let body = json!({ "plain": { "title": "x" }, "preset": "nope" });
-        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("unknown preset"), "msg: {}", err.1);
-    }
-
-    #[tokio::test]
-    async fn clone_template_overrides_reach_the_op() {
-        let app = test_app();
-        app.cfg.write().unwrap().groups.push(wire::CloneGroup {
-            name: "pooled".into(),
-            accounts: vec![],
-        });
-        let body = json!({
-            "plain": { "title": "encoder scratch", "message": "" },
-            "headless": true,
-            "group": "pooled",
-            "claudeAccount": "auto",
-        });
-        let resp = clone(State(app.clone()), Json(body)).await.unwrap().0;
-        assert_eq!(resp["ok"], true);
-        let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
-        assert_eq!(op.kind, wire::OperationKind::Clone);
-    }
-
-    #[tokio::test]
-    async fn clone_template_rejects_unknown_pool() {
-        let app = test_app();
-        let body = json!({ "plain": { "title": "x" }, "group": "nope" });
-        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("unknown account pool"), "msg: {}", err.1);
-    }
-
-    #[tokio::test]
-    async fn clone_requires_a_title() {
-        let app = test_app();
-        let body = json!({ "plain": { "title": "   " } });
-        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("plain.title is required"), "msg: {}", err.1);
-    }
-
-    #[tokio::test]
-    async fn clone_requires_a_plain_body() {
-        let app = test_app();
-        // Retired modes (hostname / linear) and a bare body all land here now.
-        for body in [
-            json!({ "hostname": "w-x" }),
-            json!({ "linear": { "ticket": "WE-142" } }),
-            json!({}),
-        ] {
-            let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
-            assert_eq!(err.0, StatusCode::BAD_REQUEST);
-            assert!(err.1.contains("{ plain: { title } }"), "msg: {}", err.1);
-        }
-    }
-
-    // --- POST /api/fork without a source: preset default, else oldest ---
+    // --- POST /api/clone + POST /api/fork (one request type, one plan) ---
 
     fn push_forkable(app: &App, id: &str) {
         app.store.mutate(|s| {
@@ -2896,51 +2569,46 @@ mod tests {
         });
     }
 
-    fn set_preset_default(app: &App, name: &str, default_fork_clone: &str) {
-        app.cfg.write().unwrap().presets.push(wire::Preset {
-            name: name.into(),
-            default_fork_clone: default_fork_clone.into(),
+    fn titled(title: &str) -> wire::CloneRequest {
+        wire::CloneRequest {
+            linear: Some(wire::LinearMeta {
+                display_name: Some(title.into()),
+                ..Default::default()
+            }),
             ..Default::default()
-        });
-    }
-
-    async fn fork_op(app: &App, body: serde_json::Value) -> Operation {
-        let req: ForkReq = serde_json::from_value(body).unwrap();
-        let resp = fork(State(app.clone()), Json(req)).await.unwrap().0;
-        serde_json::from_value(resp["op"].clone()).unwrap()
+        }
     }
 
     #[tokio::test]
-    async fn fork_without_source_uses_preset_default() {
+    async fn clone_registers_an_op_and_answers_the_plan_error() {
         let app = test_app();
-        push_forkable(&app, "old");
-        push_forkable(&app, "new");
-        set_preset_default(&app, "p", "new");
-        let op = fork_op(&app, json!({ "preset": "p" })).await;
-        assert_eq!(op.source.as_deref(), Some("new"));
-    }
+        let resp = clone(State(app.clone()), Json(titled("encoder scratch")))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(resp["ok"], true);
+        let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
+        assert_eq!(op.kind, wire::OperationKind::Clone);
+        assert!(app.store.get().operations.iter().any(|o| o.id == op.id));
 
-    #[tokio::test]
-    async fn fork_without_source_falls_back_to_oldest() {
-        let app = test_app();
-        push_forkable(&app, "old");
-        push_forkable(&app, "new");
-        // A default naming no forkable clone falls back to the oldest.
-        set_preset_default(&app, "p", "gone");
-        let op = fork_op(&app, json!({ "preset": "p" })).await;
-        assert_eq!(op.source.as_deref(), Some("old"));
-        // No preset at all: oldest as well.
-        let op = fork_op(&app, json!({})).await;
-        assert_eq!(op.source.as_deref(), Some("old"));
-    }
-
-    #[tokio::test]
-    async fn fork_without_source_and_no_forkable_clone_is_400() {
-        let app = test_app();
-        let req: ForkReq = serde_json::from_value(json!({})).unwrap();
-        let err = fork(State(app.clone()), Json(req)).await.unwrap_err();
+        let err = clone(State(app.clone()), Json(wire::CloneRequest::default()))
+            .await
+            .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("no forkable clones"), "msg: {}", err.1);
+        assert!(err.1.contains("title is required"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
+    async fn fork_resolves_its_source_and_records_it_on_the_op() {
+        let app = test_app();
+        push_forkable(&app, "old");
+        push_forkable(&app, "new");
+        let resp = fork(State(app.clone()), Json(wire::CloneRequest::default()))
+            .await
+            .unwrap()
+            .0;
+        let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
+        assert_eq!(op.source.as_deref(), Some("old"));
     }
 
     // --- sub clones: parent resolution + cascade delete ---
@@ -3054,9 +2722,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(crate::clone_ops::validate_group(&app, Some("team")).is_ok());
-        assert!(crate::clone_ops::validate_group(&app, None).is_ok());
-        let err = crate::clone_ops::validate_group(&app, Some("typo")).unwrap_err();
+        let cfg = app.config();
+        assert!(crate::clone_ops::validate_group(&cfg, Some("team")).is_ok());
+        assert!(crate::clone_ops::validate_group(&cfg, None).is_ok());
+        let err = crate::clone_ops::validate_group(&cfg, Some("typo")).unwrap_err();
         assert!(err.to_string().contains("typo"), "err: {err}");
     }
 
