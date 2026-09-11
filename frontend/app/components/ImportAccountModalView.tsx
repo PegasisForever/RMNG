@@ -65,9 +65,9 @@ export function ImportAccountModalView({
   useModalEscape(onClose);
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/30 p-4">
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
       {/* Backdrop is inert: clicking it must not close the dialog, only Cancel and Escape do. */}
-      <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+      <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 rmng-modal-in">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           {replacing
             ? "Replace account"
@@ -79,14 +79,17 @@ export function ImportAccountModalView({
           {replacing ? (
             <>
               Sign in to whichever account takes over from{" "}
-              <span className="font-medium text-slate-700 dark:text-slate-200">{replacing}</span>.
-              It inherits that account&rsquo;s pools and every clone bound to it, and the old
-              account is then deleted. Signing in as the same account just repairs its token.
+              <span className="font-medium text-slate-700 dark:text-slate-200">
+                {replacing}
+              </span>
+              . It inherits that account&rsquo;s pools and every clone bound to
+              it, and the old account is then deleted. Signing in as the same
+              account just repairs its token.
             </>
           ) : (
             <>
-              Sign in to the provider here. This server keeps the account and hands short-lived
-              tokens to clones.
+              Sign in to the provider here. This server keeps the account and
+              hands short-lived tokens to clones.
             </>
           )}
         </p>
@@ -127,8 +130,8 @@ export function ImportAccountModalView({
               {loginUrl}
             </a>
             <p className="mt-3 text-xs text-slate-600 dark:text-slate-300">
-              2. The page it lands on will fail to load. That is expected. Copy its whole
-              address and paste it here:
+              2. The page it lands on will fail to load. That is expected. Copy
+              its whole address and paste it here:
             </p>
             <input
               value={pasted}
@@ -143,7 +146,9 @@ export function ImportAccountModalView({
             />
           </>
         ) : (
-          <p className="text-xs text-slate-400 dark:text-slate-500">Preparing the sign-in…</p>
+          <p className="text-xs text-slate-400 dark:text-slate-500">
+            Preparing the sign-in…
+          </p>
         )}
 
         {/* Replacing inherits the pools of the account being replaced, so there is nothing to
@@ -194,7 +199,11 @@ export function ImportAccountModalView({
             disabled={!canImport}
             className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
           >
-            {importing ? "Finishing…" : replacing ? `Replace ${replacing}` : "Finish sign-in"}
+            {importing
+              ? "Finishing…"
+              : replacing
+                ? `Replace ${replacing}`
+                : "Finish sign-in"}
           </button>
         </div>
       </div>

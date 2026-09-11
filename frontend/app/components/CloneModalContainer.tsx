@@ -122,7 +122,7 @@ export function CloneModalContainer({
         title: d.title.trim(),
         description: d.description,
         ...(d.priority > 0 ? { priority: d.priority } : {}),
-        ...(assigneeId !== "" ? { assigneeId } : {}),
+        ...(assigneeId === "" ? {} : { assigneeId }),
       });
     return Promise.resolve(undefined);
   }

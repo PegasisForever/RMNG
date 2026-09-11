@@ -61,15 +61,19 @@ export function ChangeAccountModalView({
   useModalEscape(onClose);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
       {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
-      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 rmng-modal-in">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-          {showCodex ? "Accounts" : "Claude account"} · <span className="text-emerald-700 dark:text-emerald-400">{cloneName}</span>
+          {showCodex ? "Accounts" : "Claude account"} ·{" "}
+          <span className="text-emerald-700 dark:text-emerald-400">
+            {cloneName}
+          </span>
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Pick a pool (both sides draw from it), then per side an account: auto rotates
-          inside the pool, a single account pins it — even one outside the pool.
+          Pick a pool (both sides draw from it), then per side an account: auto
+          rotates inside the pool, a single account pins it — even one outside
+          the pool.
         </p>
 
         <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">

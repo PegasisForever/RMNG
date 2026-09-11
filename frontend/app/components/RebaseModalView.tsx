@@ -56,16 +56,16 @@ export function RebaseModalView({
   useModalEscape(onClose, !busy);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
       {/* Backdrop is inert — only Cancel/Escape close, both guarded against closing over
           a running rebase operation. */}
-      <div className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+      <div className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 rmng-modal-in">
         <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
           Rebase {cloneId}
         </h3>
         <p className="mt-1 shrink-0 text-[11px] text-slate-400 dark:text-slate-500">
-          Swaps the system image for the picked preset's image. Home, id, and the
-          clone's own preset bindings stay — rebase is image only.
+          Swaps the system image for the picked preset's image. Home, id, and
+          the clone's own preset bindings stay — rebase is image only.
         </p>
 
         <div className="mt-3 space-y-2">
@@ -103,7 +103,9 @@ export function RebaseModalView({
         </div>
 
         {error ? (
-          <p className="mt-3 shrink-0 text-[11px] text-red-600 dark:text-red-400">{error}</p>
+          <p className="mt-3 shrink-0 text-[11px] text-red-600 dark:text-red-400">
+            {error}
+          </p>
         ) : null}
 
         {operation ? (

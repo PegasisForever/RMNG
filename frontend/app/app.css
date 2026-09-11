@@ -112,3 +112,39 @@ body {
 .ticket-description [data-prev-level="3"] {
   --prev-level: 1.05em;
 }
+
+/* Modal entry: every dialog fades its backdrop and rises its panel once on mount.
+   The two classes split the job so the backdrop never scales with the panel. */
+@keyframes rmng-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes rmng-modal-in {
+  from {
+    opacity: 0;
+    transform: scale(1.25);
+    filter: blur(200px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+}
+.rmng-backdrop-in {
+  animation: rmng-backdrop-in 200ms ease-out;
+}
+.rmng-modal-in {
+  transform-origin: center;
+  animation: rmng-modal-in 200ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rmng-backdrop-in,
+  .rmng-modal-in {
+    animation: none;
+  }
+}

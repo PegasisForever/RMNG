@@ -7,7 +7,12 @@ import type { Clone } from "~/lib/types";
 import { useModalEscape } from "~/lib/useModalEscape";
 import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 
-type Row = { id?: string; remotePort: string; localPort: string; enabled: boolean };
+type Row = {
+  id?: string;
+  remotePort: string;
+  localPort: string;
+  enabled: boolean;
+};
 
 function toRows(clone: Clone): Row[] {
   return (clone.forwards ?? []).map((f) => ({
@@ -18,7 +23,10 @@ function toRows(clone: Clone): Row[] {
   }));
 }
 
-function statusFor(runtime: ForwardRuntime[], id?: string): ForwardRuntime | undefined {
+function statusFor(
+  runtime: ForwardRuntime[],
+  id?: string,
+): ForwardRuntime | undefined {
   return id ? runtime.find((r) => r.id === id) : undefined;
 }
 
@@ -36,7 +44,13 @@ export function PortForwardModal({
   error: string | null;
   onClose: () => void;
   onSubmit: (
-    forwards: Array<{ id?: string; remotePort: number; localPort: number; enabled: boolean; label?: string }>,
+    forwards: Array<{
+      id?: string;
+      remotePort: number;
+      localPort: number;
+      enabled: boolean;
+      label?: string;
+    }>,
   ) => void;
 }) {
   const [rows, setRows] = useState<Row[]>(() => toRows(clone));
@@ -63,7 +77,12 @@ export function PortForwardModal({
   const runtimeErrors = rows.flatMap((r) => {
     const rt = statusFor(runtime, r.id);
     return rt?.state === "error"
-      ? [{ id: r.id!, text: `${r.remotePort || "?"}→${r.localPort || "?"}: ${rt.error ?? "failed"}` }]
+      ? [
+          {
+            id: r.id!,
+            text: `${r.remotePort || "?"}→${r.localPort || "?"}: ${rt.error ?? "failed"}`,
+          },
+        ]
       : [];
   });
 
@@ -73,19 +92,26 @@ export function PortForwardModal({
   useModalEscape(onClose);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
       {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
-      <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+      <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 rmng-modal-in">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-          Port forwards · <span className="text-emerald-700 dark:text-emerald-400">{clone.displayName ?? clone.id}</span>
+          Port forwards ·{" "}
+          <span className="text-emerald-700 dark:text-emerald-400">
+            {clone.displayName ?? clone.id}
+          </span>
         </h3>
         <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          Expose a port inside this clone at <code>127.0.0.1:&lt;local&gt;</code> on the machine running the viewer.
+          Expose a port inside this clone at{" "}
+          <code>127.0.0.1:&lt;local&gt;</code> on the machine running the
+          viewer.
         </p>
 
         {error || runtimeErrors.length > 0 ? (
           <div className="mt-3 space-y-1">
-            {error ? <p className="text-xs text-red-600 dark:text-red-400">{error}</p> : null}
+            {error ? (
+              <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
+            ) : null}
             {runtimeErrors.map((e) => (
               <p key={e.id} className="text-xs text-red-600 dark:text-red-400">
                 {e.text}
@@ -102,18 +128,25 @@ export function PortForwardModal({
             <span></span>
           </div>
           {rows.map((r, i) => (
-            <div key={i} className="grid grid-cols-[1fr_1fr_2rem_2rem] items-center gap-2">
+            <div
+              key={i}
+              className="grid grid-cols-[1fr_1fr_2rem_2rem] items-center gap-2"
+            >
               <input
                 inputMode="numeric"
                 value={r.remotePort}
-                onChange={(e) => update(i, { remotePort: e.target.value, id: undefined })}
+                onChange={(e) =>
+                  update(i, { remotePort: e.target.value, id: undefined })
+                }
                 placeholder="3000"
                 className="min-w-0 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
               />
               <input
                 inputMode="numeric"
                 value={r.localPort}
-                onChange={(e) => update(i, { localPort: e.target.value, id: undefined })}
+                onChange={(e) =>
+                  update(i, { localPort: e.target.value, id: undefined })
+                }
                 placeholder="8080"
                 className="min-w-0 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
               />

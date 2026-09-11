@@ -1,10 +1,10 @@
 // The clone dialog's group picker plus the two per-side account pickers.
 //
 // The group is the pool the clone draws BOTH providers' accounts from; the two account
-// pickers are OVERRIDES. The container fills all three from the resolved preset (the
-// preset's pool, Auto on both sides) until the operator touches one by hand — there is
-// no "preset default" pseudo-option. Blank ("Automatic") is only the state before a
-// preset resolves, or when none is configured: the server then decides.
+// pickers are OVERRIDES. The container fills the group from the resolved preset until the
+// operator touches it by hand. Each side reads "Follow group" until the operator pins an
+// account — there is no auto option. Blank group is only the state before a preset
+// resolves, or when none is configured: the server then decides.
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { cloneField, cloneLabel } from "~/components/cloneFieldStyles";
 import type { ClaudeUsage } from "~/lib/types";
@@ -43,7 +43,7 @@ export function CloneAccountFields({
                                         }
                                         className={cloneField}
                                 >
-                                        <option value="">Automatic</option>
+                                        <option value="" disabled hidden />
                                         <option value="none">
                                                 Any group (all pools)
                                         </option>
@@ -52,8 +52,7 @@ export function CloneAccountFields({
                                                         key={g.name}
                                                         value={g.name}
                                                 >
-                                                        {g.name} (
-                                                        {g.accounts.length})
+                                                        {g.name}
                                                 </option>
                                         ))}
                                 </select>
@@ -69,7 +68,9 @@ export function CloneAccountFields({
                                                                 "codex",
                                                 )}
                                                 value={claudeAccount}
-                                                blankLabel="Automatic"
+                                                blankLabel="Follow group"
+                                                showAuto={false}
+                                                flat
                                                 onChange={onClaudeAccountChange}
                                                 className={cloneField}
                                         />
@@ -84,7 +85,9 @@ export function CloneAccountFields({
                                                                 "codex",
                                                 )}
                                                 value={codexAccount}
-                                                blankLabel="Automatic"
+                                                blankLabel="Follow group"
+                                                showAuto={false}
+                                                flat
                                                 onChange={onCodexAccountChange}
                                                 className={cloneField}
                                         />

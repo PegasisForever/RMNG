@@ -960,8 +960,7 @@ pub async fn fork_clone(
         return Err(e);
     }
     let built = async {
-        let tag =
-            crate::derived::ensure_image(app, &dockerfile, rebuild, &mut on_progress).await?;
+        let tag = crate::derived::ensure_image(app, &dockerfile, rebuild, &mut on_progress).await?;
         clone_container_gen2_from_tag(
             app,
             &tag,

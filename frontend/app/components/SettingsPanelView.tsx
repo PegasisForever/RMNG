@@ -208,10 +208,10 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
       {/* Backdrop is inert — clicking it must not close the panel, only the ✕/Cancel
           buttons and Escape (handled above) do. */}
-      <div className="flex max-h-[90vh] h-[42rem] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl">
+      <div className="flex max-h-[90vh] h-[42rem] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl rmng-modal-in">
         {draft ? (
           // No title bar: the heading lives atop the left column over the rail, and the
           // footer Close (plus Escape) is the way out. Rail beside pane on a

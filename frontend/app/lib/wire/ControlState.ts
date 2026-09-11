@@ -11,80 +11,84 @@ import type { Operation } from "./Operation";
 /**
  * The top-level state broadcast over `/events` and persisted to `state.json`.
  */
-export type ControlState = { 
-/**
- * Id of the clone that should be displayed. May be absent or point at a clone
- * not in the list; consumers must tolerate both.
- */
-selected: string | null, monitors: Array<MonitorSpec>, 
-/**
- * Name of the active layout preset (mirrored from config so the sidebar switcher
- * updates live over `/events`). Empty when no presets exist.
- */
-activeLayout: string, 
-/**
- * Names of all layout presets, in config order — the sidebar's segmented buttons.
- */
-layoutPresetNames: Array<string>, hosts: Array<Clone>, 
-/**
- * The board's columns, left to right. Empty until the operator makes one, in which
- * case the frontend draws a single default column so no clone is ever hidden.
- */
-boardColumns: Array<BoardColumn>, 
-/**
- * The operator's own arrangement of the ticket column, top to bottom. Linear owns which
- * issues exist. Their arrangement is the one thing about them rmng owns, which is why
- * it is the one thing about them that is stored here.
- *
- * Ids are stored lowercased, because that is how the browser compares them when it
- * applies the order. An id for a ticket that no longer exists is ignored rather than
- * pruned: a closed ticket costs one stale string, and no consumer has to run a cleanup
- * pass to keep this honest.
- */
-ticketOrder: Array<string>, 
-/**
- * Clones the operator has silenced. Purely a browser-notification filter: a muted clone
- * runs, reports and flags itself unread exactly as it did before, and only the desktop
- * notification for it is suppressed.
- *
- * Stored here rather than in a browser so one mute covers the desktop and the phone, which
- * is the whole point of muting a clone that notifies too often.
- *
- * A parent's mute covers its sub clones; that rule is applied where the notification is
- * raised, not here, so unmuting a parent restores its children without a second write.
- * An id for a clone that no longer exists is ignored rather than pruned, the same as
- * [`Self::ticket_order`].
- */
-mutedClones: Array<string>, operations: Array<Operation>, 
-/**
- * The single configured account-pool list, mirrored from config so pool membership
- * renders + regroups over the live `/events` SSE. Idempotent; refreshed by
- * `mirror_groups_to_state` after any pool change and once at boot.
- */
-groups: Array<CloneGroup>, 
-/**
- * Per-account usage view (no tokens). Despite the name it holds **both** providers'
- * rows, distinguished by [`ClaudeUsage::provider`]; `clone_ops::replace_provider_views`
- * is what lets the Claude and Codex pollers publish here without clobbering each other.
- */
-claudeAccounts: Array<ClaudeUsage>, 
-/**
- * Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
- * account per week, so it belongs in `state.json` (unlike per-tick stats).
- */
-codexResetMarks: Array<CodexResetMark>, 
-/**
- * All-time per-clone token totals, keyed by clone id. Unlike the volatile CPU/RAM
- * stats map (which rides its own SSE bus precisely because it changes every tick),
- * this is persisted: it is cumulative, and the logs it is derived from get pruned.
- *
- * **`BTreeMap`, not `HashMap`, and that is load-bearing.** This is the only map in
- * `ControlState`, and `state.rs`'s file watcher decides whether an on-disk change came
- * from outside by *string-comparing* a reserialization against what it last wrote. A
- * `HashMap` reserializes in a different key order after a round-trip through the parser,
- * so with two or more entries that compare never matches: every one of our own writes
- * would look like a hand-edit, triggering a redundant full-state SSE broadcast and a
- * racy out-of-band state replacement. `BTreeMap`'s ordered output keeps the gate honest.
- * The JSON shape is identical either way, so no consumer can tell the difference.
- */
-cloneTokens: { [key in string]?: CloneTokens }, };
+export type ControlState = {
+ /**
+  * Id of the clone that should be displayed. May be absent or point at a clone
+  * not in the list; consumers must tolerate both.
+  */
+ selected: string | null;
+ monitors: Array<MonitorSpec>;
+ /**
+  * Name of the active layout preset (mirrored from config so the sidebar switcher
+  * updates live over `/events`). Empty when no presets exist.
+  */
+ activeLayout: string;
+ /**
+  * Names of all layout presets, in config order — the sidebar's segmented buttons.
+  */
+ layoutPresetNames: Array<string>;
+ hosts: Array<Clone>;
+ /**
+  * The board's columns, left to right. Empty until the operator makes one, in which
+  * case the frontend draws a single default column so no clone is ever hidden.
+  */
+ boardColumns: Array<BoardColumn>;
+ /**
+  * The operator's own arrangement of the ticket column, top to bottom. Linear owns which
+  * issues exist. Their arrangement is the one thing about them rmng owns, which is why
+  * it is the one thing about them that is stored here.
+  *
+  * Ids are stored lowercased, because that is how the browser compares them when it
+  * applies the order. An id for a ticket that no longer exists is ignored rather than
+  * pruned: a closed ticket costs one stale string, and no consumer has to run a cleanup
+  * pass to keep this honest.
+  */
+ ticketOrder: Array<string>;
+ /**
+  * Clones the operator has silenced. Purely a browser-notification filter: a muted clone
+  * runs, reports and flags itself unread exactly as it did before, and only the desktop
+  * notification for it is suppressed.
+  *
+  * Stored here rather than in a browser so one mute covers the desktop and the phone, which
+  * is the whole point of muting a clone that notifies too often.
+  *
+  * A parent's mute covers its sub clones; that rule is applied where the notification is
+  * raised, not here, so unmuting a parent restores its children without a second write.
+  * An id for a clone that no longer exists is ignored rather than pruned, the same as
+  * [`Self::ticket_order`].
+  */
+ mutedClones: Array<string>;
+ operations: Array<Operation>;
+ /**
+  * The single configured account-pool list, mirrored from config so pool membership
+  * renders + regroups over the live `/events` SSE. Idempotent; refreshed by
+  * `mirror_groups_to_state` after any pool change and once at boot.
+  */
+ groups: Array<CloneGroup>;
+ /**
+  * Per-account usage view (no tokens). Despite the name it holds **both** providers'
+  * rows, distinguished by [`ClaudeUsage::provider`]; `clone_ops::replace_provider_views`
+  * is what lets the Claude and Codex pollers publish here without clobbering each other.
+  */
+ claudeAccounts: Array<ClaudeUsage>;
+ /**
+  * Codex auto-reset bookkeeping (cooldown). Non-secret; changes at most once per
+  * account per week, so it belongs in `state.json` (unlike per-tick stats).
+  */
+ codexResetMarks: Array<CodexResetMark>;
+ /**
+  * All-time per-clone token totals, keyed by clone id. Unlike the volatile CPU/RAM
+  * stats map (which rides its own SSE bus precisely because it changes every tick),
+  * this is persisted: it is cumulative, and the logs it is derived from get pruned.
+  *
+  * **`BTreeMap`, not `HashMap`, and that is load-bearing.** This is the only map in
+  * `ControlState`, and `state.rs`'s file watcher decides whether an on-disk change came
+  * from outside by *string-comparing* a reserialization against what it last wrote. A
+  * `HashMap` reserializes in a different key order after a round-trip through the parser,
+  * so with two or more entries that compare never matches: every one of our own writes
+  * would look like a hand-edit, triggering a redundant full-state SSE broadcast and a
+  * racy out-of-band state replacement. `BTreeMap`'s ordered output keeps the gate honest.
+  * The JSON shape is identical either way, so no consumer can tell the difference.
+  */
+ cloneTokens: { [key in string]?: CloneTokens };
+};

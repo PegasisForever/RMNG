@@ -111,13 +111,11 @@ test("a source picked by hand sticks until it stops being forkable", () => {
   expect(cloneDialogReducer(picked, sources("a")).draft.source).toBe("a");
 });
 
-test("the pool and both accounts follow the preset until touched", () => {
+test("the pool follows the preset until touched", () => {
   const s = dialog(edit("mode", "plain"));
-  expect([s.draft.group, s.draft.claudeAccount, s.draft.codexAccount]).toEqual([
-    "pooled",
-    "auto",
-    "auto",
-  ]);
+  expect(s.draft.group).toBe("pooled");
+  // Both sides stay blank: Follow group, until the operator pins one.
+  expect([s.draft.claudeAccount, s.draft.codexAccount]).toEqual(["", ""]);
   // A preset naming no pool reads as every pool, which is what `none` sends.
   expect(
     dialog(edit("mode", "plain"), edit("plainPreset", "side")).draft.group,
@@ -221,7 +219,6 @@ test("the request carries the open tab's own fields", () => {
     source: "pega-we-142",
     preset: "work",
     group: "pooled",
-    claudeAccount: "auto",
     linear: { displayName: "scratch" },
     firstMessage: "go",
     rebuild: true,

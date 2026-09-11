@@ -35,8 +35,8 @@ export interface CloneDraft {
  /** Ticket tabs only: appended to the agent's and Claude Code's default instructions. */
  agentInstructions: string;
  claudeInstructions: string;
- /** Account picks: an email pins, `auto` rotates inside the pool. The resolved preset
-  *  fills both until the operator picks one by hand. */
+ /** Account picks: an email pins, blank follows the group. No auto option: the
+  *  boxes offer Follow group plus the imported accounts, flat. */
  claudeAccount: string;
  codexAccount: string;
  /** The account pool: a name binds, `none` unbinds to every pool. Filled from the preset
@@ -131,8 +131,9 @@ export function resolvePreset(
 
 // --- the dialog, as one model -------------------------------------------------------------
 
-/** The picks the follow rules below leave alone once made by hand. */
-const FOLLOWED = ["source", "group", "claudeAccount", "codexAccount"] as const;
+/** The picks the follow rules below leave alone once made by hand. Account pins need
+ *  no entry: nothing fills them, so there is nothing to stick against. */
+const FOLLOWED = ["source", "group"] as const;
 type Followed = (typeof FOLLOWED)[number];
 
 export interface CloneDialog {
@@ -246,9 +247,10 @@ export function cloneDialogReducer(
  }
 }
 
-/** Fill in what the operator has not: the tab's preset and team, the fork source, and the
- *  pool and both accounts the resolved preset names. A pick made by hand stays put — unless
- *  it stopped qualifying, as a source clone does when it is deleted or archived. */
+/** Fill in what the operator has not: the tab's preset and team, the fork source, and
+ *  the pool the resolved preset names. A pick made by hand stays put — unless
+ *  it stopped qualifying, as a source clone does when it is deleted or archived. Both
+ *  account sides stay blank (Follow group) until the operator pins one. */
 function follow(s: CloneDialog): CloneDialog {
  let d = s.draft;
  const first = s.presets[0]?.name ?? "";
@@ -284,8 +286,6 @@ function follow(s: CloneDialog): CloneDialog {
    const g = preset.group.trim();
    d = { ...d, group: g === "" || g.toLowerCase() === "none" ? "none" : g };
   }
-  if (!touched.has("claudeAccount")) d = { ...d, claudeAccount: "auto" };
-  if (!touched.has("codexAccount")) d = { ...d, codexAccount: "auto" };
  }
  return { ...s, draft: d, touched };
 }

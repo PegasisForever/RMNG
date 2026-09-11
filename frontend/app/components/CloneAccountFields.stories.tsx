@@ -48,17 +48,17 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** No preset has resolved yet, which is every moment before a ticket parses (or a preset
- *  is picked). All three boxes read Automatic: the server decides. */
+ *  is picked). The group box is blank; both sides read Follow group. */
 export const Automatic: Story = { args: { ...pools() } };
 
-/** A resolved preset fills the boxes directly: its pool in the group box, Auto on both
- *  sides. No "preset default" pseudo-option — these are the real values the request sends. */
+/** A resolved preset fills the group box directly with its pool; both sides stay on
+ *  Follow group until the operator pins an account. */
 export const FilledFromPreset: Story = {
   args: {
     ...pools(),
     group: "team",
-    claudeAccount: "auto",
-    codexAccount: "auto",
+    claudeAccount: "",
+    codexAccount: "",
   },
 };
 
@@ -69,7 +69,7 @@ export const Overridden: Story = {
 };
 
 /** Nothing imported and no pools configured. The group box still offers the any-group
- *  escape hatch, and the sides rotate over everything. */
+ *  escape hatch, and the sides read Follow group. */
 export const NothingConfigured: Story = {
   args: {
     accounts: [],

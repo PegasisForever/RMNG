@@ -119,8 +119,8 @@ export function TicketModalView({
   return (
     // Backdrop is inert, like the clone dialog's: only Cancel and Escape close this, and
     // neither does while a create is in flight.
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4">
-      <div className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
+      <div className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 rmng-modal-in">
         <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
           New ticket
         </h3>
@@ -190,14 +190,15 @@ export function TicketModalView({
               its narrowest column, where either would wrap to four lines. */}
           {teams.length === 0 ? (
             <p className="text-[11px] text-red-600 dark:text-red-400">
-              No preset declares a team key. Add ticket-id prefixes to a preset in Settings.
+              No preset declares a team key. Add ticket-id prefixes to a preset
+              in Settings.
             </p>
           ) : null}
 
           {keyMissing ? (
             <p className="text-[11px] text-red-600 dark:text-red-400">
-              Preset “{chosen?.preset.name}” has no Linear API key. Add it in Settings, or
-              pick a team whose preset has one.
+              Preset “{chosen?.preset.name}” has no Linear API key. Add it in
+              Settings, or pick a team whose preset has one.
             </p>
           ) : null}
 
@@ -231,11 +232,13 @@ export function TicketModalView({
               ticket straight out of the column that opened it, which is worth saying before
               the click and not after. */}
           <p className="text-[11px] text-slate-400 dark:text-slate-500">
-            Opens as Todo, assigned to {assignee && !assignee.isViewer ? assignee.name : "you"}.
+            Opens as Todo, assigned to{" "}
+            {assignee && !assignee.isViewer ? assignee.name : "you"}.
           </p>
           {assignee && !assignee.isViewer ? (
             <p className="text-[11px] text-amber-600 dark:text-amber-400">
-              This column lists the tickets assigned to you, so it will not appear in it.
+              This column lists the tickets assigned to you, so it will not
+              appear in it.
             </p>
           ) : null}
 
