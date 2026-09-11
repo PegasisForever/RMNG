@@ -122,8 +122,18 @@ export function TicketModalView({
   return (
     // Backdrop is inert, like the clone dialog's: only Cancel and Escape close this, and
     // neither does while a create is in flight.
-    <div className={"fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 " + (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")}>
-      <div className={"flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " + (closing ? "rmng-modal-out" : "rmng-modal-in")}>
+    <div
+      className={
+        "fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 " +
+        (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")
+      }
+    >
+      <div
+        className={
+          "flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " +
+          (closing ? "rmng-modal-out" : "rmng-modal-in")
+        }
+      >
         <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
           New ticket
         </h3>

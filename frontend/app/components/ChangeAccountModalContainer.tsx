@@ -15,77 +15,83 @@ import type { CloneGroup } from "~/lib/wire/CloneGroup";
 /** The clone's pool: the shared binding, else a legacy sticky for a clone the server
  *  has not re-saved yet. */
 export function currentGroup(clone: Clone): string | null {
-  return clone.group ?? clone.claudeGroup ?? clone.codexGroup ?? null;
+    return clone.group ?? clone.claudeGroup ?? clone.codexGroup ?? null;
 }
 
 /** Current side selection ("auto" or an email). A legacy `group:<name>` selection reads
  *  as "auto" — the group half of that binding now lives in {@link currentGroup} — and so
  *  does a legacy `"none"` (no tokenless state anymore; the side resolves in scope). */
 export function currentValue(clone: Clone): string {
-  const sel = clone.claudeSelection ??
-    (clone.claudeGroup ? `group:${clone.claudeGroup}` : undefined);
-  if (!sel) return clone.claudeAccountEmail ?? "auto";
-  return sel.startsWith("group:") || sel === "none" ? "auto" : sel;
+    const sel =
+        clone.claudeSelection ??
+        (clone.claudeGroup ? `group:${clone.claudeGroup}` : undefined);
+    if (!sel) return clone.claudeAccountEmail ?? "auto";
+    return sel.startsWith("group:") || sel === "none" ? "auto" : sel;
 }
 
 export function currentCodexValue(clone: Clone): string {
-  const sel = clone.codexSelection ??
-    (clone.codexGroup ? `group:${clone.codexGroup}` : undefined);
-  if (!sel) return clone.codexAccountEmail ?? "auto";
-  return sel.startsWith("group:") || sel === "none" ? "auto" : sel;
+    const sel =
+        clone.codexSelection ??
+        (clone.codexGroup ? `group:${clone.codexGroup}` : undefined);
+    if (!sel) return clone.codexAccountEmail ?? "auto";
+    return sel.startsWith("group:") || sel === "none" ? "auto" : sel;
 }
 
 export function ChangeAccountModalContainer({
-  clone,
-  accounts,
-  codexAccounts,
-  busy,
-  onClose,
-  onSubmit,
+    clone,
+    accounts,
+    codexAccounts,
+    busy,
+    onClose,
+    onSubmit,
 }: {
-  clone: Clone;
-  /** Assignable accounts (imported Claude accounts). */
-  accounts: ClaudeUsage[];
-  /** Assignable Codex accounts. */
-  codexAccounts: ClaudeUsage[];
-  busy: boolean;
-  onClose: () => void;
-  onSubmit: (claude: string, codex: string, group: string | null) => void;
+    clone: Clone;
+    /** Assignable accounts (imported Claude accounts). */
+    accounts: ClaudeUsage[];
+    /** Assignable Codex accounts. */
+    codexAccounts: ClaudeUsage[];
+    busy: boolean;
+    onClose: () => void;
+    onSubmit: (claude: string, codex: string, group: string | null) => void;
 }) {
-  const [claudeValue, setClaudeValue] = useState(() => currentValue(clone));
-  const { closing, beginExit } = useModalExit();
-  const [codexValue, setCodexValue] = useState(() => currentCodexValue(clone));
-  const [groupValue, setGroupValue] = useState<string | null>(() => currentGroup(clone));
-  const [groups, setGroups] = useState<CloneGroup[]>([]);
+    const [claudeValue, setClaudeValue] = useState(() => currentValue(clone));
+    const { closing, beginExit } = useModalExit();
+    const [codexValue, setCodexValue] = useState(() =>
+        currentCodexValue(clone),
+    );
+    const [groupValue, setGroupValue] = useState<string | null>(() =>
+        currentGroup(clone),
+    );
+    const [groups, setGroups] = useState<CloneGroup[]>([]);
 
-  useEffect(() => {
-    getConfig()
-      .then((c) => {
-        setGroups(c.groups);
-      })
-      .catch(() => {
-        // Config unreachable — only accounts (no group options).
-      });
-  }, []);
+    useEffect(() => {
+        getConfig()
+            .then((c) => {
+                setGroups(c.groups);
+            })
+            .catch(() => {
+                // Config unreachable — only accounts (no group options).
+            });
+    }, []);
 
-  return (
-    <ChangeAccountModalView
-      cloneName={clone.displayName ?? clone.id}
-      accounts={accounts}
-      groups={groups}
-      codexAccounts={codexAccounts}
-      groupValue={groupValue}
-      claudeValue={claudeValue}
-      codexValue={codexValue}
-      busy={busy}
-      onGroupChange={setGroupValue}
-      onClaudeValueChange={setClaudeValue}
-      onCodexValueChange={setCodexValue}
-      closing={closing}
-      onClose={() => beginExit(onClose)}
-      onSubmit={() =>
-        beginExit(() => onSubmit(claudeValue, codexValue, groupValue))
-      }
-    />
-  );
+    return (
+        <ChangeAccountModalView
+            cloneName={clone.displayName ?? clone.id}
+            accounts={accounts}
+            groups={groups}
+            codexAccounts={codexAccounts}
+            groupValue={groupValue}
+            claudeValue={claudeValue}
+            codexValue={codexValue}
+            busy={busy}
+            onGroupChange={setGroupValue}
+            onClaudeValueChange={setClaudeValue}
+            onCodexValueChange={setCodexValue}
+            closing={closing}
+            onClose={() => beginExit(onClose)}
+            onSubmit={() =>
+                beginExit(() => onSubmit(claudeValue, codexValue, groupValue))
+            }
+        />
+    );
 }

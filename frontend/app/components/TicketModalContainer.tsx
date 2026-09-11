@@ -12,10 +12,10 @@ import { TicketModalView } from "~/components/TicketModalView";
 import { teamKeysOf } from "~/lib/cloneDraft";
 import { useModalExit } from "~/lib/useModalExit";
 import {
-    keyFor,
-    openTicket,
-    startingTeam,
-    useAssignee,
+        keyFor,
+        openTicket,
+        startingTeam,
+        useAssignee,
 } from "~/lib/linear/intake";
 import type { LinearTicket } from "~/lib/tickets";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
@@ -23,70 +23,72 @@ import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 // BlockNote is browser-only and heavy; the description field pulls it in on demand. The
 // container is the import target, so the upload call it owns rides the same lazy chunk.
 const MarkdownEditorContainer = lazy(
-    () => import("~/components/MarkdownEditorContainer"),
+        () => import("~/components/MarkdownEditorContainer"),
 );
 
 export function TicketModalContainer({
-    presets,
-    onClose,
-    onCreated,
+        presets,
+        onClose,
+        onCreated,
 }: {
-    /** Configured presets (`config.presets`). Their labels are the dialog's team keys, and a
-     *  non-empty `linearKey` says which of them can actually open a ticket. */
-    presets: PresetRedacted[];
-    onClose: () => void;
-    /** The issue Linear answered with, once it exists. The dialog closes either way. */
-    onCreated: (ticket: LinearTicket) => void;
+        /** Configured presets (`config.presets`). Their labels are the dialog's team keys, and a
+         *  non-empty `linearKey` says which of them can actually open a ticket. */
+        presets: PresetRedacted[];
+        onClose: () => void;
+        /** The issue Linear answered with, once it exists. The dialog closes either way. */
+        onCreated: (ticket: LinearTicket) => void;
 }) {
-    const teams = useMemo(() => teamKeysOf(presets), [presets]);
-    // Read once on mount: storage is a session fact, and re-reading it would fight the dropdown.
-    const [team, setTeam] = useState(() => startingTeam(teams));
-    const { closing, beginExit } = useModalExit();    // The body lives here because the editor does: the slot reports markdown up on every
-    // keystroke, and the View sends whatever it last said.
-    const [description, setDescription] = useState("");
+        const teams = useMemo(() => teamKeysOf(presets), [presets]);
+        // Read once on mount: storage is a session fact, and re-reading it would fight the dropdown.
+        const [team, setTeam] = useState(() => startingTeam(teams));
+        const { closing, beginExit } = useModalExit(); // The body lives here because the editor does: the slot reports markdown up on every
+        // keystroke, and the View sends whatever it last said.
+        const [description, setDescription] = useState("");
 
-    // Whichever key claims the chosen team. It opens the issue and it stores the images pasted
-    // into the body, so both follow the dropdown rather than being fixed when the dialog opened.
-    const key = keyFor(presets, team);
-    const {
-        people,
-        loading: peopleLoading,
-        assigneeId,
-        setAssigneeId,
-    } = useAssignee(key, team);
+        // Whichever key claims the chosen team. It opens the issue and it stores the images pasted
+        // into the body, so both follow the dropdown rather than being fixed when the dialog opened.
+        const key = keyFor(presets, team);
+        const {
+                people,
+                loading: peopleLoading,
+                assigneeId,
+                setAssigneeId,
+        } = useAssignee(key, team);
 
-    return (
-        <TicketModalView
-            teams={teams}
-            team={team}
-            onTeamChange={setTeam}
-            people={people}
-            assigneeId={assigneeId}
-            onAssigneeChange={setAssigneeId}
-            peopleLoading={peopleLoading}
-            description={description}
-            descriptionEditor={
-                <Suspense
-                    fallback={
-                        <p className="px-3 text-xs text-slate-400 dark:text-slate-500">
-                            Loading editor…
-                        </p>
-                    }
-                >
-                    {/* Deliberately not keyed on the team: BlockNote captures its upload function once
+        return (
+                <TicketModalView
+                        teams={teams}
+                        team={team}
+                        onTeamChange={setTeam}
+                        people={people}
+                        assigneeId={assigneeId}
+                        onAssigneeChange={setAssigneeId}
+                        peopleLoading={peopleLoading}
+                        description={description}
+                        descriptionEditor={
+                                <Suspense
+                                        fallback={
+                                                <p className="px-3 text-xs text-slate-400 dark:text-slate-500">
+                                                        Loading editor…
+                                                </p>
+                                        }
+                                >
+                                        {/* Deliberately not keyed on the team: BlockNote captures its upload function once
               at mount, so remounting to move the image target would take the typed body with
               it. Images therefore go to whichever workspace the dialog opened on, and only a
               fleet whose presets point at different Linear workspaces can notice. */}
-                    <MarkdownEditorContainer
-                        onChange={setDescription}
-                        linearKey={key}
-                        placeholder="What needs doing — paste images, format freely"
-                    />
-                </Suspense>
-            }
-            closing={closing}
-            onClose={() => beginExit(onClose)}
-            onCreate={(ticket) => openTicket(presets, ticket).then(onCreated)}
-        />
-    );
+                                        <MarkdownEditorContainer
+                                                onChange={setDescription}
+                                                linearKey={key}
+                                                placeholder="What needs doing — paste images, format freely"
+                                        />
+                                </Suspense>
+                        }
+                        closing={closing}
+                        onClose={() => beginExit(onClose)}
+                        onCreate={(ticket) =>
+                                openTicket(presets, ticket).then(onCreated)
+                        }
+                />
+        );
 }

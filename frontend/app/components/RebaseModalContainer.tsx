@@ -54,7 +54,9 @@ export function RebaseModalContainer({
       });
   }, []);
 
-  const valid = preset !== "" && (presets.length === 0 || presets.some((p) => p.name === preset));
+  const valid =
+    preset !== "" &&
+    (presets.length === 0 || presets.some((p) => p.name === preset));
 
   // --- operation tracking (same rules as the template dialog) ---------------------------
   // Finished ops are PRUNED from state a few seconds after they land, so an op that

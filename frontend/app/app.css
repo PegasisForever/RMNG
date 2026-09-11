@@ -114,9 +114,7 @@ body {
 }
 
 /* Modal entry: every dialog fades its backdrop and sharpens its panel once on mount.
-   The two classes split the job so the backdrop never scales with the panel.
-   Exit reuses the same frames backwards (`reverse`), so the two directions can never
-   drift apart; the JS delay in `useModalExit` must cover EXIT_MS below. */
+   The two classes split the job so the backdrop never scales with the panel. */
 @keyframes rmng-backdrop-in {
   from {
     opacity: 0;
@@ -144,13 +142,38 @@ body {
   transform-origin: center;
   animation: rmng-modal-in 200ms ease-out;
 }
-/* Modal exit: the mirror of entry — the panel blooms back out while the backdrop lifts. */
+/* Modal exit: the mirror of entry — the panel blooms back out while the backdrop lifts.
+   Dedicated keyframes, NOT `reverse` on the entry ones: flipping direction on an
+   already-finished same-name animation does not restart it, so the exit silently never
+   ran (the dialog just hung frozen until the unmount timer fired). The name change from
+   `-in` to `-out` is what restarts the animation; keep the two blocks' values mirrored
+   by hand. The JS delay in `useModalExit` must cover the 200ms below. */
+@keyframes rmng-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes rmng-modal-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.25);
+    filter: blur(200px);
+  }
+}
 .rmng-backdrop-out {
-  animation: rmng-backdrop-in 200ms ease-out reverse;
+  animation: rmng-backdrop-out 200ms ease-in;
 }
 .rmng-modal-out {
   transform-origin: center;
-  animation: rmng-modal-in 200ms ease-out reverse;
+  animation: rmng-modal-out 200ms ease-in;
 }
 @media (prefers-reduced-motion: reduce) {
   .rmng-backdrop-in,

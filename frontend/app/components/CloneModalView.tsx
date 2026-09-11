@@ -103,7 +103,12 @@ export function CloneModalView({
   useModalEscape(onClose, !busy);
 
   return (
-    <div className={"fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 " + (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")}>
+    <div
+      className={
+        "fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 " +
+        (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")
+      }
+    >
       {/* Backdrop is inert — clicking it must not close the dialog (nor could it while
           `busy`); only Cancel/Escape do, both guarded against closing over a running
           clone operation. This dialog always forks: the button files a fork of the picked
@@ -114,7 +119,12 @@ export function CloneModalView({
           the shortest (No ticket, ~462px) simply carries the slack as empty space above
           the button bar, which stays pinned to the bottom. `max-h-[90vh]` is the fallback
           for a genuinely short viewport, not the normal path. */}
-      <div className={"flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " + (closing ? "rmng-modal-out" : "rmng-modal-in")}>
+      <div
+        className={
+          "flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " +
+          (closing ? "rmng-modal-out" : "rmng-modal-in")
+        }
+      >
         <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
           New clone
         </h3>
