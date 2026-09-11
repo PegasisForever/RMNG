@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { RebaseModalView } from "~/components/RebaseModalView";
 import { getConfig } from "~/lib/api";
+import { useModalExit } from "~/lib/useModalExit";
 import { opPhase } from "~/lib/cloneDraft";
 import type { Operation } from "~/lib/types";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
@@ -39,6 +40,7 @@ export function RebaseModalContainer({
   const [opId, setOpId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { closing, beginExit } = useModalExit();
 
   useEffect(() => {
     getConfig()
@@ -70,7 +72,7 @@ export function RebaseModalContainer({
   }, [op]);
   useEffect(() => {
     if (!opId) return;
-    if (opPhase(op, opSeen, failed) === "done") onClose();
+    if (opPhase(op, opSeen, failed) === "done") beginExit(onClose);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [opId, op, opSeen, failed]);
 
@@ -104,7 +106,8 @@ export function RebaseModalContainer({
       error={error}
       operation={op ?? null}
       onSubmit={submit}
-      onClose={onClose}
+      closing={closing}
+      onClose={() => beginExit(onClose)}
     />
   );
 }

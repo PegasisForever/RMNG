@@ -28,6 +28,7 @@ export function ChangeAccountModalView({
   onCodexValueChange,
   onClose,
   onSubmit,
+  closing = false,
 }: {
   /** The clone this is about, as the heading names it (display name, else id). */
   cloneName: string;
@@ -49,6 +50,8 @@ export function ChangeAccountModalView({
   onCodexValueChange: (value: string) => void;
   onClose: () => void;
   onSubmit: () => void;
+  /** Exit is playing: the overlay swaps its entry classes for the reverse mirrors. */
+  closing?: boolean;
 }) {
   // The Codex picker only shows when Codex accounts exist or a pool could carry Codex
   // members; the title reflects both providers only when both are actually changeable.
@@ -61,9 +64,9 @@ export function ChangeAccountModalView({
   useModalEscape(onClose);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
+    <div className={"fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 " + (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")}>
       {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
-      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 rmng-modal-in">
+      <div className={"w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " + (closing ? "rmng-modal-out" : "rmng-modal-in")}>
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           {showCodex ? "Accounts" : "Claude account"} ·{" "}
           <span className="text-emerald-700 dark:text-emerald-400">

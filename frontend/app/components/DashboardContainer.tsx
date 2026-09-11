@@ -17,6 +17,7 @@ import { useSearchParams } from "react-router";
 
 import { AppShellV2, type SideFocus } from "~/components/AppShellV2";
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
+import { useModalExit } from "~/lib/useModalExit";
 import { CloneModalContainer } from "~/components/CloneModalContainer";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { PortForwardModal } from "~/components/PortForwardModal";
@@ -166,6 +167,8 @@ export function DashboardContainer({
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Port-forward dialog has no container of its own, so its exit delay lives here.
+  const forwardExit = useModalExit();
   // The shared cosmetic account order and the live clock. Both are session reads, so they
   // are resolved here and handed down: the rail's usage bars and the settings account lists
   // then draw from props alone, and both stay in step because they read one subscription.
@@ -1057,12 +1060,13 @@ export function DashboardContainer({
           runtime={forwards[forwardClone.id] ?? []}
           busy={forwarding}
           error={forwardError}
-          onClose={() => setForwardClone(null)}
+          closing={forwardExit.closing}
+          onClose={() => forwardExit.beginExit(() => setForwardClone(null))}
           onSubmit={(list) => {
             setForwarding(true);
             setForwardError(null);
             putForwards(forwardClone.id, list)
-              .then(() => setForwardClone(null))
+              .then(() => forwardExit.beginExit(() => setForwardClone(null)))
               .catch((e: Error) => setForwardError(e.message))
               .finally(() => setForwarding(false));
           }}

@@ -30,6 +30,7 @@ export function ImportAccountModalView({
   onGroupChange,
   onClose,
   onImport,
+  closing = false,
 }: {
   provider: "claude" | "codex";
   /** The URL to open, once the server has answered. Null while it is being asked for. */
@@ -52,6 +53,8 @@ export function ImportAccountModalView({
   onGroupChange: (group: string) => void;
   onClose: () => void;
   onImport: () => void;
+  /** Exit is playing: the overlay swaps its entry classes for the reverse mirrors. */
+  closing?: boolean;
 }) {
   const canImport = !importing && pasted.trim().length > 0;
 
@@ -65,9 +68,9 @@ export function ImportAccountModalView({
   useModalEscape(onClose);
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
+    <div className={"fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/30 p-4 " + (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")}>
       {/* Backdrop is inert: clicking it must not close the dialog, only Cancel and Escape do. */}
-      <div className="max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 rmng-modal-in">
+      <div className={"max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " + (closing ? "rmng-modal-out" : "rmng-modal-in")}>
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           {replacing
             ? "Replace account"

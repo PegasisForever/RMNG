@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 
 import { ChangeAccountModalView } from "~/components/ChangeAccountModalView";
 import { getConfig } from "~/lib/api";
+import { useModalExit } from "~/lib/useModalExit";
 import type { ClaudeUsage, Clone } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
@@ -52,6 +53,7 @@ export function ChangeAccountModalContainer({
   onSubmit: (claude: string, codex: string, group: string | null) => void;
 }) {
   const [claudeValue, setClaudeValue] = useState(() => currentValue(clone));
+  const { closing, beginExit } = useModalExit();
   const [codexValue, setCodexValue] = useState(() => currentCodexValue(clone));
   const [groupValue, setGroupValue] = useState<string | null>(() => currentGroup(clone));
   const [groups, setGroups] = useState<CloneGroup[]>([]);
@@ -79,8 +81,11 @@ export function ChangeAccountModalContainer({
       onGroupChange={setGroupValue}
       onClaudeValueChange={setClaudeValue}
       onCodexValueChange={setCodexValue}
-      onClose={onClose}
-      onSubmit={() => onSubmit(claudeValue, codexValue, groupValue)}
+      closing={closing}
+      onClose={() => beginExit(onClose)}
+      onSubmit={() =>
+        beginExit(() => onSubmit(claudeValue, codexValue, groupValue))
+      }
     />
   );
 }

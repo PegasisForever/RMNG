@@ -37,12 +37,15 @@ export function PortForwardModal({
   error,
   onClose,
   onSubmit,
+  closing = false,
 }: {
   clone: Clone;
   runtime: ForwardRuntime[];
   busy: boolean;
   error: string | null;
   onClose: () => void;
+  /** Exit is playing: the overlay swaps its entry classes for the reverse mirrors. */
+  closing?: boolean;
   onSubmit: (
     forwards: Array<{
       id?: string;
@@ -92,9 +95,9 @@ export function PortForwardModal({
   useModalEscape(onClose);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 rmng-backdrop-in">
+    <div className={"fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 " + (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")}>
       {/* Backdrop is inert — clicking it must not close the dialog, only Cancel/Escape do. */}
-      <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 rmng-modal-in">
+      <div className={"w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " + (closing ? "rmng-modal-out" : "rmng-modal-in")}>
         <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
           Port forwards ·{" "}
           <span className="text-emerald-700 dark:text-emerald-400">

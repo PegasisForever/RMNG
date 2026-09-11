@@ -113,8 +113,10 @@ body {
   --prev-level: 1.05em;
 }
 
-/* Modal entry: every dialog fades its backdrop and rises its panel once on mount.
-   The two classes split the job so the backdrop never scales with the panel. */
+/* Modal entry: every dialog fades its backdrop and sharpens its panel once on mount.
+   The two classes split the job so the backdrop never scales with the panel.
+   Exit reuses the same frames backwards (`reverse`), so the two directions can never
+   drift apart; the JS delay in `useModalExit` must cover EXIT_MS below. */
 @keyframes rmng-backdrop-in {
   from {
     opacity: 0;
@@ -142,9 +144,19 @@ body {
   transform-origin: center;
   animation: rmng-modal-in 200ms ease-out;
 }
+/* Modal exit: the mirror of entry — the panel blooms back out while the backdrop lifts. */
+.rmng-backdrop-out {
+  animation: rmng-backdrop-in 200ms ease-out reverse;
+}
+.rmng-modal-out {
+  transform-origin: center;
+  animation: rmng-modal-in 200ms ease-out reverse;
+}
 @media (prefers-reduced-motion: reduce) {
   .rmng-backdrop-in,
-  .rmng-modal-in {
+  .rmng-modal-in,
+  .rmng-backdrop-out,
+  .rmng-modal-out {
     animation: none;
   }
 }

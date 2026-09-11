@@ -10,6 +10,7 @@ import { lazy, Suspense, useMemo, useState } from "react";
 
 import { TicketModalView } from "~/components/TicketModalView";
 import { teamKeysOf } from "~/lib/cloneDraft";
+import { useModalExit } from "~/lib/useModalExit";
 import {
     keyFor,
     openTicket,
@@ -40,7 +41,7 @@ export function TicketModalContainer({
     const teams = useMemo(() => teamKeysOf(presets), [presets]);
     // Read once on mount: storage is a session fact, and re-reading it would fight the dropdown.
     const [team, setTeam] = useState(() => startingTeam(teams));
-    // The body lives here because the editor does: the slot reports markdown up on every
+    const { closing, beginExit } = useModalExit();    // The body lives here because the editor does: the slot reports markdown up on every
     // keystroke, and the View sends whatever it last said.
     const [description, setDescription] = useState("");
 
@@ -83,7 +84,8 @@ export function TicketModalContainer({
                     />
                 </Suspense>
             }
-            onClose={onClose}
+            closing={closing}
+            onClose={() => beginExit(onClose)}
             onCreate={(ticket) => openTicket(presets, ticket).then(onCreated)}
         />
     );

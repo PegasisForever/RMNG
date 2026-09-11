@@ -14,6 +14,7 @@ import {
 
 import { CloneModalView } from "~/components/CloneModalView";
 import { getConfig } from "~/lib/api";
+import { useModalExit } from "~/lib/useModalExit";
 import { keyFor, ticketForClone, useAssignee } from "~/lib/linear/intake";
 import {
   cloneDialogBusy,
@@ -66,6 +67,9 @@ export function CloneModalContainer({
   const [state, dispatch] = useReducer(cloneDialogReducer, null, () =>
     emptyCloneDialog(initialTicket, initialSource),
   );
+  // Every close (Cancel, Escape, op settled) plays the exit frames first: the delayed
+  // callback unmounts the dialog only once they have run.
+  const { closing, beginExit } = useModalExit();
   const onDraftChange = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>
       dispatch({ type: "edit", key, value } as CloneDialogEvent),
@@ -96,7 +100,7 @@ export function CloneModalContainer({
     if (state.opId) dispatch({ type: "op", op });
   }, [state.opId, op]);
   useEffect(() => {
-    if (state.done) onClose();
+    if (state.done) beginExit(onClose);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.done]);
 
@@ -172,7 +176,8 @@ export function CloneModalContainer({
       error={state.error}
       operation={op ?? null}
       onSubmit={submit}
-      onClose={onClose}
+      closing={closing}
+      onClose={() => beginExit(onClose)}
     />
   );
 }

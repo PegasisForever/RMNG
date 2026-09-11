@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 
 import { ImportAccountModalView } from "~/components/ImportAccountModalView";
 import { beginLogin, completeLogin } from "~/lib/api";
+import { useModalExit } from "~/lib/useModalExit";
 
 export function ImportAccountModalContainer({
   groupNames,
@@ -40,6 +41,7 @@ export function ImportAccountModalContainer({
   const [pasted, setPasted] = useState("");
   const [group, setGroup] = useState(initialGroup ?? "");
   const [importing, setImporting] = useState(false);
+  const { closing, beginExit } = useModalExit();
   const [error, setError] = useState<string | null>(null);
 
   const groups = groupNames;
@@ -64,7 +66,7 @@ export function ImportAccountModalContainer({
     setImporting(true);
     setError(null);
     completeLogin(provider, pasted.trim(), group, replacing?.email ?? "")
-      .then((r) => onImported(r.email))
+      .then((r) => beginExit(() => onImported(r.email)))
       .catch((e: Error) => {
         setError(e.message);
         setImporting(false);
@@ -84,7 +86,8 @@ export function ImportAccountModalContainer({
       onProviderChange={setProvider}
       onPastedChange={setPasted}
       onGroupChange={setGroup}
-      onClose={onClose}
+      closing={closing}
+      onClose={() => beginExit(onClose)}
       onImport={submit}
     />
   );
