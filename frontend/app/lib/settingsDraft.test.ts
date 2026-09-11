@@ -31,8 +31,8 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
         name: "webapp",
         labels: ["WE", "frontend"],
         linearKey: "lin_api_fixture",
-        claudeAccount: "group:pooled",
-        codexAccount: "",
+        group: "pooled",
+        defaultForkClone: "",
         agentPlaybook: "",
         globalPrompt: "",
         startupScript: "",
@@ -70,8 +70,8 @@ type Patch = {
     name: string;
     labels: string[];
     linearKey: string;
-    claudeAccount: string;
-    codexAccount: string;
+    group: string;
+    defaultForkClone: string;
     agentPlaybook: string;
     globalPrompt: string;
     dockerfile: string;
@@ -97,6 +97,20 @@ test("a rig with no layout preset is given one to edit", () => {
       monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
     },
   ]);
+});
+
+test("a preset with no pool default is seeded with the first pool", () => {
+  // A preset always names a default: a blank from an older server reads as the first
+  // pool, while `"none"` (any group) seeds as-is.
+  const blank = config({
+    presets: [{ ...config().presets[0], group: "" }],
+  });
+  expect(settingsDraftFrom(blank).presets[0].group).toBe("pooled");
+
+  const any = config({
+    presets: [{ ...config().presets[0], group: "none" }],
+  });
+  expect(settingsDraftFrom(any).presets[0].group).toBe("none");
 });
 
 test("the form never shares an array with the config it was seeded from", () => {
@@ -183,13 +197,30 @@ test("a blank Linear key is sent as-is, clearing the stored one", () => {
   expect(patch(draft).presets[0].linearKey).toBe("");
 });
 
-test("a blank account default is sent as-is, because blank is a real answer", () => {
-  // Unlike the key, blank here means "no default — let the clone decide", which is different
-  // from pinning the preset to `auto`.
+test("a blank pool default falls back to the first pool", () => {
+  // A preset always names a default: a blank (only reachable from an older save) reads
+  // as the first pool, while `"none"` (any group) is a real choice that survives as-is.
   const draft = settingsDraftFrom(config());
-  draft.presets = [{ ...draft.presets[0], claudeAccount: "" }];
+  draft.presets = [{ ...draft.presets[0], group: "" }];
 
-  expect(patch(draft).presets[0].claudeAccount).toBe("");
+  expect(patch(draft).presets[0].group).toBe("pooled");
+});
+
+test("any group survives the round trip", () => {
+  const draft = settingsDraftFrom(config());
+  draft.presets = [{ ...draft.presets[0], group: "none" }];
+
+  expect(patch(draft).presets[0].group).toBe("none");
+});
+
+test("the fork default is trimmed, blank means oldest", () => {
+  const draft = settingsDraftFrom(config());
+  draft.presets = [{ ...draft.presets[0], defaultForkClone: "  pega-x  " }];
+  expect(patch(draft).presets[0].defaultForkClone).toBe("pega-x");
+
+  const blank = settingsDraftFrom(config());
+  blank.presets = [{ ...blank.presets[0], defaultForkClone: "   " }];
+  expect(patch(blank).presets[0].defaultForkClone).toBe("");
 });
 
 test("an unnamed layout preset is dropped and negative geometry is clamped", () => {

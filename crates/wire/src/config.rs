@@ -124,18 +124,28 @@ pub struct Preset {
     /// [`PresetRedacted`], because the browser lists its own issues.
     #[serde(default)]
     pub linear_key: String,
-    /// Default Claude account for clones of this preset — an account *selection* in the usual
-    /// form: an email, `auto`, `none`, or `group:<pool>`. Deliberately the same string every
-    /// other account field takes, so a preset can pin a specific account, point at a pool, or
-    /// opt out of a token entirely, with no preset-only concept to learn.
-    ///
-    /// Empty = "no opinion", which is NOT the same as `auto`: it lets the resolution chain fall
-    /// through to the next step (see `web::effective_accounts_preset`), whereas an explicit
-    /// `auto` is a real choice that stops the chain.
+    /// Default account pool for clones of this preset: a pool name, or `"none"` for any
+    /// group (rmng picks whichever account is free in any pool). Clones draw BOTH providers'
+    /// accounts from this one pool (each side's rotator only sees its own provider's
+    /// members); an explicit per-clone email or `auto` in the clone dialog overrides it
+    /// for that side only. Always set: saves fill a blank with the first pool.
+    /// (Older configs named per-provider `group:<pool>` selections in `claude_account` /
+    /// `codex_account`; those fold into this on load.)
     #[serde(default)]
+    pub group: String,
+    /// Default fork source for the clone modal's fork tabs: a clone id, or empty for the
+    /// oldest forkable clone. When the modal resolves a preset it auto-selects this source
+    /// (where it still exists and is forkable); the operator can always pick another.
+    /// Non-secret.
+    #[serde(default)]
+    pub default_fork_clone: String,
+    /// Retired per-provider defaults (split-pool era). Parse-only: never written back.
+    /// A `group:<pool>` value migrates into [`Preset::group`] on load; an email/`auto`
+    /// pin is dropped (pins now live on the clone, not the preset).
+    #[serde(default, skip_serializing)]
     pub claude_account: String,
-    /// Default Codex account, same forms. Independent of `claude_account`.
-    #[serde(default)]
+    /// Retired per-provider default, twin of [`Preset::claude_account`]. Parse-only.
+    #[serde(default, skip_serializing)]
     pub codex_account: String,
     /// Optional per-preset text appended (after `"\n\n"`) to the global agent playbook for
     /// clones of this preset. Empty ⇒ no append. Non-secret. (Layer **d**: node-agent extra,
@@ -169,6 +179,8 @@ impl Default for Preset {
             name: String::new(),
             labels: Vec::new(),
             linear_key: String::new(),
+            group: String::new(),
+            default_fork_clone: String::new(),
             claude_account: String::new(),
             codex_account: String::new(),
             agent_playbook: String::new(),
@@ -185,8 +197,8 @@ impl Preset {
             name: self.name.clone(),
             labels: self.labels.clone(),
             linear_key: self.linear_key.clone(),
-            claude_account: self.claude_account.clone(),
-            codex_account: self.codex_account.clone(),
+            group: self.group.clone(),
+            default_fork_clone: self.default_fork_clone.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
             startup_script: self.startup_script.clone(),
@@ -211,10 +223,11 @@ pub struct PresetRedacted {
     /// is the whole test the settings panel runs to decide whether its write-only key input
     /// reads as already set.
     pub linear_key: String,
-    /// Default account selections ([`Preset::claude_account`] / [`Preset::codex_account`]) —
-    /// not secrets, shown verbatim.
-    pub claude_account: String,
-    pub codex_account: String,
+    /// Default account pool: a pool name, or `"none"` for any group (rmng picks whichever
+    /// account is free in any pool) — not secret, shown verbatim.
+    pub group: String,
+    /// Default fork source: a clone id, or empty for the oldest forkable clone.
+    pub default_fork_clone: String,
     pub agent_playbook: String,
     pub global_prompt: String,
     pub startup_script: String,
@@ -366,17 +379,12 @@ fn default_codex_judge_model() -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+#[derive(Default)]
 pub struct CodexConfig {
     /// When true, auto-spend one banked reset credit once every managed Codex account
     /// is over the weekly cap with no 7d reset within 24h (see `codex.rs` fleet gate).
     #[serde(default)]
     pub auto_reset: bool,
-}
-
-impl Default for CodexConfig {
-    fn default() -> Self {
-        Self { auto_reset: false }
-    }
 }
 
 /// Full server config (with secrets). Loaded from `config.json`; serialized back
@@ -524,7 +532,7 @@ impl AppConfig {
             layout_presets: self.layout_presets.clone(),
             active_layout: self.active_layout.clone(),
             docker: self.docker.clone(),
-            claude: self.claude.clone(),
+            claude: self.claude,
             codex: self.codex.clone(),
             groups: self.groups.clone(),
             presets: self.presets.iter().map(Preset::redacted).collect(),
@@ -785,7 +793,9 @@ mod tests {
                     name: "med".into(),
                     labels: vec!["Backend".into()],
                     linear_key: "lin_api_secret".into(),
-                    claude_account: "group:pooled".into(),
+                    group: "pooled".into(),
+                    default_fork_clone: String::new(),
+                    claude_account: String::new(),
                     codex_account: String::new(),
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
@@ -808,9 +818,8 @@ mod tests {
         assert_eq!(r.presets[0].name, "med");
         assert_eq!(r.presets[0].labels, vec!["Backend"]); // labels pass through
         assert_eq!(r.presets[0].dockerfile, "FROM x:latest");
-        // Account defaults are not secrets — they pass through the redaction verbatim.
-        assert_eq!(r.presets[0].claude_account, "group:pooled");
-        assert_eq!(r.presets[0].codex_account, "");
+        // The pool default is not secret — it passes through the redaction verbatim.
+        assert_eq!(r.presets[0].group, "pooled");
         // A preset with no key configured reads back empty, which is what the settings
         // panel's write-only key input tests to show itself as unset.
         assert_eq!(r.presets[1].linear_key, "");

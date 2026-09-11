@@ -51,19 +51,17 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** Both pickers on their blank option, which is the state that matters: blank means "follow
- *  the preset", and the option says which pool or account that is when the preset names one.
- *  `webapp` names a Claude pool, so the Claude picker reads "Preset default (group:pooled)".
- *  It names no Codex account, so the Codex picker falls back to the generic label — which is
- *  the usual case, a Codex default being optional. */
+ *  the preset", and the option says which pool that is when the preset names one.
+ *  `webapp` names a pool, so both pickers read "Preset default (group:pooled)". */
 export const PresetDefaults: Story = { args: { ...pools() } };
 
-/** The same shape on the other side: a preset that names a Codex pool and no Claude account,
- *  so the two labels swap over. Built here rather than added to the shared preset fixture,
+/** A preset that names a pool, so both blank options read "Preset default (group:team)".
+ *  Built here rather than added to the shared preset fixture,
  *  because those three also drive the ticket dialog's team dropdown. */
 export const CodexPresetDefault: Story = {
   args: {
     ...pools(),
-    preset: makePreset({ name: "codex-first", labels: ["CX"], codexAccount: "group:team" }),
+    preset: makePreset({ name: "codex-first", labels: ["CX"], group: "team" }),
   },
 };
 
@@ -88,5 +86,11 @@ export const Overridden: Story = {
 /** Nothing imported and no pools configured. Both pickers fall back to the two options that
  *  never depend on config: rotate over everything, or install no token at all. */
 export const NothingConfigured: Story = {
-  args: { accounts: [], groups: [], sourceGroup: null, group: "", preset: undefined },
+  args: {
+    accounts: [],
+    groups: [],
+    sourceGroup: null,
+    group: "",
+    preset: undefined,
+  },
 };

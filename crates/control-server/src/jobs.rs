@@ -84,6 +84,9 @@ pub struct CloneSpec {
     /// Run the preset's startup script as the clone user as the last settle step.
     /// Every caller defaults this on; opt out per request, never per preset.
     pub run_startup_script: bool,
+    /// Force a fresh image build with a fresh base pull even when the preset's tag
+    /// already exists. The New clone dialog's rebuild checkbox sets this.
+    pub rebuild: bool,
 }
 
 fn now_ms() -> i64 {
@@ -454,6 +457,7 @@ async fn run_clone(app: App, op_id: String, spec: CloneSpec) {
         &spec.agent_playbook,
         &spec.global_prompt,
         spec.headless,
+        spec.rebuild,
         progress,
     )
     .await
@@ -950,13 +954,16 @@ pub struct ForkSpec {
     /// `None` inherits the source's group. New writers use this; legacy `group:<name>`
     /// account picks still bind (see `split_group_binding`).
     pub group: Option<Option<String>>,
+    /// Force a fresh image build with a fresh base pull even when the preset's tag
+    /// already exists. The New clone dialog's rebuild checkbox sets this.
+    pub rebuild: bool,
     pub first_message: Option<String>,
     pub agent_instructions: Option<String>,
     pub claude_instructions: Option<String>,
 }
 
-/// Fork a gen-2 clone: snapshot + clone the source home, create from its recorded base
-/// tag. The fork inherits the source's preset, accounts, and ticket context; guard: no
+/// Fork a gen-2 clone: snapshot + clone the source home, create from the target
+/// preset's Dockerfile (rebuilt fresh when `rebuild` is set). The fork inherits the source's preset, accounts, and ticket context; guard: no
 /// Running op on either end, and the new hostname is valid + unused.
 pub fn start_fork(app: &App, spec: ForkSpec) -> Result<Operation, JobError> {
     let st = app.store.get();
@@ -1044,6 +1051,7 @@ async fn run_fork(app: App, op_id: String, spec: ForkSpec) {
         &prompt,
         headless,
         preset_name.as_deref(),
+        spec.rebuild,
         progress,
     )
     .await
@@ -1627,10 +1635,11 @@ pub async fn migrate_all_on_boot(app: App) {
     );
 }
 
-/// Warm a preset image without creating (`POST /api/images/prebuild`): build the posted
-/// Dockerfile text on miss, discarding the tag. The preset card's rebuild button posts
-/// the editor's current text (which may be unsaved); saving is separate. Drives a
-/// `Prebuild` op (no coarse pct table — the build streams step lines as messages).
+/// Warm a preset image without creating (`POST /api/images/prebuild`): always rebuild the
+/// posted Dockerfile text with a fresh base pull, even when its tag exists. The preset
+/// card's rebuild button posts the editor's current text (which may be unsaved); saving
+/// is separate. Drives a `Prebuild` op (no coarse pct table — the build streams step
+/// lines as messages).
 pub fn start_prebuild(app: &App, dockerfile: String) -> Result<Operation, JobError> {
     if dockerfile.trim().is_empty() {
         return Err(JobError("a Dockerfile is required to prebuild".into()));

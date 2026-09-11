@@ -18,6 +18,8 @@ const meta = {
     onHeadlessChange: fn(),
     runStartupScript: true,
     onRunStartupScriptChange: fn(),
+    rebuild: false,
+    onRebuildChange: fn(),
   },
   render: (args) => (
     <Frame>
@@ -35,4 +37,9 @@ export const Headed: Story = {};
 /** Headless on: no desktop, so the viewer shows a tmux tab view instead of a stream. */
 export const Headless: Story = {
   args: { headless: true },
+};
+
+/** Rebuild on: pulls the latest base image and rebuilds before the clone is created. */
+export const Rebuild: Story = {
+  args: { rebuild: true },
 };

@@ -21,6 +21,7 @@ function base() {
   return {
     draft: makeSettingsDraft(),
     accounts: makeClaudeAccounts(accountsNow),
+    forkSources: ["pega-we-142", "pega-dev-88", "scratch-box"],
     boardColumns: makeBoardColumns(),
     boardColumnCounts: { todo: 3, doing: 3, blocked: 1, archived: 0 },
   };

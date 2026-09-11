@@ -1,11 +1,13 @@
 //! Gen-2 derived images: each preset carries its own FULL Dockerfile, built into a
 //! hash tag (`rmng-p-<hash(file text)>`), lazily on first create that needs it.
 //!
-//! Same text twice means one build (the tag already exists — skip). Same text NEVER
-//! rebuilds: a base release under the same tag does not invalidate it. Refresh is
-//! manual — edit the Dockerfile (any text change re-tags) or hit the preset's rebuild
-//! button (prebuild). One async lock per tag, so parallel creates share the build
-//! instead of racing it. Build failure fails the caller with the daemon's log attached.
+//! Same text twice means one build (the tag already exists — skip), unless the caller
+//! forces a rebuild. The preset's rebuild button always forces: a base release under
+//! the same tag does not invalidate the cached image otherwise. Refresh is also manual
+//! per create/fork via the New clone dialog's rebuild checkbox, or by editing the
+//! Dockerfile (any text change re-tags). One async lock per tag, so parallel creates
+//! share the build instead of racing it. Build failure fails the caller with the
+//! daemon's log attached.
 //!
 //! The Dockerfile is used VERBATIM: no FROM rewrite, no digest pinning, no appended
 //! ENV. It may name any image, not only clone sources. Secrets (ENV lines) are baked
@@ -68,9 +70,9 @@ pub async fn ensure_image(
     Ok(tag)
 }
 
-/// Warm a preset image without creating: ensure + build on miss, discarding the tag.
-/// The preset card's rebuild button calls this so the first real create finds the
-/// image present. Takes the editor's current text (which may be unsaved); saving is
+/// Warm a preset image, always rebuilding: ensure + build, discarding the tag.
+/// The preset card's rebuild button calls this so the next create finds a fresh
+/// image. Takes the editor's current text (which may be unsaved); saving is
 /// separate.
 pub async fn prebuild(
     app: &App,
@@ -80,7 +82,7 @@ pub async fn prebuild(
     if dockerfile.trim().is_empty() {
         bail!("a Dockerfile is required to prebuild");
     }
-    ensure_image(app, dockerfile, false, &mut on_progress).await
+    ensure_image(app, dockerfile, true, &mut on_progress).await
 }
 
 #[cfg(test)]

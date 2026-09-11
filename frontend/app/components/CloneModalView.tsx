@@ -4,15 +4,22 @@
 // CloneModalContainer owns all three of those and hands the results down.
 //
 // The first three tabs fork the picked source clone; the fourth creates from a template
-// image onto a fresh empty home dataset (always headed, always the preset's defaults).
+// image onto a fresh empty home dataset (headed unless asked, preset defaults underneath
+// the account overrides).
 //
 // The form is one editable model (`CloneDraft`) plus a single `onDraftChange`, rather than
 // thirty value/onChange pairs. What is NOT in the draft is everything the server decides:
 // the presets, the team keys, the preset a ticket prefix resolved to, whether the request
 // would be rejected for a missing Linear key, and whether the button may fire at all.
 import { OperationProgress } from "~/components/OperationProgress";
-import { CloneAccountFields } from "~/components/CloneAccountFields";
-import { CloneExistingTicketFields, type ParsedTicket } from "~/components/CloneExistingTicketFields";
+import {
+  CloneAccountFields,
+  presetBlankLabel,
+} from "~/components/CloneAccountFields";
+import {
+  CloneExistingTicketFields,
+  type ParsedTicket,
+} from "~/components/CloneExistingTicketFields";
 import { CloneModeTabs } from "~/components/CloneModeTabs";
 import { CloneNewTicketFields } from "~/components/CloneNewTicketFields";
 import { CloneOptionsRow } from "~/components/CloneOptionsRow";
@@ -30,7 +37,10 @@ export interface CloneModalViewProps {
   /** The whole form, as one editable model. */
   draft: CloneDraft;
   /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
-  onDraftChange: <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) => void;
+  onDraftChange: <K extends keyof CloneDraft>(
+    key: K,
+    value: CloneDraft[K],
+  ) => void;
 
   /** Live clones to fork from. The container passes only forkable rows (managed, not
    *  archived); an empty list is the empty state, not an error. */
@@ -132,30 +142,6 @@ export function CloneModalView({
             />
           </div>
 
-          {/* Only the fork tabs take a source: the template tab builds an image. */}
-          {draft.mode !== "template" ? (
-            <div className="mt-3 space-y-2">
-              <label className={`${cloneLabel} font-medium`}>
-                Source clone to fork
-                <select
-                  value={draft.source ?? ""}
-                  disabled={busy || clonesLoading}
-                  onChange={(e) => onDraftChange("source", e.target.value || null)}
-                  className={cloneField}
-                >
-                  <option value="" disabled>
-                    {clonesLoading ? "Loading clones…" : clones.length === 0 ? "No forkable clones" : "Pick a clone"}
-                  </option>
-                  {clones.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          ) : null}
-
           {/* No height pin on the tab block — the whole scroll body above carries it, so each
               tab is free to be its natural size. */}
           {draft.mode === "existing" ? (
@@ -176,7 +162,9 @@ export function CloneModalView({
               description={descriptionEditor}
               onTeamChange={(team) => onDraftChange("team", team)}
               onTitleChange={(title) => onDraftChange("title", title)}
-              onPriorityChange={(priority) => onDraftChange("priority", priority)}
+              onPriorityChange={(priority) =>
+                onDraftChange("priority", priority)
+              }
             />
           ) : draft.mode === "plain" ? (
             <ClonePlainFields
@@ -209,7 +197,9 @@ export function CloneModalView({
                 <select
                   value={draft.templatePreset}
                   disabled={busy || presets.length === 0}
-                  onChange={(e) => onDraftChange("templatePreset", e.target.value)}
+                  onChange={(e) =>
+                    onDraftChange("templatePreset", e.target.value)
+                  }
                   className={cloneField}
                 >
                   {presets.length === 0 ? (
@@ -225,23 +215,81 @@ export function CloneModalView({
                   )}
                 </select>
               </label>
-              <label
-                className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400"
-                title="Runs the preset's startup script as the clone user when the clone is created"
-              >
-                <input
-                  type="checkbox"
-                  checked={draft.runStartupScript}
-                  disabled={busy}
-                  onChange={(e) => onDraftChange("runStartupScript", e.target.checked)}
-                  className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
-                />
-                Run startup script
+            </div>
+          )}
+
+          {/* The template tab takes the same account overrides as the fork tabs, minus a
+              source to inherit from: blank means the picked preset's default. Headless
+              lives beside the startup toggle, exactly as on the fork tabs. */}
+          {draft.mode === "template" ? (
+            <>
+              <CloneAccountFields
+                accounts={accounts}
+                groups={groups}
+                sourceGroup={null}
+                groupBlankLabel={presetBlankLabel(preset?.group)}
+                preset={preset}
+                group={draft.group}
+                claudeAccount={draft.claudeAccount}
+                codexAccount={draft.codexAccount}
+                onGroupChange={(value) => onDraftChange("group", value)}
+                onClaudeAccountChange={(value) =>
+                  onDraftChange("claudeAccount", value)
+                }
+                onCodexAccountChange={(value) =>
+                  onDraftChange("codexAccount", value)
+                }
+              />
+              <CloneOptionsRow
+                headless={draft.headless}
+                onHeadlessChange={(headless) =>
+                  onDraftChange("headless", headless)
+                }
+                runStartupScript={draft.runStartupScript}
+                onRunStartupScriptChange={(run) =>
+                  onDraftChange("runStartupScript", run)
+                }
+                rebuild={draft.rebuild}
+                onRebuildChange={(rebuild) =>
+                  onDraftChange("rebuild", rebuild)
+                }
+              />
+            </>
+          ) : null}
+
+          {/* Fork source sits with the account picks it drives: the group picker's blank
+              label names this clone's pool, and both account pickers fall back to the
+              resolved preset. Only the fork tabs take a source. */}
+          {draft.mode === "template" ? null : (
+            <div className="mt-3 space-y-2">
+              <label className={`${cloneLabel} font-medium`}>
+                Source clone to fork
+                <select
+                  value={draft.source ?? ""}
+                  disabled={busy || clonesLoading}
+                  onChange={(e) =>
+                    onDraftChange("source", e.target.value || null)
+                  }
+                  className={cloneField}
+                >
+                  <option value="" disabled>
+                    {clonesLoading
+                      ? "Loading clones…"
+                      : clones.length === 0
+                        ? "No forkable clones"
+                        : "Pick a clone"}
+                  </option>
+                  {clones.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.id}
+                    </option>
+                  ))}
+                </select>
               </label>
             </div>
           )}
 
-          {draft.mode !== "template" ? (
+          {draft.mode === "template" ? null : (
             <CloneAccountFields
               accounts={accounts}
               groups={groups}
@@ -251,10 +299,14 @@ export function CloneModalView({
               claudeAccount={draft.claudeAccount}
               codexAccount={draft.codexAccount}
               onGroupChange={(value) => onDraftChange("group", value)}
-              onClaudeAccountChange={(value) => onDraftChange("claudeAccount", value)}
-              onCodexAccountChange={(value) => onDraftChange("codexAccount", value)}
+              onClaudeAccountChange={(value) =>
+                onDraftChange("claudeAccount", value)
+              }
+              onCodexAccountChange={(value) =>
+                onDraftChange("codexAccount", value)
+              }
             />
-          ) : null}
+          )}
 
           {linearKeyMissing ? (
             <p className="mt-3 text-[11px] text-red-600 dark:text-red-400">
@@ -278,10 +330,12 @@ export function CloneModalView({
                 Clone agent instructions
                 <textarea
                   value={draft.agentInstructions}
-                  onChange={(e) => onDraftChange("agentInstructions", e.target.value)}
+                  onChange={(e) =>
+                    onDraftChange("agentInstructions", e.target.value)
+                  }
                   rows={5}
                   placeholder={
-                    'Appended to the default ("Follow your \"Implementing a ticket\" procedure"); takes precedence where they conflict.'
+                    'Appended to the default ("Follow your "Implementing a ticket" procedure"); takes precedence where they conflict.'
                   }
                   className={`resize-y ${cloneField}`}
                 />
@@ -290,7 +344,9 @@ export function CloneModalView({
                 Claude Code instructions
                 <textarea
                   value={draft.claudeInstructions}
-                  onChange={(e) => onDraftChange("claudeInstructions", e.target.value)}
+                  onChange={(e) =>
+                    onDraftChange("claudeInstructions", e.target.value)
+                  }
                   rows={5}
                   placeholder="Appended to the default (pull latest → switch to the feature branch → setup docs → implement); takes precedence where they conflict."
                   className={`resize-y ${cloneField}`}
@@ -299,18 +355,28 @@ export function CloneModalView({
             </div>
           ) : null}
 
-          {draft.mode !== "template" ? (
+          {draft.mode === "template" ? null : (
             <CloneOptionsRow
               headless={draft.headless}
-              onHeadlessChange={(headless) => onDraftChange("headless", headless)}
+              onHeadlessChange={(headless) =>
+                onDraftChange("headless", headless)
+              }
               runStartupScript={draft.runStartupScript}
-              onRunStartupScriptChange={(run) => onDraftChange("runStartupScript", run)}
+              onRunStartupScriptChange={(run) =>
+                onDraftChange("runStartupScript", run)
+              }
+              rebuild={draft.rebuild}
+              onRebuildChange={(rebuild) =>
+                onDraftChange("rebuild", rebuild)
+              }
             />
-          ) : null}
+          )}
         </div>
 
         {error ? (
-          <p className="mt-3 shrink-0 text-[11px] text-red-600 dark:text-red-400">{error}</p>
+          <p className="mt-3 shrink-0 text-[11px] text-red-600 dark:text-red-400">
+            {error}
+          </p>
         ) : null}
 
         {operation ? (

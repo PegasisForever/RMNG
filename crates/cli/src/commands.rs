@@ -229,7 +229,7 @@ pub async fn clone_create_plain(
         None => None,
     };
     let op = client
-        .clone_create_plain(title, message, preset, !common.no_startup_script)
+        .clone_create_plain(title, message, preset, !common.no_startup_script, false)
         .await?;
     file_started_clone(client, &op, column.as_deref()).await?;
     started(client, op, &common.wait, json, "clone", true).await
@@ -282,11 +282,13 @@ pub async fn clone_rm(
     started(client, op, wait, json, "delete", false).await
 }
 
-/// `rmng clone fork <source>` — snapshot + clone the source home, create from
-/// its recorded base tag. The new hostname derives server-side.
+/// `rmng clone fork [source]` — snapshot + clone the source home, create from
+/// its recorded base tag. Omitted source = the preset's default fork clone,
+/// else the oldest forkable clone (resolved server-side). The new hostname
+/// derives server-side.
 pub async fn fork(
     client: &Client,
-    source: &str,
+    source: Option<&str>,
     headless: bool,
     preset: Option<String>,
     claude_account: Option<String>,
@@ -1016,9 +1018,9 @@ fn direct_ssh_target(host: &wire::RmngClone) -> String {
 }
 
 /// `rmng ssh <clone>`: print the ready-to-paste `ssh` one-liner that jumps through the
-/// bastion into the clone. Fetches the redacted config for `ssh.publicHost` and
-/// `listen.bastion`; falls back to a best-effort host guess (with a stderr note) when
-/// `publicHost` isn't set, so the command on stdout stays copy-pasteable either way.
+/// bastion into the clone. The bastion port is hardcoded server-side (`wire::PORT_BASTION`)
+/// and the host is the server this CLI talks to, so the command on stdout stays
+/// copy-pasteable either way.
 pub async fn clone_ssh(client: &Client, clone: &str, json: bool) -> Result<u8> {
     let st = client.state().await?;
     let target = validate_ssh_host(&st, clone)?;
@@ -1032,18 +1034,12 @@ pub async fn clone_ssh(client: &Client, clone: &str, json: bool) -> Result<u8> {
             "direct",
         )
     } else {
-        let cfg = client.config().await?;
-        let public_host = if !cfg.ssh.public_host.trim().is_empty() {
-            cfg.ssh.public_host.clone()
-        } else {
-            let fallback = host_from_base(client.base()).to_string();
-            eprintln!(
-                "note: ssh.publicHost is not set; using {fallback} — set it in Settings → SSH Access for the correct laptop-facing address"
-            );
-            fallback
-        };
+        // No configured public host anymore (`ssh.publicHost` is retired): the server
+        // this CLI talks to is the bastion host, mirroring the dashboard's
+        // `sshPublicHost || window.location.hostname`.
+        let public_host = host_from_base(client.base()).to_string();
         (
-            build_ssh_command(&public_host, cfg.listen.bastion, clone),
+            build_ssh_command(&public_host, wire::PORT_BASTION, clone),
             "bastion",
         )
     };

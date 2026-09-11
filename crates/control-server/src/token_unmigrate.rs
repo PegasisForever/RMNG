@@ -404,10 +404,9 @@ fn heal_clone_bindings(
 
 /// Each preset's `group` from the RAW `./config.json`.
 ///
-/// `Preset.group` was removed with the group-proxy model, so the live `AppConfig` no longer
-/// deserializes it — by the time this migration runs, `app.config()` has already dropped it.
-/// Reading the file directly is the only way to see what a preset was bound to, and it must
-/// happen before the first config save rewrites the file without it.
+/// Read straight from the file (rather than trusting the already-parsed config) so a
+/// preset bound under an older field shape still carries across, and it must happen
+/// before the first config save rewrites the file without it.
 fn read_raw_preset_groups() -> std::collections::HashMap<String, String> {
     #[derive(Deserialize, Default)]
     struct RawPreset {
@@ -571,12 +570,11 @@ pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
     let mut cfg = app.config();
     cfg.groups = groups;
     // Carry each preset's pool binding across. The group-proxy era had ONE provider-agnostic
-    // `Preset.group`; the restored model has one default per provider, so a preset that pointed
-    // at `Personal` now defaults BOTH providers to `group:Personal` — the closest thing to what
-    // it meant, and only where that pool actually survived the migration.
+    // `Preset.group`, which is also what the current model holds — so a preset that pointed
+    // at `Personal` keeps pointing at it, where that pool actually survived the migration.
     //
-    // Read from the RAW config: `Preset.group` no longer exists as a field, so serde has already
-    // dropped it from `app.config()` by the time we get here. Without this, every preset on an
+    // Read from the RAW config: by the time we get here serde has already parsed
+    // `app.config()`. Without this, every preset on an
     // upgraded deployment silently loses its binding and its clones fall through to `auto`.
     let raw_preset_pools = read_raw_preset_groups();
     let mut carried = 0usize;
@@ -584,13 +582,8 @@ pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
         let Some(pool) = raw_preset_pools.get(&preset.name).filter(|p| !p.is_empty()) else {
             continue;
         };
-        let sel = format!("group:{pool}");
-        if preset.claude_account.is_empty() && cfg.clone_groups.iter().any(|g| &g.name == pool) {
-            preset.claude_account = sel.clone();
-            carried += 1;
-        }
-        if preset.codex_account.is_empty() && cfg.codex_groups.iter().any(|g| &g.name == pool) {
-            preset.codex_account = sel;
+        if preset.group.is_empty() && cfg.groups.iter().any(|g| &g.name == pool) {
+            preset.group = pool.clone();
             carried += 1;
         }
     }
@@ -601,7 +594,7 @@ pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
     if carried > 0 {
         tracing::info!(
             target: "token_unmigrate",
-            "carried {carried} preset pool default(s) across (one per provider whose pool survived)",
+            "carried {carried} preset pool default(s) across",
         );
     }
 
@@ -940,37 +933,20 @@ mod tests {
     }
 
     #[test]
-    fn preset_pool_binding_maps_to_both_providers() {
-        // (raw group, claude pools that survived, codex pools that survived) → what a preset gets.
-        let apply = |pool: &str, claude_pools: &[&str], codex_pools: &[&str]| -> (String, String) {
-            let mut claude = String::new();
-            let mut codex = String::new();
-            let sel = format!("group:{pool}");
-            if claude_pools.contains(&pool) {
-                claude = sel.clone();
+    fn preset_pool_binding_carries_the_pool_name() {
+        // (raw group, merged pools that survived) → what a preset gets.
+        let apply = |pool: &str, pools: &[&str]| -> String {
+            if pools.contains(&pool) {
+                pool.to_string()
+            } else {
+                String::new()
             }
-            if codex_pools.contains(&pool) {
-                codex = sel;
-            }
-            (claude, codex)
         };
 
-        // The common case: the pool holds both providers' accounts, so both default to it.
-        assert_eq!(
-            apply("Personal", &["Personal", "Medi"], &["Personal"]),
-            ("group:Personal".into(), "group:Personal".into())
-        );
-        // A pool with only Claude accounts binds only the Claude side — pointing Codex at a pool
-        // with no Codex credentials in it would be a dangling selection.
-        assert_eq!(
-            apply("Medi", &["Personal", "Medi"], &["Personal"]),
-            ("group:Medi".into(), String::new())
-        );
-        // A pool that did not survive the migration at all binds neither.
-        assert_eq!(
-            apply("Gone", &["Personal"], &["Personal"]),
-            (String::new(), String::new())
-        );
+        // The common case: the pool survived, so the preset keeps pointing at it.
+        assert_eq!(apply("Personal", &["Personal", "Medi"]), "Personal");
+        // A pool that did not survive the migration binds nothing.
+        assert_eq!(apply("Gone", &["Personal"]), "");
     }
 
     #[test]

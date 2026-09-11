@@ -64,6 +64,16 @@ export type ClonePayload = {
  preset?: string;
  /** Run the preset's startup script. Always sent explicitly; the server defaults on. */
  runStartupScript: boolean;
+ /** No desktop: the viewer shows a tmux tab view instead of a video stream. */
+ headless?: boolean;
+ /** Force a fresh image build with a fresh base pull even when the preset's tag
+  *  already exists. The New clone dialog's rebuild checkbox sets this. */
+ rebuild?: boolean;
+ /** Pool binding: name binds, null unbinds, omitted takes the preset default. */
+ group?: string | null;
+ /** Per-side account overrides; omitted sides follow the binding. */
+ claudeAccount?: string;
+ codexAccount?: string;
 };
 
 /** Start a template clone (title + preset in `payload`). The server builds the
@@ -75,9 +85,10 @@ export const duplicateClone = (payload: ClonePayload) =>
 export const activate = (id: string | null) =>
  postJson("/api/activate", { id });
 export const deleteClone = (id: string) => postJson("/api/delete", { id });
-/** Warm a preset image without creating: build the posted Dockerfile text on miss.
- *  The preset card's rebuild button posts the editor's current text (which may be
- *  unsaved). Returns the driving Operation; progress streams over /events. */
+/** Warm a preset image, always rebuilding: force a fresh build with a fresh base
+ *  pull even when its tag exists. The preset card's rebuild button posts the editor's
+ *  current text (which may be unsaved). Returns the driving Operation; progress streams
+ *  over /events. */
 export const prebuildDockerfile = (dockerfile: string) =>
  postJson("/api/images/prebuild", { dockerfile }).then(
   (r) => (r as { op: Operation }).op,
@@ -105,6 +116,9 @@ export interface ForkPayload {
  claudeInstructions?: string;
  /** Run the preset's startup script. Always sent explicitly; the server defaults on. */
  runStartupScript: boolean;
+ /** Force a fresh image build with a fresh base pull even when the preset's tag
+  *  already exists. The New clone dialog's rebuild checkbox sets this. */
+ rebuild?: boolean;
 }
 
 export const forkClone = (
@@ -116,6 +130,7 @@ export const forkClone = (
   source,
   ...(headless ? { headless } : {}),
   runStartupScript: payload?.runStartupScript ?? true,
+  ...(payload?.rebuild ? { rebuild: true } : {}),
   ...(payload?.preset ? { preset: payload.preset } : {}),
   ...(payload?.linear ? { linear: payload.linear } : {}),
   ...(payload?.claudeAccount ? { claudeAccount: payload.claudeAccount } : {}),
@@ -247,7 +262,11 @@ export const refreshClaudeUsage = () => postJson("/api/claude/refresh", {});
 /** Change a clone's Claude account + pool binding. `account` is "auto" (rotate in
  *  scope) or an email (pin, even outside the pool); `group` binds the whole clone
  *  (null unbinds to any-group scope, undefined keeps). */
-export const swapClaudeAccount = (clone: string, account: string, group?: string | null) =>
+export const swapClaudeAccount = (
+ clone: string,
+ account: string,
+ group?: string | null,
+) =>
  postJson("/api/claude/swap", { host: clone, account, group }) as Promise<{
   ok: boolean;
   account: string | null;
@@ -265,7 +284,11 @@ export const deleteClaudeAccount = (account: string) =>
 
 export const refreshCodexUsage = () => postJson("/api/codex/refresh", {});
 
-export const swapCodexAccount = (clone: string, account: string, group?: string | null) =>
+export const swapCodexAccount = (
+ clone: string,
+ account: string,
+ group?: string | null,
+) =>
  postJson("/api/codex/swap", { host: clone, account, group }) as Promise<{
   ok: boolean;
   account: string | null;

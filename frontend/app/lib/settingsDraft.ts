@@ -51,8 +51,10 @@ export interface PresetDraft {
   name: string;
   labels: string;
   linearKey: string;
-  claudeAccount: string;
-  codexAccount: string;
+  /** Default account pool (a pool name, `"none"` = any group). One pool feeds both sides. */
+  group: string;
+  /** Default fork source (a clone id, or "" for the oldest forkable clone). */
+  defaultForkClone: string;
   agentPlaybook: string;
   globalPrompt: string;
   startupScript: string;
@@ -87,15 +89,15 @@ export function newLayoutPreset(name = ""): LayoutPresetDraft {
   };
 }
 
-/** A blank preset row. Both account defaults start empty: a new preset takes no opinion on
- *  which pool its clones get until the operator gives it one. */
-export function newPreset(): PresetDraft {
+/** A blank preset row. The caller passes the pool it should point at (the first pool —
+ *  a preset always names a default). No fork default: the oldest forkable clone. */
+export function newPreset(group = ""): PresetDraft {
   return {
     name: "",
     labels: "",
     linearKey: "",
-    claudeAccount: "",
-    codexAccount: "",
+    group,
+    defaultForkClone: "",
     agentPlaybook: "",
     globalPrompt: "",
     startupScript: "",
@@ -129,6 +131,9 @@ export function monitorPatch(m: MonitorDraft): MonitorDraft {
  *  but sharing the server payload's arrays would leave the loaded config and the form
  *  aliased, and a re-seed after save would then compare a value against itself. */
 export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
+  // A preset always names a pool default: a blank from an older server falls back to the
+  // first pool (there is always at least one). `"none"` (any group) survives as-is.
+  const fallback = c.groups[0]?.name.trim() ?? "none";
   return {
     layoutPresets: c.layoutPresets.length
       ? c.layoutPresets.map((p) => ({
@@ -140,8 +145,8 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       name: p.name,
       labels: p.labels.join(", "),
       linearKey: p.linearKey,
-      claudeAccount: p.claudeAccount,
-      codexAccount: p.codexAccount,
+      group: presetGroupOf(p, fallback),
+      defaultForkClone: p.defaultForkClone ?? "",
       agentPlaybook: p.agentPlaybook,
       globalPrompt: p.globalPrompt,
       startupScript: p.startupScript ?? "",
@@ -170,6 +175,26 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
   };
 }
 
+/** The pool a preset points its clones at, as the form edits it: the wire `group`, with a
+ *  fallback that reads the retired per-provider `group:<pool>` selections (Claude side wins
+ *  when the two name different pools; anything else means no pool). Only for payloads from
+ *  an older server — the current one always sends `group`. */
+function presetGroupOf(
+  p: {
+    group: string;
+    claudeAccount?: string;
+    codexAccount?: string;
+  },
+  fallback: string,
+): string {
+  if (p.group.trim()) return p.group.trim();
+  const poolOf = (sel?: string) =>
+    sel?.trimStart().startsWith("group:")
+      ? sel.trim().slice("group:".length).trim()
+      : "";
+  return poolOf(p.claudeAccount) || poolOf(p.codexAccount) || fallback;
+}
+
 /** Half-typed rows are dropped rather than saved as unnamed pools, and members are deduped —
  *  the checkbox editor cannot produce a duplicate, but a hand-edited config can, and a
  *  repeated email would skew group selection. */
@@ -188,6 +213,10 @@ export function settingsPatch(
   draft: SettingsDraft,
   _setupComplete: boolean,
 ): unknown {
+  const groups = savedGroups(draft.groups);
+  // A preset always names a pool default: a blank (only reachable from a hand-edited
+  // form) falls back to the first pool. `"none"` (any group) is a real choice, not blank.
+  const fallback = groups[0]?.name ?? "none";
   return {
     layoutPresets: draft.layoutPresets
       .filter((p) => p.name.trim())
@@ -200,7 +229,7 @@ export function settingsPatch(
       cloneCpus: draft.cloneCpus,
       cloneMemoryMb: draft.cloneMemoryMb,
     },
-    groups: savedGroups(draft.groups),
+    groups,
     codex: { autoReset: draft.codex.autoReset },
     chroma: draft.chroma,
     ssh: draft.ssh,
@@ -218,10 +247,12 @@ export function settingsPatch(
           .map((s) => s.trim())
           .filter(Boolean),
         linearKey: p.linearKey,
-        // Unlike linearKey a blank here is MEANINGFUL ("no default — let the clone decide"),
-        // so it is sent as-is rather than treated as "keep stored".
-        claudeAccount: p.claudeAccount,
-        codexAccount: p.codexAccount,
+        // A blank here cannot survive: it falls back to the first pool, so a preset
+        // always names a default. `"none"` (any group) is sent as-is.
+        group: p.group.trim() || fallback,
+        // Blank = oldest forkable clone; a stale id survives the round trip and falls
+        // back at use time, so renaming a clone never silently repoints a preset.
+        defaultForkClone: p.defaultForkClone.trim(),
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
         startupScript: p.startupScript,

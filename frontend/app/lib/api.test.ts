@@ -80,3 +80,22 @@ test("rebaseClone posts preset plus rebuild and resolves the wrapped op", async 
     rebuild: true,
   });
 });
+
+test("forkClone sends rebuild only when checked", async () => {
+  const seen: { url: string; init?: RequestInit }[] = [];
+  stubFetch(seen);
+  await forkClone("src-id", false, {
+    preset: "webapp",
+    runStartupScript: true,
+    rebuild: true,
+  });
+  expect(JSON.parse(seen[0].init?.body as string).rebuild).toBe(true);
+
+  const seen2: { url: string; init?: RequestInit }[] = [];
+  stubFetch(seen2);
+  await forkClone("src-id", false, {
+    preset: "webapp",
+    runStartupScript: true,
+  });
+  expect("rebuild" in JSON.parse(seen2[0].init?.body as string)).toBe(false);
+});

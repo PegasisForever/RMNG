@@ -162,6 +162,21 @@ pub(crate) fn split_group_binding(
     (group, rewrite(claude_sel), rewrite(codex_sel))
 }
 
+/// The fork source both the clone modal and `POST /api/fork` resolve the same way: the
+/// preset's default fork clone where it still exists and is forkable (managed, not
+/// archived), else the oldest forkable clone (first in store order — clones append on
+/// creation, so the head is the oldest survivor).
+pub(crate) fn resolve_fork_source(app: &App, preset_default: Option<&str>) -> Option<String> {
+    let st = app.store.get();
+    let mut forkable = st.hosts.iter().filter(|h| h.managed && !h.archived);
+    if let Some(def) = preset_default.map(str::trim).filter(|s| !s.is_empty()) {
+        if forkable.clone().any(|h| h.id == def) {
+            return Some(def.to_string());
+        }
+    }
+    forkable.next().map(|h| h.id.clone())
+}
+
 /// Delete every imported account the merged pool list leaves unclaimed. An account in
 /// zero groups is removed (the group tree's rule) — the existing per-provider delete path
 /// settles clones onto surviving accounts, and refuses (Err) when a clone pins the account,

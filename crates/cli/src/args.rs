@@ -135,10 +135,12 @@ pub enum CloneCmd {
         wait: WaitArgs,
     },
     /// Fork a gen-2 clone: snapshot + clone the source home, create from its recorded
-    /// base tag (`rmng clone fork <source>`). The new hostname derives server-side.
+    /// base tag (`rmng clone fork [source]`). Omitted source = the preset's default fork
+    /// clone where it still exists and is forkable, else the oldest forkable clone.
+    /// The new hostname derives server-side.
     Fork {
-        /// Source gen-2 clone id
-        source: String,
+        /// Source gen-2 clone id (omitted = preset default, else oldest forkable)
+        source: Option<String>,
         /// Headless (no desktop) fork
         #[arg(long)]
         headless: bool,

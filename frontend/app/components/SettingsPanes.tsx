@@ -48,9 +48,9 @@ export interface BoardPaneProps extends PaneDraftProps {
 /** Layout: only the form. */
 export type LayoutPaneProps = PaneDraftProps;
 
-/** Presets: the form plus the account list the preset pickers read. */
+/** Presets: only the form, plus the forkable clones the default-source picker offers. */
 export interface PresetsPaneProps extends PaneDraftProps {
-  accounts: ClaudeUsage[];
+  forkSources: string[];
 }
 
 /** LLM: the form, the ordered account rows, the import entry point, and the judge test. */
@@ -135,7 +135,7 @@ export function LayoutPane({ draft, onDraftChange }: LayoutPaneProps) {
 export function PresetsPane({
   draft,
   onDraftChange,
-  accounts,
+  forkSources,
 }: PresetsPaneProps) {
   return (
     <>
@@ -178,8 +178,8 @@ export function PresetsPane({
       >
         <SettingsPresetList
           presets={draft.presets}
-          accounts={accounts}
           groups={draft.groups}
+          forkSources={forkSources}
           onChange={(presets) => onDraftChange("presets", presets)}
         />
       </Section>

@@ -84,7 +84,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 let body = args::read_text(message.as_ref(), message_file.as_ref())?;
                 commands::fork(
                     client,
-                    source,
+                    source.as_deref(),
                     *headless,
                     preset.clone(),
                     claude_account.clone(),

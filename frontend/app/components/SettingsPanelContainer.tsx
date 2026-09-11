@@ -58,6 +58,8 @@ export interface SettingsPanelContainerProps {
    *  control-server harvests the tokens off a clone that's already signed in. Takes the
    *  provider tab + preselected group for the group tree's per-group import buttons. */
   onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
+  /** Forkable clone ids, oldest first, for the preset default-source picker. */
+  forkSources: string[];
   // --- board columns ---
   /** The dashboard board's columns, left to right. Omit to hide the section entirely,
    *  which is what a page without a board does. */
@@ -82,6 +84,7 @@ export function SettingsPanelContainer({
   operations,
   restartServer,
   onImportAccount,
+  forkSources,
   boardColumns,
   boardColumnCounts,
   onAddBoardColumn,
@@ -244,6 +247,7 @@ export function SettingsPanelContainer({
       accounts={accounts}
       accountOrder={acctOrder}
       onImportAccount={onImportAccount}
+      forkSources={forkSources}
       error={error}
       restartRequired={restartRequired}
       saving={saving}

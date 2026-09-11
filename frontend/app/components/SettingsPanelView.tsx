@@ -61,6 +61,8 @@ export interface SettingsPanelViewProps {
    *  in the browser — the control-server harvests the tokens off a clone that's
    *  already signed in. */
   onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
+  /** Forkable clone ids, oldest first, for the preset default-source picker. */
+  forkSources: string[];
 
   /** The last failed load or save, in the panel's own banner. */
   error: string | null;
@@ -113,6 +115,7 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
     accounts,
     accountOrder,
     onImportAccount,
+    forkSources,
     error,
     restartRequired,
     saving,
@@ -173,7 +176,7 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
           <PresetsPane
             draft={loaded}
             onDraftChange={onDraftChange}
-            accounts={accounts}
+            forkSources={forkSources}
           />
         );
       case "llm":

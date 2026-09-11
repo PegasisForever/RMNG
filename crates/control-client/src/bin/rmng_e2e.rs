@@ -1,4 +1,5 @@
-//! Gen-2 happy-path end to end: create → fork → archive → rebase → unarchive → delete.
+//! Gen-2 happy-path end to end: create → prebuild → fork(rebuild) → create(rebuild) →
+//! archive → rebase → unarchive → delete.
 //!
 //! Drives a LIVE server over its web API with the `control-client` typed client — the same
 //! calls the CLI and the dialogs make. Needs real Docker + ZFS + one preset, so this never
@@ -163,7 +164,11 @@ impl Runner {
         }
         let n = (w as f64) * (h as f64);
         let mean = gray.pixels().map(|p| p[0] as f64).sum::<f64>() / n;
-        let var = gray.pixels().map(|p| (p[0] as f64 - mean).powi(2)).sum::<f64>() / n;
+        let var = gray
+            .pixels()
+            .map(|p| (p[0] as f64 - mean).powi(2))
+            .sum::<f64>()
+            / n;
         let sd = var.sqrt();
         if sd < 5.0 {
             bail!("frame has no variance (stddev {sd:.1} — dead session?)");
@@ -174,7 +179,11 @@ impl Runner {
     async fn cleanup(&mut self) {
         if let Some((preset, script)) = self.script_restore.take() {
             println!("e2e: restoring preset '{preset}' startup script ...");
-            if let Err(e) = self.client.set_preset_startup_script(&preset, &script).await {
+            if let Err(e) = self
+                .client
+                .set_preset_startup_script(&preset, &script)
+                .await
+            {
                 eprintln!("e2e: WARNING: script restore failed: {e:#}");
             }
         }
@@ -222,7 +231,18 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// The preset startup script ran as the clone user: the op log carries `exit 0`, the
+/// The op built its preset image fresh: the log carries the `building preset image`
+/// line. A build-on-miss path would skip the build when the tag already exists, so
+/// this proves the forced-rebuild behavior (prebuild button, create/fork rebuild box).
+async fn assert_rebuilt(r: &Runner, op: &Operation, what: &str) -> Result<()> {
+    let log = r.op_log(op, what).await?;
+    let text = log.join("\n");
+    if !text.contains("building preset image") {
+        bail!("{what}: no fresh image build in op log:\n{text}");
+    }
+    println!("e2e: {what} built its image fresh");
+    Ok(())
+}
 /// marker echo, and the `rmng` username — proving user, not root, ran it.
 async fn assert_startup_ran(r: &Runner, op: &Operation, marker: &str, what: &str) -> Result<()> {
     let log = r.op_log(op, what).await?;
@@ -261,6 +281,7 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
         "e2e: preset '{preset}', dockerfile starts: {}",
         found.dockerfile.lines().next().unwrap_or("(empty)")
     );
+    let dockerfile = found.dockerfile.clone();
 
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -284,7 +305,7 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     println!("e2e: create '{title}' ...");
     let op = r
         .client
-        .clone_create_plain(&title, "", Some(preset), true)
+        .clone_create_plain(&title, "", Some(preset), true, false)
         .await
         .context("POST /api/clone")?;
     r.wait_op(&op, "create").await?;
@@ -309,21 +330,34 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     // output, no dmabuf) used to pass green. Screenshot directly, headlessly.
     r.wait_frames(&id, "create").await?;
 
-    // 2. Fork it with a first message.
+    // 1b. Prebuild the SAME Dockerfile text: the tag already exists, so a
+    // build-on-miss path would skip. The rebuild button always rebuilds.
+    println!("e2e: prebuild same Dockerfile ...");
+    let op_rebuild = r
+        .client
+        .prebuild(&dockerfile)
+        .await
+        .context("POST /api/images/prebuild")?;
+    r.wait_op(&op_rebuild, "prebuild").await?;
+    assert_rebuilt(r, &op_rebuild, "prebuild").await?;
+
+    // 2. Fork it with a first message, forcing a fresh image build first.
     println!("e2e: fork '{id}' ...");
     let op = r
         .client
         .fork_with(
-            &id,
+            Some(id.as_str()),
             &ForkOpts {
                 first_message: Some("e2e fork"),
                 run_startup_script: true,
+                rebuild: true,
                 ..Default::default()
             },
         )
         .await
         .context("POST /api/fork")?;
     r.wait_op(&op, "fork").await?;
+    assert_rebuilt(r, &op, "fork").await?;
     assert_startup_ran(r, &op, &marker, "fork").await?;
     let fork = op.target.clone();
     r.made.push(fork.clone());
@@ -333,6 +367,24 @@ async fn run(r: &mut Runner, preset: &str) -> Result<()> {
     println!("e2e: forked '{fork}'");
     r.wait_connected(&fork, "fork").await?;
     r.wait_frames(&fork, "fork").await?;
+
+    // 2b. Create a second clone with the rebuild box ticked: same tag exists, so
+    // the build in its log proves the create path forced a rebuild. Delete it after.
+    println!("e2e: create-with-rebuild '{title}-rb' ...");
+    let op_rb = r
+        .client
+        .clone_create_plain(&format!("{title}-rb"), "", Some(preset), true, true)
+        .await
+        .context("POST /api/clone (rebuild)")?;
+    r.wait_op(&op_rb, "create-rebuild").await?;
+    assert_rebuilt(r, &op_rb, "create-rebuild").await?;
+    let rb = op_rb.target.clone();
+    println!("e2e: delete rebuild probe '{rb}' ...");
+    let op_del = r.client.delete(&rb).await.context("delete")?;
+    r.wait_op(&op_del, "delete rebuild probe").await?;
+    if r.hosts_contain(&rb).await? {
+        bail!("clone '{rb}' still in state after delete");
+    }
 
     // 3. Archive the fork.
     println!("e2e: archive '{fork}' ...");

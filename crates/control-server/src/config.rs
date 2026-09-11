@@ -68,8 +68,7 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                     labels: Vec::new(),
                     linear_key: String::new(),
                     // Blank = no opinion; a legacy env-only preset never had an account default.
-                    claude_account: String::new(),
-                    codex_account: String::new(),
+                    group: String::new(),
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
                     ..Default::default()
@@ -134,6 +133,57 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
         );
         cfg.groups = merged;
         changed = true;
+    }
+
+    // Retired per-provider preset defaults → one `group` (one-shot). A `group:<pool>`
+    // value folds to the pool name (Claude side wins when the two name different pools —
+    // only reachable from a hand-written config; the old UI offered two pickers).
+    // Anything else (email/`auto`/`none` pins, bare `group:`) means no pool was named:
+    // fall back to the first pool when one exists, else `"none"` (any group) — a preset
+    // always names a default.
+    {
+        let fallback = cfg
+            .groups
+            .first()
+            .map(|g| g.name.clone())
+            .unwrap_or_else(|| "none".to_string());
+        let mut folded = 0usize;
+        for p in cfg.presets.iter_mut() {
+            if !p.group.is_empty() {
+                continue;
+            }
+            fn pool_of(sel: &str) -> Option<String> {
+                sel.strip_prefix("group:")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            }
+            let g1 = pool_of(p.claude_account.trim());
+            let g2 = pool_of(p.codex_account.trim());
+            let next = match (g1, g2) {
+                (Some(a), Some(b)) => {
+                    if a != b {
+                        tracing::warn!(
+                            "preset {name:?} named two pools ({a:?} vs {b:?}) — keeping {a:?}",
+                            name = p.name,
+                        );
+                    }
+                    a
+                }
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => fallback.clone(),
+            };
+            p.group = next;
+            p.claude_account.clear();
+            p.codex_account.clear();
+            folded += 1;
+        }
+        if folded > 0 {
+            tracing::info!(
+                "folding retired preset claude/codex defaults into one group ({folded} preset(s))"
+            );
+            changed = true;
+        }
     }
 
     // Legacy single `monitors` array → a "Default" layout preset (one-shot). Only when
@@ -268,10 +318,76 @@ mod tests {
         assert_eq!(team.accounts, vec!["a@x.com", "z@o.com"]);
         assert!(cfg.clone_groups.is_empty() && cfg.codex_groups.is_empty());
 
-        // Fully-migrated file → no rewrite.
-        let raw = serde_json::json!({ "presets": [{ "name": "p" }] });
+        // A preset with no pool default always gains one (`"none"` = any group when
+        // no pools exist yet).
         let mut cfg = AppConfig::default();
-        assert!(!migrate_legacy(&raw, &mut cfg));
+        cfg.presets = vec![wire::Preset {
+            name: "p".into(),
+            ..Default::default()
+        }];
+        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
+        assert_eq!(cfg.presets[0].group, "none");
+    }
+
+    #[test]
+    fn migrate_legacy_folds_preset_account_defaults_into_one_group() {
+        // Both sides naming the same pool → that pool.
+        let mut cfg = AppConfig::default();
+        cfg.presets = vec![wire::Preset {
+            name: "p".into(),
+            claude_account: "group:pooled".into(),
+            codex_account: "group:pooled".into(),
+            ..Default::default()
+        }];
+        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
+        assert_eq!(cfg.presets[0].group, "pooled");
+        assert!(cfg.presets[0].claude_account.is_empty());
+        assert!(cfg.presets[0].codex_account.is_empty());
+
+        // One side only → that side's pool.
+        let mut cfg = AppConfig::default();
+        cfg.presets = vec![wire::Preset {
+            name: "p".into(),
+            claude_account: "group:team".into(),
+            ..Default::default()
+        }];
+        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
+        assert_eq!(cfg.presets[0].group, "team");
+
+        // Different pools → the Claude side wins.
+        let mut cfg = AppConfig::default();
+        cfg.presets = vec![wire::Preset {
+            name: "p".into(),
+            claude_account: "group:a".into(),
+            codex_account: "group:b".into(),
+            ..Default::default()
+        }];
+        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
+        assert_eq!(cfg.presets[0].group, "a");
+
+        // No pool named and pools exist → the first pool.
+        let mut cfg = AppConfig::default();
+        cfg.groups = vec![wire::CloneGroup {
+            name: "pooled".into(),
+            accounts: vec![],
+        }];
+        cfg.presets = vec![wire::Preset {
+            name: "p".into(),
+            claude_account: "sam@example.com".into(),
+            codex_account: "group:".into(),
+            ..Default::default()
+        }];
+        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
+        assert_eq!(cfg.presets[0].group, "pooled");
+
+        // No pool named and no pools exist → any group.
+        let mut cfg = AppConfig::default();
+        cfg.presets = vec![wire::Preset {
+            name: "p".into(),
+            ..Default::default()
+        }];
+        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
+        assert_eq!(cfg.presets[0].group, "none");
     }
 
     #[test]
@@ -694,6 +810,15 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
     }
     if let Some(serde_json::Value::Array(rows)) = incoming_presets {
         merged.presets = merge_presets(&base.presets, &rows);
+        // A preset always names a pool default: a blank row falls back to the first pool
+        // (`"none"` = any group survives as-is). The pool backstop above guarantees one exists.
+        if let Some(first) = merged.groups.first().map(|g| g.name.clone()) {
+            for p in merged.presets.iter_mut() {
+                if p.group.trim().is_empty() {
+                    p.group = first.clone();
+                }
+            }
+        }
     }
     // Keep active_layout valid after preset edits: if it no longer names a preset,
     // point it at the first (or clear it when there are none).
@@ -824,22 +949,33 @@ fn merge_presets(_base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // Default account selections. Unlike `linearKey` a blank does NOT keep the stored value:
-        // blank is a meaningful state here ("no opinion — fall through to the next resolution
-        // step"), so the editor must be able to clear one back to it.
-        let account = |key: &str| {
-            r.get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string()
+        // Default account pool: a pool name or `"none"` (any group). Unlike `linearKey`
+        // a blank does NOT keep the stored value — `merge_update` fills blanks with the
+        // first pool, so a preset always names a default.
+        let group = r
+            .get("group")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let group = if group.eq_ignore_ascii_case("none") {
+            "none".to_string()
+        } else {
+            group
         };
         out.push(wire::Preset {
             name,
             labels,
             linear_key,
-            claude_account: account("claudeAccount"),
-            codex_account: account("codexAccount"),
+            group,
+            default_fork_clone: r
+                .get("defaultForkClone")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            claude_account: String::new(),
+            codex_account: String::new(),
             agent_playbook,
             global_prompt,
             startup_script,

@@ -1001,17 +1001,58 @@ async fn clone(
             )));
         }
     };
-    // The preset's own account defaults, if it names any; `None` reads as `auto` downstream.
-    let preset_default = |pick: fn(&wire::Preset) -> &str| -> Option<String> {
-        explicit
-            .map(|p| pick(p).trim().to_string())
-            .filter(|s| !s.is_empty())
+    // The preset's own pool default, if it names one; `None` reads as `auto` downstream.
+    // One pool feeds both sides: both selections name it, and `split_group_binding`
+    // binds the clone once with both sides resolving inside it. `"none"` (any group)
+    // and a blank both mean fleet-wide auto.
+    let preset_group = explicit
+        .map(|p| p.group.trim().to_string())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("none"))
+        .map(|g| format!("group:{g}"));
+    // Optional per-request account overrides; absent = the preset default above.
+    // `group` present binds (name) or unbinds (null/blank) fleet-wide auto; per-side
+    // `claudeAccount`/`codexAccount` picks win over the binding on their side.
+    // Unknown pools fail fast here (mirroring fork) rather than stranding the clone
+    // tokenless. Blank per-side picks fall back to the binding.
+    let has_group = body.get("group").is_some();
+    let group_val = body
+        .get("group")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let (bind_claude, bind_codex) = if !has_group {
+        (preset_group.clone(), preset_group)
+    } else if group_val.is_empty() {
+        (None, None)
+    } else {
+        let b = Some(format!("group:{group_val}"));
+        (b.clone(), b)
     };
+    let str_opt = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let claude_account = str_opt("claudeAccount").or(bind_claude);
+    let codex_account = str_opt("codexAccount").or(bind_codex);
     // Startup script: default on everywhere, opt out per request.
     let run_startup_script = body
         .get("runStartupScript")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    // Headless (no desktop): opt in per request, default headed.
+    let headless = body
+        .get("headless")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    // Rebuild image: force a fresh build with a fresh base pull even when the
+    // preset's tag already exists. The New clone dialog's rebuild checkbox sets this.
+    let rebuild = body
+        .get("rebuild")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let (hostname, display) =
         derive_hostname(&app, &naming::plain_hostname_base(&prefix, &title), &title);
     let spec = CloneSpec {
@@ -1021,8 +1062,8 @@ async fn clone(
             display_name: Some(display),
             ..Default::default()
         }),
-        claude_account: preset_default(|p| &p.claude_account),
-        codex_account: preset_default(|p| &p.codex_account),
+        claude_account,
+        codex_account,
         first_message: Some(message).filter(|m| !m.is_empty()),
         agent_instructions: None,
         claude_instructions: None,
@@ -1030,9 +1071,10 @@ async fn clone(
         env,
         agent_playbook: compose_playbook(&cfg, explicit),
         global_prompt: compose_global_prompt(&cfg, explicit),
-        headless: false,
+        headless,
         parent: None,
         run_startup_script,
+        rebuild,
     };
     let op = jobs::start_clone(&app, spec).map_err(|e| bad(e.to_string()))?;
     Ok(Json(json!({ "ok": true, "op": op })))
@@ -1080,8 +1122,8 @@ pub(crate) fn compose_global_prompt(
 
 // --- derived images (gen-2 preset builds) -----------------------------------
 
-/// `POST /api/images/prebuild` — warm a preset image without creating: build the posted
-/// Dockerfile text on miss. The preset card's rebuild button posts the editor's current
+/// `POST /api/images/prebuild` — always rebuild a preset image with a fresh base pull,
+/// even when its tag exists. The preset card's rebuild button posts the editor's current
 /// text (which may be unsaved). Returns the driving Operation (kind `prebuild`).
 async fn images_prebuild(
     State(app): State<App>,
@@ -1131,8 +1173,10 @@ fn default_true() -> bool {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ForkReq {
-    /// Source gen-2 clone id.
-    source: String,
+    /// Source gen-2 clone id. Omitted/blank = the preset's default fork clone where it
+    /// still exists and is forkable, else the oldest forkable clone.
+    #[serde(default)]
+    source: Option<String>,
     /// Headless (no desktop) fork.
     #[serde(default)]
     headless: bool,
@@ -1162,6 +1206,10 @@ struct ForkReq {
     /// Run the preset's startup script as the clone user. Default on; opt out per request.
     #[serde(default = "default_true")]
     run_startup_script: bool,
+    /// Force a fresh image build with a fresh base pull even when the preset's tag
+    /// already exists. The New clone dialog's rebuild checkbox sets this.
+    #[serde(default)]
+    rebuild: bool,
 }
 
 /// `POST /api/fork` — fork a gen-2 clone (`{ source }` plus the optional
@@ -1193,10 +1241,37 @@ async fn fork(
         }
     };
     let hostname = derive_hostname(&app, &base, "").0;
+    // No source named: the preset override's default fork clone where it still exists
+    // and is forkable, else the oldest forkable clone (first in store order), mirroring
+    // the clone modal. An explicit source skips this and validates in `start_fork`.
+    let source_id = match req
+        .source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(source) => source.to_string(),
+        None => {
+            let preset_default = req
+                .preset
+                .as_deref()
+                .and_then(|name| cfg.presets.iter().find(|p| p.name == *name))
+                .map(|p| p.default_fork_clone.trim().to_string())
+                .filter(|s| !s.is_empty());
+            crate::clone_ops::resolve_fork_source(&app, preset_default.as_deref()).ok_or_else(
+                || {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "no forkable clones: create one from the template tab first".to_string(),
+                    )
+                },
+            )?
+        }
+    };
     jobs::start_fork(
         &app,
         jobs::ForkSpec {
-            source_id: req.source.trim().to_string(),
+            source_id,
             new_hostname: hostname,
             headless: req.headless,
             preset_name: req.preset,
@@ -1208,6 +1283,7 @@ async fn fork(
             agent_instructions: req.agent_instructions,
             claude_instructions: req.claude_instructions,
             run_startup_script: req.run_startup_script,
+            rebuild: req.rebuild,
         },
     )
     .map(|op| Json(json!({ "ok": true, "op": op })))
@@ -2724,6 +2800,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clone_template_overrides_reach_the_op() {
+        let app = test_app();
+        app.cfg.write().unwrap().groups.push(wire::CloneGroup {
+            name: "pooled".into(),
+            accounts: vec![],
+        });
+        let body = json!({
+            "plain": { "title": "encoder scratch", "message": "" },
+            "headless": true,
+            "group": "pooled",
+            "claudeAccount": "auto",
+        });
+        let resp = clone(State(app.clone()), Json(body)).await.unwrap().0;
+        assert_eq!(resp["ok"], true);
+        let op: Operation = serde_json::from_value(resp["op"].clone()).unwrap();
+        assert_eq!(op.kind, wire::OperationKind::Clone);
+    }
+
+    #[tokio::test]
+    async fn clone_template_rejects_unknown_pool() {
+        let app = test_app();
+        let body = json!({ "plain": { "title": "x" }, "group": "nope" });
+        let err = clone(State(app.clone()), Json(body)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("unknown account pool"), "msg: {}", err.1);
+    }
+
+    #[tokio::test]
     async fn clone_requires_a_title() {
         let app = test_app();
         let body = json!({ "plain": { "title": "   " } });
@@ -2745,6 +2849,67 @@ mod tests {
             assert_eq!(err.0, StatusCode::BAD_REQUEST);
             assert!(err.1.contains("{ plain: { title } }"), "msg: {}", err.1);
         }
+    }
+
+    // --- POST /api/fork without a source: preset default, else oldest ---
+
+    fn push_forkable(app: &App, id: &str) {
+        app.store.mutate(|s| {
+            s.hosts.push(wire::RmngClone {
+                id: id.into(),
+                host: id.into(),
+                managed: true,
+                base_tag: Some("rmng-p-0".into()),
+                ..Default::default()
+            });
+        });
+    }
+
+    fn set_preset_default(app: &App, name: &str, default_fork_clone: &str) {
+        app.cfg.write().unwrap().presets.push(wire::Preset {
+            name: name.into(),
+            default_fork_clone: default_fork_clone.into(),
+            ..Default::default()
+        });
+    }
+
+    async fn fork_op(app: &App, body: serde_json::Value) -> Operation {
+        let req: ForkReq = serde_json::from_value(body).unwrap();
+        let resp = fork(State(app.clone()), Json(req)).await.unwrap().0;
+        serde_json::from_value(resp["op"].clone()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fork_without_source_uses_preset_default() {
+        let app = test_app();
+        push_forkable(&app, "old");
+        push_forkable(&app, "new");
+        set_preset_default(&app, "p", "new");
+        let op = fork_op(&app, json!({ "preset": "p" })).await;
+        assert_eq!(op.source.as_deref(), Some("new"));
+    }
+
+    #[tokio::test]
+    async fn fork_without_source_falls_back_to_oldest() {
+        let app = test_app();
+        push_forkable(&app, "old");
+        push_forkable(&app, "new");
+        // A default naming no forkable clone falls back to the oldest.
+        set_preset_default(&app, "p", "gone");
+        let op = fork_op(&app, json!({ "preset": "p" })).await;
+        assert_eq!(op.source.as_deref(), Some("old"));
+        // No preset at all: oldest as well.
+        let op = fork_op(&app, json!({})).await;
+        assert_eq!(op.source.as_deref(), Some("old"));
+    }
+
+    #[tokio::test]
+    async fn fork_without_source_and_no_forkable_clone_is_400() {
+        let app = test_app();
+        let req: ForkReq = serde_json::from_value(json!({})).unwrap();
+        let err = fork(State(app.clone()), Json(req)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("no forkable clones"), "msg: {}", err.1);
     }
 
     // --- sub clones: parent resolution + cascade delete ---

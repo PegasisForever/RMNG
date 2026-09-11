@@ -4,14 +4,21 @@
 //
 // Fork submit files `POST /api/fork` with the ticket mode's answer plus
 // preset/accounts/instructions; omitted fields inherit the source's bindings server-side.
-// Template submit files `POST /api/clone` in plain mode (title + preset), always headed
-// with the preset's default accounts.
+// Template submit files `POST /api/clone` in plain mode (title + preset), headed unless
+// asked, with the preset's defaults underneath the account overrides.
 //
 // Four things live here and nowhere below: the config read that supplies the presets and
 // the account pools, the fork/clone POSTs, and the operation the POST returns. The dialog
 // stays open on that operation and closes only when it settles, which is why the op list
 // is a prop rather than something the View could ever have. The markup is CloneModalView.
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 import { CloneModalView } from "~/components/CloneModalView";
 import { getConfig, type ClonePayload } from "~/lib/api";
@@ -31,6 +38,7 @@ import {
   emptyCloneDraft,
   linearKeyMissing,
   opPhase,
+  resolveForkSource,
   resolvePreset,
   teamKeysOf,
   type CloneDraft,
@@ -42,7 +50,9 @@ import { parseTicketInput } from "~/lib/workspace";
 
 // BlockNote is browser-only and heavy; the description field pulls it in on demand. The
 // container is the import target, so the /api/upload call it owns rides the same lazy chunk.
-const MarkdownEditorContainer = lazy(() => import("~/components/MarkdownEditorContainer"));
+const MarkdownEditorContainer = lazy(
+  () => import("~/components/MarkdownEditorContainer"),
+);
 
 export function CloneModalContainer({
   clones,
@@ -72,7 +82,11 @@ export function CloneModalContainer({
   /** Starts the fork and resolves with the driving Operation. The dialog stays open,
    *  showing its progress, until the operation settles. Payload carries the ticket
    *  mode's answer plus preset/accounts/instructions; omitted fields inherit server-side. */
-  onFork: (source: string, headless: boolean, payload: ForkPayload) => Promise<Operation>;
+  onFork: (
+    source: string,
+    headless: boolean,
+    payload: ForkPayload,
+  ) => Promise<Operation>;
   /** Starts a template clone and resolves with the driving Operation. Same lifecycle as
    *  a fork: the dialog stays open, showing its progress, until the operation settles. */
   onClone: (payload: ClonePayload) => Promise<Operation>;
@@ -81,23 +95,29 @@ export function CloneModalContainer({
     ...emptyCloneDraft(initialTicket),
     source: initialSource,
   }));
+  // A source arriving via `initialSource` (the clone's own menu) counts as the
+  // operator's pick: resolving a preset must not move it.
+  const [sourceTouched, setSourceTouched] = useState(initialSource != null);
   const update = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>
       setDraft((d) => ({ ...d, [key]: value })),
     [],
   );
+  // The View's writer: picking a source by hand pins it, so a later preset resolving
+  // no longer moves it. Every other field writes straight through.
+  const onDraftChange = useCallback(
+    <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) => {
+      if (key === "source") setSourceTouched(true);
+      setDraft((d) => ({ ...d, [key]: value }));
+    },
+    [],
+  );
   // Only live managed clones can be forked: archived ones are stopped and retained, and
-  // unmanaged rows are not ours to snapshot. Pre-select the first forkable row on a fresh
-  // dialog, and skip whenever the operator has already picked one that still qualifies.
+  // unmanaged rows are not ours to snapshot.
   const sources = useMemo(
     () => clones.filter((c) => c.managed && !c.archived),
     [clones],
   );
-  useEffect(() => {
-    if (draft.source && sources.some((c) => c.id === draft.source)) return;
-    if (sources.length > 0) update("source", sources[0].id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clones]);
   useEffect(() => {
     if (!clonesLoading && sources.length === 0 && draft.mode !== "template") {
       update("mode", "template");
@@ -130,10 +150,18 @@ export function CloneModalContainer({
 
   // The no-ticket and template tabs need an explicit preset — default to the first one.
   useEffect(() => {
-    if (draft.mode === "plain" && draft.plainPreset === "" && presets.length > 0) {
+    if (
+      draft.mode === "plain" &&
+      draft.plainPreset === "" &&
+      presets.length > 0
+    ) {
       update("plainPreset", presets[0].name);
     }
-    if (draft.mode === "template" && draft.templatePreset === "" && presets.length > 0) {
+    if (
+      draft.mode === "template" &&
+      draft.templatePreset === "" &&
+      presets.length > 0
+    ) {
       update("templatePreset", presets[0].name);
     }
   }, [draft.mode, draft.plainPreset, draft.templatePreset, presets, update]);
@@ -153,7 +181,28 @@ export function CloneModalContainer({
     team: draft.team,
     ticketPrefix: parsedTicket?.prefix,
   });
-  const keyMissing = linearKeyMissing(draft.mode, presets, preset, configLoaded);
+  // Fork source follows the resolved preset until the operator picks one by hand: the
+  // preset's default fork clone where it is still forkable, else the oldest forkable
+  // clone. A hand pick (or `initialSource`) sticks across preset changes; a pick that
+  // stops qualifying (clone deleted or archived) falls back to auto.
+  const presetDefault = preset?.defaultForkClone;
+  useEffect(() => {
+    if (sources.length === 0) return;
+    const ids = sources.map((c) => c.id);
+    if (sourceTouched) {
+      if (draft.source && ids.includes(draft.source)) return;
+      setSourceTouched(false);
+    }
+    const next = resolveForkSource(presetDefault, ids);
+    if (next && draft.source !== next) update("source", next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetDefault, sources]);
+  const keyMissing = linearKeyMissing(
+    draft.mode,
+    presets,
+    preset,
+    configLoaded,
+  );
   const valid = cloneDraftValid(draft, {
     presets,
     preset,
@@ -177,7 +226,10 @@ export function CloneModalContainer({
     if (op) setOpSeen(true);
     if (op?.status === "error") {
       setFailed(true);
-      setError(op.message || (draft.mode === "template" ? "the clone failed" : "the fork failed"));
+      setError(
+        op.message ||
+          (draft.mode === "template" ? "the clone failed" : "the fork failed"),
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [op]);
@@ -197,7 +249,9 @@ export function CloneModalContainer({
   // The one sentence the description slot shows before it can take a keystroke, whether the
   // wait is for the config or for BlockNote's own chunk.
   const editorLoading = (
-    <p className="px-3 text-xs text-slate-400 dark:text-slate-500">Loading editor…</p>
+    <p className="px-3 text-xs text-slate-400 dark:text-slate-500">
+      Loading editor…
+    </p>
   );
 
   /** The issue this fork is for, and the key proven to reach it.
@@ -205,12 +259,18 @@ export function CloneModalContainer({
    *  Existing-ticket looks it up by identifier across every configured key. New-ticket opens
    *  one with the key of the preset that claims the team. Both answer the same pair, so the
    *  step after them does not care which tab is open. */
-  async function resolveIssue(): Promise<{ issue: ResolvedIssue; key: string }> {
+  async function resolveIssue(): Promise<{
+    issue: ResolvedIssue;
+    key: string;
+  }> {
     if (draft.mode === "existing") {
       const ref = issueRefOf(draft.ticket);
       // Unreachable while `valid` gates the button on the same parse, and stated anyway
       // because this function is the one that would otherwise fetch `undefined`.
-      if (!ref) throw new Error(`could not find a ticket id (like WE-142) in "${draft.ticket}"`);
+      if (!ref)
+        throw new Error(
+          `could not find a ticket id (like WE-142) in "${draft.ticket}"`,
+        );
       return fetchIssueAny(keysForTeam(presets, ref.prefix), ref);
     }
     const team = draft.team.trim();
@@ -233,9 +293,12 @@ export function CloneModalContainer({
     const base: ForkPayload = {
       ...(preset ? { preset: preset.name } : {}),
       runStartupScript: draft.runStartupScript,
+      ...(draft.rebuild ? { rebuild: true } : {}),
       ...(draft.claudeAccount ? { claudeAccount: draft.claudeAccount } : {}),
       ...(draft.codexAccount ? { codexAccount: draft.codexAccount } : {}),
-      ...(draft.group ? { group: draft.group === "none" ? null : draft.group } : {}),
+      ...(draft.group
+        ? { group: draft.group === "none" ? null : draft.group }
+        : {}),
       ...(draft.mode !== "plain" && draft.agentInstructions.trim()
         ? { agentInstructions: draft.agentInstructions.trim() }
         : {}),
@@ -273,6 +336,13 @@ export function CloneModalContainer({
         plain: { title: draft.title.trim(), message: "" },
         ...(draft.templatePreset ? { preset: draft.templatePreset } : {}),
         runStartupScript: draft.runStartupScript,
+        ...(draft.rebuild ? { rebuild: true } : {}),
+        ...(draft.headless ? { headless: true } : {}),
+        ...(draft.group
+          ? { group: draft.group === "none" ? null : draft.group }
+          : {}),
+        ...(draft.claudeAccount ? { claudeAccount: draft.claudeAccount } : {}),
+        ...(draft.codexAccount ? { codexAccount: draft.codexAccount } : {}),
       };
       onClone(payload)
         .then((started) => setOpId(started.id))
@@ -295,7 +365,7 @@ export function CloneModalContainer({
   return (
     <CloneModalView
       draft={draft}
-      onDraftChange={update}
+      onDraftChange={onDraftChange}
       clones={sources}
       clonesLoading={clonesLoading}
       accounts={accounts}

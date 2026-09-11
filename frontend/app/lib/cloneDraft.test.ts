@@ -5,6 +5,7 @@ import {
   emptyCloneDraft,
   linearKeyMissing,
   opPhase,
+  resolveForkSource,
   resolvePreset,
   teamKeysOf,
   type CloneDraft,
@@ -61,8 +62,8 @@ const presets: PresetRedacted[] = [
     name: "work",
     labels: ["WE", "DEV"],
     linearKey: "lin_api_fixture",
-    claudeAccount: "group:pooled",
-    codexAccount: "",
+    group: "pooled",
+    defaultForkClone: "",
     agentPlaybook: "",
     globalPrompt: "",
     startupScript: "",
@@ -72,8 +73,8 @@ const presets: PresetRedacted[] = [
     name: "side",
     labels: ["AW"],
     linearKey: "",
-    claudeAccount: "",
-    codexAccount: "",
+    group: "",
+    defaultForkClone: "",
     agentPlaybook: "",
     globalPrompt: "",
     startupScript: "",
@@ -83,8 +84,8 @@ const presets: PresetRedacted[] = [
     name: "bare",
     labels: [],
     linearKey: "",
-    claudeAccount: "",
-    codexAccount: "",
+    group: "",
+    defaultForkClone: "",
     agentPlaybook: "",
     globalPrompt: "",
     startupScript: "",
@@ -147,11 +148,11 @@ test("a key claimed by two presets goes to the first in config order", () => {
       name: "late",
       labels: ["WE"],
       linearKey: "lin_api_fixture",
-      claudeAccount: "",
-      codexAccount: "",
+      group: "",
+      defaultForkClone: "",
       agentPlaybook: "",
       globalPrompt: "",
-    startupScript: "",
+      startupScript: "",
       dockerfile: "FROM pegasis0/rmng-template:latest",
     },
   ];
@@ -165,6 +166,22 @@ test("a key claimed by two presets goes to the first in config order", () => {
 test("an unlabelled preset contributes no team key", () => {
   // `bare` has no labels, so the dropdown cannot offer it and nothing auto-selects it.
   expect(teamKeysOf(presets).map((t) => t.preset.name)).not.toContain("bare");
+});
+
+// --- fork source resolution (mirrors the server) ------------------------------------------
+
+test("the preset default wins where still forkable", () => {
+  expect(resolveForkSource("b", ["a", "b"])).toBe("b");
+});
+
+test("a stale or blank default falls back to the oldest", () => {
+  expect(resolveForkSource("gone", ["a", "b"])).toBe("a");
+  expect(resolveForkSource("", ["a", "b"])).toBe("a");
+  expect(resolveForkSource(undefined, ["a", "b"])).toBe("a");
+});
+
+test("no forkable clone resolves to null", () => {
+  expect(resolveForkSource("a", [])).toBeNull();
 });
 
 // --- the missing-Linear-key rule (mirrors the server, per tab) ---------------------------
@@ -301,13 +318,22 @@ test("a template clone needs a title, and a preset whenever any are configured",
   expect(t({ title: "scratch", templatePreset: "" })).toBe(false);
   expect(t({ title: "", templatePreset: "work" })).toBe(false);
   // Nothing configured, so there is no preset to pick and the title carries the form.
-  expect(check(draft({ mode: "template", source: null, title: "scratch" }), {
-    presets: [],
-    needsSource: false,
-  })).toBe(true);
+  expect(
+    check(draft({ mode: "template", source: null, title: "scratch" }), {
+      presets: [],
+      needsSource: false,
+    }),
+  ).toBe(true);
   // …but without the template opt-out a missing source still blocks, like every tab.
   expect(
-    check(draft({ mode: "template", source: null, title: "x", templatePreset: "work" })),
+    check(
+      draft({
+        mode: "template",
+        source: null,
+        title: "x",
+        templatePreset: "work",
+      }),
+    ),
   ).toBe(false);
 });
 

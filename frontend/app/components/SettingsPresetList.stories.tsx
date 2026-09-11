@@ -3,7 +3,6 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { SettingsPresetList } from "./SettingsPresetList";
-import { accountsNow, makeClaudeAccounts } from "./__fixtures__/accounts";
 import { makeSettingsDraft } from "./__fixtures__/appConfig";
 import { newPreset } from "~/lib/settingsDraft";
 
@@ -12,15 +11,15 @@ function Frame({ children }: { children: React.ReactNode }) {
   return <div className="w-[38rem] p-4">{children}</div>;
 }
 
-/** The three configured presets plus the pools their account pickers offer, rebuilt per
- *  story. Every card here is editable, so one set behind the stories would let an edit in one
- *  show up in the next. */
+/** The three configured presets, the pools the group picker offers, and the forkable
+ *  clones the default-source picker offers, rebuilt per story. Every card here is
+ *  editable, so one set behind the stories would let an edit in one show up in the next. */
 function base() {
   const draft = makeSettingsDraft();
   return {
     presets: draft.presets,
-    accounts: makeClaudeAccounts(accountsNow),
     groups: draft.groups,
+    forkSources: ["pega-we-142", "pega-dev-88", "scratch-box"],
   };
 }
 
@@ -47,10 +46,9 @@ type Story = StoryObj<typeof meta>;
  *  under OPS. */
 export const Default: Story = { args: { ...base() } };
 
-/** A preset being filled in. Everything is blank, including both account defaults: a new
- *  preset takes no opinion on which pool its clones get until it is given one. */
+/** A preset being filled in. It points at the first pool: a preset always names a default. */
 export const NewRow: Story = {
-  args: { ...base(), presets: [newPreset()] },
+  args: { ...base(), presets: [newPreset("pooled")] },
 };
 
 /** Nothing configured. Cloning from a ticket has no preset to auto-select, so every clone
@@ -59,10 +57,14 @@ export const Empty: Story = {
   args: { ...base(), presets: [] },
 };
 
-/** No accounts imported and no pools configured, so both pickers fall back to the two options
- *  that never depend on config: rotate over everything, or install no token at all. */
+/** No pools configured, so the picker offers only any group. (Unreachable from the
+ *  server, which always keeps at least one pool.) */
 export const NothingToDefaultTo: Story = {
-  args: { ...base(), accounts: [], groups: [] },
+  args: {
+    ...base(),
+    groups: [],
+    presets: [newPreset("none")],
+  },
 };
 
 /** Wired to local state: renaming, adding a variable, dropping a preset and picking a

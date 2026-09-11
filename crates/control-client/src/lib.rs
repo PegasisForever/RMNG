@@ -65,6 +65,9 @@ pub struct ForkOpts<'a> {
     pub headless: bool,
     /// Run the preset's startup script (default true: pass false only to opt out).
     pub run_startup_script: bool,
+    /// Force a fresh image build with a fresh base pull even when the preset's tag
+    /// already exists.
+    pub rebuild: bool,
 }
 
 impl Client {
@@ -259,13 +262,15 @@ impl Client {
 
     /// Start a template clone: `{ plain: { title, message } }` plus an optional preset
     /// name. The hostname derives server-side and the image builds on demand from the
-    /// preset's Dockerfile.
+    /// preset's Dockerfile. `rebuild` forces a fresh build with a fresh base pull even
+    /// when the preset's tag already exists.
     pub async fn clone_create_plain(
         &self,
         title: &str,
         message: &str,
         preset: Option<&str>,
         run_startup_script: bool,
+        rebuild: bool,
     ) -> Result<Operation> {
         let mut body = json!({ "plain": { "title": title.trim(), "message": message.trim() } });
         if let Some(p) = preset.map(str::trim).filter(|p| !p.is_empty()) {
@@ -275,10 +280,14 @@ impl Client {
         }
         // Always explicit: the server defaults on, but the wire should say what the
         // operator asked so a default change can never silently flip old callers.
-        body.as_object_mut().unwrap().insert(
-            "runStartupScript".into(),
-            json!(run_startup_script),
-        );
+        body.as_object_mut()
+            .unwrap()
+            .insert("runStartupScript".into(), json!(run_startup_script));
+        if rebuild {
+            body.as_object_mut()
+                .unwrap()
+                .insert("rebuild".into(), json!(true));
+        }
         self.post_op("/api/clone", &body).await
     }
 
@@ -293,10 +302,14 @@ impl Client {
     }
 
     /// Fork with optional ticket/preset/account overrides (`None` = inherit the source).
-    /// Keys are camelCase to match the server's `ForkReq`.
-    pub async fn fork_with(&self, source: &str, opts: &ForkOpts<'_>) -> Result<Operation> {
-        let mut body = json!({ "source": source });
+    /// Keys are camelCase to match the server's `ForkReq`. A `None` source lets the
+    /// server pick the preset's default fork clone, else the oldest forkable clone.
+    pub async fn fork_with(&self, source: Option<&str>, opts: &ForkOpts<'_>) -> Result<Operation> {
+        let mut body = json!({});
         let obj = body.as_object_mut().unwrap();
+        if let Some(source) = source.map(str::trim).filter(|v| !v.is_empty()) {
+            obj.insert("source".into(), json!(source));
+        }
         if opts.headless {
             obj.insert("headless".into(), json!(true));
         }
@@ -315,11 +328,24 @@ impl Client {
         if let Some(linear) = &opts.linear {
             obj.insert("linear".into(), linear.clone());
         }
+        if opts.rebuild {
+            obj.insert("rebuild".into(), json!(true));
+        }
         // Always explicit, same reasoning as create (see above).
         obj.insert("runStartupScript".into(), json!(opts.run_startup_script));
         self.post_op("/api/fork", &body).await
     }
 
+    /// Rebuild a preset image from its Dockerfile text, always pulling fresh base and
+    /// rebuilding even when its tag exists. Returns the driving Operation; progress
+    /// streams over /events.
+    pub async fn prebuild(&self, dockerfile: &str) -> Result<Operation> {
+        self.post_op(
+            "/api/images/prebuild",
+            &json!({ "dockerfile": dockerfile }),
+        )
+        .await
+    }
     /// Rebase a gen-2 clone onto a preset's image (dataset + id kept). `rebuild`
     /// forces a fresh image build even when the tag exists.
     pub async fn rebase(&self, id: &str, preset: &str, rebuild: bool) -> Result<Operation> {

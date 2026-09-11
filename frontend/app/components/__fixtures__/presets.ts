@@ -9,13 +9,15 @@
 
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
-export function makePreset(overrides: Partial<PresetRedacted> = {}): PresetRedacted {
+export function makePreset(
+  overrides: Partial<PresetRedacted> = {},
+): PresetRedacted {
   return {
     name: "webapp",
     labels: ["WE", "frontend"],
     linearKey: "lin_api_fixture",
-    claudeAccount: "",
-    codexAccount: "",
+    group: "",
+    defaultForkClone: "",
     agentPlaybook: "",
     globalPrompt: "",
     startupScript: "",
@@ -29,23 +31,18 @@ export function makePreset(overrides: Partial<PresetRedacted> = {}): PresetRedac
  *  The team keys match the ticket fixtures, WE and DEV, so a ticket in the column and a
  *  ticket the dialog opens land in the same teams. Between them: two team keys that map to
  *  different presets (so the team dropdown has a real choice), one preset that defaults its
- *  clones to a Claude pool and one that defaults to nothing (so both of the CLAUDE picker's
+ *  clones to a pool and one that defaults to nothing (so both of the account pickers'
  *  blank labels are reachable), and `platform`, the one with no Linear key, so the
- *  key-missing warning is reachable by picking OPS.
- *
- *  No preset here names a Codex default, so the Codex picker's blank option reads
- *  "Preset default / auto" against every one of them. That is a real deployment: a Codex
- *  default is optional and most presets do without. A story that needs the other Codex label
- *  builds its own preset with `makePreset` rather than adding a default here, because these
- *  three also drive the ticket dialog's team dropdown. */
+ *  key-missing warning is reachable by picking OPS. */
 export function makeClonePresets(): PresetRedacted[] {
   return [
     makePreset({
       name: "webapp",
       labels: ["WE", "frontend"],
       linearKey: "lin_api_fixture",
-      // A preset that defaults its clones to a pool; Codex left with no default.
-      claudeAccount: "group:pooled",
+      // A preset that defaults its clones to a pool, forked from pega-we-142.
+      group: "pooled",
+      defaultForkClone: "pega-we-142",
     }),
     makePreset({
       name: "devtools",

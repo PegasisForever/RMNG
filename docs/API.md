@@ -594,7 +594,12 @@ Body:
 ```jsonc
 {
   "plain":  { "title": "quick task", "message": "do X" },
-  "preset": "<name>"  // REQUIRED while any presets exist.
+  "preset": "<name>",  // REQUIRED while any presets exist.
+  "headless": false,    // opt in: no desktop, viewer shows tmux instead.
+  "group": "<pool>",   // optional: name binds, null/blank unbinds to fleet-wide
+                         // auto; omitted takes the preset default.
+  "claudeAccount": "<email|auto>",  // optional per-side overrides; omitted
+  "codexAccount": "<email|auto>"    // sides follow the binding.
 }
 ```
 
@@ -719,9 +724,10 @@ Fork a live gen-2 clone: snapshot its home dataset, copy it, and create from the
 recorded base tag. The source keeps running. Runs async — returns `{ "ok": true, "op":
 Operation }`; progress over `/events`.
 
-Body (`source` required, everything else an override — each omitted field inherits the
-source value, except `linear`, which when present replaces the source ticket context
-wholesale):
+Body (`source` optional — omitted means the preset's default fork clone where it still
+exists and is forkable, else the oldest forkable clone; everything else an override —
+ each omitted field inherits the source value, except `linear`, which when present replaces
+ the source ticket context wholesale):
 
 ```jsonc
 {
