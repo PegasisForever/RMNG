@@ -54,7 +54,12 @@ export const Automatic: Story = { args: { ...pools() } };
 /** A resolved preset fills the boxes directly: its pool in the group box, Auto on both
  *  sides. No "preset default" pseudo-option — these are the real values the request sends. */
 export const FilledFromPreset: Story = {
-  args: { ...pools(), group: "team", claudeAccount: "auto", codexAccount: "auto" },
+  args: {
+    ...pools(),
+    group: "team",
+    claudeAccount: "auto",
+    codexAccount: "auto",
+  },
 };
 
 /** Overridden by hand: this clone draws from one pool and pins its Claude side to one

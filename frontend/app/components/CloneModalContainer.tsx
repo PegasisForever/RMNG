@@ -211,15 +211,21 @@ export function CloneModalContainer({
     const next = resolveForkSource(presetDefault, ids);
     if ((next ?? null) !== draft.source) update("source", next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [configLoaded, preset, presetDefault, presets.length, sources, draft.mode]);
+  }, [
+    configLoaded,
+    preset,
+    presetDefault,
+    presets.length,
+    sources,
+    draft.mode,
+  ]);
   // Account picks follow the resolved preset until touched by hand (see above): the
   // preset's pool fills the group box directly and both sides read Auto.
   useEffect(() => {
     if (!configLoaded || !preset) return;
     if (!groupTouched) {
       const g = preset.group.trim();
-      const next =
-        g === "" || g.toLowerCase() === "none" ? "none" : g;
+      const next = g === "" || g.toLowerCase() === "none" ? "none" : g;
       if (draft.group !== next) update("group", next);
     }
     if (!claudeTouched && draft.claudeAccount !== "auto")

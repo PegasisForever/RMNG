@@ -229,6 +229,18 @@ function PresetCard({
         </div>
       </div>
       <div className="mt-2">
+        <Field label="Startup script for this preset (runs as the clone user as the last create/fork step, when the request opts in)">
+          <textarea
+            value={p.startupScript}
+            onChange={(e) => onChange({ startupScript: e.target.value })}
+            spellCheck={false}
+            rows={4}
+            placeholder="e.g. pip install -r requirements.txt (optional — empty runs nothing)"
+            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+          />
+        </Field>
+      </div>
+      <div className="mt-2">
         <Field label="Extra global prompt for this preset (appended to the global agent prompt, for every agent)">
           <textarea
             value={p.globalPrompt}
@@ -236,18 +248,6 @@ function PresetCard({
             spellCheck={false}
             rows={4}
             placeholder="(optional)"
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
-          />
-        </Field>
-      </div>
-      <div className="mt-2">
-        <Field label="Startup script for this preset (runs as the clone user as the last create/fork step, when the request opts in)">
-          <textarea
-            value={p.startupScript}
-            onChange={(e) => onChange({ startupScript: e.target.value })}
-            spellCheck={false}
-            rows={4}
-            placeholder="e.g. ~/bin/setup-env.sh (optional — empty runs nothing)"
             className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
           />
         </Field>
