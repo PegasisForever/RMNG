@@ -12,10 +12,7 @@
 // the presets, the team keys, the preset a ticket prefix resolved to, whether the request
 // would be rejected for a missing Linear key, and whether the button may fire at all.
 import { OperationProgress } from "~/components/OperationProgress";
-import {
-  CloneAccountFields,
-  presetBlankLabel,
-} from "~/components/CloneAccountFields";
+import { CloneAccountFields } from "~/components/CloneAccountFields";
 import {
   CloneExistingTicketFields,
   type ParsedTicket,
@@ -98,18 +95,6 @@ export function CloneModalView({
   onSubmit,
   onClose,
 }: CloneModalViewProps) {
-  // The fork source's pool, for the group picker's blank label. A legacy `group:<name>`
-  // side selection reads as that group (the server migrates it on load; the picker only
-  // ever writes the shared binding).
-  const sourceClone = clones.find((c) => c.id === draft.source);
-  const sourceGroup =
-    sourceClone?.group ??
-    sourceClone?.claudeSelection?.match(/^group:(.+)$/)?.[1] ??
-    sourceClone?.codexSelection?.match(/^group:(.+)$/)?.[1] ??
-    sourceClone?.claudeGroup ??
-    sourceClone?.codexGroup ??
-    null;
-
   // Escape closes regardless of focus — a document-level listener since the backdrop click no
   // longer does (see below). Guarded the same as the backdrop was: no closing out from under a
   // running fork operation. While `busy` the dialog still holds its slot in the Escape stack,
@@ -219,16 +204,14 @@ export function CloneModalView({
           )}
 
           {/* The template tab takes the same account overrides as the fork tabs, minus a
-              source to inherit from: blank means the picked preset's default. Headless
-              lives beside the startup toggle, exactly as on the fork tabs. */}
+              source to inherit from: the container fills them from the picked preset
+              until touched. Headless lives beside the startup toggle, exactly as on
+              the fork tabs. */}
           {draft.mode === "template" ? (
             <>
               <CloneAccountFields
                 accounts={accounts}
                 groups={groups}
-                sourceGroup={null}
-                groupBlankLabel={presetBlankLabel(preset?.group)}
-                preset={preset}
                 group={draft.group}
                 claudeAccount={draft.claudeAccount}
                 codexAccount={draft.codexAccount}
@@ -255,9 +238,9 @@ export function CloneModalView({
             </>
           ) : null}
 
-          {/* Fork source sits with the account picks it drives: the group picker's blank
-              label names this clone's pool, and both account pickers fall back to the
-              resolved preset. Only the fork tabs take a source. */}
+          {/* Fork source: blank until a preset resolves, then the preset's default fork
+              clone (else the oldest forkable one) fills in directly. Only the fork
+              tabs take a source. */}
           {draft.mode === "template" ? null : (
             <div className="mt-3 space-y-2">
               <label className={`${cloneLabel} font-medium`}>
@@ -291,8 +274,6 @@ export function CloneModalView({
             <CloneAccountFields
               accounts={accounts}
               groups={groups}
-              sourceGroup={sourceGroup}
-              preset={preset}
               group={draft.group}
               claudeAccount={draft.claudeAccount}
               codexAccount={draft.codexAccount}

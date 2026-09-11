@@ -1,30 +1,18 @@
 // The clone dialog's group picker plus the two per-side account pickers.
 //
 // The group is the pool the clone draws BOTH providers' accounts from; the two account
-// pickers are OVERRIDES. Blank means "follow the source", and the blank option says what
-// that is, so the operator can see what they are overriding before they override it.
-// Picking a pool binds the clone once (both sides draw from it); picking anything else on
-// a side pins that side regardless of pool.
+// pickers are OVERRIDES. The container fills all three from the resolved preset (the
+// preset's pool, Auto on both sides) until the operator touches one by hand — there is
+// no "preset default" pseudo-option. Blank ("Automatic") is only the state before a
+// preset resolves, or when none is configured: the server then decides.
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { cloneField, cloneLabel } from "~/components/cloneFieldStyles";
 import type { ClaudeUsage } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
-import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
-
-/** "Preset default (group:pooled)" when the preset names a pool, "Preset default / auto"
- *  when it names any group. */
-export function presetBlankLabel(group: string | undefined): string {
-        return group && group !== "none"
-                ? `Preset default (group:${group})`
-                : "Preset default / auto";
-}
 
 export function CloneAccountFields({
         accounts,
         groups,
-        sourceGroup,
-        groupBlankLabel,
-        preset,
         group,
         claudeAccount,
         codexAccount,
@@ -37,15 +25,6 @@ export function CloneAccountFields({
         accounts: ClaudeUsage[];
         /** The single configured pool list (`config.groups`). */
         groups: CloneGroup[];
-        /** The source clone's pool, for the blank label. Null when the source binds none.
-         *  Ignored when `groupBlankLabel` is given (the template tab has no source). */
-        sourceGroup: string | null;
-        /** Blunt override for the group picker's blank option, for tabs with no source
-         *  clone to inherit from. Omitted = the source-based label above. */
-        groupBlankLabel?: string;
-        /** The preset that will drive the clone, for the two blank labels. Undefined before one
-         *  resolves, which is what leaves them reading "Preset default / auto". */
-        preset: PresetRedacted | undefined;
         group: string;
         claudeAccount: string;
         codexAccount: string;
@@ -64,12 +43,7 @@ export function CloneAccountFields({
                                         }
                                         className={cloneField}
                                 >
-                                        <option value="">
-                                                {groupBlankLabel ??
-                                                        (sourceGroup
-                                                                ? `Source default (group:${sourceGroup})`
-                                                                : "Source default / auto")}
-                                        </option>
+                                        <option value="">Automatic</option>
                                         <option value="none">
                                                 Any group (all pools)
                                         </option>
@@ -95,9 +69,7 @@ export function CloneAccountFields({
                                                                 "codex",
                                                 )}
                                                 value={claudeAccount}
-                                                blankLabel={presetBlankLabel(
-                                                        preset?.group,
-                                                )}
+                                                blankLabel="Automatic"
                                                 onChange={onClaudeAccountChange}
                                                 className={cloneField}
                                         />
@@ -112,9 +84,7 @@ export function CloneAccountFields({
                                                                 "codex",
                                                 )}
                                                 value={codexAccount}
-                                                blankLabel={presetBlankLabel(
-                                                        preset?.group,
-                                                )}
+                                                blankLabel="Automatic"
                                                 onChange={onCodexAccountChange}
                                                 className={cloneField}
                                         />

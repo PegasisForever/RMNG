@@ -98,16 +98,24 @@ export function CloneModalContainer({
   // A source arriving via `initialSource` (the clone's own menu) counts as the
   // operator's pick: resolving a preset must not move it.
   const [sourceTouched, setSourceTouched] = useState(initialSource != null);
+  // Same stickiness for the account picks: the effects below fill them from the
+  // resolved preset, but a hand pick stays whatever preset resolves later.
+  const [groupTouched, setGroupTouched] = useState(false);
+  const [claudeTouched, setClaudeTouched] = useState(false);
+  const [codexTouched, setCodexTouched] = useState(false);
   const update = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>
       setDraft((d) => ({ ...d, [key]: value })),
     [],
   );
-  // The View's writer: picking a source by hand pins it, so a later preset resolving
-  // no longer moves it. Every other field writes straight through.
+  // The View's writer: picking a source or an account pick by hand pins it, so a
+  // later preset resolving no longer moves it. Every other field writes straight through.
   const onDraftChange = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) => {
       if (key === "source") setSourceTouched(true);
+      if (key === "group") setGroupTouched(true);
+      if (key === "claudeAccount") setClaudeTouched(true);
+      if (key === "codexAccount") setCodexTouched(true);
       setDraft((d) => ({ ...d, [key]: value }));
     },
     [],
@@ -183,20 +191,48 @@ export function CloneModalContainer({
   });
   // Fork source follows the resolved preset until the operator picks one by hand: the
   // preset's default fork clone where it is still forkable, else the oldest forkable
-  // clone. A hand pick (or `initialSource`) sticks across preset changes; a pick that
-  // stops qualifying (clone deleted or archived) falls back to auto.
+  // clone. Blank until a preset resolves (nothing to follow yet) — except with no
+  // presets configured, where the oldest forkable clone is the only answer. A hand pick
+  // (or `initialSource`) sticks across preset changes; a pick that stops qualifying
+  // (clone deleted or archived) falls back to auto.
   const presetDefault = preset?.defaultForkClone;
   useEffect(() => {
-    if (sources.length === 0) return;
+    if (!configLoaded || sources.length === 0 || draft.mode === "template")
+      return;
     const ids = sources.map((c) => c.id);
     if (sourceTouched) {
       if (draft.source && ids.includes(draft.source)) return;
       setSourceTouched(false);
     }
+    if (!preset && presets.length > 0) {
+      if (draft.source !== null) update("source", null);
+      return;
+    }
     const next = resolveForkSource(presetDefault, ids);
-    if (next && draft.source !== next) update("source", next);
+    if ((next ?? null) !== draft.source) update("source", next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presetDefault, sources]);
+  }, [configLoaded, preset, presetDefault, presets.length, sources, draft.mode]);
+  // Account picks follow the resolved preset until touched by hand (see above): the
+  // preset's pool fills the group box directly and both sides read Auto.
+  useEffect(() => {
+    if (!configLoaded || !preset) return;
+    if (!groupTouched) {
+      const g = preset.group.trim();
+      const next =
+        g === "" || g.toLowerCase() === "none" ? "none" : g;
+      if (draft.group !== next) update("group", next);
+    }
+    if (!claudeTouched && draft.claudeAccount !== "auto")
+      update("claudeAccount", "auto");
+    if (!codexTouched && draft.codexAccount !== "auto")
+      update("codexAccount", "auto");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configLoaded, preset, groupTouched, claudeTouched, codexTouched]);
+  // Account picks follow the resolved preset until touched by hand: the preset's pool
+  // fills the group box directly and both sides read Auto — no "preset default"
+  // pseudo-option. Blank until a preset resolves (or none is configured, where blank
+  // keeps today's server-side fallback). A fork therefore binds the detected preset's
+  // pool rather than inheriting the source's.
   const keyMissing = linearKeyMissing(
     draft.mode,
     presets,

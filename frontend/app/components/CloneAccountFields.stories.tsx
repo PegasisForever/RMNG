@@ -8,7 +8,6 @@ import {
   makeClaudeAccounts,
   makeGroups,
 } from "./__fixtures__/accounts";
-import { makeClonePresets, makePreset } from "./__fixtures__/presets";
 
 /** The pickers sit in the dialog's body, so the story gives them the same width. */
 function Frame({ children }: { children: ReactNode }) {
@@ -22,7 +21,6 @@ function pools() {
   return {
     accounts: makeClaudeAccounts(accountsNow),
     groups: makeGroups(),
-    sourceGroup: "team",
     group: "",
     onGroupChange: fn(),
   };
@@ -34,7 +32,6 @@ const meta = {
   parameters: { layout: "centered" },
   args: {
     ...pools(),
-    preset: makeClonePresets()[0],
     claudeAccount: "",
     codexAccount: "",
     onClaudeAccountChange: fn(),
@@ -50,47 +47,30 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Both pickers on their blank option, which is the state that matters: blank means "follow
- *  the preset", and the option says which pool that is when the preset names one.
- *  `webapp` names a pool, so both pickers read "Preset default (group:pooled)". */
-export const PresetDefaults: Story = { args: { ...pools() } };
+/** No preset has resolved yet, which is every moment before a ticket parses (or a preset
+ *  is picked). All three boxes read Automatic: the server decides. */
+export const Automatic: Story = { args: { ...pools() } };
 
-/** A preset that names a pool, so both blank options read "Preset default (group:team)".
- *  Built here rather than added to the shared preset fixture,
- *  because those three also drive the ticket dialog's team dropdown. */
-export const CodexPresetDefault: Story = {
-  args: {
-    ...pools(),
-    preset: makePreset({ name: "codex-first", labels: ["CX"], group: "team" }),
-  },
-};
-
-/** A preset that names no defaults. Both blank options fall back to the generic label, and
- *  picking nothing leaves the server to resolve the pool from its own chain. */
-export const NoPresetDefaults: Story = {
-  args: { ...pools(), preset: makeClonePresets()[1] },
-};
-
-/** No preset has resolved yet, which is every moment before a ticket parses. Same generic
- *  labels, for a different reason. */
-export const NoPreset: Story = {
-  args: { ...pools(), preset: undefined },
+/** A resolved preset fills the boxes directly: its pool in the group box, Auto on both
+ *  sides. No "preset default" pseudo-option — these are the real values the request sends. */
+export const FilledFromPreset: Story = {
+  args: { ...pools(), group: "team", claudeAccount: "auto", codexAccount: "auto" },
 };
 
 /** Overridden by hand: this clone draws from one pool and pins its Claude side to one
- *  account, and it stays there whatever preset it ends up on. */
+ *  account, and it stays there whatever preset resolves later. */
 export const Overridden: Story = {
   args: { ...pools(), group: "team", claudeAccount: "sam@example.com" },
 };
 
-/** Nothing imported and no pools configured. Both pickers fall back to the two options that
- *  never depend on config: rotate over everything, or install no token at all. */
+/** Nothing imported and no pools configured. The group box still offers the any-group
+ *  escape hatch, and the sides rotate over everything. */
 export const NothingConfigured: Story = {
   args: {
     accounts: [],
     groups: [],
-    sourceGroup: null,
     group: "",
-    preset: undefined,
+    claudeAccount: "",
+    codexAccount: "",
   },
 };
