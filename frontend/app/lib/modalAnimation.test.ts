@@ -42,3 +42,12 @@ test("the exit delay covers the exit animation", () => {
   expect(animationMs("rmng-modal-out")).toBeLessThan(MODAL_EXIT_MS);
   expect(animationMs("rmng-backdrop-out")).toBeLessThan(MODAL_EXIT_MS);
 });
+
+test("exit holds its end state until unmount (no full-visibility flash)", () => {
+  // The unmount timer fires after the animation ends; without a forwards fill both
+  // elements snap back to natural full visibility for those frames — one flash, then
+  // gone. This fails if the fill is dropped from either exit rule.
+  for (const cls of ["rmng-modal-out", "rmng-backdrop-out"]) {
+    expect(ruleBody(cls)).toMatch(/animation:[^;]*\b(forwards|both)\b/);
+  }
+});

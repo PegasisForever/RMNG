@@ -169,11 +169,14 @@ body {
   }
 }
 .rmng-backdrop-out {
-  animation: rmng-backdrop-out 200ms ease-in;
+  /* `forwards` holds the faded end state until the unmount timer fires: without it
+     the backdrop snaps back to full opacity for the frames between animation end
+     and unmount — one full-visibility flash. Same for the panel below. */
+  animation: rmng-backdrop-out 200ms ease-in forwards;
 }
 .rmng-modal-out {
   transform-origin: center;
-  animation: rmng-modal-out 200ms ease-in;
+  animation: rmng-modal-out 200ms ease-in forwards;
 }
 @media (prefers-reduced-motion: reduce) {
   .rmng-backdrop-in,
