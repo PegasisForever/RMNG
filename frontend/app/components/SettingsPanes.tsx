@@ -8,6 +8,7 @@
 // and one assembly branch — not all five panes.
 
 import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
 import { Field, Section, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
@@ -235,18 +236,14 @@ export function LlmPane({
         </label>
       </Section>
 
-      {/* How RMNG tells a clone that is thinking from one that is waiting on you. The
-          undecidable cases are settled by a GPT call on an imported Codex account, so
-          this lives with the accounts, not with the Docker settings it used to sit under. */}
       <SettingsStuckSection
-        model={draft.judge.codexModel}
-        email={draft.judge.codexEmail}
-        accounts={rows.codex.map((a) => a.email)}
-        onModelChange={(v) =>
-          onDraftChange("judge", { ...draft.judge, codexModel: v })
+        provider={draft.judge.provider}
+        geminiKey={draft.judge.geminiKey}
+        onProviderChange={(v) =>
+          onDraftChange("judge", { ...draft.judge, provider: v })
         }
-        onEmailChange={(v) =>
-          onDraftChange("judge", { ...draft.judge, codexEmail: v })
+        onGeminiKeyChange={(v) =>
+          onDraftChange("judge", { ...draft.judge, geminiKey: v })
         }
         onTest={onTestJudge}
         testMessage={judgeTestMessage}
@@ -296,16 +293,16 @@ export function ServerPane({
         hint="Chroma subsampling for the port-1 viewer stream, server-wide. 4:4:4 recovers full chroma via AVC444 packing (a double-height stream reassembled on the GPU); keep monitors ≤1440p in that mode."
       >
         <Field label="Chroma mode">
-          <select
+          <DropdownSelect
+            rows={[
+              { value: "yuv420", label: "4:2:0 (default)" },
+              { value: "yuv444", label: "4:4:4 (AVC444, ≤1440p/monitor)" },
+            ]}
             value={draft.chroma}
-            onChange={(e) =>
-              onDraftChange("chroma", e.target.value as ChromaMode)
-            }
+            onChange={(value) => onDraftChange("chroma", value as ChromaMode)}
+            label="Chroma mode"
             className={settingsInput}
-          >
-            <option value="yuv420">4:2:0 (default)</option>
-            <option value="yuv444">4:4:4 (AVC444, ≤1440p/monitor)</option>
-          </select>
+          />
         </Field>
       </Section>
 

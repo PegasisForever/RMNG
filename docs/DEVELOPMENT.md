@@ -9,7 +9,7 @@ run → wizard → upgrade flow, see [DEPLOY.md](DEPLOY.md).
 The control-server exposes video, web/API, forward, SSH, and SMB surfaces; the desktop automation MCP lives inside each clone.
 
 | Port | Default | Transport | Purpose |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **1 — video** | `9001` | framed H.264 over TCP | the selected clone's monitors to the native GTK viewer, with input + clipboard + cursor back |
 | **2 — web API** | `9000` | HTTP + SSE (+ embedded frontend) | the React management UI: clone selection, clone/Linear/Claude/chat orchestration, settings; also the `rmng desktop`/`rmng exec` proxy endpoints |
 | **4 — forward** | `9005` | framed TCP over TCP | the viewer's port-forwarding data plane: one TCP connection per accepted local socket, spliced to the clone |
@@ -30,7 +30,7 @@ running server's payloads; there's no manual redeploy step.
 ## Documentation
 
 | Doc | Covers |
-|---|---|
+| --- | --- |
 | [API.md](API.md) | Every HTTP endpoint on the web port (9000), incl. the SSE streams |
 | [MCP.md](MCP.md) | Clone-local daemon MCP on 9004: JSON-RPC envelope, tools, and curl examples |
 | [CLI.md](CLI.md) | The `rmng` CLI (`/usr/local/bin/rmng` in every clone): every subcommand incl. `desktop`/`exec`, `--json`, exit codes, wait semantics |
@@ -42,7 +42,7 @@ running server's payloads; there's no manual redeploy step.
 ## Workspace map
 
 | Path | Kind | What |
-|---|---|---|
+| --- | --- | --- |
 | [crates/wire](../crates/wire/README.md) | lib | shared types: control state, config, the clone socket + viewer protocols, MCP DTOs; ts-rs export for the frontend |
 | [crates/control-server](../crates/control-server/README.md) | bin | the server: media plane, web API/SSE, passive token accounting, Docker lifecycle, port-forward + SMB planes, and clone payloads |
 | [crates/media](../crates/media/README.md) | lib | dmabuf ingest → VA-API H.264 per monitor + dmabuf→JPEG screenshots + the clone-socket transport |
@@ -53,7 +53,7 @@ running server's payloads; there's no manual redeploy step.
 | [crates/control-client](../crates/control-client/README.md) | lib | typed reqwest+SSE client for the port-2 web API (`/api/state`, `/events`, clone/delete/image/account wrappers); used by the `rmng` CLI and integration tests |
 | [crates/cli](../crates/cli/README.md) | bin | the `rmng` fleet CLI: clones/images/accounts/operations over the port-2 web API; injected into every clone as `/usr/local/bin/rmng` |
 | [frontend](../frontend/README.md) | web app | React Router 7 management UI, ts-rs types from `wire`, served by the control-server |
-| [gnome-patch](../gnome-patch/README.md) | tooling | builds the patched gnome-shell `.deb` (hide screen-share indicator + enable `Eval` for window-mgmt); built + installed by `template/Dockerfile`'s `gnome-build` stage into the published clone template — not a control-server payload |
+| [template/gnome-patch](../template/gnome-patch/README.md) | tooling | builds the patched gnome-shell `.deb` (hide screen-share indicator + enable `Eval` for window-mgmt); built + installed by `template/Dockerfile`'s `gnome-build` stage into the published clone template — not a control-server payload |
 
 The per-clone **agent-wrapper** (Bun, Claude Agent SDK) is vendored at `agent-wrapper/`; the
 control-server installs its current build into each clone at create time (the template
@@ -61,6 +61,7 @@ doesn't carry it) and proxies chat to it. Its `desktop` MCP points at the clone-
 (`http://127.0.0.1:9004`).
 
 <a id="clean-room"></a>
+
 ## Clean-room
 
 `RMNG` is its own Cargo workspace (own lockfile, edition 2024). It does **not** import the
@@ -70,6 +71,7 @@ one preserved contract is the JSON wire format of `/events` and the web API, so 
 frontend works unchanged.
 
 <a id="prerequisites"></a>
+
 ## Prerequisites
 
 Rust (edition 2024), `bun`, `clang`/`libclang`; `libpipewire-0.3-dev`, `libva-dev` + AMD VA-API
@@ -85,6 +87,7 @@ See the [dev loop](DEPLOY.md#the-dev-loop). **The clone template is built on the
 see [Publishing the template](DEPLOY.md#publishing-the-template).
 
 <a id="macos"></a>
+
 ### macOS (Apple Silicon) — viewer only
 
 macOS runs [`crates/viewer-macos`](../crates/viewer-macos/README.md), and only that. The GTK
@@ -121,6 +124,7 @@ terminal, Settings under ⌘, — is documented in
 [`crates/viewer-macos`](../crates/viewer-macos/README.md).
 
 <a id="windows"></a>
+
 ### Windows — viewer only
 
 As on macOS, only the **viewer** builds and runs; the capture/encode/server side is Linux-only by

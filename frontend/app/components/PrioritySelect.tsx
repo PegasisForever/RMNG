@@ -26,7 +26,12 @@ export interface PrioritySelectProps {
   className?: string;
 }
 
-export function PrioritySelect({ value, onChange, disabled, className }: PrioritySelectProps) {
+export function PrioritySelect({
+  value,
+  onChange,
+  disabled,
+  className,
+}: PrioritySelectProps) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement | null>(null);
 
@@ -57,10 +62,9 @@ export function PrioritySelect({ value, onChange, disabled, className }: Priorit
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={`Priority: ${PRIORITY_LABEL[value]}`}
-        // `h-9` because this stands in a row of native `<select>`s, and a select lays its text
-        // out at the browser's `line-height: normal` (36px here) while a button inherits the
-        // form's own 20px and comes out two pixels taller. Pinned here rather than asked of
-        // each caller: lining up with a select is this control's whole job.
+        // `h-9` because this stands in a row of inputs and custom dropdown triggers, and a
+        // bare button lays its text out at a different height. Pinned here rather than asked
+        // of each caller: lining up with its neighbours is this control's whole job.
         className={`flex h-9 items-center gap-2 text-left disabled:opacity-50 ${className ?? ""}`}
       >
         <PriorityIcon level={value} />
@@ -99,7 +103,9 @@ function PriorityMenu({
   const list = useRef<HTMLUListElement | null>(null);
   // Which row the arrows are on. It starts on the current value, so opening and pressing Enter
   // changes nothing, and moves independently of the selection until one is committed.
-  const [active, setActive] = useState(() => Math.max(0, PRIORITY_LEVELS.indexOf(value)));
+  const [active, setActive] = useState(() =>
+    Math.max(0, PRIORITY_LEVELS.indexOf(value)),
+  );
 
   useModalEscape(onDismiss);
   useEffect(() => list.current?.focus(), []);
@@ -115,7 +121,9 @@ function PriorityMenu({
         if (e.key === "ArrowDown" || e.key === "ArrowUp") {
           e.preventDefault();
           const step = e.key === "ArrowDown" ? 1 : -1;
-          setActive((i) => (i + step + PRIORITY_LEVELS.length) % PRIORITY_LEVELS.length);
+          setActive(
+            (i) => (i + step + PRIORITY_LEVELS.length) % PRIORITY_LEVELS.length,
+          );
         }
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
@@ -149,7 +157,9 @@ function PriorityMenu({
           }`}
         >
           <PriorityIcon level={level} />
-          <span className="min-w-0 flex-1 truncate">{PRIORITY_LABEL[level]}</span>
+          <span className="min-w-0 flex-1 truncate">
+            {PRIORITY_LABEL[level]}
+          </span>
         </li>
       ))}
     </ul>

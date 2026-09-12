@@ -21,7 +21,15 @@ import { CloneModeTabs } from "~/components/CloneModeTabs";
 import { CloneNewTicketFields } from "~/components/CloneNewTicketFields";
 import { CloneOptionsRow } from "~/components/CloneOptionsRow";
 import { ClonePlainFields } from "~/components/ClonePlainFields";
-import { cloneField, cloneLabel } from "~/components/cloneFieldStyles";
+import { DropdownSelect } from "~/components/DropdownSelect";
+import {
+  cloneRow,
+  cloneRowField,
+  cloneRowLabel,
+  cloneRowLabelTop,
+  cloneRowTop,
+  cloneSectionCaption,
+} from "~/components/cloneFieldStyles";
 import type { CloneDraft, TeamKey } from "~/lib/cloneDraft";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
@@ -111,26 +119,19 @@ export function CloneModalView({
     >
       {/* Backdrop is inert — clicking it must not close the dialog (nor could it while
           `busy`); only Cancel/Escape do, both guarded against closing over a running
-          clone operation. This dialog always forks: the button files a fork of the picked
-          source clone. One height for every tab. The pin is on the whole scroll body,
-          not on the tab-specific block: the tabs also differ BELOW that block (No ticket
-          shows no preset line and no instruction overrides), so pinning only the block
-          still left this tab shorter. 49.5rem is the tallest tab (New ticket, ~786px);
-          the shortest (No ticket, ~462px) simply carries the slack as empty space above
-          the button bar, which stays pinned to the bottom. `max-h-[90vh]` is the fallback
-          for a genuinely short viewport, not the normal path. */}
+          clone operation. Two panels like Settings: the mode rail on the left, the form
+          on the right, the button bar pinned to the bottom. */}
       <div
         className={
-          "flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " +
+          "flex h-[42rem] max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800 " +
           (closing ? "rmng-modal-out" : "rmng-modal-in")
         }
       >
-        <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
-          New clone
-        </h3>
-
-        <div className="h-[49.5rem] min-h-0 shrink overflow-y-auto pr-0.5">
-          <div className="mt-3">
+        <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+          <div className="shrink-0 border-b border-slate-100 dark:border-slate-800 sm:w-44 sm:border-b-0 sm:border-r">
+            <h3 className="px-4 pt-4 pb-1 text-base font-semibold text-slate-900 dark:text-slate-100">
+              New clone
+            </h3>
             <CloneModeTabs
               mode={draft.mode}
               disabled={busy}
@@ -138,256 +139,285 @@ export function CloneModalView({
             />
           </div>
 
-          {/* No height pin on the tab block — the whole scroll body above carries it, so each
+          <div className="min-w-0 flex-1 space-y-5 overflow-y-auto p-5">
+            {/* No height pin on the tab block — the whole scroll body above carries it, so each
               tab is free to be its natural size. */}
-          {draft.mode === "existing" ? (
-            <CloneExistingTicketFields
-              ticket={draft.ticket}
-              parsed={parsedTicket}
-              preset={preset}
-              presets={presets}
-              onTicketChange={(ticket) => onDraftChange("ticket", ticket)}
-              onSubmit={onSubmit}
-            />
-          ) : draft.mode === "create" ? (
-            <CloneNewTicketFields
-              teamKeys={teamKeys}
-              team={draft.team}
-              title={draft.title}
-              priority={draft.priority}
-              description={descriptionEditor}
-              onTeamChange={(team) => onDraftChange("team", team)}
-              onTitleChange={(title) => onDraftChange("title", title)}
-              onPriorityChange={(priority) =>
-                onDraftChange("priority", priority)
-              }
-            />
-          ) : draft.mode === "plain" ? (
-            <ClonePlainFields
-              title={draft.title}
-              message={draft.message}
-              presets={presets}
-              preset={draft.plainPreset}
-              onTitleChange={(title) => onDraftChange("title", title)}
-              onMessageChange={(message) => onDraftChange("message", message)}
-              onPresetChange={(name) => onDraftChange("plainPreset", name)}
-              onSubmit={onSubmit}
-            />
-          ) : (
-            <div className="mt-3 space-y-2">
-              <label className={`${cloneLabel} font-medium`}>
-                Clone title
-                <input
-                  value={draft.title}
-                  disabled={busy}
-                  onChange={(e) => onDraftChange("title", e.target.value)}
-                  placeholder="encoder-scratch"
-                  className={cloneField}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") onSubmit();
-                  }}
-                />
-              </label>
-              <label className={`${cloneLabel} font-medium`}>
-                Preset
-                <select
-                  value={draft.templatePreset}
-                  disabled={busy || presets.length === 0}
-                  onChange={(e) =>
-                    onDraftChange("templatePreset", e.target.value)
-                  }
-                  className={cloneField}
-                >
-                  {presets.length === 0 ? (
-                    <option value="" disabled>
-                      No presets configured
-                    </option>
-                  ) : (
-                    presets.map((p) => (
-                      <option key={p.name} value={p.name}>
-                        {p.name}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </label>
-            </div>
-          )}
+            {draft.mode === "existing" ? (
+              <CloneExistingTicketFields
+                ticket={draft.ticket}
+                parsed={parsedTicket}
+                preset={preset}
+                presets={presets}
+                onTicketChange={(ticket) => onDraftChange("ticket", ticket)}
+                onSubmit={onSubmit}
+              />
+            ) : draft.mode === "create" ? (
+              <CloneNewTicketFields
+                teamKeys={teamKeys}
+                team={draft.team}
+                title={draft.title}
+                priority={draft.priority}
+                description={descriptionEditor}
+                onTeamChange={(team) => onDraftChange("team", team)}
+                onTitleChange={(title) => onDraftChange("title", title)}
+                onPriorityChange={(priority) =>
+                  onDraftChange("priority", priority)
+                }
+              />
+            ) : draft.mode === "plain" ? (
+              <ClonePlainFields
+                title={draft.title}
+                message={draft.message}
+                presets={presets}
+                preset={draft.plainPreset}
+                onTitleChange={(title) => onDraftChange("title", title)}
+                onMessageChange={(message) => onDraftChange("message", message)}
+                onPresetChange={(name) => onDraftChange("plainPreset", name)}
+                onSubmit={onSubmit}
+              />
+            ) : (
+              <div className="space-y-3">
+                <label className={cloneRow}>
+                  <span className={cloneRowLabel}>Clone title</span>
+                  <input
+                    value={draft.title}
+                    disabled={busy}
+                    onChange={(e) => onDraftChange("title", e.target.value)}
+                    placeholder="encoder-scratch"
+                    className={cloneRowField}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") onSubmit();
+                    }}
+                  />
+                </label>
+                <label className={cloneRow}>
+                  <span className={cloneRowLabel}>Preset</span>
+                  <DropdownSelect
+                    rows={
+                      presets.length === 0
+                        ? [
+                            {
+                              value: "",
+                              label: "No presets configured",
+                              disabled: true,
+                            },
+                          ]
+                        : presets.map((p) => ({
+                            value: p.name,
+                            label: p.name,
+                          }))
+                    }
+                    value={draft.templatePreset}
+                    onChange={(name) => onDraftChange("templatePreset", name)}
+                    disabled={busy || presets.length === 0}
+                    label="Preset"
+                    className={cloneRowField}
+                  />
+                </label>
+              </div>
+            )}
 
-          {/* The template tab takes the same account overrides as the fork tabs, minus a
+            {/* The template tab takes the same account overrides as the fork tabs, minus a
               source to inherit from: the container fills them from the picked preset
               until touched. Headless lives beside the startup toggle, exactly as on
               the fork tabs. */}
-          {draft.mode === "template" ? (
-            <>
-              <CloneAccountFields
-                accounts={accounts}
-                groups={groups}
-                group={draft.group}
-                claudeAccount={draft.claudeAccount}
-                codexAccount={draft.codexAccount}
-                onGroupChange={(value) => onDraftChange("group", value)}
-                onClaudeAccountChange={(value) =>
-                  onDraftChange("claudeAccount", value)
-                }
-                onCodexAccountChange={(value) =>
-                  onDraftChange("codexAccount", value)
-                }
-              />
-              <CloneOptionsRow
-                headless={draft.headless}
-                onHeadlessChange={(headless) =>
-                  onDraftChange("headless", headless)
-                }
-                runStartupScript={draft.runStartupScript}
-                onRunStartupScriptChange={(run) =>
-                  onDraftChange("runStartupScript", run)
-                }
-                rebuild={draft.rebuild}
-                onRebuildChange={(rebuild) => onDraftChange("rebuild", rebuild)}
-              />
-            </>
-          ) : null}
+            {draft.mode === "template" ? (
+              <>
+                <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+                  <h4 className={`${cloneSectionCaption} mb-3`}>Accounts</h4>
+                  <CloneAccountFields
+                    accounts={accounts}
+                    groups={groups}
+                    group={draft.group}
+                    claudeAccount={draft.claudeAccount}
+                    codexAccount={draft.codexAccount}
+                    onGroupChange={(value) => onDraftChange("group", value)}
+                    onClaudeAccountChange={(value) =>
+                      onDraftChange("claudeAccount", value)
+                    }
+                    onCodexAccountChange={(value) =>
+                      onDraftChange("codexAccount", value)
+                    }
+                  />
+                </section>
+                <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+                  <h4 className={`${cloneSectionCaption} mb-3`}>Options</h4>
+                  <CloneOptionsRow
+                    headless={draft.headless}
+                    onHeadlessChange={(headless) =>
+                      onDraftChange("headless", headless)
+                    }
+                    runStartupScript={draft.runStartupScript}
+                    onRunStartupScriptChange={(run) =>
+                      onDraftChange("runStartupScript", run)
+                    }
+                    rebuild={draft.rebuild}
+                    onRebuildChange={(rebuild) =>
+                      onDraftChange("rebuild", rebuild)
+                    }
+                  />
+                </section>
+              </>
+            ) : null}
 
-          {/* Fork source: blank until a preset resolves, then the preset's default fork
+            {/* Fork source: blank until a preset resolves, then the preset's default fork
               clone (else the oldest forkable one) fills in directly. Only the fork
               tabs take a source. */}
-          {draft.mode === "template" ? null : (
-            <div className="mt-3 space-y-2">
-              <label className={`${cloneLabel} font-medium`}>
-                Source clone to fork
-                <select
-                  value={draft.source ?? ""}
-                  disabled={busy}
-                  onChange={(e) =>
-                    onDraftChange("source", e.target.value || null)
+            {draft.mode === "template" ? null : (
+              <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+                <h4 className={`${cloneSectionCaption} mb-3`}>Source</h4>
+                <label className={cloneRow}>
+                  <span className={cloneRowLabel}>Source clone to fork</span>
+                  <DropdownSelect
+                    rows={
+                      clones.length === 0
+                        ? [
+                            {
+                              value: "",
+                              label: "No forkable clones",
+                              disabled: true,
+                            },
+                          ]
+                        : clones.map((c) => ({
+                            value: c.id,
+                            label: c.id,
+                          }))
+                    }
+                    value={draft.source ?? ""}
+                    onChange={(id) => onDraftChange("source", id || null)}
+                    disabled={busy}
+                    label="Source clone to fork"
+                    className={cloneRowField}
+                  />
+                </label>
+              </section>
+            )}
+
+            {draft.mode === "template" ? null : (
+              <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+                <h4 className={`${cloneSectionCaption} mb-3`}>Accounts</h4>
+                <CloneAccountFields
+                  accounts={accounts}
+                  groups={groups}
+                  group={draft.group}
+                  claudeAccount={draft.claudeAccount}
+                  codexAccount={draft.codexAccount}
+                  onGroupChange={(value) => onDraftChange("group", value)}
+                  onClaudeAccountChange={(value) =>
+                    onDraftChange("claudeAccount", value)
                   }
-                  className={cloneField}
-                >
-                  <option value="" disabled>
-                    {clones.length === 0
-                      ? "No forkable clones"
-                      : "Pick a clone"}
-                  </option>
-                  {clones.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          )}
+                  onCodexAccountChange={(value) =>
+                    onDraftChange("codexAccount", value)
+                  }
+                />
+              </section>
+            )}
 
-          {draft.mode === "template" ? null : (
-            <CloneAccountFields
-              accounts={accounts}
-              groups={groups}
-              group={draft.group}
-              claudeAccount={draft.claudeAccount}
-              codexAccount={draft.codexAccount}
-              onGroupChange={(value) => onDraftChange("group", value)}
-              onClaudeAccountChange={(value) =>
-                onDraftChange("claudeAccount", value)
-              }
-              onCodexAccountChange={(value) =>
-                onDraftChange("codexAccount", value)
-              }
-            />
-          )}
+            {linearKeyMissing ? (
+              <p className="mt-3 text-[11px] text-red-600 dark:text-red-400">
+                {presets.length === 0
+                  ? draft.mode === "create"
+                    ? "Creating a ticket needs a preset with a Linear API key — add one in Settings."
+                    : "Looking up a ticket needs a preset with a Linear API key — add one in Settings."
+                  : draft.mode === "create"
+                    ? `Preset “${preset?.name ?? "—"}” has no Linear API key — creating a ticket needs one. Add it in Settings, or pick a team whose preset has one.`
+                    : "No preset has a Linear API key — looking up a ticket needs one. Add it in Settings."}
+              </p>
+            ) : null}
 
-          {linearKeyMissing ? (
-            <p className="mt-3 text-[11px] text-red-600 dark:text-red-400">
-              {presets.length === 0
-                ? draft.mode === "create"
-                  ? "Creating a ticket needs a preset with a Linear API key — add one in Settings."
-                  : "Looking up a ticket needs a preset with a Linear API key — add one in Settings."
-                : draft.mode === "create"
-                  ? `Preset “${preset?.name ?? "—"}” has no Linear API key — creating a ticket needs one. Add it in Settings, or pick a team whose preset has one.`
-                  : "No preset has a Linear API key — looking up a ticket needs one. Add it in Settings."}
-            </p>
-          ) : null}
-
-          {/* Always visible (no expander), stacked — their placeholders are long enough that
+            {/* Always visible (no expander), stacked — their placeholders are long enough that
               a half-width column truncates them to uselessness. Five rows each: they take
               prose, and the dialog has the room now that only the Existing tab carries the
               preset line. Still resizable. */}
-          {draft.mode === "existing" || draft.mode === "create" ? (
-            <div className="mt-3 space-y-2 text-xs">
-              <label className={`${cloneLabel} font-medium`}>
-                Clone agent instructions
-                <textarea
-                  value={draft.agentInstructions}
-                  onChange={(e) =>
-                    onDraftChange("agentInstructions", e.target.value)
-                  }
-                  rows={5}
-                  placeholder={
-                    'Appended to the default ("Follow your "Implementing a ticket" procedure"); takes precedence where they conflict.'
-                  }
-                  className={`resize-y ${cloneField}`}
-                />
-              </label>
-              <label className={`${cloneLabel} font-medium`}>
-                Claude Code instructions
-                <textarea
-                  value={draft.claudeInstructions}
-                  onChange={(e) =>
-                    onDraftChange("claudeInstructions", e.target.value)
-                  }
-                  rows={5}
-                  placeholder="Appended to the default (pull latest → switch to the feature branch → setup docs → implement); takes precedence where they conflict."
-                  className={`resize-y ${cloneField}`}
-                />
-              </label>
-            </div>
-          ) : null}
+            {draft.mode === "existing" || draft.mode === "create" ? (
+              <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+                <h4 className={`${cloneSectionCaption} mb-3`}>Instructions</h4>
+                <div className="space-y-3 text-xs">
+                  <label className={cloneRowTop}>
+                    <span className={cloneRowLabelTop}>
+                      Clone agent instructions
+                    </span>
+                    <textarea
+                      value={draft.agentInstructions}
+                      onChange={(e) =>
+                        onDraftChange("agentInstructions", e.target.value)
+                      }
+                      rows={5}
+                      placeholder={
+                        'Appended to the default ("Follow your "Implementing a ticket" procedure"); takes precedence where they conflict.'
+                      }
+                      className={`resize-y ${cloneRowField}`}
+                    />
+                  </label>
+                  <label className={cloneRowTop}>
+                    <span className={cloneRowLabelTop}>
+                      Claude Code instructions
+                    </span>
+                    <textarea
+                      value={draft.claudeInstructions}
+                      onChange={(e) =>
+                        onDraftChange("claudeInstructions", e.target.value)
+                      }
+                      rows={5}
+                      placeholder="Appended to the default (pull latest → switch to the feature branch → setup docs → implement); takes precedence where they conflict."
+                      className={`resize-y ${cloneRowField}`}
+                    />
+                  </label>
+                </div>
+              </section>
+            ) : null}
 
-          {draft.mode === "template" ? null : (
-            <CloneOptionsRow
-              headless={draft.headless}
-              onHeadlessChange={(headless) =>
-                onDraftChange("headless", headless)
-              }
-              runStartupScript={draft.runStartupScript}
-              onRunStartupScriptChange={(run) =>
-                onDraftChange("runStartupScript", run)
-              }
-              rebuild={draft.rebuild}
-              onRebuildChange={(rebuild) => onDraftChange("rebuild", rebuild)}
-            />
-          )}
+            {draft.mode === "template" ? null : (
+              <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+                <h4 className={`${cloneSectionCaption} mb-3`}>Options</h4>
+                <CloneOptionsRow
+                  headless={draft.headless}
+                  onHeadlessChange={(headless) =>
+                    onDraftChange("headless", headless)
+                  }
+                  runStartupScript={draft.runStartupScript}
+                  onRunStartupScriptChange={(run) =>
+                    onDraftChange("runStartupScript", run)
+                  }
+                  rebuild={draft.rebuild}
+                  onRebuildChange={(rebuild) =>
+                    onDraftChange("rebuild", rebuild)
+                  }
+                />
+              </section>
+            )}
+          </div>
         </div>
 
-        {error ? (
-          <p className="mt-3 shrink-0 text-[11px] text-red-600 dark:text-red-400">
-            {error}
-          </p>
-        ) : null}
-
-        {operation ? (
-          <div className="mt-3 shrink-0">
-            <OperationProgress op={operation} />
+        <div className="shrink-0 border-t border-slate-100 px-5 py-3 dark:border-slate-800">
+          {error || operation ? (
+            <div className="mb-3 space-y-2">
+              {error ? (
+                <p className="text-[11px] text-red-600 dark:text-red-400">
+                  {error}
+                </p>
+              ) : null}
+              {operation ? <OperationProgress op={operation} /> : null}
+            </div>
+          ) : null}
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy}
+              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onSubmit}
+              disabled={!valid || busy}
+              className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+            >
+              {busy ? "Creating…" : "Create"}
+            </button>
           </div>
-        ) : null}
-
-        <div className="mt-4 flex shrink-0 justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onSubmit}
-            disabled={!valid || busy}
-            className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
-          >
-            {busy ? "Creating…" : "Create"}
-          </button>
         </div>
       </div>
     </div>

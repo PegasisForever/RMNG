@@ -6,6 +6,7 @@
 // It takes the wizard's whole model plus one updater, the same pair `SetupWizardView` holds
 // and `SetupReviewStep` reads, rather than a value/setter couple per field.
 import { MonitorsEditor } from "~/components/MonitorsEditor";
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { Field, settingsInput } from "~/components/SettingsFields";
 import type { SetupDraft } from "~/lib/setupDraft";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
@@ -19,7 +20,10 @@ export function SetupServerStep({
    *  the config, not by the operator. */
   draft: SetupDraft;
   /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
-  onDraftChange: <K extends keyof SetupDraft>(key: K, value: SetupDraft[K]) => void;
+  onDraftChange: <K extends keyof SetupDraft>(
+    key: K,
+    value: SetupDraft[K],
+  ) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -47,7 +51,9 @@ export function SetupServerStep({
             type="number"
             min={1}
             value={draft.cloneCpus}
-            onChange={(e) => onDraftChange("cloneCpus", Number(e.target.value) || 0)}
+            onChange={(e) =>
+              onDraftChange("cloneCpus", Number(e.target.value) || 0)
+            }
             className={settingsInput}
           />
         </Field>
@@ -56,14 +62,18 @@ export function SetupServerStep({
             type="number"
             min={1024}
             value={draft.cloneMemoryMb}
-            onChange={(e) => onDraftChange("cloneMemoryMb", Number(e.target.value) || 0)}
+            onChange={(e) =>
+              onDraftChange("cloneMemoryMb", Number(e.target.value) || 0)
+            }
             className={settingsInput}
           />
         </Field>
       </div>
 
       <div>
-        <span className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">Monitors</span>
+        <span className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
+          Monitors
+        </span>
         <MonitorsEditor
           monitors={draft.monitors}
           onChange={(monitors) => onDraftChange("monitors", monitors)}
@@ -71,16 +81,17 @@ export function SetupServerStep({
       </div>
 
       <Field label="Chroma mode">
-        <select
+        <DropdownSelect
+          rows={[
+            { value: "yuv420", label: "4:2:0 (default)" },
+            { value: "yuv444", label: "4:4:4 (AVC444, ≤1440p/monitor)" },
+          ]}
           value={draft.chroma}
-          onChange={(e) => onDraftChange("chroma", e.target.value as ChromaMode)}
+          onChange={(value) => onDraftChange("chroma", value as ChromaMode)}
+          label="Chroma mode"
           className={settingsInput}
-        >
-          <option value="yuv420">4:2:0 (default)</option>
-          <option value="yuv444">4:4:4 (AVC444, ≤1440p/monitor)</option>
-        </select>
+        />
       </Field>
-
     </div>
   );
 }

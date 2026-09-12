@@ -27,16 +27,16 @@ control-server binary and streamed to a container over `docker exec bash -s` —
 (both Dockerfile-stage/`RUN` steps, not `docker exec`).
 
 | Script | Runs where | Invoked by | Purpose |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `crates/control-server/scripts/claude-import.sh` | in a clone container (`docker exec`) | `provision::run_clone_op` (`claude.rs`) | Clear the credentials file, or install a token and the identity that goes with it |
 | `crates/control-server/scripts/codex-import.sh` | in a clone container (`docker exec`) | `clone_ops::run_clone_op` (`codex.rs`) | Read `~/.codex/auth.json` status / the auth file, clear it, or install a token |
 | `template/setup/{lib,10-desktop,15-gnome-patch,20-toolbox,30-user}.sh` | in the template build (`RUN`) | `template/Dockerfile` | Provision the clone template rootfs: desktop, patched shell, dev toolbox, the clone user + its units (the RMNG binaries are **not** baked in — the control-server injects them at clone-create time) |
-| `gnome-patch/build-shell-deb.sh` | the `gnome-build` stage of `template/Dockerfile` | `docker build` | Build the patched gnome-shell `.deb` |
+| `template/gnome-patch/build-shell-deb.sh` | the `gnome-build` stage of `template/Dockerfile` | `docker build` | Build the patched gnome-shell `.deb` |
 
 The two runtime guest scripts are baked in at compile time
 ([provision.rs:32-33](../crates/control-server/src/provision.rs)) and fed to
 `bash -s -- <args…>` over the exec's stdin at runtime — they are **not** pre-installed in any
-container. Each emits its step lines as `    [ct] <message>`, which `provision.rs` strips for
+container. Each emits its step lines as `[ct] <message>`, which `provision.rs` strips for
 the operation message; other stdout/stderr becomes plain log context. The template build
 scripts, by contrast, are `COPY`'d into the build context and `RUN` by the Dockerfile itself —
 they never touch the control-server binary or a live container.
@@ -56,6 +56,7 @@ repo. Prints the framework/Homebrew link counts as a check. Runs on macOS only.
 ## In-container guest scripts
 
 ### `claude-import.sh <user> clear|apply [creds_b64] [identity_b64]`
+
 Runs inside the target **clone** container as the clone user, printing the raw result to
 stdout. `clear` — delete `~/.claude/.credentials.json`, print `CLEARED`. `apply` — write
 that file (0600) from the base64 JSON in `$3` (the current short-lived access token, refresh
@@ -68,6 +69,7 @@ the push. Backs `claude.rs`'s `apply_clone_token`; hot-swaps a running clone's a
 no restart (Claude Code re-reads both files per request).
 
 ### `codex-import.sh <user> status|read|clear|apply [b64]`
+
 Mirrors `claude-import.sh` for the Codex CLI. Runs inside the target **clone** container
 as the clone user. `status` — decode `~/.codex/auth.json` and print identity (email, plan,
 account_id) from the `id_token` JWT; exits non-zero if no token or if only an API key is
@@ -97,7 +99,7 @@ sources `lib.sh` first (`DEBIAN_FRONTEND=noninteractive` + `SYSTEMD_OFFLINE=1`, 
 inside the script — never baked as image `ENV`, or it would leak into the booted clone).
 
 | Script | Purpose |
-|---|---|
+| --- | --- |
 | `lib.sh` | Shared env + `log()` helper; sourced (not run) by every phase |
 | `10-desktop.sh` | Locale/tz, headless GNOME + Mutter + VA-API + PipeWire (no gdm3/g-r-d/flatpak), the Recommends strip, container masks, the polkit sudo-group rule (DM-less ⇒ no resolvable session) |
 | `15-gnome-patch.sh` | `dpkg -i` the patched gnome-shell `.deb` (from the `gnome-build` stage) over stock |
@@ -116,14 +118,15 @@ once, at `template/Dockerfile` build time; see
 
 ---
 
-## gnome-patch build
+## template/gnome-patch build
 
-### `gnome-patch/build-shell-deb.sh`
+### `template/gnome-patch/build-shell-deb.sh`
+
 Runs in the **`gnome-build` stage of `template/Dockerfile`** (`docker build`). Repack approach:
-applies shell-01 + shell-03 to the gnome-shell source, rebuilds only `libshell-<N>.so`
+applies shell-01 + shell-02 to the gnome-shell source, rebuilds only `libshell-<N>.so`
 (meson/ninja), swaps it into the stock `.deb`, and bumps the version `+ngshell1`. Prints
 `DEB=<path>` — `template/Dockerfile` copies that to `/tmp/gnome-shell.deb` in the final stage,
 where `15-gnome-patch.sh` `dpkg -i`s it directly into the template rootfs (it is **not** a
 control-server payload — nothing under `/usr/local/share/rmng/` ships it any more). Cached
 (skips if the deb is newer than the patches; `FORCE=1` rebuilds). See
-[gnome-patch/README.md](../gnome-patch/README.md).
+[template/gnome-patch/README.md](../template/gnome-patch/README.md).

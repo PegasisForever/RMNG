@@ -18,6 +18,7 @@ import { createPortal } from "react-dom";
 
 import chatgptLogo from "~/assets/chatgpt.svg";
 import claudeLogo from "~/assets/claude.svg";
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { settingsInput } from "~/components/SettingsFields";
 import {
   applyTreeDrop,
@@ -483,22 +484,22 @@ function GroupCard({
             + Import codex
           </button>
           {referenceable.length > 0 && (
-            <select
-              disabled={!!active}
+            <DropdownSelect
+              rows={[
+                { value: "", label: "+ Clone an existing account…" },
+                ...referenceable.map((account) => ({
+                  value: account.email,
+                  label: account.email,
+                })),
+              ]}
               value=""
-              onChange={(event) => {
-                if (event.target.value) onReference(event.target.value);
+              onChange={(picked) => {
+                if (picked) onReference(picked);
               }}
+              disabled={!!active}
+              label={`reference an existing account into ${group.name || "this group"}`}
               className={`${actionClass} min-w-0 max-w-full dark:bg-slate-900`}
-              aria-label={`reference an existing account into ${group.name || "this group"}`}
-            >
-              <option value="">+ Clone an existing account…</option>
-              {referenceable.map((account) => (
-                <option key={account.id} value={account.email}>
-                  {account.email}
-                </option>
-              ))}
-            </select>
+            />
           )}
         </div>
       </div>

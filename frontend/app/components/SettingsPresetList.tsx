@@ -10,6 +10,7 @@
 import { useState } from "react";
 
 import { Field, settingsInput } from "~/components/SettingsFields";
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { prebuildDockerfile } from "~/lib/api";
 import {
   newPreset,
@@ -150,26 +151,35 @@ function PresetCard({
           per preset. */}
       <div className="mt-2">
         <Field label="Default group (both Claude and Codex draw from it)">
-          <select
+          <DropdownSelect
+            rows={[
+              {
+                value: "none",
+                label: "Any group (rmng picks a free account)",
+              },
+              ...poolNames.map((name) => {
+                const members =
+                  groups.find((g) => g.name.trim() === name)?.accounts.length ??
+                  0;
+                return {
+                  value: name,
+                  label: `${name} (${members})`,
+                };
+              }),
+              ...(selected !== "none" && !poolNames.includes(selected)
+                ? [
+                    {
+                      value: selected,
+                      label: `${selected} (deleted pool)`,
+                    },
+                  ]
+                : []),
+            ]}
             value={selected}
-            onChange={(e) => onChange({ group: e.target.value })}
+            onChange={(value) => onChange({ group: value })}
+            label="Default group (both Claude and Codex draw from it)"
             className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
-          >
-            <option value="none">Any group (rmng picks a free account)</option>
-            {poolNames.map((name) => {
-              const members =
-                groups.find((g) => g.name.trim() === name)?.accounts.length ??
-                0;
-              return (
-                <option key={name} value={name}>
-                  {name} ({members})
-                </option>
-              );
-            })}
-            {selected !== "none" && !poolNames.includes(selected) ? (
-              <option value={selected}>{selected} (deleted pool)</option>
-            ) : null}
-          </select>
+          />
         </Field>
       </div>
       {/* Default fork source for the clone modal's fork tabs. Blank = oldest forkable
@@ -177,28 +187,29 @@ function PresetCard({
           the preset. */}
       <div className="mt-2">
         <Field label="Default fork clone (fork tabs)">
-          <select
+          <DropdownSelect
+            rows={[
+              { value: "", label: "Oldest forkable clone" },
+              ...forkSources.map((id) => ({ value: id, label: id })),
+              ...(p.defaultForkClone.trim() !== "" &&
+              !forkSources.includes(p.defaultForkClone.trim())
+                ? [
+                    {
+                      value: p.defaultForkClone.trim(),
+                      label: `${p.defaultForkClone.trim()} (gone — falls back to oldest)`,
+                    },
+                  ]
+                : []),
+            ]}
             value={
               forkSources.includes(p.defaultForkClone.trim())
                 ? p.defaultForkClone.trim()
                 : ""
             }
-            onChange={(e) => onChange({ defaultForkClone: e.target.value })}
+            onChange={(value) => onChange({ defaultForkClone: value })}
+            label="Default fork clone (fork tabs)"
             className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
-          >
-            <option value="">Oldest forkable clone</option>
-            {forkSources.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-            {p.defaultForkClone.trim() !== "" &&
-            !forkSources.includes(p.defaultForkClone.trim()) ? (
-              <option value={p.defaultForkClone.trim()}>
-                {p.defaultForkClone.trim()} (gone — falls back to oldest)
-              </option>
-            ) : null}
-          </select>
+          />
         </Field>
       </div>
       <div className="mt-2">

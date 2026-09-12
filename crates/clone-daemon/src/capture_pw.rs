@@ -376,7 +376,7 @@ fn build_buffers_pod() -> Result<Vec<u8>> {
                 flags: PropertyFlags::MANDATORY,
                 value: Value::Choice(spa::pod::ChoiceValue::Int(Choice(
                     ChoiceFlags::empty(),
-                    ChoiceEnum::Flags { default: data_types as i32, flags: vec![] },
+                    ChoiceEnum::Flags { default: data_types, flags: vec![] },
                 ))),
             },
         ],

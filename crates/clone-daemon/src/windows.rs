@@ -4,7 +4,7 @@
 //! can't enumerate or move windows — that lives inside the compositor. We reach it
 //! by running JavaScript in gnome-shell via its `Eval(s) -> (b, s)` D-Bus method.
 //! `Eval` is gated behind `unsafe_mode` (off since GNOME 41), so this needs the
-//! `shell-03-enable-eval` patch (already on the template). Ported from
+//! `shell-02-enable-eval` patch (already on the template). Ported from
 //! `../../computer-use/src/windows.rs`.
 
 use serde_json::{Value, json};
@@ -21,9 +21,7 @@ trait ShellEval {
 
 /// MCP tool defs appended to the daemon's `tools/list`.
 pub fn tools() -> Vec<Value> {
-    let obj = |props: Value, required: Value| {
-        json!({ "type": "object", "properties": props, "required": required })
-    };
+    let obj = |props: Value, required: Value| json!({ "type": "object", "properties": props, "required": required });
     vec![
         json!({ "name": "list_windows", "description": "List open windows (id, title, wm_class, monitor, geometry, state)", "inputSchema": obj(json!({}), json!([])) }),
         json!({ "name": "move_window", "description": "Tile a window: mode \"maximize\" (default) or \"center-half\", optionally onto monitor index", "inputSchema": obj(json!({ "id": { "type": "integer" }, "monitor": { "type": "integer" }, "mode": { "type": "string", "enum": ["maximize", "center-half"] } }), json!(["id"])) }),
@@ -38,9 +36,14 @@ pub async fn call(conn: &zbus::Connection, name: &str, args: &Value) -> Result<V
         "move_window" => {
             let id = window_id(args.get("id"))?;
             let monitor = args.get("monitor").and_then(Value::as_i64).unwrap_or(-1) as i32;
-            let mode = args.get("mode").and_then(Value::as_str).unwrap_or("maximize");
+            let mode = args
+                .get("mode")
+                .and_then(Value::as_str)
+                .unwrap_or("maximize");
             if mode != "maximize" && mode != "center-half" {
-                return Err(format!("unknown mode {mode:?} (want \"maximize\" or \"center-half\")"));
+                return Err(format!(
+                    "unknown mode {mode:?} (want \"maximize\" or \"center-half\")"
+                ));
             }
             js_move_resize(id, monitor, mode)
         }
@@ -58,9 +61,7 @@ pub async fn call(conn: &zbus::Connection, name: &str, args: &Value) -> Result<V
 /// argument rather than a quoted one.
 fn window_id(arg: Option<&Value>) -> Result<u64, String> {
     match arg {
-        None | Some(Value::Null) => {
-            Err("id required (a window id from list_windows)".to_string())
-        }
+        None | Some(Value::Null) => Err("id required (a window id from list_windows)".to_string()),
         Some(v) => v
             .as_u64()
             .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
@@ -82,9 +83,11 @@ async fn eval(conn: &zbus::Connection, script: &str) -> Result<String, String> {
     })?;
     if !success {
         if result.is_empty() {
-            return Err("org.gnome.Shell.Eval is disabled (gnome-shell unsafe_mode off) — needs the \
-                        shell-03-enable-eval patch on the template"
-                .into());
+            return Err(
+                "org.gnome.Shell.Eval is disabled (gnome-shell unsafe_mode off) — needs the \
+                        shell-02-enable-eval patch on the template"
+                    .into(),
+            );
         }
         return Err(format!("gnome-shell Eval script error: {result}"));
     }
@@ -171,7 +174,11 @@ mod tests {
     #[test]
     fn a_missing_id_and_a_junk_one_say_different_things() {
         assert!(window_id(None).unwrap_err().contains("required"));
-        assert!(window_id(Some(&json!(null))).unwrap_err().contains("required"));
+        assert!(
+            window_id(Some(&json!(null)))
+                .unwrap_err()
+                .contains("required")
+        );
         let err = window_id(Some(&json!("cursor"))).unwrap_err();
         assert!(err.contains("must be a window id"), "{err}");
     }

@@ -3,7 +3,14 @@
 //
 // It is also the one tab that picks a preset by hand, because there is no ticket id and no
 // team key for one to be derived from.
-import { cloneField, cloneLabel } from "~/components/cloneFieldStyles";
+import { DropdownSelect } from "~/components/DropdownSelect";
+import {
+  cloneRow,
+  cloneRowField,
+  cloneRowLabel,
+  cloneRowLabelTop,
+  cloneRowTop,
+} from "~/components/cloneFieldStyles";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
 export function ClonePlainFields({
@@ -31,9 +38,9 @@ export function ClonePlainFields({
   onSubmit: () => void;
 }) {
   return (
-    <div className="mt-3 space-y-3">
-      <label className={cloneLabel}>
-        Title
+    <div className="space-y-3">
+      <label className={cloneRow}>
+        <span className={cloneRowLabel}>Title</span>
         <input
           autoFocus
           value={title}
@@ -42,34 +49,34 @@ export function ClonePlainFields({
             if (e.key === "Enter") onSubmit();
           }}
           placeholder="Container title"
-          className={cloneField}
+          className={cloneRowField}
         />
       </label>
-      <label className={cloneLabel}>
-        First message to the agent
+      <label className={cloneRowTop}>
+        <span className={cloneRowLabelTop}>First message to the agent</span>
         <textarea
           value={message}
           onChange={(e) => onMessageChange(e.target.value)}
           rows={3}
           placeholder="Optional — leave empty to not auto-send a first message"
-          className={`resize-y ${cloneField}`}
+          className={`resize-y ${cloneRowField}`}
         />
       </label>
       {presets.length > 0 ? (
-        <label className={cloneLabel}>
-          Preset
-          <select
+        <label className={cloneRow}>
+          <span className={cloneRowLabel}>Preset</span>
+          <DropdownSelect
+            rows={presets.map((p) => ({
+              value: p.name,
+              label:
+                p.name +
+                (p.labels.length > 0 ? ` · ${p.labels.join(", ")}` : ""),
+            }))}
             value={preset}
-            onChange={(e) => onPresetChange(e.target.value)}
-            className={cloneField}
-          >
-            {presets.map((p) => (
-              <option key={p.name} value={p.name}>
-                {p.name}
-                {p.labels.length > 0 ? ` · ${p.labels.join(", ")}` : ""}
-              </option>
-            ))}
-          </select>
+            onChange={onPresetChange}
+            label="Preset"
+            className={cloneRowField}
+          />
         </label>
       ) : null}
     </div>

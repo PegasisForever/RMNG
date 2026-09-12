@@ -12,13 +12,13 @@ use wire::{AppConfig, CloneRequest, ControlState, LinearMeta, OperationStatus, P
 use crate::naming;
 use crate::provision::is_dns_label;
 
-/// What one provider's account does on the new clone.
+/// What one provider's account does on the new clone: always a fresh pick inside the
+/// plan's pool. `None` reads as `auto`. A fork never keeps its source's account: it draws
+/// from the group like every other clone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Side {
     /// Resolve this selection inside the plan's pool (`None` reads as `auto`).
     Assign(Option<String>),
-    /// Keep the source clone's account, selection and pool; its token is pushed again.
-    Inherit,
 }
 
 /// A clone that does not exist yet, fully decided.
@@ -94,39 +94,15 @@ pub(crate) fn plan(
         .group
         .as_deref()
         .map(|g| Some(g.trim().to_string()).filter(|g| !g.eq_ignore_ascii_case("none")));
-    let side_selection = |asked: &Option<String>, of_source: Option<&String>| {
-        named(asked).or_else(|| of_source.cloned())
-    };
     let (group, claude_sel, codex_sel) = crate::clone_ops::split_group_binding(
-        side_selection(
-            &req.claude_account,
-            source.as_ref().and_then(|s| s.claude_selection.as_ref()),
-        ),
-        side_selection(
-            &req.codex_account,
-            source.as_ref().and_then(|s| s.codex_selection.as_ref()),
-        ),
+        named(&req.claude_account),
+        named(&req.codex_account),
         default_group,
         explicit,
     );
     crate::clone_ops::validate_group(cfg, group.as_deref()).map_err(|e| e.to_string())?;
-    // A fork leaves a side alone when the request says nothing about it and the pool it
-    // draws from has not moved. Anything else is a fresh pick inside the plan's pool.
-    let keeps = |asked: &Option<String>| {
-        source
-            .as_ref()
-            .is_some_and(|s| named(asked).is_none() && group == s.group)
-    };
-    let claude = if keeps(&req.claude_account) {
-        Side::Inherit
-    } else {
-        Side::Assign(claude_sel)
-    };
-    let codex = if keeps(&req.codex_account) {
-        Side::Inherit
-    } else {
-        Side::Assign(codex_sel)
-    };
+    let claude = Side::Assign(claude_sel);
+    let codex = Side::Assign(codex_sel);
 
     // The name: the ticket identifier, else a slug of the title. A clone built from an image
     // has no ticket to fall back on, so there a title is required.
@@ -397,8 +373,8 @@ mod tests {
         .unwrap();
         assert_eq!(got.group, None);
         // The pool moved, so neither side may keep the account it drew from the old one.
-        assert_eq!(got.claude, Side::Assign(Some("auto".into())));
-        assert_eq!(got.codex, Side::Assign(Some("auto".into())));
+        assert_eq!(got.claude, Side::Assign(None));
+        assert_eq!(got.codex, Side::Assign(None));
     }
 
     /// A fork naming a preset takes that preset's pool, exactly as a clone built from the
@@ -430,19 +406,20 @@ mod tests {
         assert_eq!(got.group, None);
     }
 
-    /// A fork that asks for nothing keeps what the source has, on both sides.
+    /// A fork that asks for nothing draws both sides fresh from the pool, like every
+    /// other clone. It never keeps the source's account.
     #[test]
-    fn a_plain_fork_inherits_both_accounts() {
+    fn a_plain_fork_follows_the_group_on_both_sides() {
         let got = plan_of(&state(vec![source("pega-we-1")]), true, titled("spike")).unwrap();
         assert_eq!(got.group.as_deref(), Some("pooled"));
-        assert_eq!(got.claude, Side::Inherit);
-        assert_eq!(got.codex, Side::Inherit);
+        assert_eq!(got.claude, Side::Assign(None));
+        assert_eq!(got.codex, Side::Assign(None));
         assert_eq!(got.preset_name.as_deref(), Some("work"));
     }
 
-    /// One side named, the other silent: only the named side is picked again.
+    /// One side named, the other silent: the named side pins, the other follows the group.
     #[test]
-    fn naming_one_side_leaves_the_other_alone() {
+    fn naming_one_side_leaves_the_other_on_the_group() {
         let got = plan_of(
             &state(vec![source("pega-we-1")]),
             true,
@@ -453,7 +430,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(got.claude, Side::Assign(Some("me@x".into())));
-        assert_eq!(got.codex, Side::Inherit);
+        assert_eq!(got.codex, Side::Assign(None));
     }
 
     // --- which clone a fork copies --------------------------------------------------------

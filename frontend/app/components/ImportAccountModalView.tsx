@@ -11,6 +11,7 @@
 //
 // It renders from props alone. Every server call lives in ImportAccountModalContainer, and
 // every state the operator can reach here is a prop, so all of them are stories.
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { useModalEscape } from "~/lib/useModalEscape";
 
 const input =
@@ -170,19 +171,17 @@ export function ImportAccountModalView({
           <>
             <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
               Pool
-              <select
+              <DropdownSelect
+                rows={[
+                  { value: "", label: "No pool" },
+                  ...groups.map((g) => ({ value: g, label: g })),
+                ]}
                 value={group}
-                onChange={(e) => onGroupChange(e.target.value)}
+                onChange={onGroupChange}
                 disabled={groups.length === 0}
+                label="Pool"
                 className={input}
-              >
-                <option value="">No pool</option>
-                {groups.map((g) => (
-                  <option key={g} value={g}>
-                    {g}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
             <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
               {groups.length === 0

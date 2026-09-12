@@ -147,7 +147,7 @@ pub enum CloneCmd {
         #[arg(long)]
         preset: Option<String>,
         /// Claude account override: an email, `auto`, `none`, or `group:<pool>`
-        /// (omitted inherits the source selection)
+        /// (omitted follows the group with a fresh pick)
         #[arg(long)]
         claude_account: Option<String>,
         /// Codex account override, same forms

@@ -632,14 +632,14 @@ the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no 
 ## Patched gnome-shell
 
 The clone-daemon needs two gnome-shell patches: **shell-01** (hide the screen-sharing pill
-that would otherwise composite into captured frames) and **shell-03** (enable
+that would otherwise composite into captured frames) and **shell-02** (enable
 `org.gnome.Shell.Eval` for the window-management MCP tools). `template/Dockerfile`'s
 `gnome-build` stage builds the patched `gnome-shell_*+ngshell1` `.deb` (rebuilding only
 `libshell-<N>.so` and repacking the stock deb); `template/setup/15-gnome-patch.sh` `dpkg -i`s
 it over stock **during the template build** — every clone created from the published template
 inherits it (there's no per-install control-server payload any more; see
 [Publishing the template](#publishing-the-template)). Details + verification:
-[gnome-patch/README.md](../gnome-patch/README.md).
+[template/gnome-patch/README.md](../template/gnome-patch/README.md).
 
 ## Day-2 operations (from the dashboard / API / `rmng` CLI)
 

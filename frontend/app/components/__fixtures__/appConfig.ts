@@ -53,7 +53,7 @@ export function makeAppConfig(
     agentPlaybook: "# Desktop agent — operating notes\n\n(sample playbook)\n",
     globalPrompt:
       "# Working in this clone\n\n(sample shared operating memory)\n",
-    judge: { codexModel: "gpt-5.6-luna", codexEmail: null },
+    judge: { provider: "codex", geminiKey: "" },
     ...overrides,
   };
 }

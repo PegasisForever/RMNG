@@ -54,7 +54,7 @@ export interface SettingsPanelViewProps {
    *  rather than a list of rows wants it. */
   accounts: ClaudeUsage[];
   /** The operator's own cosmetic ordering of those rows, per provider. It orders the
-   *  group tree's account source and the stuck-judge email options. */
+   *  group tree's account source. */
   accountOrder: AcctOrder;
   /** Open the import modal, optionally on one provider tab with a group preselected
    *  (the settings group tree's per-group import buttons). Accounts are never OAuth'd

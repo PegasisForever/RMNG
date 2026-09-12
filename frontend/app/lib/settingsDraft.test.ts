@@ -45,13 +45,12 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     },
     agentPlaybook: "playbook",
     globalPrompt: "prompt",
-    judge: { codexModel: "gpt-5.6-luna", codexEmail: null },
+    judge: { provider: "codex", geminiKey: "" },
     ...overrides,
   };
 }
 
-/** The patch, narrowed to the shape the tests read. `settingsPatch` returns `unknown` because
- *  it is a request body, not a value this app consumes. */
+/** The patch, narrowed to the shape the tests read. */
 type Patch = {
   docker: { hostnamePrefix: string };
   codex: { autoReset: boolean };
@@ -76,7 +75,7 @@ type Patch = {
     globalPrompt: string;
     dockerfile: string;
   }[];
-  judge: { codexModel: string; codexEmail: string | null };
+  judge: { provider: string; geminiKey: string };
 };
 
 const patch = (
@@ -256,16 +255,15 @@ test("the cosmetic account order is never part of the patch", () => {
   );
 });
 
-test("clearing the judge's Codex account sends null, not a blank the server would ignore", () => {
-  // An empty string means "keep stored" on the way in, so going back to "the first imported
-  // account" after picking one has to be sent as null. Same rule as a pinned account email.
+test("the judge key round-trips verbatim like a Linear key", () => {
   const seeded = settingsDraftFrom(config());
-  expect(seeded.judge.codexEmail).toBe("");
-  expect(patch(seeded).judge.codexEmail).toBe(null);
+  expect(seeded.judge.provider).toBe("codex");
+  expect(seeded.judge.geminiKey).toBe("");
+  expect(patch(seeded).judge.geminiKey).toBe("");
 
-  const picked = patch({
-    ...seeded,
-    judge: { codexModel: "gpt-5.6-luna", codexEmail: "alex@example.com" },
-  });
-  expect(picked.judge.codexEmail).toBe("alex@example.com");
+  const withKey = settingsDraftFrom(
+    config({ judge: { provider: "gemini", geminiKey: "K" } }),
+  );
+  expect(withKey.judge.provider).toBe("gemini");
+  expect(patch(withKey).judge.geminiKey).toBe("K");
 });

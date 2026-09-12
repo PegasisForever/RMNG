@@ -7,6 +7,7 @@
 // to now, and owns the swap calls. Nothing here reads the server, so each combination the
 // operator can pick is a story.
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
+import { DropdownSelect } from "~/components/DropdownSelect";
 import type { ClaudeUsage } from "~/lib/types";
 import { useModalEscape } from "~/lib/useModalEscape";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
@@ -91,18 +92,19 @@ export function ChangeAccountModalView({
 
         <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
           Group
-          <select
+          <DropdownSelect
+            rows={[
+              { value: "", label: "Any group (all pools)" },
+              ...groups.map((g) => ({
+                value: g.name,
+                label: `${g.name} (${g.accounts.length})`,
+              })),
+            ]}
             value={groupValue ?? ""}
-            onChange={(e) => onGroupChange(e.target.value || null)}
+            onChange={(value) => onGroupChange(value || null)}
+            label="Group"
             className={select}
-          >
-            <option value="">Any group (all pools)</option>
-            {groups.map((g) => (
-              <option key={g.name} value={g.name}>
-                {g.name} ({g.accounts.length})
-              </option>
-            ))}
-          </select>
+          />
         </label>
 
         <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
@@ -111,6 +113,7 @@ export function ChangeAccountModalView({
             accounts={accounts}
             value={claudeValue}
             onChange={onClaudeValueChange}
+            label="Claude account"
             className={select}
           />
         </label>
@@ -122,6 +125,7 @@ export function ChangeAccountModalView({
               accounts={codexAccounts}
               value={codexValue}
               onChange={onCodexValueChange}
+              label="Codex account"
               className={select}
             />
           </label>

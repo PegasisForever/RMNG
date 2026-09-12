@@ -37,7 +37,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     ssh: { authorizedKeys: [] },
     agentPlaybook: "",
     globalPrompt: "",
-    judge: { codexModel: "gpt-5.6-luna", codexEmail: null },
+    judge: { provider: "codex", geminiKey: "" },
     ...overrides,
   };
 }

@@ -17,6 +17,7 @@
 
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
+import type { JudgeProvider } from "~/lib/wire/JudgeProvider";
 import type { SshConfig } from "~/lib/wire/SshConfig";
 
 /** One monitor in a layout preset. Same shape as the wire `MonitorSpec`; named separately
@@ -75,9 +76,8 @@ export interface SettingsDraft {
   agentPlaybook: string;
   globalPrompt: string;
   ssh: SshConfig;
-  /** Which GPT answers the stuck question, and which Codex account pays for it.
-   *  `codexEmail` is flattened to "" here so no input has to handle a null. */
-  judge: { codexModel: string; codexEmail: string };
+  /** Which backend settles stuck detection, plus the Gemini key when picked. */
+  judge: { provider: JudgeProvider; geminiKey: string };
 }
 
 /** The layout preset a rig with none configured is given to edit. Offering an empty list
@@ -166,8 +166,8 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     agentPlaybook: c.agentPlaybook,
     globalPrompt: c.globalPrompt,
     judge: {
-      codexModel: c.judge?.codexModel ?? "",
-      codexEmail: c.judge?.codexEmail ?? "",
+      provider: (c.judge?.provider as JudgeProvider) ?? "codex",
+      geminiKey: c.judge?.geminiKey ?? "",
     },
     ssh: {
       authorizedKeys: c.ssh?.authorizedKeys ?? [],
@@ -212,7 +212,7 @@ function savedGroups(groups: GroupDraft[]): GroupDraft[] {
 export function settingsPatch(
   draft: SettingsDraft,
   _setupComplete: boolean,
-): unknown {
+): Record<string, unknown> {
   const groups = savedGroups(draft.groups);
   // A preset always names a pool default: a blank (only reachable from a hand-edited
   // form) falls back to the first pool. `"none"` (any group) is a real choice, not blank.
@@ -235,9 +235,8 @@ export function settingsPatch(
     ssh: draft.ssh,
     agentPlaybook: draft.agentPlaybook,
     globalPrompt: draft.globalPrompt,
-    // `null` rather than "", which the server reads as "keep stored": picking an account and
-    // then going back to "the first one" has to be sendable.
-    judge: { ...draft.judge, codexEmail: draft.judge.codexEmail || null },
+    // Judge key is verbatim like preset Linear keys: blank clears it.
+    judge: { ...draft.judge },
     presets: draft.presets
       .filter((p) => p.name.trim())
       .map((p) => ({

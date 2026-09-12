@@ -331,8 +331,9 @@ async fn run_clone(app: App, op_id: String, plan: ClonePlan) {
         Ok(v) => v,
         Err(e) => return fail_op(&app, &op_id, format!("{e:#}")),
     };
-    // A clone built from an image boots on the template's baked `RMNG_MONITORS`, one monitor
-    // nobody chose; bring it to the active layout preset. A fork's home remembers its own.
+    // A clone built from an image boots on one monitor nobody chose (the daemon's
+    // 1920x1080 default); bring it to the active layout preset. A fork's home remembers
+    // its own.
     if plan.source.is_none() && !plan.headless {
         crate::mediaplane::apply_active_layout_when_ready(app.clone(), plan.id.clone());
     }
@@ -437,56 +438,50 @@ async fn run_clone(app: App, op_id: String, plan: ClonePlan) {
     }
 }
 
-/// Settle one provider's account and answer the row's (selection, email, pool). A fork that
-/// keeps its source's account still gets the token pushed fresh — never copied from the
-/// source's files. Best-effort: a failure is logged into the op, never fatal.
+/// Settle one provider's account and answer the row's (selection, email, pool).
+/// Best-effort: a failure is logged into the op, never fatal.
 async fn bind_side<P: crate::pool::PoolProvider>(
     app: &App,
     op_id: &str,
     plan: &ClonePlan,
     side: &Side,
 ) -> (Option<String>, Option<String>, Option<String>) {
-    let src = plan.source.as_ref();
-    let inherited = (
-        src.and_then(|s| P::selection(s).map(str::to_string)),
-        src.and_then(|s| P::host_email(s).map(str::to_string)),
-        src.and_then(|s| P::sticky(s).map(str::to_string)),
-    );
     let requested = match side {
-        Side::Inherit => {
-            if let Some(email) = inherited.1.clone() {
-                let pushed = P::push(app, &plan.id, &email).await;
-                patch_op(app, op_id, |op| {
-                    op.log.push(match pushed {
-                        Ok(()) => format!("{}: inherited {email}", P::OP_LABEL),
-                        Err(e) => format!("{}: failed to inherit {email}: {e}", P::OP_LABEL),
-                    })
-                });
-            }
-            return inherited;
-        }
         Side::Assign(sel) => sel.clone(),
     };
+    // A new clone has no incumbent account: stickiness toward the source's account would
+    // keep what the plan just refused to inherit, so the rotator always picks fresh.
+    let current: Option<&str> = None;
     match crate::pool::assign_clone_side::<P>(
         app,
         Some(op_id),
         &plan.id,
         requested.as_deref(),
-        inherited.1.as_deref(),
+        current,
         plan.group.as_deref(),
         crate::pool::AssignStrictness::BestEffort,
     )
     .await
     {
         Ok(Some(b)) => (Some(b.selection), b.email, b.group),
-        Ok(None) => inherited,
+        // No account can take this side yet (or the assign failed): follow the group with
+        // nothing installed, never the source's account.
+        Ok(None) => (
+            Some(crate::pool::normalize_selection(requested.as_deref())),
+            None,
+            plan.group.clone(),
+        ),
         Err(e) => {
             tracing::warn!("unexpected assignment failure: {e:#}");
             patch_op(app, op_id, |op| {
                 op.log
                     .push(format!("{}: assignment failed: {e:#}", P::OP_LABEL))
             });
-            inherited
+            (
+                Some(crate::pool::normalize_selection(requested.as_deref())),
+                None,
+                plan.group.clone(),
+            )
         }
     }
 }

@@ -335,45 +335,41 @@ pub fn dockerfile_tag(dockerfile: &str) -> String {
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ClaudeConfig {}
 
-/// What settles the clones the file checks cannot: GPT, on an imported Codex account's
-/// ChatGPT plan. See [`crate::MonitorState`].
+/// Which backend settles the clones the file checks cannot.
 ///
-/// No credential of its own. The server already holds that account's OAuth pair to run the
-/// clones, and the judge spends the same weekly allowance they do. With no Codex account
-/// imported, nothing answers the question and no clone is ever reported as working. That is
-/// deliberate: a guess in either direction is worse than an honest "not working", and
-/// per-clone token accounting is unaffected either way.
+/// `codex` asks GPT on the best imported Codex account's ChatGPT plan.
+/// `gemini` asks Gemini with the stored API key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub enum JudgeProvider {
+    #[default]
+    Codex,
+    Gemini,
+}
+
+/// What settles the clones the file checks cannot.
 ///
-/// Nothing here is secret, so the whole struct reaches the browser.
+/// Two backends. `codex` bills the best imported Codex account. `gemini` uses the stored
+/// API key. The key passes through redaction verbatim, like preset Linear keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct JudgeConfig {
-    /// Which GPT answers.
-    #[serde(default = "default_codex_judge_model")]
-    pub codex_model: String,
-    /// Which imported Codex account pays for those calls. Unset means the first imported
-    /// account, so a rig with one account needs no answer here. The calls come out of that
-    /// account's weekly ChatGPT allowance, the same one its clones spend.
-    ///
-    /// `Option` because a `PUT` reads an
-    /// empty string as "keep what is stored", so `null` is how the panel says "no account in
-    /// particular" once one has been picked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub codex_email: Option<String>,
+    #[serde(default)]
+    pub provider: JudgeProvider,
+    /// Gemini API key, verbatim. Empty means unset.
+    #[serde(default)]
+    pub gemini_key: String,
 }
 
 impl Default for JudgeConfig {
     fn default() -> Self {
         Self {
-            codex_model: default_codex_judge_model(),
-            codex_email: None,
+            provider: JudgeProvider::Codex,
+            gemini_key: String::new(),
         }
     }
-}
-
-fn default_codex_judge_model() -> String {
-    "gpt-5.6-luna".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -834,21 +830,29 @@ mod tests {
     #[test]
     fn the_judge_choice_survives_the_redaction() {
         let c: AppConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(c.judge.codex_model, "gpt-5.6-luna");
-        assert_eq!(c.judge.codex_email, None);
+        assert_eq!(c.judge.provider, JudgeProvider::Codex);
+        assert_eq!(c.judge.gemini_key, "");
+
+        // Old files with the retired codex keys still load; they map to defaults.
+        let old: AppConfig = serde_json::from_str(
+            r#"{"judge":{"codexModel":"gpt-5.6-luna","codexEmail":"alex@example.com"}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.judge.provider, JudgeProvider::Codex);
 
         let c = AppConfig {
             judge: JudgeConfig {
-                codex_email: Some("alex@example.com".into()),
-                ..Default::default()
+                provider: JudgeProvider::Gemini,
+                gemini_key: "K".into(),
             },
             ..Default::default()
         };
         let r = c.redacted();
-        assert_eq!(r.judge.codex_email.as_deref(), Some("alex@example.com"));
+        assert_eq!(r.judge.provider, JudgeProvider::Gemini);
+        assert_eq!(r.judge.gemini_key, "K");
         let v = serde_json::to_value(&r.judge).unwrap();
         assert!(
-            v.get("codexModel").is_some(),
+            v.get("geminiKey").is_some(),
             "round-trips as camelCase: {v}"
         );
     }

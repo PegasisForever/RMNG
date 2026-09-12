@@ -37,7 +37,7 @@ export interface SettingsPanelContainerProps {
   putConfig: (
     patch: unknown,
   ) => Promise<ConfigPutResponse & { networkWarning?: string }>;
-  /** Validate a setting (e.g. `"judge"` — puts one real question to GPT). */
+  /** Validate a setting (e.g. `"judge"` — puts one real question to the picked backend). */
   /** `value` and `model` test unsaved fields the operator has just typed. */
   testConfig: (
     what: string,
@@ -225,14 +225,14 @@ export function SettingsPanelContainer({
   }
 
   // Tests what is typed rather than what is stored, so the verdict is about the fields the
-  // operator is looking at. There is no key to check, so it puts one real question to GPT.
+  // operator is looking at. For the judge that is the picked provider + the unsaved key.
   async function runJudgeTest() {
     setJudgeTestMsg("testing…");
     try {
       const r = await testConfig(
         "judge",
-        draft?.judge.codexEmail || "",
-        draft?.judge.codexModel,
+        draft?.judge.geminiKey || "",
+        draft?.judge.provider || "",
       );
       setJudgeTestMsg(`${r.ok ? "✓" : "✗"} ${r.message}`);
     } catch (e) {

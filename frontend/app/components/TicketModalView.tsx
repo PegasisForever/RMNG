@@ -20,6 +20,7 @@
 // call, so TicketModalContainer decides when and how it mounts.
 import { useState, type ReactNode } from "react";
 
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { PrioritySelect } from "~/components/PrioritySelect";
 import type { TeamKey } from "~/lib/cloneDraft";
 import type { TicketPerson } from "~/lib/linear/people";
@@ -111,10 +112,11 @@ export function TicketModalView({
       });
   };
 
-  // `h-9` pins every field to one height. Left to their content they come out at two: a
-  // `<select>` lays its text out at the browser's own `line-height: normal` and lands on 36px,
-  // while an input and the priority button inherit `text-sm`'s 20px and land on 38px. Nobody
-  // could see that until the three sat on one row.
+  // `h-9` pins every trigger and input to one height. A native `<select>` lays its text
+  // out at the browser's own `line-height: normal` and lands on 36px, while the custom
+  // dropdowns and inputs inherit `text-sm`'s 20px and land on 38px — now that every
+  // control here is either an input or a custom dropdown, the pin is what keeps the row
+  // one height.
   const field =
     "mt-1 h-9 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500";
   const label = "block text-xs font-medium text-slate-500 dark:text-slate-400";
@@ -146,19 +148,21 @@ export function TicketModalView({
           <div className="grid grid-cols-3 gap-2">
             <label className={`${label} min-w-0`}>
               Team key
-              <select
+              <DropdownSelect
+                rows={
+                  teams.length === 0
+                    ? [{ value: "", label: "None", disabled: true }]
+                    : teams.map((t) => ({
+                        value: t.key,
+                        label: `${t.key.toUpperCase()} · ${t.preset.name}`,
+                      }))
+                }
                 value={team}
-                onChange={(e) => onTeamChange(e.target.value)}
+                onChange={onTeamChange}
                 disabled={busy || teams.length === 0}
+                label="Team key"
                 className={field}
-              >
-                {teams.length === 0 ? <option value="">None</option> : null}
-                {teams.map((t) => (
-                  <option key={t.key} value={t.key}>
-                    {t.key.toUpperCase()} · {t.preset.name}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
 
             {/* Not a `<select>`: the priority is read as a glyph everywhere else on the board,
@@ -175,27 +179,27 @@ export function TicketModalView({
 
             <label className={`${label} min-w-0`}>
               Assignee
-              <select
+              <DropdownSelect
+                rows={
+                  peopleLoading || people.length === 0
+                    ? [
+                        {
+                          value: "",
+                          label: peopleLoading ? "Loading…" : "You",
+                          disabled: true,
+                        },
+                      ]
+                    : people.map((person) => ({
+                        value: person.id,
+                        label: person.isViewer ? "You" : person.name,
+                      }))
+                }
                 value={assigneeId}
-                onChange={(e) => onAssigneeChange(e.target.value)}
+                onChange={onAssigneeChange}
                 disabled={busy || peopleLoading || people.length === 0}
+                label="Assignee"
                 className={field}
-              >
-                {/* One blank option covers both nothing-yet cases, so the field is never empty
-                    while it waits and never claims a name it does not have. The create still
-                    works from it: an empty assignee falls back to the key's own owner. */}
-                {peopleLoading || people.length === 0 ? (
-                  <option value="">{peopleLoading ? "Loading…" : "You"}</option>
-                ) : null}
-                {/* You are "You" rather than your own name: it is the shortest true label, it
-                    is the one the field falls back to before the list arrives, and a third of
-                    this row is not wide enough for a name and a marker beside it. */}
-                {people.map((person) => (
-                  <option key={person.id} value={person.id}>
-                    {person.isViewer ? "You" : person.name}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
           </div>
 

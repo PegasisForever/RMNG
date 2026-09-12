@@ -732,8 +732,8 @@ pub struct CloneRequest {
     #[ts(optional)]
     pub linear: Option<LinearMeta>,
     /// This side's account: an email pins it, `auto` rotates inside the pool, `none` leaves
-    /// the clone tokenless, and a legacy `group:<pool>` binds that pool. Omitted, a fork
-    /// keeps its source's account and every other clone takes `auto`.
+    /// the clone tokenless, and a legacy `group:<pool>` binds that pool. Omitted, the side
+    /// follows the plan's pool with a fresh pick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub claude_account: Option<String>,

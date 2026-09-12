@@ -21,7 +21,9 @@ function derive(ticket: string) {
   const parsed = parseTicketInput(ticket);
   return {
     parsed,
-    preset: resolvePreset("existing", presets, { ticketPrefix: parsed?.prefix }),
+    preset: resolvePreset("existing", presets, {
+      ticketPrefix: parsed?.prefix,
+    }),
   };
 }
 
@@ -46,12 +48,12 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Nothing pasted yet. No parse, so no badge and no preset — the line reads an em-dash rather
+/** Nothing pasted yet. No parse, so no preset — the line reads an em-dash rather
  *  than naming a preset the clone might not get. */
 export const Empty: Story = {};
 
-/** A pasted Linear link. The id comes out of the URL, the hostname it will become is shown
- *  next to it, and the prefix has resolved to the preset that claims it. */
+/** A pasted Linear link. The id comes out of the URL and the prefix has resolved to
+ *  the preset that claims it. */
 export const TicketPasted: Story = {
   args: { ticket: cloneTicketUrl, ...derive(cloneTicketUrl) },
 };
@@ -71,5 +73,10 @@ export const PrefixUnclaimed: Story = {
 /** No presets configured at all. A prefix that resolves to nothing is then expected rather
  *  than wrong, so the line stays neutral instead of blaming the ticket. */
 export const NoPresets: Story = {
-  args: { ticket: "WE-142", parsed: parseTicketInput("WE-142"), preset: undefined, presets: [] },
+  args: {
+    ticket: "WE-142",
+    parsed: parseTicketInput("WE-142"),
+    preset: undefined,
+    presets: [],
+  },
 };

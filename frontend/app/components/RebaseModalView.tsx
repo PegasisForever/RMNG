@@ -7,6 +7,7 @@
 // keeps the home dataset, the id, and the clone's own preset bindings (rebase is image
 // only, never a preset change). The image builds on miss; the checkbox forces a fresh
 // build even when the tag already exists.
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { OperationProgress } from "~/components/OperationProgress";
 import { cloneField, cloneLabel } from "~/components/cloneFieldStyles";
 import type { Operation } from "~/lib/types";
@@ -84,24 +85,27 @@ export function RebaseModalView({
         <div className="mt-3 space-y-2">
           <label className={`${cloneLabel} font-medium`}>
             Preset
-            <select
+            <DropdownSelect
+              rows={
+                presets.length === 0
+                  ? [
+                      {
+                        value: "",
+                        label: "No presets configured",
+                        disabled: true,
+                      },
+                    ]
+                  : presets.map((p) => ({
+                      value: p.name,
+                      label: p.name,
+                    }))
+              }
               value={preset}
+              onChange={onPresetChange}
               disabled={busy || presets.length === 0}
-              onChange={(e) => onPresetChange(e.target.value)}
+              label="Preset"
               className={cloneField}
-            >
-              {presets.length === 0 ? (
-                <option value="" disabled>
-                  No presets configured
-                </option>
-              ) : (
-                presets.map((p) => (
-                  <option key={p.name} value={p.name}>
-                    {p.name}
-                  </option>
-                ))
-              )}
-            </select>
+            />
           </label>
           <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
             <input

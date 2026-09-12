@@ -379,6 +379,12 @@ fn best_scored<P: PoolProvider>(app: &App) -> Option<String> {
     pool.first().map(|s| s.email.clone())
 }
 
+/// Best Codex account by the same rotation scoring clones use.
+/// Returns None when no Codex account is imported.
+pub(crate) fn best_codex_email(app: &App) -> Option<String> {
+    best_scored::<CodexPool>(app)
+}
+
 /// Resolve a clone request's account selection to a concrete account email.
 pub(crate) fn resolve_clone_account<P: PoolProvider>(
     app: &App,

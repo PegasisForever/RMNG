@@ -135,6 +135,12 @@ const CODEX_RESPONSES: &str = "https://chatgpt.com/backend-api/codex/responses";
 /// Reasoning effort for the GPT path. Measured at 3.5s per call on `gpt-5.6-luna`, well
 /// inside [`ASK_TIMEOUT`].
 const CODEX_EFFORT: &str = "medium";
+/// Fixed model for the ChatGPT path.
+const CODEX_MODEL: &str = "gpt-5.6-luna";
+/// Fixed model for the Gemini path.
+const GEMINI_MODEL: &str = "gemini-3.5-flash-lite";
+/// Thinking level for the Gemini path.
+const GEMINI_THINKING: &str = "minimal";
 
 /// A clone's answer. `Working` is deliberately absent: see the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2329,51 +2335,60 @@ struct Answer {
     reason: Option<String>,
 }
 
-/// What answers [`Verdict::Ask`]: one imported Codex account's credentials, resolved once per
-/// fleet pass because the access token in it has to be a fresh one.
+/// What answers [`Verdict::Ask`].
 ///
-/// No `Debug`: it holds a live access token, and a derived one would print it the first time
-/// anything logged a backend.
+/// No `Debug`: the Codex arm holds a live access token, and a derived one would print it
+/// the first time anything logged a backend.
 #[derive(Clone)]
-pub struct Backend {
-    token: String,
-    account_id: String,
-    model: String,
+pub enum Backend {
+    Codex { token: String, account_id: String },
+    Gemini { key: String },
 }
 
-/// Which imported Codex account pays, or the line that says why none.
+/// The account the Codex judge will bill, with its token refreshed if it was due.
 ///
-/// Both the fleet pass and the settings Test button ask this, and they have to give the same
-/// answer: "your account is gone" and "you have no accounts" are different problems.
-fn judge_account(app: &crate::app::App, want: &str) -> Result<String, String> {
-    crate::codex::judge_email(app, want).ok_or_else(|| match want.is_empty() {
-        true => "no Codex account is imported".to_string(),
-        false => format!("no imported Codex account for '{want}'"),
-    })
-}
-
-/// The account the judge will bill, with its token refreshed if it was due.
-///
-/// Called at most once per fleet pass, and only when some clone actually needs asking. A rig
-/// with no Codex account gets `None` plus a line saying so, which the caller logs once rather
-/// than once per clone per tick, and every undecided clone reads idle.
+/// Always the best imported Codex account by the same rotation scoring clones use.
+/// Called at most once per fleet pass, and only when some clone actually needs asking.
+/// A rig with no Codex account gets `None` plus a line saying so, which the caller logs
+/// once rather than once per clone per tick, and every undecided clone reads idle.
 pub async fn backend(app: &crate::app::App) -> (Option<Backend>, NoBackend, String) {
     let cfg = app.config();
-    let email = match judge_account(app, &cfg.judge.codex_email.unwrap_or_default()) {
-        Ok(email) => email,
-        Err(why) => return (None, NoBackend::Absent, why),
-    };
-    match crate::codex::fresh_access_token(app, &email).await {
-        Ok((acct, _)) => (
-            Some(Backend {
-                token: acct.access_token,
-                account_id: acct.account_id,
-                model: cfg.judge.codex_model,
-            }),
-            NoBackend::None,
-            String::new(),
-        ),
-        Err(e) => (None, NoBackend::Broken, format!("{email}: {e:#}")),
+    match cfg.judge.provider {
+        wire::JudgeProvider::Gemini => {
+            let key = cfg.judge.gemini_key.trim().to_string();
+            if key.is_empty() {
+                return (
+                    None,
+                    NoBackend::Absent,
+                    "no Gemini API key is set".to_string(),
+                );
+            }
+            (
+                Some(Backend::Gemini { key }),
+                NoBackend::None,
+                String::new(),
+            )
+        }
+        wire::JudgeProvider::Codex => {
+            let Some(email) = crate::pool::best_codex_email(app) else {
+                return (
+                    None,
+                    NoBackend::Absent,
+                    "no Codex account is imported".to_string(),
+                );
+            };
+            match crate::codex::fresh_access_token(app, &email).await {
+                Ok((acct, _)) => (
+                    Some(Backend::Codex {
+                        token: acct.access_token,
+                        account_id: acct.account_id,
+                    }),
+                    NoBackend::None,
+                    String::new(),
+                ),
+                Err(e) => (None, NoBackend::Broken, format!("{email}: {e:#}")),
+            }
+        }
     }
 }
 
@@ -2387,7 +2402,7 @@ pub async fn backend(app: &crate::app::App) -> (Option<Backend>, NoBackend, Stri
 pub enum NoBackend {
     /// A backend was built.
     None,
-    /// No Codex account is imported, or none matches `judge.codexEmail`.
+    /// No backend is set up, or its credential will not refresh.
     Absent,
     /// An account is configured and its token could not be refreshed.
     Broken,
@@ -2484,14 +2499,12 @@ async fn ask(
     backend: &Backend,
     view: &Value,
 ) -> Result<(Answer, Option<crate::stucklog::CallUsage>)> {
-    ask_codex(
-        http,
-        &backend.token,
-        &backend.account_id,
-        &backend.model,
-        view,
-    )
-    .await
+    match backend {
+        Backend::Codex { token, account_id } => {
+            ask_codex(http, token, account_id, CODEX_MODEL, view).await
+        }
+        Backend::Gemini { key } => ask_gemini(http, key, view).await,
+    }
 }
 
 /// Ask GPT over the Codex CLI's own endpoint, on an imported account's ChatGPT plan.
@@ -2542,6 +2555,68 @@ async fn ask_codex(
     }
     let (text, usage) = codex_answer_text(&text)?;
     Ok((parse_answer(&text), usage))
+}
+
+/// Ask Gemini with the stored API key.
+async fn ask_gemini(
+    http: &reqwest::Client,
+    key: &str,
+    view: &Value,
+) -> Result<(Answer, Option<crate::stucklog::CallUsage>)> {
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    );
+    let body = json!({
+        "systemInstruction": { "parts": [{ "text": SYSTEM }] },
+        "contents": [{ "parts": [{ "text": serde_json::to_string_pretty(view)? }] }],
+        "generationConfig": {
+            "thinkingConfig": { "thinkingLevel": GEMINI_THINKING },
+            "responseMimeType": "application/json",
+            "temperature": 0,
+        },
+    });
+    let resp = http
+        .post(url)
+        .timeout(ASK_TIMEOUT)
+        .header("x-goog-api-key", key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow::anyhow!(
+            "gemini {}: {}",
+            status.as_u16(),
+            snippet(&text)
+        ));
+    }
+    let v: Value = serde_json::from_str(&text)?;
+    let answer_text = v
+        .pointer("/candidates/0/content/parts")
+        .and_then(|p| p.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default();
+    let usage = v.get("usageMetadata").map(|u| crate::stucklog::CallUsage {
+        input_tokens: u
+            .get("promptTokenCount")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0),
+        output_tokens: u
+            .get("candidatesTokenCount")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0),
+        cached_input_tokens: u.get("cachedContentTokenCount").and_then(|n| n.as_u64()),
+        reasoning_output_tokens: u.get("thoughtsTokenCount").and_then(|n| n.as_u64()),
+    });
+    Ok((parse_answer(&answer_text), usage))
 }
 
 /// One line describing a failed call, reading the body rather than only its status.
@@ -2834,14 +2909,57 @@ fn degraded_state(view: &Value) -> (wire::MonitorState, String) {
 /// Asks the real question against a fixture view rather than pinging something cheaper, which
 /// is the point: one call exercises the account lookup, the token refresh, the endpoint and
 /// the model name together, and those are the four things that break.
-pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bool, String) {
-    let email = match judge_account(app, email) {
-        Ok(email) => email,
-        Err(why) => return (false, why),
+/// Does the judge path work end to end? Used by `POST /api/config/test`.
+///
+/// Asks the real question against a fixture view. `provider_override` and `key_override`
+/// carry unsaved draft values so "paste key, press Test" tests what is on screen.
+/// Empty means "use what is stored".
+pub async fn probe_judge(
+    app: &crate::app::App,
+    provider_override: &str,
+    key_override: &str,
+) -> (bool, String) {
+    let stored = app.config().judge;
+    let provider = if provider_override.is_empty() {
+        stored.provider
+    } else if provider_override.eq_ignore_ascii_case("gemini") {
+        wire::JudgeProvider::Gemini
+    } else {
+        wire::JudgeProvider::Codex
     };
-    let acct = match crate::codex::fresh_access_token(app, &email).await {
-        Ok((acct, _)) => acct,
-        Err(e) => return (false, format!("{email}: {e:#}")),
+    let key = if key_override.is_empty() {
+        stored.gemini_key
+    } else {
+        key_override.to_string()
+    };
+    let backend = match provider {
+        wire::JudgeProvider::Gemini => {
+            if key.trim().is_empty() {
+                return (false, "no Gemini API key is set".to_string());
+            }
+            Backend::Gemini { key }
+        }
+        wire::JudgeProvider::Codex => {
+            let Some(email) = crate::pool::best_codex_email(app) else {
+                return (false, "no Codex account is imported".to_string());
+            };
+            let acct = match crate::codex::fresh_access_token(app, &email).await {
+                Ok((acct, _)) => acct,
+                Err(e) => return (false, format!("{email}: {e:#}")),
+            };
+            Backend::Codex {
+                token: acct.access_token,
+                account_id: acct.account_id,
+            }
+        }
+    };
+    let label = match &backend {
+        Backend::Codex { .. } => CODEX_MODEL.to_string(),
+        Backend::Gemini { .. } => GEMINI_MODEL.to_string(),
+    };
+    let who = match &backend {
+        Backend::Codex { .. } => crate::pool::best_codex_email(app).unwrap_or_default(),
+        Backend::Gemini { .. } => "gemini key".to_string(),
     };
     let view = json!({
         "sessions": [{"status": "shell", "quiet_for_seconds": 40}],
@@ -2849,16 +2967,8 @@ pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bo
     });
     // This call is billed like any other, but it belongs to no session and so has no decision
     // line to ride. Its cost is reported to the operator who pressed the button instead.
-    match ask_codex(
-        &app.http,
-        &acct.access_token,
-        &acct.account_id,
-        model,
-        &view,
-    )
-    .await
-    {
-        Err(e) => (false, format!("{model} on {email}: {e:#}")),
+    match ask(&app.http, &backend, &view).await {
+        Err(e) => (false, format!("{label} on {who}: {e:#}")),
         Ok((a, usage)) => match a.will_progress {
             // The fixture describes a release build still running, so a judge that is working
             // says true. Anything else means the model answered but not the question.
@@ -2866,12 +2976,12 @@ pub async fn probe_codex(app: &crate::app::App, email: &str, model: &str) -> (bo
                 let cost = usage.map_or(String::new(), |u| {
                     format!(" ({} in / {} out)", u.input_tokens, u.output_tokens)
                 });
-                (true, format!("{model} answers on {email}{cost}"))
+                (true, format!("{label} answers on {who}{cost}"))
             }
             _ => (
                 false,
                 format!(
-                    "{model} on {email} gave an unusable answer: {}",
+                    "{label} on {who} gave an unusable answer: {}",
                     a.reason.unwrap_or_default()
                 ),
             ),
