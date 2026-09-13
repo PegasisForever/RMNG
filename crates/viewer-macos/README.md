@@ -73,3 +73,19 @@ Deliberately different from the GTK viewer, because the platform is:
 - **No FPS readout in the title bar.** The GTK viewer puts one in its `HeaderBar`; this uses the
   real NSWindow titlebar.
 - **Settings is a menu item (⌘,)** rather than a title-bar button.
+- **Each monitor gets a separate native window.** Monitor windows disable AppKit tabbing so
+  adding a monitor while another is fullscreen cannot fold it into an OS-level tab.
+
+## Window layout regression check
+
+On a logged-in macOS desktop, this check opens a fullscreen monitor window, adds a second
+using the real viewer window constructor, and verifies that they remain separate and the first
+stays fullscreen. It closes both test windows afterward and requires no server connection.
+
+```sh
+cargo run -p viewer-macos --example window-layout-check -- -AppleWindowTabbingMode fullscreen
+cargo run -p viewer-macos --example window-layout-check -- -AppleWindowTabbingMode always --windowed
+```
+
+The tab preference override applies only to the check process. Omit `--windowed` from the
+second command to also check fullscreen with the system's "always prefer tabs" policy.

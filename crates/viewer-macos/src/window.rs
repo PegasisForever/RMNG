@@ -22,7 +22,7 @@ use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationPresentationOptions, NSBackingStoreType, NSCursor, NSEvent,
     NSEventModifierFlags, NSResponder, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask,
+    NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
     MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -644,6 +644,10 @@ pub fn make_window_shell(mtm: MainThreadMarker, title: &str) -> Retained<NSWindo
         )
     };
     unsafe { window.setReleasedWhenClosed(false) };
+    // Each remote monitor needs its own window. AppKit's automatic tabbing otherwise
+    // folds newly added monitors into the existing fullscreen window as native tabs.
+    // Set this before ordering the window on screen, when AppKit decides how to group it.
+    window.setTabbingMode(NSWindowTabbingMode::Disallowed);
     window.setTitle(&NSString::from_str(title));
     window.setAcceptsMouseMovedEvents(true);
     install_window_delegate(mtm, &window);
