@@ -1730,7 +1730,7 @@ async fn config_put(
     // touched the pools — otherwise a plain settings save would eat a freshly imported
     // account that was never assigned to a pool yet.
     if touches_groups {
-        crate::clone_ops::sweep_ungrouped_accounts(&app)
+        crate::pool::sweep_ungrouped(&app)
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     }
@@ -2127,10 +2127,12 @@ async fn login_complete(State(app): State<App>, Json(req): Json<LoginCompleteReq
         // than pretending the sign-in did not happen.
         moved = match provider {
             crate::oauth::Provider::Claude => {
-                crate::claude::replace_account(&app, &replaces, &email).await
+                crate::pool::replace_account::<crate::pool::ClaudePool>(&app, &replaces, &email)
+                    .await
             }
             crate::oauth::Provider::Codex => {
-                crate::codex::replace_account(&app, &replaces, &email).await
+                crate::pool::replace_account::<crate::pool::CodexPool>(&app, &replaces, &email)
+                    .await
             }
         }
         .map_err(|e| {
@@ -2182,92 +2184,30 @@ async fn refresh_response(
     }
 }
 
-#[derive(Deserialize)]
-struct SwapReq {
-    host: String,
-    /// Account email (a pin — any imported account, even outside the clone's pool),
-    /// `auto` (rotate in scope), or legacy `group:<name>` (rebinds the pool).
-    account: String,
-    /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent keeps.
-    /// A `group:<name>` account implies the bind.
-    #[serde(default)]
-    group: Option<Option<String>>,
-}
-
 /// `POST /api/claude/swap` — change a clone's Claude account/pool. `account` is an
 /// email (pin), `auto` (rotate in the clone's pool, or fleet-wide when unbound), or legacy
 /// `group:<name>` (rebinds the pool). Binding to a pool enrolls the clone in rotation; a
 /// side with no pin and no provider members in scope runs with no token.
 async fn claude_swap(
     State(app): State<App>,
-    Json(req): Json<SwapReq>,
+    Json(req): Json<crate::pool::SwapRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let host = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .find(|h| h.id == req.host)
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("unknown host '{}'", req.host),
-            )
-        })?;
-    if !host.managed {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("'{}' is not a managed clone", host.id),
-        ));
+    swap_reply(crate::pool::swap_side::<crate::pool::ClaudePool>(&app, &req).await)
+}
+
+/// The finished swap as HTTP: the binding as JSON, or the pool's refusal mapped onto a
+/// status. A rejected request is the operator's to fix (400); an undelivered one means the
+/// account resolved and the clone would not take it, which is the clone's fault (502).
+fn swap_reply(
+    out: std::result::Result<crate::pool::SideBinding, crate::pool::SwapError>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    match out {
+        Ok(b) => Ok(Json(
+            json!({ "ok": true, "account": b.email, "group": b.group, "selection": b.selection }),
+        )),
+        Err(crate::pool::SwapError::Rejected(msg)) => Err((StatusCode::BAD_REQUEST, msg)),
+        Err(crate::pool::SwapError::Undelivered(msg)) => Err((StatusCode::BAD_GATEWAY, msg)),
     }
-    // A `group:<name>` account rebinds the whole clone (both sides draw from it
-    // afterwards); the selection is stored as `auto`. Explicit email/`none` overrides
-    // this side only — the clone-level group stays for the other side.
-    let (bound_group, claude_req, _) = crate::clone_ops::split_group_binding(
-        Some(req.account.clone()),
-        None,
-        host.group.clone(),
-        req.group.clone(),
-    );
-    crate::clone_ops::validate_group(&app.config(), bound_group.as_deref())
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let binding = crate::pool::assign_clone_side::<crate::pool::ClaudePool>(
-        &app,
-        None,
-        &host.id,
-        claude_req.as_deref(),
-        host.claude_account_email.as_deref(),
-        bound_group.as_deref(),
-        crate::pool::AssignStrictness::Strict,
-    )
-    .await
-    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
-    .ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "no Claude account can take this clone: none is imported, or every one \
-                     that could has a token that expired and cannot be refreshed"
-                .into(),
-        )
-    })?;
-    let (group, email, selection) = (binding.group, binding.email, binding.selection);
-    let (id, email_set, group_set, sel_set) = (
-        host.id.clone(),
-        email.clone(),
-        group.clone(),
-        selection.clone(),
-    );
-    app.store.mutate(|s| {
-        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-            h.claude_account_email = email_set;
-            h.claude_group = group_set;
-            h.claude_selection = Some(sel_set);
-            h.group = bound_group.clone();
-        }
-    });
-    Ok(Json(
-        json!({ "ok": true, "account": email, "group": group, "selection": selection }),
-    ))
 }
 
 /// A request naming a single imported account by email — the body for the delete endpoints.
@@ -2280,7 +2220,7 @@ struct AccountRef {
 /// is pinned to it (the message lists them); otherwise deletes the token and reassigns
 /// auto/group clones off it. Returns the ids of clones that were moved.
 async fn claude_delete(State(app): State<App>, Json(req): Json<AccountRef>) -> JsonResult {
-    let moved = crate::claude::delete_account(&app, req.account.trim())
+    let moved = crate::pool::delete_account::<crate::pool::ClaudePool>(&app, req.account.trim())
         .await
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(json!({ "ok": true, "moved": moved })))
@@ -2306,91 +2246,19 @@ async fn codex_refresh(State(app): State<App>) -> Json<serde_json::Value> {
     )
 }
 
-#[derive(Deserialize)]
-struct CodexSwapReq {
-    host: String,
-    /// Account email (a pin), `auto` (rotate in scope), or legacy `group:<name>`.
-    account: String,
-    /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent keeps.
-    /// A `group:<name>` account implies the bind.
-    #[serde(default)]
-    group: Option<Option<String>>,
-}
-
-/// `POST /api/codex/swap` — change a clone's Codex account/group.
+/// `POST /api/codex/swap` — change a clone's Codex account/pool. Same body and same rules
+/// as [`claude_swap`], on the other side of the clone.
 async fn codex_swap(
     State(app): State<App>,
-    Json(req): Json<CodexSwapReq>,
+    Json(req): Json<crate::pool::SwapRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let host = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .find(|h| h.id == req.host)
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("unknown host '{}'", req.host),
-            )
-        })?;
-    if !host.managed {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("'{}' is not a managed clone", host.id),
-        ));
-    }
-    let (bound_group, _, codex_req) = crate::clone_ops::split_group_binding(
-        None,
-        Some(req.account.clone()),
-        host.group.clone(),
-        req.group.clone(),
-    );
-    crate::clone_ops::validate_group(&app.config(), bound_group.as_deref())
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-    let binding = crate::pool::assign_clone_side::<crate::pool::CodexPool>(
-        &app,
-        None,
-        &host.id,
-        codex_req.as_deref(),
-        host.codex_account_email.as_deref(),
-        bound_group.as_deref(),
-        crate::pool::AssignStrictness::Strict,
-    )
-    .await
-    .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
-    .ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "no Codex account can take this clone: none is imported, or every one that \
-                 could has a token that expired and cannot be refreshed"
-                .into(),
-        )
-    })?;
-    let (group, email, selection) = (binding.group, binding.email, binding.selection);
-    let (id, email_set, group_set, sel_set) = (
-        host.id.clone(),
-        email.clone(),
-        group.clone(),
-        selection.clone(),
-    );
-    app.store.mutate(|s| {
-        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-            h.codex_account_email = email_set;
-            h.codex_group = group_set;
-            h.codex_selection = Some(sel_set);
-            h.group = bound_group.clone();
-        }
-    });
-    Ok(Json(
-        json!({ "ok": true, "account": email, "group": group, "selection": selection }),
-    ))
+    swap_reply(crate::pool::swap_side::<crate::pool::CodexPool>(&app, &req).await)
 }
 
 /// `POST /api/codex/delete` — remove an imported Codex account by email (the Codex twin of
 /// [`claude_delete`]). 400 if any clone is pinned to it; otherwise deletes + reassigns.
 async fn codex_delete(State(app): State<App>, Json(req): Json<AccountRef>) -> JsonResult {
-    let moved = crate::codex::delete_account(&app, req.account.trim())
+    let moved = crate::pool::delete_account::<crate::pool::CodexPool>(&app, req.account.trim())
         .await
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, e))?;
     Ok(Json(json!({ "ok": true, "moved": moved })))
@@ -2768,9 +2636,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        crate::clone_ops::sweep_ungrouped_accounts(&app)
-            .await
-            .unwrap();
+        crate::pool::sweep_ungrouped(&app).await.unwrap();
         assert!(app.claude.get_by_email("kept@x.com").is_some());
         assert!(app.claude.get_by_email("gone@x.com").is_none());
     }

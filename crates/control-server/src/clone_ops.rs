@@ -170,33 +170,6 @@ pub(crate) fn validate_group(cfg: &wire::AppConfig, group: Option<&str>) -> anyh
     Ok(())
 }
 
-/// Delete every imported account the merged pool list leaves unclaimed. An account in
-/// zero groups is removed (the group tree's rule) — the existing per-provider delete path
-/// settles clones onto surviving accounts, and refuses (Err) when a clone pins the account,
-/// which fails the save with that reason instead of stranding the pin.
-pub(crate) async fn sweep_ungrouped_accounts(app: &App) -> anyhow::Result<()> {
-    use std::collections::HashSet;
-    let claimed: HashSet<String> = app
-        .config()
-        .groups
-        .iter()
-        .flat_map(|g| g.accounts.iter().cloned())
-        .collect();
-    for email in app.claude.emails() {
-        if !claimed.contains(&email) {
-            tracing::info!("removing ungrouped Claude account {email} (claimed by no pool)");
-            crate::claude::delete_account(app, &email).await?;
-        }
-    }
-    for email in app.codex.emails() {
-        if !claimed.contains(&email) {
-            tracing::info!("removing ungrouped Codex account {email} (claimed by no pool)");
-            crate::codex::delete_account(app, &email).await?;
-        }
-    }
-    Ok(())
-}
-
 /// Publish `views` (all of `provider`) into `ControlState.claude_accounts`, replacing
 /// exactly this provider's existing rows and leaving every other provider's rows intact.
 /// `views` are sorted alphabetical; the combined list is then

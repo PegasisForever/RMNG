@@ -34,10 +34,10 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
 use wire::{CloneTokens, RmngClone};
 
 use crate::app::App;
+use crate::transcript::{self, ClaudeMessage, ClaudeRecord, CodexRecord, TokenField, Walk};
 
 /// How often to walk the log trees.
 ///
@@ -95,41 +95,11 @@ const MAX_PLAUSIBLE_TOKENS: u64 = 50_000_000;
 ///
 /// A file already read to its end costs one `metadata` call per tick and nothing else, so the
 /// cap is really a bound on syscalls, not on work. 8192 is four times the busiest real clone.
+///
+/// This is a bound on READING, not on walking. What keeps the walk itself finite is
+/// [`transcript::MAX_ENUM_FILES_PER_PROVIDER`], which has to be the larger of the two: picking
+/// the newest files means seeing all of them first.
 const MAX_SCAN_FILES_PER_PROVIDER: usize = 8192;
-
-/// Hard stop on how many paths one provider's walk will enumerate.
-///
-/// [`MAX_SCAN_FILES_PER_PROVIDER`] alone cannot be the walk's stopping point: choosing the newest
-/// files means seeing all of them first. This is the backstop that keeps "see all of them" finite
-/// for a clone that creates millions of `.jsonl` files, which it can, being root in its own
-/// sandbox. Paths past it are dropped with a warning.
-const MAX_ENUM_FILES_PER_PROVIDER: usize = 32_768;
-
-/// How far below `~/.claude/projects` a transcript can sit.
-///
-/// Claude writes three shapes, and a walk that reaches only the first two silently drops the
-/// third. Counted across the CT 105 and CT 106 fleets, with the depth each needs:
-///
-/// | Shape | Depth | Files |
-/// |---|---|---|
-/// | `<slug>/<session>.jsonl` | 1 | 796 |
-/// | `<slug>/<session>/subagents/agent-*.jsonl` | 3 | 5,553 |
-/// | `<slug>/<session>/subagents/workflows/<run>/agent-*.jsonl` | 5 | 2,564 |
-///
-/// The third is what a workflow's agents write, one directory per run. On the clone that
-/// surfaced it, `haoran-dev-270`, it was 624 of 1,038 transcripts and every one of the files
-/// being appended to at the time: the clone had an agent working in front of someone's eyes and
-/// read `idle`, because nothing it was writing was in range.
-///
-/// 5 covers all three exactly, with no headroom, which is deliberate. Depth is what keeps this
-/// walk inside the CLI's own tree instead of descending into whatever a clone parks under it, and
-/// a shape this misses is a visible bug rather than a silent wrong number. Breadth is bounded
-/// separately by [`MAX_ENUM_FILES_PER_PROVIDER`].
-const CLAUDE_WALK_DEPTH: usize = 5;
-
-/// How far below `~/.codex/sessions` a rollout can sit: `YYYY/MM/DD/rollout-*.jsonl`, three
-/// levels of date directory. Codex writes one file per session and nests nothing under it.
-const CODEX_WALK_DEPTH: usize = 3;
 
 /// How long one clone's filesystem walk may take before the pass abandons it.
 ///
@@ -265,46 +235,12 @@ impl Delta {
     }
 }
 
-// --- Claude transcript records -------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct ClaudeLine {
-    #[serde(default)]
-    timestamp: Option<String>,
-    /// The API request this line reports on. Present on a small minority of lines, and on none
-    /// of the subagent transcripts sampled — see [`response_key`].
-    #[serde(rename = "requestId", default)]
-    request_id: Option<String>,
-    #[serde(default)]
-    message: Option<ClaudeMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeMessage {
-    /// The API response id (`msg_…`). Every line carrying a `usage` block carries one, and all
-    /// the lines of one response share it, which is what makes it the counting key.
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    usage: Option<ClaudeUsageRec>,
-}
-
-/// A token count as it appears in a log.
-///
-/// `Option<u64>` rather than `#[serde(default)] u64` on purpose. These fields sit inside a
-/// nested struct, so serde failing on ONE of them fails the whole line, and the caller's
-/// `let Ok(rec) = … else { return }` then drops a real response silently. `null` — which
-/// `#[serde(default)]` does *not* accept for a bare `u64` — is a shape these CLIs really do
-/// emit. Being tolerant per field turns "lose the entire record" into "treat one field as
-/// absent".
-type TokenField = Option<u64>;
-
 /// A log-supplied token count, floored at 0 and rejected outright if implausible.
 ///
 /// See [`MAX_PLAUSIBLE_TOKENS`]: the totals are cumulative and persisted, so a single crafted
-/// or corrupt record would otherwise poison a clone's figure for good.
+/// or corrupt record would otherwise poison a clone's figure for good. The record type itself
+/// stays tolerant (see [`TokenField`]); plausibility is this module's question, because this
+/// module is the one that adds figures up and keeps them.
 fn token(v: TokenField) -> u64 {
     match v {
         Some(n) if n <= MAX_PLAUSIBLE_TOKENS => n,
@@ -312,67 +248,7 @@ fn token(v: TokenField) -> u64 {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct ClaudeUsageRec {
-    #[serde(default)]
-    input_tokens: TokenField,
-    #[serde(default)]
-    output_tokens: TokenField,
-    #[serde(default)]
-    cache_creation_input_tokens: TokenField,
-    // `cache_read_input_tokens` is deliberately NOT deserialized: it is excluded from the
-    // count, and naming it here would invite someone to add it in.
-}
-
-// --- Codex rollout records -----------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct CodexLine {
-    #[serde(default)]
-    timestamp: Option<String>,
-    #[serde(default)]
-    payload: Option<CodexPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexPayload {
-    #[serde(rename = "type", default)]
-    kind: Option<String>,
-    #[serde(default)]
-    info: Option<CodexInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodexInfo {
-    /// The per-turn delta. Deliberately used instead of the sibling `total_token_usage`,
-    /// which is cumulative *within the session* — summing that across events would
-    /// multiply-count every earlier turn.
-    #[serde(default)]
-    last_token_usage: Option<CodexUsageRec>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct CodexUsageRec {
-    #[serde(default)]
-    input_tokens: TokenField,
-    #[serde(default)]
-    cached_input_tokens: TokenField,
-    #[serde(default)]
-    output_tokens: TokenField,
-    #[serde(default)]
-    reasoning_output_tokens: TokenField,
-}
-
 // --- parsing --------------------------------------------------------------------------------
-
-/// Epoch ms from an RFC3339 timestamp.
-///
-/// Reuses the account pollers' parser, which already handles both the `Z` form these logs
-/// use and the `±HH:MM` form (a clone in a non-UTC zone). Sub-second precision is dropped —
-/// irrelevant here, where the coarsest consumer is a 5-minute activity window.
-fn parse_ts_ms(s: &str) -> Option<i64> {
-    crate::pool::parse_rfc3339_utc_secs(s).map(|secs| secs * 1000)
-}
 
 /// Whether a model id names the Fable family.
 ///
@@ -394,15 +270,19 @@ fn is_fable(model: &str) -> bool {
 /// of a response already counted. They are freshly written bytes with their own timestamps, so
 /// they are evidence the agent is working even when they add no tokens.
 fn fold_claude_line(line: &str, ledger: &mut Ledger, delta: &mut Delta) {
-    let Ok(rec) = serde_json::from_str::<ClaudeLine>(line) else {
+    let Some(rec) = ClaudeRecord::parse(line) else {
         return;
     };
-    let ClaudeLine {
+    let ClaudeRecord {
         timestamp,
         request_id,
         message,
+        ..
     } = rec;
-    let Some(ClaudeMessage { id, model, usage }) = message else {
+    let Some(ClaudeMessage {
+        id, model, usage, ..
+    }) = message
+    else {
         return;
     };
     let Some(usage) = usage else { return };
@@ -424,7 +304,7 @@ fn fold_claude_line(line: &str, ledger: &mut Ledger, delta: &mut Delta) {
     };
     delta.input_tokens = delta.input_tokens.saturating_add(new.input);
     delta.output_tokens = delta.output_tokens.saturating_add(new.output);
-    let ts = timestamp.as_deref().and_then(parse_ts_ms);
+    let ts = timestamp.as_deref().and_then(transcript::ts_ms);
     delta.observe(ts);
     if is_fable(&model) {
         delta.observe_fable(ts);
@@ -450,14 +330,13 @@ fn response_key(message_id: Option<String>, request_id: Option<String>) -> Optio
 /// No request-id dedup: each `token_count` event is appended exactly once, and the byte cursor
 /// already guarantees a given event is read at most once.
 fn fold_codex_line(line: &str, delta: &mut Delta) {
-    let Ok(rec) = serde_json::from_str::<CodexLine>(line) else {
+    let Some(rec) = CodexRecord::parse(line) else {
         return;
     };
-    let Some(payload) = rec.payload else { return };
-    if payload.kind.as_deref() != Some("token_count") {
+    if rec.payload_kind() != Some("token_count") {
         return;
     }
-    let Some(usage) = payload.info.and_then(|i| i.last_token_usage) else {
+    let Some(usage) = rec.last_token_usage() else {
         return;
     };
     // Cached input is the analogue of Claude's cache reads — excluded for the same reason.
@@ -470,7 +349,7 @@ fn fold_codex_line(line: &str, delta: &mut Delta) {
         .output_tokens
         .saturating_add(token(usage.output_tokens))
         .saturating_add(token(usage.reasoning_output_tokens));
-    delta.observe(rec.timestamp.as_deref().and_then(parse_ts_ms));
+    delta.observe(rec.timestamp.as_deref().and_then(transcript::ts_ms));
 }
 
 /// Which parser a path needs.
@@ -576,45 +455,6 @@ fn scan_file(
     })
 }
 
-/// Every `*.jsonl` under `root`, recursing to `depth` more levels, up to `budget` files.
-///
-/// Bounded in BOTH dimensions, because a clone's home is writable by someone with root inside
-/// the sandbox. Depth keeps the walk inside the two known tree shapes
-/// (`projects/<slug>/<uuid>.jsonl`, `sessions/YYYY/MM/DD/rollout-*.jsonl`) rather than wandering
-/// into a checkout of someone's dataset. Breadth matters just as much and is easier to miss:
-/// without it, a clone that creates millions of `.jsonl` files costs a `metadata` syscall each
-/// per tick and a permanent `PathBuf` in the cursor map. `budget` is decremented across the
-/// whole walk, siblings and subdirectories alike, so the total is capped rather than the total
-/// per directory.
-///
-/// Symlinks are followed only in the sense that `entry.file_type()` reports the LINK's type, so
-/// a symlinked directory is not descended into. Escaping the clone is separately impossible:
-/// `/proc/<pid>/root` resolves paths with chroot-like semantics, so an absolute link inside the
-/// clone lands inside the clone and `..` cannot climb past its root.
-fn collect_jsonl(root: &Path, depth: usize, budget: &mut usize, out: &mut Vec<PathBuf>) {
-    if *budget == 0 {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        if *budget == 0 {
-            return;
-        }
-        let path = entry.path();
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_dir() {
-            if depth > 0 {
-                collect_jsonl(&path, depth - 1, budget, out);
-            }
-        } else if ft.is_file() && path.extension().is_some_and(|e| e == "jsonl") {
-            *budget -= 1;
-            out.push(path);
-        }
-    }
-}
-
 /// One clone's log files: the ones to read this pass, and every one the walk saw.
 struct LogSet {
     /// What to read, at most [`MAX_SCAN_FILES_PER_PROVIDER`] per provider.
@@ -636,13 +476,13 @@ struct LogSet {
 fn log_files_capped(home: &Path, scan_cap: usize, enum_cap: usize) -> LogSet {
     let roots = [
         (
-            home.join(".claude/projects"),
-            CLAUDE_WALK_DEPTH,
+            home.join(transcript::CLAUDE_PROJECTS),
+            transcript::CLAUDE_WALK_DEPTH,
             Flavor::Claude,
         ),
         (
-            home.join(".codex/sessions"),
-            CODEX_WALK_DEPTH,
+            home.join(transcript::CODEX_SESSIONS),
+            transcript::CODEX_WALK_DEPTH,
             Flavor::Codex,
         ),
     ];
@@ -653,7 +493,9 @@ fn log_files_capped(home: &Path, scan_cap: usize, enum_cap: usize) -> LogSet {
     for (root, depth, flavor) in roots {
         let mut budget = enum_cap;
         let mut found = Vec::new();
-        collect_jsonl(&root, depth, &mut budget, &mut found);
+        transcript::walk_jsonl(&root, Walk::to_depth(depth), &mut budget, &mut |entry| {
+            found.push(entry.path())
+        });
         if budget == 0 {
             tracing::warn!(
                 target: "agentlog",
@@ -704,7 +546,7 @@ fn scan_clone(home: &Path, scan: &mut CloneScan) -> Delta {
         home,
         scan,
         MAX_SCAN_FILES_PER_PROVIDER,
-        MAX_ENUM_FILES_PER_PROVIDER,
+        transcript::MAX_ENUM_FILES_PER_PROVIDER,
     )
 }
 
@@ -1813,10 +1655,10 @@ mod tests {
     #[test]
     fn timestamps_parse_in_both_rfc3339_forms() {
         // Sub-second precision is dropped; the consumers work in minutes.
-        let z = parse_ts_ms("2026-07-29T13:10:25.021Z").expect("Z form parses");
+        let z = transcript::ts_ms("2026-07-29T13:10:25.021Z").expect("Z form parses");
         // The same instant written with an offset must land on the same millisecond.
-        assert_eq!(parse_ts_ms("2026-07-29T09:10:25.021-04:00"), Some(z));
+        assert_eq!(transcript::ts_ms("2026-07-29T09:10:25.021-04:00"), Some(z));
         assert_eq!(z % 1000, 0, "seconds resolution");
-        assert_eq!(parse_ts_ms("nonsense"), None);
+        assert_eq!(transcript::ts_ms("nonsense"), None);
     }
 }

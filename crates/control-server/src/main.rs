@@ -42,6 +42,7 @@ mod stuck;
 mod stucklog;
 mod termplane;
 mod token_unmigrate;
+mod transcript;
 mod update;
 mod web;
 mod zfs;

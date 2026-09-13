@@ -353,7 +353,7 @@ impl OpHandle {
     }
 }
 
-/// Append to an operation's progress log, capped. Shared with [`crate::jobs::run_update`],
+/// Append to an operation's progress log, capped. Shared with `jobs::run_update`,
 /// whose pull callback writes into the op directly (it borrows `(app, op_id)` rather than a
 /// progress closure, to keep the borrow checker out of the way), and with
 /// [`crate::pool`], which logs assignment delivery into the create/fork op it runs under.

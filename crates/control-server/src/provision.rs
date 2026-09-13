@@ -1054,8 +1054,7 @@ pub async fn rebase_clone(
 /// start with the fleet, not during the window). Returns the copied bytes for the report.
 ///
 /// Account token re-push is NOT done here: stage 3 reads the stored selections and calls
-/// `crate::claude::push_account_to_clone` / `crate::codex::push_account_to_clone` after
-/// the fleet starts (those need running clones).
+/// [`crate::pool::push_both_sides`] after the fleet starts (it needs running clones).
 #[allow(clippy::too_many_arguments)]
 pub async fn migrate_one(
     app: &App,

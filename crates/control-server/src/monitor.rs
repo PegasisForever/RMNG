@@ -3,8 +3,16 @@
 //! Docker determines whether a managed container is running; [`crate::stuck`] decides whether
 //! a running one is `working` or `idle`, by reading Claude Code's own session registry and
 //! agent hooks and, for the cases those cannot settle, asking a cheap model one question.
+//!
+//! The poller is two halves. [`FleetPoll::tick`] owns the tick's state and the fixed order it
+//! folds readings in — which is where every incident recorded in this file happened — and
+//! reaches Docker, the kernel and the judge only through [`FleetProbe`]. [`LiveProbe`] is that
+//! interface's production implementation and the test module holds a scripted one, so a sequence
+//! of ticks is an ordinary unit test. Everything else here is the volatile buses a tick
+//! publishes on.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, Instant};
 
@@ -41,10 +49,6 @@ impl StatsBus {
     /// The latest published map (JSON) plus a live receiver for a new `/events` subscriber.
     pub fn subscribe(&self) -> (String, broadcast::Receiver<String>) {
         (self.latest.read().unwrap().1.clone(), self.tx.subscribe())
-    }
-
-    fn latest_map(&self) -> HashMap<String, ContainerStats> {
-        self.latest.read().unwrap().0.clone()
     }
 
     /// Broadcast only a logically changed map, so an idle fleet does not wake SSE clients.
@@ -195,8 +199,9 @@ impl ActivityBus {
     }
 }
 
-/// One clone the daemon answered for this tick: id, running, its stats sample, and its IP
-/// (the outer `Option` is "did we look", the inner one is "does it have one").
+/// One clone Docker actually answered for this tick: id, running, the reading its raw sample
+/// rated to, and its IP. A [`Probe`] whose `running` is `None` never becomes one of these, which
+/// is what leaves an unreachable clone's stored state untouched.
 type SettledProbe = (String, bool, Option<ContainerStats>, Option<Option<String>>);
 
 #[derive(Clone, Copy)]
@@ -230,7 +235,10 @@ fn cpu_pct(previous: &mut Option<CpuSample>, usage_usec: u64, now: Instant) -> O
 
 /// One CT 105-wide CPU/RAM/disk sample. Every cgroup input is read through PID 1's root so the
 /// result includes the Docker daemon and other LXC processes, not merely managed clones.
-async fn sample_lxc(previous_cpu: &mut Option<CpuSample>) -> Option<LxcStats> {
+///
+/// Raw counters, not a rate: [`FleetPoll::rate_lxc`] turns the CPU counter into a percentage on
+/// the tick's own clock, so the CT gauge and every clone row are rated against one instant.
+async fn sample_lxc() -> Option<LxcUsage> {
     let (cpu, memory, disk) = tokio::join!(
         tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::lxc_cpu_usage_usec()),
         tokio::time::timeout(CGROUP_FETCH_TIMEOUT, crate::cgroup::lxc_memory_usage()),
@@ -267,8 +275,8 @@ async fn sample_lxc(previous_cpu: &mut Option<CpuSample>) -> Option<LxcStats> {
         }
     };
 
-    Some(LxcStats {
-        cpu_pct: cpu_pct(previous_cpu, cpu, Instant::now()),
+    Some(LxcUsage {
+        usage_usec: cpu,
         mem_used: memory.used,
         mem_limit: memory.limit,
         disk_used,
@@ -279,13 +287,10 @@ async fn sample_lxc(previous_cpu: &mut Option<CpuSample>) -> Option<LxcStats> {
 /// both come from the clone's own cgroup through the inspect's PID, which is also the sole source
 /// for the persisted IP — avoiding a clone-recreate race between separate inspections.
 ///
-/// `previous_cpu` carries this clone's prior CPU counter across ticks, so the first sample after a
-/// clone appears yields no CPU reading (the CT-wide gauge behaves the same way).
-async fn sample_clone(
-    app: &App,
-    host: &RmngClone,
-    previous_cpu: &mut Option<CpuSample>,
-) -> (Option<ContainerStats>, Option<Option<String>>) {
+/// Raw counters, like [`sample_lxc`]. The clone's prior counter lives on [`FleetPoll`], one side
+/// of the probe seam away, so the first sample after a clone appears yields no CPU reading (the
+/// CT-wide gauge behaves the same way) and a restart rates from its fresh zero.
+async fn sample_clone(app: &App, host: &RmngClone) -> (Option<CloneUsage>, Option<Option<String>>) {
     if !host.managed {
         return (None, None);
     }
@@ -327,13 +332,10 @@ async fn sample_clone(
             return (None, ip);
         }
     };
-    let Some(cpu_pct) = cpu_pct(previous_cpu, cpu, Instant::now()) else {
-        return (None, ip);
-    };
 
     (
-        Some(ContainerStats {
-            cpu_pct,
+        Some(CloneUsage {
+            usage_usec: cpu,
             mem_used: memory.used,
             mem_limit: memory.limit,
         }),
@@ -555,33 +557,83 @@ fn should_flag_unread(
     true
 }
 
-async fn poll_once(
-    app: &App,
-    previous_lxc_cpu: &mut Option<CpuSample>,
-    previous_clone_cpu: &mut HashMap<String, CpuSample>,
-    pending_state: &mut HashMap<String, (MonitorState, Instant)>,
-    blinded: &mut HashMap<String, MonitorState>,
-) {
-    let hosts: Vec<RmngClone> = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .filter(|host| host.managed && !host.archived)
-        .collect();
-    if hosts.is_empty() {
-        let lxc_stats = sample_lxc(previous_lxc_cpu).await;
-        previous_clone_cpu.clear();
-        app.stats.publish(&HashMap::new());
-        app.lxc_stats.publish(&lxc_stats);
-        return;
-    }
+/// One clone's cgroup reading for one tick, exactly as the kernel handed it over.
+///
+/// Raw counters rather than a rate: `usage_usec` is cumulative, so turning it into a percentage
+/// needs the previous tick's sample. That sample belongs to [`FleetPoll`], not to the probe, which
+/// is what puts the counter-reset rule on the testable side of [`FleetProbe`] — a container
+/// restart is a thing a test can script.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CloneUsage {
+    /// Cumulative CPU time for this clone's cgroup, in microseconds.
+    pub usage_usec: u64,
+    pub mem_used: u64,
+    pub mem_limit: u64,
+}
 
-    // Each probe owns its clone's prior CPU counter for the duration of the tick and hands the
-    // updated one back, so the concurrent futures need no shared lock over the map.
-    let probes = futures::future::join_all(hosts.iter().map(|host| {
-        let mut cpu_sample = previous_clone_cpu.get(&host.id).copied();
-        async move {
+/// The CT 105-wide reading for one tick, raw for the same reason [`CloneUsage`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LxcUsage {
+    pub usage_usec: u64,
+    pub mem_used: u64,
+    pub mem_limit: u64,
+    pub disk_used: Option<u64>,
+}
+
+/// One clone's reading for one tick, as the probes found it.
+#[derive(Debug, Clone)]
+pub(crate) struct Probe {
+    pub id: String,
+    /// What Docker said about the container. `None` is "Docker did not answer" — a daemon
+    /// hiccup or a timeout — and is emphatically NOT `Some(false)`: an unavailable daemon
+    /// leaves the lifecycle unchanged, and only a successful liveness response may write
+    /// `offline`.
+    pub running: Option<bool>,
+    pub usage: Option<CloneUsage>,
+    /// The outer `Option` is "did we look", the inner one is "does it have one".
+    pub ip: Option<Option<String>>,
+}
+
+/// Everything one sweep of the fleet found: a reading per clone plus the CT-wide sample.
+pub(crate) struct FleetReading {
+    pub clones: Vec<Probe>,
+    pub lxc: Option<LxcUsage>,
+}
+
+/// The two things a tick cannot do in a test: ask Docker and the kernel what the fleet looks
+/// like, and ask [`crate::stuck`] whether a running clone is working.
+///
+/// Everything else a tick does is arithmetic over what comes back through here — what a silent
+/// daemon means, what an archive completing mid-flight means, the sub-clone lift, the debounce,
+/// the outage replay — so scripting this interface makes a sequence of ticks an ordinary unit
+/// test. [`LiveProbe`] is the production implementation and the test module holds a scripted
+/// one; two implementations, so the seam is real.
+///
+/// Declared as `Sync` with explicit `Send` futures rather than as plain `async fn`s because the
+/// poller runs under `tokio::spawn`: an `async fn` in a trait promises nothing about `Send`, and
+/// the spawn in `main` would stop compiling.
+pub(crate) trait FleetProbe: Sync {
+    /// One concurrent sweep: Docker liveness, the cgroup sample and the bridge IP for every
+    /// host, plus the CT-wide sample. The concurrency lives in here rather than in the tick, so
+    /// the tick reads as the fixed sequence it is.
+    fn probe(&self, app: &App, hosts: &[RmngClone]) -> impl Future<Output = FleetReading> + Send;
+
+    /// Working-vs-idle for the clones Docker said are up. One call for the whole fleet: deciding
+    /// this reads each clone's files and may ask a model, so it happens once, concurrently,
+    /// rather than inline per clone.
+    fn resolve(
+        &self,
+        app: &App,
+        ids: Vec<String>,
+    ) -> impl Future<Output = HashMap<String, MonitorState>> + Send;
+}
+
+/// The production implementation: Docker, cgroup-v2 and the real judge.
+pub(crate) struct LiveProbe;
+
+impl FleetProbe for LiveProbe {
+    async fn probe(&self, app: &App, hosts: &[RmngClone]) -> FleetReading {
+        let clones = futures::future::join_all(hosts.iter().map(|host| async move {
             // An unavailable Docker daemon leaves the lifecycle unchanged; it is not proof that
             // the container stopped. Only a successful liveness response may write `offline`.
             let running =
@@ -596,10 +648,8 @@ async fn poll_once(
                         None
                     }
                 };
-            let (stats, ip) = if running == Some(true) {
-                match tokio::time::timeout(FETCH_TIMEOUT, sample_clone(app, host, &mut cpu_sample))
-                    .await
-                {
+            let (usage, ip) = if running == Some(true) {
+                match tokio::time::timeout(FETCH_TIMEOUT, sample_clone(app, host)).await {
                     Ok(sample) => sample,
                     Err(_) => {
                         tracing::debug!(host = %host.id, "clone resource sample timed out");
@@ -607,122 +657,230 @@ async fn poll_once(
                     }
                 }
             } else if running == Some(false) {
-                // A stopped container's counter is gone; drop the sample so a later restart rates
-                // from its fresh zero rather than against a pre-stop total.
-                cpu_sample = None;
+                // A stopped container has no bridge IP. Saying so is a reading, unlike the
+                // silence above it.
                 (None, Some(None))
             } else {
                 (None, None)
             };
-            (host.id.clone(), running, stats, ip, cpu_sample)
-        }
-    }));
-    let (lxc_stats, probes) = tokio::join!(sample_lxc(previous_lxc_cpu), probes);
-    let prev_stats = app.stats.latest_map();
-
-    let mut next: HashMap<String, MonitorState> = HashMap::with_capacity(probes.len());
-    let mut stats_map = HashMap::new();
-    let mut ip_updates: HashMap<String, Option<String>> = HashMap::new();
-    // Clones whose liveness Docker actually answered for. An unreachable daemon leaves a
-    // clone out entirely, which is what keeps its stored state untouched.
-    let mut settled: Vec<SettledProbe> = Vec::with_capacity(probes.len());
-    for (id, running, stats, ip, cpu_sample) in probes {
-        match cpu_sample {
-            Some(sample) => {
-                previous_clone_cpu.insert(id.clone(), sample);
+            Probe {
+                id: host.id.clone(),
+                running,
+                usage,
+                ip,
             }
-            None => {
-                previous_clone_cpu.remove(&id);
-            }
-        }
-        let Some(running) = running else {
-            continue;
-        };
-        settled.push((id, running, stats, ip));
+        }));
+        let (lxc, clones) = tokio::join!(sample_lxc(), clones);
+        FleetReading { clones, lxc }
     }
 
-    // Deciding working-vs-stuck reads each clone's files and may ask a model, so it happens
-    // once for the whole fleet, concurrently, rather than inline per clone.
-    let states = crate::stuck::resolve_fleet(
-        app,
-        settled
-            .iter()
-            .filter(|(_, up, _, _)| *up)
-            .map(|(id, ..)| id.clone())
-            .collect(),
-    )
-    .await;
+    async fn resolve(&self, app: &App, ids: Vec<String>) -> HashMap<String, MonitorState> {
+        crate::stuck::resolve_fleet(app, ids).await
+    }
+}
 
-    for (id, running, stats, ip) in settled {
-        let state = if running {
-            states.get(&id).copied().unwrap_or(MonitorState::Idle)
-        } else {
-            MonitorState::Offline
-        };
-        if let Some(stats) = pick_stat(stats, state, prev_stats.get(&id)) {
-            stats_map.insert(id.clone(), stats);
+/// What one tick decided: what to publish, and what to write onto each clone's row.
+///
+/// Deciding and writing are deliberately two steps. Everything in here is settled by arithmetic
+/// over [`FleetProbe`] answers, which is what a test can hold; [`Self::apply`] is the single
+/// place the monitor touches the store.
+pub(crate) struct FleetUpdate {
+    /// The state each clone settled on this tick, after the sub-clone lift and the debounce.
+    /// A clone Docker did not answer for is ABSENT, which is what leaves its stored reading
+    /// alone — and a clone archived while the probes were in flight is absent too.
+    pub states: HashMap<String, MonitorState>,
+    /// The bridge IP read for each clone this tick looked at.
+    pub ips: HashMap<String, Option<String>>,
+    /// The unread badge this tick decides: `true` raises it, `false` clears it, absent leaves it
+    /// where it is. Empty whenever [`Self::changed`] is false — see the gate in
+    /// [`FleetPoll::tick`].
+    pub unread: HashMap<String, bool>,
+    /// Whether any of the above differs from what is stored. False means the whole write is
+    /// skipped, so an idle fleet never rewrites `state.json`.
+    pub changed: bool,
+    /// The per-clone CPU/RAM map to publish, already pruned to the live fleet.
+    pub stats: HashMap<String, ContainerStats>,
+    /// The CT 105-wide sample to publish; `None` explicitly clears an unavailable reading.
+    pub lxc: Option<LxcStats>,
+    /// The live managed fleet as re-read AFTER the probes returned — the rows the chat
+    /// listeners are spawned against.
+    pub active: Vec<RmngClone>,
+}
+
+impl FleetUpdate {
+    /// Write this tick's decision. The only place the monitor mutates the store.
+    fn apply(&self, app: &App) {
+        if !self.changed {
+            return;
         }
-        if let Some(ip) = ip {
-            ip_updates.insert(id.clone(), ip);
+        app.store.mutate(|state| {
+            for host in &mut state.hosts {
+                // Checked here as well as in the tick's second filter: an archive can also
+                // complete between that read and this write.
+                if host.archived || !host.managed {
+                    continue;
+                }
+                if let Some(&monitor_state) = self.states.get(&host.id) {
+                    if let Some(&unread) = self.unread.get(&host.id) {
+                        host.unread = unread;
+                    }
+                    host.monitor_state = Some(monitor_state);
+                    // The wire says `idle` for an unreachable judge, which is what every client
+                    // showed before this existed; this is what lets a client that knows better
+                    // say "no reading" instead. See `wire::MonitorState`.
+                    host.activity_unknown = monitor_state == MonitorState::Unknown;
+                }
+                if let Some(ip) = self.ips.get(&host.id) {
+                    host.local_ip = ip.clone();
+                }
+            }
+        });
+    }
+}
+
+/// The monitor tick, and everything it has to remember between ticks.
+///
+/// These five maps used to live as `&mut` arguments owned by the poll loop, which meant nothing
+/// could be run tick-after-tick without rebuilding all of them — and the tick's ORDER, which is
+/// where every incident in this file happened, was the one part with no test at all. They are
+/// fields now, so a test constructs one poll and drives it.
+pub(crate) struct FleetPoll {
+    previous_lxc_cpu: Option<CpuSample>,
+    /// Each clone's last CPU counter, so a rate can be taken against it. Bounded to the live
+    /// fleet every tick, so archived and deleted clones cannot accumulate here across the life
+    /// of a long-running server.
+    previous_clone_cpu: HashMap<String, CpuSample>,
+    /// Slides into `idle` that are waiting out [`DEBOUNCE`], and when each started.
+    pending_state: HashMap<String, (MonitorState, Instant)>,
+    /// What each clone read as before an outage blinded it, so a stop that happened while the
+    /// judge was down still surfaces once it is back. See [`replay_baseline`].
+    blinded: HashMap<String, MonitorState>,
+    /// The stats map this poll produced last tick — what [`pick_stat`] carries forward across a
+    /// transient sampling gap. Kept here rather than read back off [`StatsBus`]: the bus is a
+    /// broadcast, not the tick's memory, and a poll that owns its own previous map is one a test
+    /// can run without publishing anything.
+    last_stats: HashMap<String, ContainerStats>,
+}
+
+impl FleetPoll {
+    pub(crate) fn new() -> Self {
+        Self {
+            previous_lxc_cpu: None,
+            previous_clone_cpu: HashMap::new(),
+            pending_state: HashMap::new(),
+            blinded: HashMap::new(),
+            last_stats: HashMap::new(),
         }
-        next.insert(id, state);
     }
 
-    // An archive operation may complete while Docker and cgroup calls are in flight. Filter a
-    // second time so its intentional stop cannot race into lifecycle, stats, or chat updates.
-    let active_clones: Vec<RmngClone> = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .filter(|host| host.managed && !host.archived)
-        .collect();
-    let active_ids: HashSet<String> = active_clones.iter().map(|host| host.id.clone()).collect();
-    next.retain(|id, _| active_ids.contains(id));
-    lift_sub_clone_activity(&mut next, &active_clones);
-    // Last of all, so a change that reverses inside a minute is never shown. See [`debounce`].
-    debounce(&mut next, &active_clones, pending_state, Instant::now());
-    stats_map.retain(|id, _| active_ids.contains(id));
-    ip_updates.retain(|id, _| active_ids.contains(id));
-    // Bound the CPU-sample map to the live fleet, so archived and deleted clones cannot
-    // accumulate in it across the life of a long-running server.
-    previous_clone_cpu.retain(|id, _| active_ids.contains(id));
-    blinded.retain(|id, _| active_ids.contains(id));
-    app.views.retain(&active_ids);
-    app.activity.retain(&active_ids);
+    /// One tick: probes in, the decided update out. Pure given its probes.
+    ///
+    /// The order below is load-bearing, and the reason for each step sits on the step. `now` is
+    /// the tick's single clock — every CPU rate and the debounce read it — so one tick rates the
+    /// whole fleet against one instant instead of against however long each probe happened to
+    /// take. Nothing is lost over a long run: this tick's `now` is also the start of the next
+    /// tick's interval.
+    pub(crate) async fn tick(
+        &mut self,
+        app: &App,
+        probe: &impl FleetProbe,
+        now: Instant,
+    ) -> FleetUpdate {
+        let hosts: Vec<RmngClone> = app
+            .store
+            .get()
+            .hosts
+            .into_iter()
+            .filter(|host| host.managed && !host.archived)
+            .collect();
 
-    // Snapshot the two inputs to the unread decision (last-viewed + last-token-activity) before
-    // entering `store.mutate`, so we neither hold the view/token locks across the state mutation
-    // nor re-lock them per host inside the closure.
-    let unread_ctx: HashMap<String, (Option<i64>, Option<i64>)> = active_clones
-        .iter()
-        .map(|host| {
-            (
-                host.id.clone(),
-                (
-                    app.views.last_viewed(&host.id),
-                    app.activity.last_active_at(&host.id),
-                ),
-            )
-        })
-        .collect();
+        let FleetReading { clones, lxc } = probe.probe(app, &hosts).await;
+        let lxc = self.rate_lxc(lxc, now);
 
-    app.stats.publish(&stats_map);
-    app.lxc_stats.publish(&lxc_stats);
-
-    for host in &active_clones {
-        if next
-            .get(&host.id)
-            .is_some_and(|state| *state != MonitorState::Offline)
+        // Clones whose liveness Docker actually answered for. An unreachable daemon leaves a
+        // clone out entirely, which is what keeps its stored state untouched.
+        let mut settled: Vec<SettledProbe> = Vec::with_capacity(clones.len());
+        for Probe {
+            id,
+            running,
+            usage,
+            ip,
+        } in clones
         {
-            crate::chat::ensure_autonomous_listener(app, host);
+            let stats = match (running, usage) {
+                // A stopped container's counter is gone; drop the sample so a later restart
+                // rates from its fresh zero rather than against a pre-stop total.
+                (Some(false), _) => {
+                    self.previous_clone_cpu.remove(&id);
+                    None
+                }
+                (_, Some(usage)) => self.rate(&id, usage, now),
+                (_, None) => None,
+            };
+            let Some(running) = running else {
+                continue;
+            };
+            settled.push((id, running, stats, ip));
         }
-    }
 
-    let changed = app.store.get().hosts.iter().any(|host| {
-        !host.archived
-            && host.managed
-            && (next.get(&host.id).is_some_and(|state| Some(*state) != host.monitor_state)
+        // Only clones Docker says are UP are judged: a stopped one is `offline` whatever its
+        // files say, and one we could not reach is not asked about at all.
+        let states = probe
+            .resolve(
+                app,
+                settled
+                    .iter()
+                    .filter(|(_, up, _, _)| *up)
+                    .map(|(id, ..)| id.clone())
+                    .collect(),
+            )
+            .await;
+
+        let mut next: HashMap<String, MonitorState> = HashMap::with_capacity(settled.len());
+        let mut stats_map = HashMap::new();
+        let mut ips: HashMap<String, Option<String>> = HashMap::new();
+        for (id, running, stats, ip) in settled {
+            let state = if running {
+                states.get(&id).copied().unwrap_or(MonitorState::Idle)
+            } else {
+                MonitorState::Offline
+            };
+            if let Some(stats) = pick_stat(stats, state, self.last_stats.get(&id)) {
+                stats_map.insert(id.clone(), stats);
+            }
+            if let Some(ip) = ip {
+                ips.insert(id.clone(), ip);
+            }
+            next.insert(id, state);
+        }
+
+        // An archive operation may complete while Docker and cgroup calls are in flight. Read
+        // the fleet a second time so its intentional stop cannot race into lifecycle, stats, or
+        // chat updates.
+        let snapshot = app.store.get();
+        let selected = snapshot.selected;
+        let active: Vec<RmngClone> = snapshot
+            .hosts
+            .into_iter()
+            .filter(|host| host.managed && !host.archived)
+            .collect();
+        let active_ids: HashSet<String> = active.iter().map(|host| host.id.clone()).collect();
+        next.retain(|id, _| active_ids.contains(id));
+        lift_sub_clone_activity(&mut next, &active);
+        // Last of all, so a change that reverses inside a minute is never shown. See [`debounce`].
+        debounce(&mut next, &active, &mut self.pending_state, now);
+        stats_map.retain(|id, _| active_ids.contains(id));
+        ips.retain(|id, _| active_ids.contains(id));
+        // Bound every per-clone map to the live fleet, so archived and deleted clones cannot
+        // accumulate in them across the life of a long-running server.
+        self.previous_clone_cpu
+            .retain(|id, _| active_ids.contains(id));
+        self.blinded.retain(|id, _| active_ids.contains(id));
+        app.views.retain(&active_ids);
+        app.activity.retain(&active_ids);
+
+        let changed = active.iter().any(|host| {
+            next.get(&host.id).is_some_and(|state| Some(*state) != host.monitor_state)
                 // `activity_unknown` is derived from the same reading, but it does NOT move
                 // with `monitor_state`: `Unknown` is stored as itself and serialized as `idle`,
                 // so a state.json written during an outage reloads as `Idle` + the flag set.
@@ -731,44 +889,106 @@ async fn poll_once(
                 // "no reading" against a judge that is answering fine, persisted, and
                 // surviving restarts until something else about a clone happens to change.
                 || next.get(&host.id).is_some_and(|s| flag_is_stale(*s, host))
-                || ip_updates.get(&host.id).is_some_and(|ip| *ip != host.local_ip))
-    });
-    if !changed {
-        return;
-    }
-    app.store.mutate(|state| {
-        let selected = state.selected.clone();
-        for host in &mut state.hosts {
-            if host.archived || !host.managed {
-                continue;
-            }
-            if let Some(&monitor_state) = next.get(&host.id) {
-                // What this clone last read as before the judge went dark. While a clone sits
-                // at `unknown` its stored state is no longer `working`, so the plain transition
-                // test below would never fire and a clone that really did stop during an
-                // outage would be swallowed silently. Remembered here, spent on the way out.
-                let before = replay_baseline(blinded, &host.id, host.monitor_state, monitor_state);
-                if before == Some(MonitorState::Working) && monitor_state != MonitorState::Working {
-                    let (last_viewed, last_token) =
-                        unread_ctx.get(&host.id).copied().unwrap_or((None, None));
+                || ips.get(&host.id).is_some_and(|ip| *ip != host.local_ip)
+        });
+
+        // The unread decision, and the replay bookkeeping behind it, run only when something is
+        // actually going to be written — the same gate they sat behind when they lived inside
+        // `store.mutate`. A tick that changes nothing cannot be the tick a held stop comes out
+        // on: a held stop means the stored state is `unknown`, and any real reading out of
+        // `unknown` is itself a change.
+        //
+        // Both inputs to the decision (last-viewed and last-token-activity) are read here,
+        // outside the store mutation, so neither of their locks is held across it and neither is
+        // re-locked per host inside it.
+        let mut unread = HashMap::new();
+        if changed {
+            for host in &active {
+                let Some(&state) = next.get(&host.id) else {
+                    continue;
+                };
+                // What this clone last read as before the judge went dark. While a clone sits at
+                // `unknown` its stored state is no longer `working`, so the plain transition
+                // test below would never fire and a clone that really did stop during an outage
+                // would be swallowed silently. Remembered on the way in, spent here.
+                let before =
+                    replay_baseline(&mut self.blinded, &host.id, host.monitor_state, state);
+                if before == Some(MonitorState::Working) && state != MonitorState::Working {
                     let is_selected = selected.as_deref() == Some(host.id.as_str());
-                    if should_flag_unread(monitor_state, is_selected, last_viewed, last_token) {
-                        host.unread = true;
+                    if should_flag_unread(
+                        state,
+                        is_selected,
+                        app.views.last_viewed(&host.id),
+                        app.activity.last_active_at(&host.id),
+                    ) {
+                        unread.insert(host.id.clone(), true);
                     }
-                } else if monitor_state == MonitorState::Working {
-                    host.unread = false;
+                } else if state == MonitorState::Working {
+                    unread.insert(host.id.clone(), false);
                 }
-                host.monitor_state = Some(monitor_state);
-                // The wire says `idle` for an unreachable judge, which is what every client
-                // showed before this existed; this is what lets a client that knows better say
-                // "no reading" instead. See `wire::MonitorState`.
-                host.activity_unknown = monitor_state == MonitorState::Unknown;
-            }
-            if let Some(ip) = ip_updates.get(&host.id) {
-                host.local_ip = ip.clone();
             }
         }
-    });
+
+        self.last_stats = stats_map.clone();
+        FleetUpdate {
+            states: next,
+            ips,
+            unread,
+            changed,
+            stats: stats_map,
+            lxc,
+            active,
+        }
+    }
+
+    /// Turn one clone's raw counter into a publishable reading, against its previous sample.
+    fn rate(&mut self, id: &str, usage: CloneUsage, now: Instant) -> Option<ContainerStats> {
+        let mut previous = self.previous_clone_cpu.get(id).copied();
+        let pct = cpu_pct(&mut previous, usage.usage_usec, now);
+        // `cpu_pct` leaves this tick's sample behind whether or not it could rate it, which is
+        // what lets the tick after a counter reset rate from the fresh zero.
+        if let Some(sample) = previous {
+            self.previous_clone_cpu.insert(id.to_string(), sample);
+        }
+        Some(ContainerStats {
+            cpu_pct: pct?,
+            mem_used: usage.mem_used,
+            mem_limit: usage.mem_limit,
+        })
+    }
+
+    /// The same conversion for the CT-wide gauge, so a clone reading 50% and the CT reading 50%
+    /// mean the same eight busy cores.
+    fn rate_lxc(&mut self, usage: Option<LxcUsage>, now: Instant) -> Option<LxcStats> {
+        let usage = usage?;
+        Some(LxcStats {
+            cpu_pct: cpu_pct(&mut self.previous_lxc_cpu, usage.usage_usec, now),
+            mem_used: usage.mem_used,
+            mem_limit: usage.mem_limit,
+            disk_used: usage.disk_used,
+        })
+    }
+}
+
+/// One tick, published and written. Only the two edges the tick deliberately does not own live
+/// here: the SSE publishes and the store write.
+async fn poll_once(poll: &mut FleetPoll, app: &App, probe: &impl FleetProbe) {
+    let update = poll.tick(app, probe, Instant::now()).await;
+
+    app.stats.publish(&update.stats);
+    app.lxc_stats.publish(&update.lxc);
+
+    for host in &update.active {
+        if update
+            .states
+            .get(&host.id)
+            .is_some_and(|state| *state != MonitorState::Offline)
+        {
+            crate::chat::ensure_autonomous_listener(app, host);
+        }
+    }
+
+    update.apply(app);
 }
 
 /// Background loop; spawned once at startup.
@@ -777,21 +997,10 @@ pub async fn run(app: App) {
         "monitor poller started (every {}s)",
         POLL_INTERVAL.as_secs()
     );
-    let mut previous_lxc_cpu = None;
-    let mut previous_clone_cpu = HashMap::new();
-    let mut pending_state = HashMap::new();
-    // What each clone read as before an outage blinded it, so a stop that happened while the
-    // judge was down still surfaces once it is back.
-    let mut blinded = HashMap::new();
+    let mut poll = FleetPoll::new();
+    let probe = LiveProbe;
     loop {
-        poll_once(
-            &app,
-            &mut previous_lxc_cpu,
-            &mut previous_clone_cpu,
-            &mut pending_state,
-            &mut blinded,
-        )
-        .await;
+        poll_once(&mut poll, &app, &probe).await;
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -815,6 +1024,467 @@ mod tests {
             mem_limit: 264u64 << 30,
             disk_used: Some(320u64 << 30),
         }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The tick itself.
+    //
+    // Every pure helper above has had a test since the day it was extracted. The ORDER they run
+    // in did not, and the comments in this file are the record of what that cost: a silent
+    // daemon read as `offline`, an archive completing mid-flight racing into the lifecycle, a
+    // flapping verdict shown to the operator, a stop swallowed by an outage, a restarted
+    // container's counter read as a spike. Those are sequences, not single calls, so they are
+    // tested as sequences — one [`FleetPoll`], scripted probes, tick after tick.
+    // ---------------------------------------------------------------------------------------
+
+    /// A fleet whose Docker answers and judge verdicts the test writes.
+    ///
+    /// The second implementation of [`FleetProbe`], which is what makes that interface a seam
+    /// rather than a shape: a tick driven through this one touches no daemon, no cgroup and no
+    /// model, so a sequence of ticks is an ordinary unit test.
+    #[derive(Default)]
+    struct Scripted {
+        /// What Docker says per clone id. An id with no entry answers "up, nothing sampled".
+        docker: StdRwLock<HashMap<String, Probe>>,
+        /// What the judge says per clone id. An id with no entry is not answered for at all,
+        /// which the tick reads as `idle` exactly as the real judge's silence is read.
+        verdicts: StdRwLock<HashMap<String, MonitorState>>,
+        lxc: StdRwLock<Option<LxcUsage>>,
+        /// The ids the last tick asked the judge about, sorted.
+        asked: StdRwLock<Vec<String>>,
+        /// Runs while the tick's probes are "in flight" — the window the second fleet read
+        /// exists for.
+        during: StdRwLock<Option<Box<dyn FnOnce(&App) + Send + Sync>>>,
+    }
+
+    impl Scripted {
+        fn answer(
+            &self,
+            id: &str,
+            running: Option<bool>,
+            usage: Option<CloneUsage>,
+            ip: Option<Option<String>>,
+        ) -> &Self {
+            self.docker.write().unwrap().insert(
+                id.to_string(),
+                Probe {
+                    id: id.to_string(),
+                    running,
+                    usage,
+                    ip,
+                },
+            );
+            self
+        }
+
+        /// Docker answers "up", with no cgroup sample to go with it.
+        fn up(&self, id: &str) -> &Self {
+            self.answer(id, Some(true), None, None)
+        }
+
+        /// Docker answers "up" and the cgroup hands back this cumulative CPU counter.
+        fn usage(&self, id: &str, usage_usec: u64) -> &Self {
+            self.answer(
+                id,
+                Some(true),
+                Some(CloneUsage {
+                    usage_usec,
+                    mem_used: 1 << 30,
+                    mem_limit: 8u64 << 30,
+                }),
+                None,
+            )
+        }
+
+        /// Docker answers "stopped". A stopped container has no bridge IP, and saying so is a
+        /// reading.
+        fn down(&self, id: &str) -> &Self {
+            self.answer(id, Some(false), None, Some(None))
+        }
+
+        /// Docker does not answer at all: a dead daemon or a timed-out call. NOT a stopped
+        /// container — that distinction is the whole point of the `Option`.
+        fn silent(&self, id: &str) -> &Self {
+            self.answer(id, None, None, None)
+        }
+
+        /// The judge's verdict for `id`, from this tick on.
+        fn verdict(&self, id: &str, state: MonitorState) -> &Self {
+            self.verdicts.write().unwrap().insert(id.to_string(), state);
+            self
+        }
+
+        /// Do this while the next tick's probes are in flight.
+        fn during(&self, f: impl FnOnce(&App) + Send + Sync + 'static) {
+            *self.during.write().unwrap() = Some(Box::new(f));
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked.read().unwrap().clone()
+        }
+    }
+
+    impl FleetProbe for Scripted {
+        async fn probe(&self, app: &App, hosts: &[RmngClone]) -> FleetReading {
+            let during = self.during.write().unwrap().take();
+            if let Some(during) = during {
+                during(app);
+            }
+            let scripted = self.docker.read().unwrap();
+            let clones = hosts
+                .iter()
+                .map(|host| {
+                    scripted.get(&host.id).cloned().unwrap_or(Probe {
+                        id: host.id.clone(),
+                        running: Some(true),
+                        usage: None,
+                        ip: None,
+                    })
+                })
+                .collect();
+            FleetReading {
+                clones,
+                lxc: *self.lxc.read().unwrap(),
+            }
+        }
+
+        async fn resolve(&self, _app: &App, ids: Vec<String>) -> HashMap<String, MonitorState> {
+            let mut asked = ids.clone();
+            asked.sort();
+            *self.asked.write().unwrap() = asked;
+            let verdicts = self.verdicts.read().unwrap();
+            ids.into_iter()
+                .filter_map(|id| verdicts.get(&id).map(|state| (id, *state)))
+                .collect()
+        }
+    }
+
+    /// An app holding one managed clone per id, as a fresh fleet reads: no stored state yet.
+    fn fleet(ids: &[&str]) -> App {
+        let app = App::test_app();
+        app.store.mutate(|state| {
+            state.hosts = ids.iter().map(|id| clone_row(id, None, None)).collect();
+        });
+        app
+    }
+
+    fn stored(app: &App, id: &str) -> RmngClone {
+        app.store
+            .get()
+            .hosts
+            .into_iter()
+            .find(|host| host.id == id)
+            .expect("clone is still in the fleet")
+    }
+
+    /// One production tick minus the SSE publishes: decide, then write.
+    async fn run_tick(
+        poll: &mut FleetPoll,
+        app: &App,
+        probe: &Scripted,
+        now: Instant,
+    ) -> FleetUpdate {
+        let update = poll.tick(app, probe, now).await;
+        update.apply(app);
+        update
+    }
+
+    fn at(t0: Instant, secs: u64) -> Instant {
+        t0 + Duration::from_secs(secs)
+    }
+
+    #[tokio::test]
+    async fn a_silent_docker_daemon_leaves_the_reading_where_it_was() {
+        // An unavailable daemon is news about US. Reading it as `offline` turns one Docker
+        // hiccup into a fleet of dead clones on the operator's screen, and writes that to disk.
+        let app = fleet(&["c"]);
+        let probe = Scripted::default();
+        let mut poll = FleetPoll::new();
+        let t0 = Instant::now();
+
+        probe.verdict("c", MonitorState::Working);
+        let update = run_tick(&mut poll, &app, &probe, t0).await;
+        assert_eq!(update.states["c"], MonitorState::Working);
+        assert_eq!(stored(&app, "c").monitor_state, Some(MonitorState::Working));
+
+        probe.silent("c");
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 4)).await;
+        assert!(
+            !update.states.contains_key("c"),
+            "no liveness answer is no reading"
+        );
+        assert!(!update.changed, "and nothing to write");
+        assert_eq!(
+            stored(&app, "c").monitor_state,
+            Some(MonitorState::Working),
+            "the stored reading stands; it is not offline"
+        );
+        assert!(
+            probe.asked().is_empty(),
+            "a clone we could not reach is not put to the judge either"
+        );
+
+        // And it comes back on the tick the daemon does.
+        probe.up("c");
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 8)).await;
+        assert_eq!(update.states["c"], MonitorState::Working);
+        assert_eq!(probe.asked(), vec!["c".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_clone_archived_mid_tick_is_dropped_from_the_update() {
+        // An archive operation may complete while the Docker and cgroup calls are in flight.
+        // Its stop is intentional, and must not race into the lifecycle as a reading.
+        let app = fleet(&["a", "b"]);
+        let probe = Scripted::default();
+        probe.verdict("a", MonitorState::Working);
+        probe.verdict("b", MonitorState::Working).usage("b", 1_000);
+        let mut poll = FleetPoll::new();
+
+        probe.during(|app| {
+            app.store.mutate(|state| {
+                for host in &mut state.hosts {
+                    if host.id == "b" {
+                        host.archived = true;
+                    }
+                }
+            });
+        });
+        let update = run_tick(&mut poll, &app, &probe, Instant::now()).await;
+
+        assert_eq!(update.states["a"], MonitorState::Working);
+        assert!(!update.states.contains_key("b"), "it left the fleet");
+        assert!(!update.stats.contains_key("b"));
+        assert!(
+            !update.active.iter().any(|host| host.id == "b"),
+            "and no chat listener is spawned against it"
+        );
+        assert_eq!(
+            stored(&app, "b").monitor_state,
+            None,
+            "an intentional stop is not a reading"
+        );
+        assert!(
+            !poll.previous_clone_cpu.contains_key("b"),
+            "its CPU sample goes with it, so the map cannot grow unbounded"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_flip_flop_is_never_shown_but_a_real_slide_is() {
+        // 36% of changes reversed inside 30 seconds on the live fleet. Held one minute, a
+        // reversal inside the window costs the operator nothing at all.
+        let app = fleet(&["c"]);
+        let probe = Scripted::default();
+        let mut poll = FleetPoll::new();
+        let t0 = Instant::now();
+
+        probe.verdict("c", MonitorState::Working);
+        run_tick(&mut poll, &app, &probe, t0).await;
+        assert_eq!(stored(&app, "c").monitor_state, Some(MonitorState::Working));
+
+        // It reads idle for two ticks, then comes back.
+        probe.verdict("c", MonitorState::Idle);
+        for secs in [4, 8] {
+            assert_eq!(
+                run_tick(&mut poll, &app, &probe, at(t0, secs)).await.states["c"],
+                MonitorState::Working,
+                "held while the clock runs"
+            );
+        }
+        probe.verdict("c", MonitorState::Working);
+        assert_eq!(
+            run_tick(&mut poll, &app, &probe, at(t0, 12)).await.states["c"],
+            MonitorState::Working
+        );
+        assert!(
+            poll.pending_state.is_empty(),
+            "the reversal drops the pending change rather than letting it age"
+        );
+        assert!(
+            !stored(&app, "c").unread,
+            "nothing was ever shown, so nothing was flagged"
+        );
+
+        // Now it really stops. The slide waits out its own fresh minute — it does not inherit
+        // the clock of the change that reversed.
+        probe.verdict("c", MonitorState::Idle);
+        for secs in [16, 20, 60, 75] {
+            assert_eq!(
+                run_tick(&mut poll, &app, &probe, at(t0, secs)).await.states["c"],
+                MonitorState::Working
+            );
+        }
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 76)).await;
+        assert_eq!(update.states["c"], MonitorState::Idle);
+        assert_eq!(update.unread.get("c"), Some(&true));
+        assert_eq!(stored(&app, "c").monitor_state, Some(MonitorState::Idle));
+        assert!(
+            stored(&app, "c").unread,
+            "a stop the operator has not seen raises the badge"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stop_during_an_outage_surfaces_on_the_tick_the_judge_returns() {
+        // The replay, end to end. `unread` fires on `working → not-working`; once a clone sits
+        // at `unknown` its stored state is no longer `working`, so without the baseline the
+        // plain transition test never fires again and a clone that really did stop mid-outage
+        // is swallowed in silence.
+        let app = fleet(&["c"]);
+        let probe = Scripted::default();
+        let mut poll = FleetPoll::new();
+        let t0 = Instant::now();
+
+        probe.verdict("c", MonitorState::Working);
+        run_tick(&mut poll, &app, &probe, t0).await;
+
+        // The judge goes dark. That slide is not held — an operator should learn at once that
+        // the reading stopped being trustworthy — and it raises nothing, because this is the
+        // one case where we do not know.
+        probe.verdict("c", MonitorState::Unknown);
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 4)).await;
+        assert_eq!(update.states["c"], MonitorState::Unknown);
+        assert!(update.unread.is_empty());
+        assert!(
+            stored(&app, "c").activity_unknown,
+            "the row says 'no reading'"
+        );
+        assert!(!stored(&app, "c").unread);
+
+        // However long the outage lasts, and whatever else ticks past.
+        for secs in [8, 12, 300] {
+            let update = run_tick(&mut poll, &app, &probe, at(t0, secs)).await;
+            assert_eq!(update.states["c"], MonitorState::Unknown);
+            assert!(!update.changed, "nothing to rewrite while it is dark");
+            assert!(!stored(&app, "c").unread);
+        }
+
+        // The judge answers again, and says the clone is idle: it stopped in the dark. The
+        // recovery tick is held like any other slide into idle — held at `unknown`, never at a
+        // `working` it is not.
+        probe.verdict("c", MonitorState::Idle);
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 304)).await;
+        assert_eq!(update.states["c"], MonitorState::Unknown);
+        assert!(!stored(&app, "c").unread);
+
+        // When it stands, the stop replays.
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 364)).await;
+        assert_eq!(update.states["c"], MonitorState::Idle);
+        assert_eq!(update.unread.get("c"), Some(&true));
+        assert!(stored(&app, "c").unread);
+        assert!(
+            !stored(&app, "c").activity_unknown,
+            "and the row has a reading again"
+        );
+
+        // Exactly once: the baseline is spent, not re-fired every quiet tick afterwards.
+        app.store.mutate(|state| {
+            for host in &mut state.hosts {
+                host.unread = false;
+            }
+        });
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 368)).await;
+        assert!(update.unread.is_empty());
+        assert!(!stored(&app, "c").unread);
+    }
+
+    #[tokio::test]
+    async fn a_restarted_containers_counter_reset_is_never_published_as_a_spike() {
+        let app = fleet(&["c"]);
+        let probe = Scripted::default();
+        let mut poll = FleetPoll::new();
+        let t0 = Instant::now();
+        probe.verdict("c", MonitorState::Working);
+
+        probe.usage("c", 0);
+        assert!(
+            !run_tick(&mut poll, &app, &probe, t0)
+                .await
+                .stats
+                .contains_key("c"),
+            "one sample cannot make a rate"
+        );
+
+        // 8 of CT 105's 16 cores, for 4 seconds.
+        probe.usage("c", 32_000_000);
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 4)).await;
+        assert!((update.stats["c"].cpu_pct - 50.0).abs() < 1e-9);
+
+        // A tick that could not sample keeps the last reading rather than blanking the row.
+        probe.up("c");
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 8)).await;
+        assert!((update.stats["c"].cpu_pct - 50.0).abs() < 1e-9);
+
+        // The container stops. Its numbers clear, and its counter goes with it: a stopped
+        // container's `usage_usec` is gone, so a later restart must rate from its fresh zero
+        // rather than against the pre-stop total.
+        probe.down("c");
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 12)).await;
+        assert_eq!(update.states["c"], MonitorState::Offline);
+        assert!(
+            !update.stats.contains_key("c"),
+            "an offline clone shows none"
+        );
+        assert!(!poll.previous_clone_cpu.contains_key("c"));
+
+        // It comes back with a fresh counter: the first tick after has nothing to rate against,
+        // and publishes no figure at all rather than a delta over a counter that no longer
+        // exists.
+        probe.usage("c", 1_000);
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 16)).await;
+        assert_eq!(update.states["c"], MonitorState::Working);
+        assert!(!update.stats.contains_key("c"));
+
+        // The next one rates normally, from the restarted counter.
+        probe.usage("c", 6_401_000);
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 20)).await;
+        assert!(
+            (update.stats["c"].cpu_pct - 10.0).abs() < 1e-9,
+            "expected 10%, got {}",
+            update.stats["c"].cpu_pct
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parent_stays_working_past_the_debounce_while_its_sub_clone_works() {
+        // A parent that handed work to a sub clone and is waiting produces no signals of its
+        // own, so its own judge calls it idle. The lift is what keeps it working, and the point
+        // of driving it across a whole minute is that the debounce alone could not: a hold
+        // expires, and the row would then grey out while its group is plainly busy.
+        let app = App::test_app();
+        app.store.mutate(|state| {
+            state.hosts = vec![
+                clone_row("parent", None, None),
+                clone_row("sub", Some("parent"), None),
+            ];
+        });
+        let probe = Scripted::default();
+        probe.verdict("parent", MonitorState::Working);
+        probe.verdict("sub", MonitorState::Working);
+        let mut poll = FleetPoll::new();
+        let t0 = Instant::now();
+        run_tick(&mut poll, &app, &probe, t0).await;
+
+        // The parent dispatches and goes quiet. Long past the debounce window, it still reads
+        // working — and nothing is being held back to make that true.
+        probe.verdict("parent", MonitorState::Idle);
+        for secs in [4, 64, 300] {
+            let update = run_tick(&mut poll, &app, &probe, at(t0, secs)).await;
+            assert_eq!(update.states["parent"], MonitorState::Working);
+            assert!(
+                poll.pending_state.is_empty(),
+                "lifted, not held: a hold would have expired by now"
+            );
+        }
+
+        // It goes idle once the work under it has, on the usual terms.
+        probe.verdict("sub", MonitorState::Idle);
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 304)).await;
+        assert_eq!(update.states["parent"], MonitorState::Working, "held now");
+        let update = run_tick(&mut poll, &app, &probe, at(t0, 364)).await;
+        assert_eq!(update.states["parent"], MonitorState::Idle);
+        assert_eq!(update.states["sub"], MonitorState::Idle);
     }
 
     /// The replay contract, driven through the real function rather than a copy of it.

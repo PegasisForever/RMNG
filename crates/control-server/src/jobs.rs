@@ -894,16 +894,7 @@ pub async fn migrate_all_on_boot(app: App) -> bool {
             continue;
         }
         started += 1;
-        if let Some(email) = h.claude_account_email {
-            if let Err(e) = crate::claude::push_account_to_clone(&app, &h.id, &email).await {
-                tracing::warn!("migrate: re-pushing Claude account to {} failed: {e}", h.id);
-            }
-        }
-        if let Some(email) = h.codex_account_email {
-            if let Err(e) = crate::codex::push_account_to_clone(&app, &h.id, &email).await {
-                tracing::warn!("migrate: re-pushing Codex account to {} failed: {e}", h.id);
-            }
-        }
+        crate::pool::push_both_sides(&app, &h.id, "migrate").await;
     }
     tracing::warn!(
         "gen-2 migration: {pass} passed, {} failed ({}), {started} started",
@@ -1144,35 +1135,10 @@ async fn run_unarchive(app: App, op: OpHandle, host_id: String) -> anyhow::Resul
             // (The shared pool and /dev/shm need no re-apply: both are create-time config now.)
             crate::homes::ensure_now(&app, &host_id).await;
             crate::ssh::allow_clone_now(&app, &host_id).await;
-            push_current_tokens(&app, &host_id).await;
+            crate::pool::push_both_sides(&app, &host_id, "unarchive").await;
             // Fresh /etc on a carried-over home: converge content now that it boots.
             crate::clone_reconcile::spawn_converge_after_start(&app, &host_id, "unarchive");
         }))
-}
-
-/// Install both providers' current access tokens into a clone that has just come back.
-///
-/// An archived clone is skipped by every push pass while it is down ([`crate::claude::
-/// push_stale_tokens_for`]) and re-bound without a push by the rotator, so the credentials
-/// on its disk are whatever it was archived with — possibly an account that has since been
-/// deleted or gone dark. Without this it runs them until the next poll, up to ten minutes of
-/// 401s on a clone the operator was just told is ready.
-///
-/// Best-effort on both halves. A failure here is logged and left to the next reconcile pass.
-async fn push_current_tokens(app: &App, host_id: &str) {
-    let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == host_id) else {
-        return;
-    };
-    if let Some(email) = host.claude_account_email.as_deref() {
-        if let Err(e) = crate::claude::push_account_to_clone(app, host_id, email).await {
-            tracing::warn!("unarchive {host_id}: installing {email}'s Claude token failed: {e}");
-        }
-    }
-    if let Some(email) = host.codex_account_email.as_deref() {
-        if let Err(e) = crate::codex::push_account_to_clone(app, host_id, email).await {
-            tracing::warn!("unarchive {host_id}: installing {email}'s Codex token failed: {e}");
-        }
-    }
 }
 
 #[cfg(test)]

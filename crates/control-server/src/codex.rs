@@ -8,23 +8,24 @@
 //! auth.json so its CLI can never rotate the refresh token the server now owns.
 //!
 //! The store and the refresh lifecycle are NOT here, and they no longer come from `claude.rs`
-//! either. Both sides share one module ([`crate::account`]); this one is the adapter: the
-//! account struct, the refresh POST, the usage/auto-reset specifics, and token delivery. What
-//! used to make this file depend on Claude's internals — `RefreshRecord`, `token_alive`,
-//! `grant_rejected`, even `PUSH_CONCURRENCY` — is neutral vocabulary there now.
-
-use std::time::Duration;
+//! either. Both sides share one module ([`crate::account`]); rotation, token delivery, the
+//! delete/replace lifecycle, the poll and rotate loops and the swap are one more
+//! ([`crate::pool`]). This file is the adapter: the account struct, the refresh POST, the
+//! usage/auto-reset specifics, and the two files a Codex token is written into. What used to
+//! make it depend on Claude's internals — `RefreshRecord`, `token_alive`, `grant_rejected`,
+//! even `PUSH_CONCURRENCY` — is neutral vocabulary in those two modules now.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use wire::{ClaudeUsage, ClaudeUsageWindow};
 
 use crate::account::{
-    AccountKind, FETCH_TIMEOUT, PUSH_CONCURRENCY, ROTATE_SECS, RefreshFailure, RefreshRecord,
-    Store, account_usable, fingerprint, refresh_status_is_fatal,
+    AccountKind, FETCH_TIMEOUT, RefreshFailure, RefreshRecord, Store, account_usable, fingerprint,
+    refresh_status_is_fatal,
 };
 use crate::app::App;
 use crate::clone_ops::{now_ms, rand_u64, snippet};
+use crate::pool::{CodexPool, push_stale_tokens, push_stale_tokens_for};
 
 const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONSUME_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
@@ -333,124 +334,18 @@ pub async fn clear_clone_token(_app: &App, host_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Refresh-if-needed and install `email`'s tokens into clone `host_id`, recording the
-/// push. If the refresh rotated the token, fan it out to the account's other clones.
-pub async fn push_account_to_clone(app: &App, host_id: &str, email: &str) -> Result<()> {
-    let (acct, rotated) = fresh_access_token(app, email).await?;
-    let applied = apply_clone_token(app, host_id, &acct).await;
-    if applied.is_ok() {
-        app.codex
-            .pushed
-            .lock()
-            .unwrap()
-            .insert(host_id.to_string(), acct.access_token.clone());
-    }
-    // Fan out even when this clone's own push failed — see `claude::push_account_to_clone`
-    // for why. The refresh has already invalidated the previous token for every clone on
-    // this account, and the one that triggered it is often a stopped clone that could never
-    // have taken the new one.
-    if rotated {
-        let app = app.clone();
-        let email = email.to_string();
-        tokio::spawn(async move { push_stale_tokens_for(&app, Some(&email)).await });
-    }
-    applied
-}
-
-/// Fleet-wide reconcile pass: see [`push_stale_tokens_for`]. Runs at the end of every
-/// poll to retry failed pushes and catch out-of-band reassignments.
-pub async fn push_stale_tokens(app: &App) {
-    push_stale_tokens_for(app, None).await;
-}
-
-/// Give every clone assigned a Codex account that account's current access token, unless
-/// the last successful push already delivered it. With `only` set, visit just that
-/// account's clones. Mirrors `claude::push_stale_tokens_for` (which carries the reasoning
-/// on scope), reading `RmngClone.codex_account_email`.
-/// See `claude::push_stale_tokens_for` for why this runs wide rather than one at a time: a
-/// refresh kills the previous token outright, so every clone still holding it is broken
-/// until this arrives.
-pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
-    let started = std::time::Instant::now();
-    let mut targets = Vec::new();
-    let mut skipped_fresh = 0usize;
-
-    for host in app.store.get().hosts {
-        let Some(email) = host.codex_account_email.as_deref() else {
-            continue;
-        };
-        // Archived clones cannot take a push; see `claude::push_stale_tokens_for`.
-        if only.is_some_and(|want| want != email) || !host.managed || host.archived {
-            continue;
-        }
-        let Some(acct) = app.codex.get_by_email(email) else {
-            tracing::warn!(
-                "clone {} is bound to codex account {email}, which is not imported; leaving its token alone",
-                host.id
-            );
-            continue;
-        };
-        if app.codex.pushed.lock().unwrap().get(&host.id) == Some(&acct.access_token) {
-            skipped_fresh += 1;
-            continue;
-        }
-        targets.push((host.id.clone(), email.to_string(), acct));
-    }
-
-    if targets.is_empty() {
-        tracing::debug!("codex token push: nothing to do ({skipped_fresh} already current)");
-        return;
-    }
-    tracing::info!(
-        "codex token push: {} clone(s) to update ({skipped_fresh} already current)",
-        targets.len()
-    );
-
-    let (mut ok, mut failed, mut unreachable) = (0usize, 0usize, 0usize);
-    for chunk in targets.chunks(PUSH_CONCURRENCY) {
-        let results = futures::future::join_all(chunk.iter().map(|(id, email, acct)| async move {
-            // Plain home write now: works stopped or running, skips only deleted clones.
-            if !crate::home_overlay::clone_home_present(id) {
-                return (id, email, acct, None);
-            }
-            (
-                id,
-                email,
-                acct,
-                Some(apply_clone_token(app, id, acct).await),
-            )
-        }))
-        .await;
-
-        for (id, email, acct, outcome) in results {
-            match outcome {
-                None => {
-                    unreachable += 1;
-                    tracing::debug!("skipping codex token push to {id}: no live home");
-                }
-                Some(Ok(())) => {
-                    ok += 1;
-                    app.codex
-                        .pushed
-                        .lock()
-                        .unwrap()
-                        .insert(id.clone(), acct.access_token.clone());
-                    tracing::info!("pushed fresh codex token ({email}) to {id}");
-                }
-                Some(Err(e)) => {
-                    failed += 1;
-                    tracing::warn!(
-                        "pushing codex token ({email}) to {id} failed (retried next pass): {e}"
-                    );
-                }
-            }
-        }
-    }
-
-    tracing::info!(
-        "codex token push done in {:?}: {ok} pushed, {failed} failed, {unreachable} without live home",
-        started.elapsed()
-    );
+/// This side's [`crate::pool::push_key_of`]: the access token that was installed, plus the
+/// identity installed with it — the account id every request carries in its
+/// `ChatGPT-Account-Id` header, and the id token written beside the access token.
+///
+/// Both belong in the key because both are delivered. Until this existed Codex compared the
+/// bare access token, so a rebind onto an account whose token some other clone already held
+/// read as "already current" and the clone went on running under its previous account.
+pub(crate) fn push_key(acct: &StoredCodexAccount) -> String {
+    crate::pool::push_key_of(
+        &acct.access_token,
+        &format!("{}|{}", acct.account_id, acct.id_token),
+    )
 }
 
 // --- usage fetch + mapping -------------------------------------------------
@@ -707,117 +602,17 @@ fn prune_marks(marks: &mut Vec<wire::CodexResetMark>, now_secs: i64) {
     marks.retain(|m| m.window_resets_at > now_secs);
 }
 
+/// One rotation pass over every named pool plus the implicit "auto" pool. The pass itself
+/// lives in [`crate::pool`]; this entry point keeps the call sites (swap, delete, refresh)
+/// on the provider they mean.
 pub async fn rotate_once(app: &App) {
-    crate::pool::rotate_once::<crate::pool::CodexPool>(app).await
+    crate::pool::rotate_once::<CodexPool>(app).await
 }
 
-/// Delete an imported Codex account by email, then heal the fleet — the Codex twin of
-/// [`crate::claude::delete_account`], including its ordering: everything visible is settled
-/// before this returns (token gone, row out of the published state, no clone pointing at
-/// it), and the re-placement runs in the background. Refuses if any clone is pinned to it.
-/// Returns the ids of clones that were on the account.
-pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
-    let pinned: Vec<String> = app
-        .store
-        .get()
-        .hosts
-        .iter()
-        .filter(|h| h.codex_selection.as_deref() == Some(email))
-        .map(|h| h.id.clone())
-        .collect();
-    if !pinned.is_empty() {
-        bail!(
-            "{n} clone(s) are pinned to {email}: {ids}. Reassign them (swap to another \
-             account, a group, or auto) before deleting the account.",
-            n = pinned.len(),
-            ids = pinned.join(", "),
-        );
-    }
-    let account_id = app.codex.get_by_email(email).map(|a| a.id);
-    if !app.codex.delete(email)? {
-        bail!("no imported Codex account '{email}'");
-    }
-    if let Some(id) = &account_id {
-        app.codex.last_good.lock().unwrap().remove(id);
-    }
-
-    let on_it: Vec<String> = app
-        .store
-        .get()
-        .hosts
-        .iter()
-        .filter(|h| h.codex_account_email.as_deref() == Some(email))
-        .map(|h| h.id.clone())
-        .collect();
-    for id in &on_it {
-        app.codex.forget_pushed(id);
-    }
-
-    app.store.mutate(|s| {
-        s.claude_accounts
-            .retain(|u| u.provider != Some(wire::Provider::Codex) || u.email != email);
-        for h in &mut s.hosts {
-            if h.codex_account_email.as_deref() == Some(email) {
-                h.codex_account_email = None;
-            }
-        }
-    });
-
-    let bg = app.clone();
-    tokio::spawn(async move { rotate_once(&bg).await });
-    Ok(on_it)
-}
-
-/// Move both of a clone's Codex bindings from `old` to `new`, fleet-wide, in one mutation.
-/// The Codex twin of `crate::claude::repoint_clones` — see there for why both bindings move
-/// and why this is separate from the config write.
-fn repoint_clones(app: &App, old: &str, new: &str) -> Vec<String> {
-    crate::pool::repoint_clones::<crate::pool::CodexPool>(app, old, new)
-}
-
-/// Hand everything `old_email` holds to `new_email`, then delete it — the Codex twin of
-/// [`crate::claude::replace_account`]. Same contract: pools and both bindings move, a
-/// sign-in as the same account is a no-op, and the token delivery is backgrounded.
-pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Result<Vec<String>> {
-    if old_email == new_email {
-        return Ok(Vec::new());
-    }
-    if app.codex.get_by_email(old_email).is_none() {
-        bail!("no imported Codex account '{old_email}' to replace");
-    }
-    if app.codex.get_by_email(new_email).is_none() {
-        bail!("'{new_email}' is not an imported Codex account");
-    }
-
-    let mut cfg = app.config();
-    let joined = crate::pool::swap_pool_member(&mut cfg.groups, old_email, new_email);
-    crate::config::save(&cfg).context("saving the replacement's pool membership")?;
-    *app.cfg.write().unwrap() = cfg;
-
-    let moved = repoint_clones(app, old_email, new_email);
-    delete_account(app, old_email).await?;
-    tracing::info!(
-        "replaced Codex account {old_email} with {new_email}: {} clone(s), pool(s) {}",
-        moved.len(),
-        if joined.is_empty() {
-            "none".to_string()
-        } else {
-            joined.join(", ")
-        },
-    );
-
-    let bg = app.clone();
-    let email = new_email.to_string();
-    tokio::spawn(async move { push_stale_tokens_for(&bg, Some(&email)).await });
-    Ok(moved)
-}
-
+/// Self-scheduling rotation loop for the Codex side. The loop is
+/// [`crate::pool::run_rotator`]; this entry point is what `main.rs` spawns.
 pub async fn run_rotator(app: App) {
-    tokio::time::sleep(Duration::from_secs(30)).await;
-    loop {
-        rotate_once(&app).await;
-        tokio::time::sleep(Duration::from_secs(ROTATE_SECS)).await;
-    }
+    crate::pool::run_rotator::<CodexPool>(app).await
 }
 
 // --- poller ----------------------------------------------------------------
@@ -853,7 +648,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
             if rotated {
                 // Deliver before the usage fetch: this account's clones are holding the
                 // token the refresh above just replaced.
-                push_stale_tokens_for(app, Some(&acct.email)).await;
+                push_stale_tokens_for::<CodexPool>(app, Some(&acct.email)).await;
             }
             let raw = fetch_usage(&app.http, &fresh.access_token, &fresh.account_id).await?;
             let facts = gate_facts(&acct.id, &raw); // borrow before `raw` moves into to_usage
@@ -985,39 +780,18 @@ async fn poll_inner(app: &App) -> Result<bool> {
 
     crate::clone_ops::replace_provider_views(app, wire::Provider::Codex, views);
 
-    push_stale_tokens(app).await;
+    // Rotations were fanned out per account as they happened; this sweep only retries pushes
+    // that failed and catches clones reassigned during the pass.
+    push_stale_tokens::<CodexPool>(app).await;
 
     Ok(any429)
 }
 
+/// Self-scheduling usage-poll loop for the Codex side. The loop is
+/// [`crate::pool::run_poller`]; this entry point is what `main.rs` spawns, and it names the
+/// poll interval this side answers to.
 pub async fn run_poller(app: App) {
-    const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
-    let mut backoff: u32 = 0;
-    loop {
-        let any429 = match poll_once(&app).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("codex usage poll failed: {e}");
-                false
-            }
-        };
-        let base = Duration::from_secs(wire::CODEX_POLL_SECS.max(15));
-        let delay = if any429 {
-            backoff = (backoff + 1).min(8);
-            let escalate = backoff.saturating_sub(2);
-            (base * 2u32.pow(escalate)).min(MAX_BACKOFF)
-        } else {
-            backoff = 0;
-            base
-        };
-        if any429 {
-            tracing::warn!(
-                "codex usage rate-limited (429); next poll in {}s",
-                delay.as_secs()
-            );
-        }
-        tokio::time::sleep(delay).await;
-    }
+    crate::pool::run_poller::<CodexPool>(app, wire::CODEX_POLL_SECS).await
 }
 
 #[cfg(test)]
@@ -1025,17 +799,15 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::pool::{
-        CodexPool, RotationCandidate, assign_rotation, assign_saturated_rotation, auto_pool_clones,
-        is_exhausted,
-    };
+    // What is left here is what needs a Codex account to assert: the store, the two auth
+    // files, the usage shapes and the fleet auto-reset gate. The rotation rules these tests
+    // used to assert a second time are asserted once, in `crate::pool`; the refresh-phase
+    // rules both sides share (the lead and its per-account offset) are `crate::account`'s,
+    // asserted once over in `crate::claude` where the fixtures already are.
+    use crate::pool::assign_rotation;
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as B64;
     use wire::RmngClone;
-
-    /// Parity with `claude::jittered_lead_never_drops_below_the_floor`: the offset only
-    /// ever adds lead, and it is derived from the email so a batch of accounts imported
-    /// together stops coming due in the same second.
 
     fn jwt_with(payload: &str) -> String {
         let b64 = B64.encode(payload.as_bytes());
@@ -1238,6 +1010,9 @@ mod tests {
         }
     }
 
+    /// The one rotation rule that is this side's rather than the pool's: the pick is read
+    /// from and written to `codex_account_email`. The sticky-keep and placement rules it
+    /// exercises are asserted once in `crate::pool`.
     #[test]
     fn assignment_uses_codex_account_field() {
         // Sticky keep: a clone on an eligible account stays; a homeless clone lands in-set.
@@ -1251,83 +1026,6 @@ mod tests {
             let by_id: HashMap<_, _> = got.iter().map(|(h, e)| (h.id.clone(), e.clone())).collect();
             assert_eq!(by_id["c1"], "a@o");
             assert_eq!(by_id["c2"], "b@o");
-        }
-    }
-
-    fn codex_rotation_candidate(
-        email: &str,
-        seven_pct: f64,
-        seven_reset: Option<i64>,
-    ) -> RotationCandidate {
-        RotationCandidate {
-            email: email.to_string(),
-            five_pct: 0.0,
-            seven_pct,
-            five_reset: None,
-            seven_reset,
-        }
-    }
-
-    #[test]
-    fn codex_exhaustion_threshold_is_95_7d() {
-        assert!(!is_exhausted::<CodexPool>(0.0, 94.9));
-        assert!(is_exhausted::<CodexPool>(0.0, 95.0));
-    }
-
-    #[test]
-    fn saturated_prefers_soonest_7d_reset_when_all_weekly_capped() {
-        // Everyone is weekly-capped → soonest weekly reset wins. This pins the unified
-        // ranking to the old Codex order (Codex has no 5h window, so the class key is
-        // constant and the reset decides, exactly as before the merge).
-        let candidates = [
-            codex_rotation_candidate("soon@o", 97.0, Some(500_000)),
-            codex_rotation_candidate("late@o", 96.0, Some(600_000)),
-        ];
-        let clones = [clone_host("c1", Some("late@o"))];
-
-        let got = assign_saturated_rotation::<CodexPool>(&clones, &candidates);
-
-        assert_eq!(got[0].1, "soon@o");
-    }
-
-    #[test]
-    fn saturated_keeps_current_when_its_reset_is_close_to_best() {
-        // c1 sits on soon@o, whose reset is within the sticky margin of best's — churning
-        // it onto late@o would buy nothing.
-        let candidates = [
-            codex_rotation_candidate("soon@o", 97.0, Some(500_000)),
-            codex_rotation_candidate("late@o", 96.0, Some(500_100)),
-        ];
-        let clones = [clone_host("c1", Some("soon@o"))];
-
-        let got = assign_saturated_rotation::<CodexPool>(&clones, &candidates);
-
-        assert_eq!(got[0].1, "soon@o");
-    }
-
-    #[test]
-    fn auto_pool_is_only_managed_ungrouped_auto_clones() {
-        let hosts = vec![
-            host_sel("auto1", true, None, Some("auto")),        // in
-            host_sel("pinned", true, None, Some("me@o")),       // out: pinned to an email
-            host_sel("legacy", true, None, None),               // out: legacy None == pinned
-            host_sel("grouped", true, Some("g"), Some("auto")), // out: named group handles it
-            host_sel("stopped", false, None, Some("auto")),     // out: unmanaged
-        ];
-        let picked: Vec<String> = auto_pool_clones::<CodexPool>(&hosts)
-            .into_iter()
-            .map(|h| h.id)
-            .collect();
-        assert_eq!(picked, vec!["auto1"]);
-    }
-
-    fn host_sel(id: &str, managed: bool, group: Option<&str>, sel: Option<&str>) -> RmngClone {
-        RmngClone {
-            id: id.into(),
-            managed,
-            codex_group: group.map(str::to_string),
-            codex_selection: sel.map(str::to_string),
-            ..Default::default()
         }
     }
 

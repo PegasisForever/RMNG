@@ -104,6 +104,12 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::transcript::{self, ClaudeRecord, CodexRecord, Walk};
+
+/// Re-exported because [`crate::ledger`] reads a rollout's name the same way this module does,
+/// and it has always reached the function through here.
+pub(crate) use crate::transcript::codex_session_id;
+
 /// How fresh a file has to be to count as still producing. The sample window for "is it
 /// moving right now", not a policy about how long anything may take.
 const MOVING_WINDOW_S: f64 = 60.0;
@@ -386,8 +392,24 @@ fn proc_start(proc: &Path, pid: i64) -> Option<String> {
     tail.split_whitespace().nth(19).map(str::to_string)
 }
 
-/// Where Claude Code keeps its live session registry, under the clone's home.
+/// Where Claude Code keeps its live session registry, under the clone's home. Its own
+/// directory, not a transcript tree — the transcripts are [`transcript::CLAUDE_PROJECTS`].
 const CLAUDE_SESSIONS: &str = "home/rmng/.claude/sessions";
+
+/// This clone's Codex transcript tree.
+///
+/// The tree names live in [`crate::transcript`]; what this module supplies is the base. It works
+/// from the container root rather than from the home, because the background-task outputs it
+/// also reads sit under `/tmp`, outside the home entirely.
+fn codex_sessions(root: &Path) -> PathBuf {
+    root.join(transcript::HOME).join(transcript::CODEX_SESSIONS)
+}
+
+/// This clone's Pi transcript tree. See [`codex_sessions`] for why the base is the container
+/// root and not the home.
+fn pi_sessions(root: &Path) -> PathBuf {
+    root.join(transcript::HOME).join(transcript::PI_SESSIONS)
+}
 
 /// Every record in the registry, each tagged with whether its process is still alive.
 pub fn read_sessions(root: &Path) -> Vec<Session> {
@@ -828,25 +850,6 @@ impl AgentFlavor for CursorFlavor {
 // Codex
 // ---------------------------------------------------------------------------------------
 
-/// Where the Codex CLI files a session's transcript, under the clone's home.
-///
-/// One JSONL "rollout" per session, in dated directories:
-/// `~/.codex/sessions/2026/08/08/rollout-2026-08-08T02-59-54-<session-id>.jsonl`. The name
-/// carries both the start time and the id, and the id is its last 36 characters.
-const CODEX_SESSIONS: &str = "home/rmng/.codex/sessions";
-
-/// The session id inside a rollout's file name, which is the trailing UUID.
-///
-/// `rollout-2026-08-08T02-59-54-019fe02b-cb2c-7ec0-8a48-77d87c7f057f` is one id, not five
-/// dash-separated fields, so this counts characters from the end rather than splitting.
-pub fn codex_session_id(stem: &str) -> Option<&str> {
-    let id = stem.get(stem.len().checked_sub(36)?..)?;
-    let shaped = id.len() == 36
-        && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
-        && [8, 13, 18, 23].iter().all(|i| id.as_bytes()[*i] == b'-');
-    shaped.then_some(id)
-}
-
 /// Every rollout a running `codex` has open, as `(pid, path)`.
 ///
 /// **Why the file descriptor.** Codex publishes no registry: there is no `~/.claude/sessions`
@@ -912,18 +915,6 @@ fn codex_rollouts(root: &Path) -> Vec<(i64, PathBuf)> {
     out
 }
 
-/// One rollout line. Codex wraps everything in `{type, timestamp, payload}` and the payload
-/// carries its own `type`, so the pair is what identifies a record.
-#[derive(Debug, Deserialize)]
-struct CodexLine {
-    #[serde(rename = "type", default)]
-    kind: Option<String>,
-    #[serde(default)]
-    timestamp: Option<String>,
-    #[serde(default)]
-    payload: Option<Value>,
-}
-
 /// The tool-call payload names, and the output that closes each one.
 ///
 /// Codex calls a tool three ways depending on how the model addressed it, and the pairing is
@@ -966,19 +957,18 @@ fn codex_events(path: &Path, session: &str) -> Vec<HookEvent> {
     };
     let mut out: Vec<HookEvent> = Vec::new();
     for line in body.lines() {
-        let Ok(raw) = serde_json::from_str::<CodexLine>(line) else {
+        let Some(raw) = CodexRecord::parse(line) else {
             continue;
         };
-        let Some(payload) = raw.payload else { continue };
-        let Some(kind) = payload.get("type").and_then(Value::as_str) else {
+        let Some(kind) = raw.payload_kind() else {
             continue;
         };
         let ts = raw
             .timestamp
             .as_deref()
-            .and_then(crate::pool::parse_rfc3339_utc_secs)
-            .map_or(0.0, |secs| secs as f64);
-        let str_at = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_string);
+            .and_then(transcript::ts_secs)
+            .unwrap_or(0.0);
+        let str_at = |key: &str| raw.str_at(key);
         let base = HookEvent {
             session_id: Some(session.to_string()),
             ts,
@@ -1034,7 +1024,7 @@ impl AgentFlavor for CodexFlavor {
     /// this gate and pays for one walk, which is exactly what it paid before adapters
     /// existed; a clone that never ran Codex now pays nothing at all.
     fn present(root: &Path) -> bool {
-        root.join(CODEX_SESSIONS).is_dir()
+        codex_sessions(root).is_dir()
     }
 
     /// Codex's sessions, shaped so one resolver covers every agent.
@@ -1087,14 +1077,6 @@ impl AgentFlavor for CodexFlavor {
         }
     }
 }
-
-/// Where the Pi coding agent files a session's transcript, under the clone's home.
-///
-/// One JSONL session per file: `~/.pi/agent/sessions/<slug>/<timestamp>_<id>.jsonl`, where
-/// `<slug>` is the working directory with separators flattened (`--home-rmng-RMNG--`) and
-/// `<id>` is the session id. The first line names the session and its `cwd`:
-/// `{"type":"session","id":"<id>","cwd":"/home/rmng/<project>"}`.
-const PI_SESSIONS: &str = "home/rmng/.pi/agent/sessions";
 
 /// Most Pi session files read for one clone in one pass. Pi keeps every session it has ever
 /// run, and a long-lived clone accumulates them. Newest mtime first, so a cap drops dead
@@ -1180,9 +1162,7 @@ fn pi_ts(line_ts: Option<&str>, msg_ts: Option<i64>) -> f64 {
     if let Some(ms) = msg_ts {
         return ms as f64 / 1000.0;
     }
-    line_ts
-        .and_then(crate::pool::parse_rfc3339_utc_secs)
-        .map_or(0.0, |secs| secs as f64)
+    line_ts.and_then(transcript::ts_secs).unwrap_or(0.0)
 }
 
 /// Pi, which publishes neither a registry nor a status and is read entirely off its
@@ -1199,7 +1179,7 @@ impl AgentFlavor for PiFlavor {
     /// is the widest read of the four: a directory walk over every session Pi has ever run in
     /// the clone, and a JSONL parse of the newest [`MAX_PI_SESSION_FILES`] of them.
     fn present(root: &Path) -> bool {
-        root.join(PI_SESSIONS).is_dir()
+        pi_sessions(root).is_dir()
     }
 
     /// Pi's sessions, shaped so one resolver covers every agent, plus hook-shaped events for
@@ -1216,49 +1196,32 @@ impl AgentFlavor for PiFlavor {
     /// judge correctly calls its huge quiet hung. The mtime cap bounds the cost.
     fn read(root: &Path) -> Reading {
         let mut files: Vec<(f64, PathBuf)> = Vec::new();
-        let mut stack = vec![root.join(PI_SESSIONS)];
-        let mut budget = 20_000;
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for e in entries.flatten() {
-                if budget == 0 {
-                    break;
-                }
-                budget -= 1;
-                let path = e.path();
-                if e.file_type().is_ok_and(|t| t.is_dir()) {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|x| x != "jsonl") {
-                    continue;
-                }
-                if path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(pi_session_id)
-                    .is_none()
-                {
-                    continue;
-                }
-                // Skip huge transcripts: a multi-MB session costs a full parse every 4s tick.
-                // The live turn is almost always in a small file; subagent bulk lives under
-                // `subagent-artifacts/`, which this walk never enters by name shape anyway.
-                let mtime = e.metadata().and_then(|m| m.modified()).ok();
-                files.push((
-                    mtime
-                        .map(|t| {
-                            t.duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs_f64())
-                                .unwrap_or(0.0)
-                        })
-                        .unwrap_or(0.0),
-                    path,
-                ));
+        let mut budget = transcript::MAX_TICK_WALK_FILES;
+        transcript::walk_jsonl(&pi_sessions(root), Walk::all(), &mut budget, &mut |e| {
+            let path = e.path();
+            if path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(pi_session_id)
+                .is_none()
+            {
+                return;
             }
-        }
+            // Skip huge transcripts: a multi-MB session costs a full parse every 4s tick.
+            // The live turn is almost always in a small file; subagent bulk lives under
+            // `subagent-artifacts/`, which this walk never enters by name shape anyway.
+            let mtime = e.metadata().and_then(|m| m.modified()).ok();
+            files.push((
+                mtime
+                    .map(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs_f64())
+                            .unwrap_or(0.0)
+                    })
+                    .unwrap_or(0.0),
+                path,
+            ));
+        });
         files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         files.truncate(MAX_PI_SESSION_FILES);
         // Read oldest-first so later files cannot shadow an id they predate; newest wins below.
@@ -1769,45 +1732,30 @@ struct Transcript {
 
 /// Every transcript under `root`, keyed by the session or conversation id it belongs to.
 ///
-/// Contents are read for one line and no more: everything else the judge used to get by
-/// parsing JSONL now arrives on a hook payload instead.
+/// All four agents' trees are read the same way, because the file stem is the id in all four
+/// (see [`transcript::CURSOR_PROJECTS`] for the one that is least obviously so). Contents are
+/// read for one line and no more: everything else the judge used to get by parsing JSONL now
+/// arrives on a hook payload instead.
+///
+/// One budget across all four trees, threaded rather than reset per tree: this bounds what one
+/// four-second tick may touch, and a clone keeps every project it has ever opened.
 fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
     let mut out: HashMap<String, Transcript> = HashMap::new();
-    // Cursor files its transcripts under `~/.cursor/projects/<workspace>/agent-transcripts/
-    // <conversation>/<conversation>.jsonl`, so the stem is the conversation id and the same
-    // stem-keyed walk covers both agents.
-    let mut stack = vec![
-        root.join("home/rmng/.claude/projects"),
-        root.join("home/rmng/.cursor/projects"),
-        root.join(CODEX_SESSIONS),
-        root.join(PI_SESSIONS),
-    ];
-    // Bounded walk: a clone keeps every project it has ever opened, and the tree is shallow.
-    let mut budget = 20_000;
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if budget == 0 {
-                return out;
-            }
-            budget -= 1;
+    let home = root.join(transcript::HOME);
+    // Pi's `subagent-artifacts/` holds reviewer inputs, outputs and meta files beside the
+    // transcripts; none of them is a live turn, so the walk never enters the dir.
+    let walk = Walk::all().skipping(&["subagent-artifacts"]);
+    let mut budget = transcript::MAX_TICK_WALK_FILES;
+    for tree in [
+        transcript::CLAUDE_PROJECTS,
+        transcript::CURSOR_PROJECTS,
+        transcript::CODEX_SESSIONS,
+        transcript::PI_SESSIONS,
+    ] {
+        transcript::walk_jsonl(&home.join(tree), walk, &mut budget, &mut |entry| {
+            let Ok(meta) = entry.metadata() else { return };
+            let Ok(mtime) = meta.modified() else { return };
             let path = entry.path();
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                // Pi's `subagent-artifacts/` holds reviewer inputs, outputs and meta files
-                // beside the transcripts; none of them is a live turn, so skip the dir.
-                if path.file_name().is_some_and(|n| n == "subagent-artifacts") {
-                    continue;
-                }
-                stack.push(path);
-                continue;
-            }
-            if path.extension().is_none_or(|x| x != "jsonl") {
-                continue;
-            }
-            let Ok(meta) = entry.metadata() else { continue };
-            let Ok(mtime) = meta.modified() else { continue };
             let age = now
                 - mtime
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1835,7 +1783,7 @@ fn transcript_silence(root: &Path, now: f64) -> HashMap<String, Transcript> {
                     );
                 }
             }
-        }
+        });
     }
     out
 }
@@ -1857,57 +1805,22 @@ const INTERRUPT_MARKER: &str = "[Request interrupted by user";
 /// later, and the judge answered `working` on every four-second tick because two subagents
 /// appeared to be running. The transcript is the only place that interrupt is written down.
 ///
-/// Read from the end, so a 200 MB transcript costs the same as a small one. A last record too
-/// large for the window, or one that will not parse, reads as no interrupt: the failure has to
-/// fall on the side of leaving a live call alone.
+/// Only the transcript's last record is read, from the end, so a 200 MB transcript costs the
+/// same as a small one ([`transcript::last_record`]). A record too large for that window, or one
+/// that will not parse, reads as no interrupt: the failure has to fall on the side of leaving a
+/// live call alone.
 fn ends_interrupted(path: &Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    /// Comfortably past an interrupt record, which is about 500 bytes.
-    const WINDOW: u64 = 16 * 1024;
-
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Some(last) = transcript::last_record(path) else {
         return false;
     };
-    let Ok(len) = file.metadata().map(|m| m.len()) else {
-        return false;
-    };
-    let from = len.saturating_sub(WINDOW);
-    if file.seek(SeekFrom::Start(from)).is_err() {
-        return false;
-    }
-    let mut buf: Vec<u8> = Vec::new();
-    if file.take(len - from).read_to_end(&mut buf).is_err() {
-        return false;
-    }
-    let text = String::from_utf8_lossy(&buf);
-    // The window can open mid-line, and that leading fragment is dropped by taking the last.
-    let Some(last) = text.lines().rfind(|l| !l.trim().is_empty()) else {
-        return false;
-    };
-    let Ok(raw) = serde_json::from_str::<Value>(last) else {
+    let Some(raw) = ClaudeRecord::parse(&last) else {
         return false;
     };
     // A user-role record, so an assistant merely quoting the marker is not mistaken for one.
-    // Cursor names this key `role` where Claude Code names it `type`.
-    let role = raw
-        .get("type")
-        .or_else(|| raw.get("role"))
-        .and_then(Value::as_str);
-    if role != Some("user") {
+    if raw.speaker() != Some("user") {
         return false;
     }
-    let content = raw.pointer("/message/content");
-    let said = match content.and_then(Value::as_str) {
-        Some(s) => s.to_string(),
-        None => content
-            .and_then(Value::as_array)
-            .and_then(|blocks| blocks.first())
-            .and_then(|b| b.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-    };
-    said.trim_start().starts_with(INTERRUPT_MARKER)
+    raw.said().trim_start().starts_with(INTERRUPT_MARKER)
 }
 
 /// Drop every call whose owner's transcript ends on an interrupt.

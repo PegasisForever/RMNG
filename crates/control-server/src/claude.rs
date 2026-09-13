@@ -6,8 +6,9 @@
 //! leaves it. A clone is authed by writing **only the current access token** into
 //! its `~/.claude/.credentials.json` (empty refresh token, far-future expiry, so
 //! Claude Code just uses whatever we last installed; see [`apply_clone_token`]).
-//! Whenever a refresh rotates an account's access token, [`push_stale_tokens_for`]
-//! fans the new token out to every clone assigned to that account. The poller
+//! Whenever a refresh rotates an account's access token,
+//! [`crate::pool::push_stale_tokens_for`] fans the new token out to every clone assigned to
+//! that account. The poller
 //! publishes a token-free `ClaudeUsage` view onto `ControlState.claudeAccounts`.
 //! Clones select an account via `"auto"` (rotated across all imported accounts by
 //! [`rotate_once`]), a named group, or a pinned email.
@@ -26,22 +27,23 @@
 //!
 //! The store and the refresh lifecycle are NOT here. They are one module shared with Codex
 //! ([`crate::account`]), because the two sides had the same store struct with the same eleven
-//! methods and Codex imported Claude's refresh vocabulary to get them. What stays on this side
-//! is the adapter: the account struct, the refresh POST, the OAuth/usage specifics, and token
-//! delivery.
-
-use std::time::Duration;
+//! methods and Codex imported Claude's refresh vocabulary to get them. Neither are rotation,
+//! token delivery, the delete/replace lifecycle, the poll and rotate loops or the swap: those
+//! are [`crate::pool`], for the same reason. What stays on this side is the adapter: the
+//! account struct, the refresh POST, the OAuth/usage specifics, and the two files a Claude
+//! token is written into.
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use wire::{ClaudeSpend, ClaudeUsage, ClaudeUsageWindow};
 
 use crate::account::{
-    AccountKind, FETCH_TIMEOUT, PUSH_CONCURRENCY, ROTATE_SECS, RefreshFailure, RefreshRecord,
-    Store, account_usable, fingerprint, refresh_status_is_fatal,
+    AccountKind, FETCH_TIMEOUT, RefreshFailure, RefreshRecord, Store, account_usable, fingerprint,
+    refresh_status_is_fatal,
 };
 use crate::app::App;
 use crate::clone_ops::{now_ms, snippet};
+use crate::pool::{ClaudePool, push_stale_tokens, push_stale_tokens_for};
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 /// Who an access token belongs to. Same endpoint the sign-in uses (`crate::oauth`), read
@@ -467,7 +469,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 // Before the usage fetch, not after the whole pass: this account's clones
                 // are holding the token the refresh above just replaced, and the fetch can
                 // burn 10s (or a 429) per remaining account before the pass ends.
-                push_stale_tokens_for(app, Some(&acct.email)).await;
+                push_stale_tokens_for::<ClaudePool>(app, Some(&acct.email)).await;
             }
             let raw = fetch_usage(&app.http, &token).await?;
             // After the usage fetch, so a profile lookup that fails never costs the numbers.
@@ -527,7 +529,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
 
     // Rotations were fanned out per account as they happened; this sweep only retries
     // pushes that failed and catches clones reassigned during the pass.
-    push_stale_tokens(app).await;
+    push_stale_tokens::<ClaudePool>(app).await;
 
     Ok(any429)
 }
@@ -537,159 +539,20 @@ async fn poll_inner(app: &App) -> Result<bool> {
 /// leaves its pool. The pass itself lives in [`crate::pool`]; this entry point keeps the
 /// call sites (swap, delete, refresh) on the provider they mean.
 pub async fn rotate_once(app: &App) {
-    crate::pool::rotate_once::<crate::pool::ClaudePool>(app).await
+    crate::pool::rotate_once::<ClaudePool>(app).await
 }
 
-/// Delete an imported Claude account by email, then heal the fleet.
-///
-/// Refuses (Err) if any clone is **pinned** to it (`claude_selection == email`) — a pin
-/// is an explicit operator choice, so it must be reassigned first (swap it to another
-/// account, a group, or `auto`). Clones running the account via `auto`/a group need no
-/// pre-work: once the token is gone a [`rotate_once`] pass moves them onto a surviving
-/// account (its assign step treats a no-longer-imported account as ineligible).
-///
-/// Everything the operator can see is settled before this returns: the token is off disk,
-/// the account's row is out of the published state, and no clone still points at it. The
-/// re-placement ([`rotate_once`]) runs in the background, because it walks the whole fleet
-/// with a per-clone `docker exec` and the screen must not wait on that. A clone its assign
-/// step cannot place — the account was its pool's only member — simply stays unassigned.
-///
-/// Returns the ids of clones that were on the account.
-pub async fn delete_account(app: &App, email: &str) -> Result<Vec<String>> {
-    let pinned: Vec<String> = app
-        .store
-        .get()
-        .hosts
-        .iter()
-        .filter(|h| h.claude_selection.as_deref() == Some(email))
-        .map(|h| h.id.clone())
-        .collect();
-    if !pinned.is_empty() {
-        bail!(
-            "{n} clone(s) are pinned to {email}: {ids}. Reassign them (swap to another \
-             account, a group, or auto) before deleting the account.",
-            n = pinned.len(),
-            ids = pinned.join(", "),
-        );
-    }
-    let account_id = app.claude.get_by_email(email).map(|a| a.id);
-    if !app.claude.delete(email)? {
-        bail!("no imported Claude account '{email}'");
-    }
-    if let Some(id) = &account_id {
-        app.claude.last_good.lock().unwrap().remove(id);
-    }
-
-    // Clones currently running the (now-deleted) account. Drop their pushed-token records so
-    // the re-placement pushes the replacement token.
-    let on_it: Vec<String> = app
-        .store
-        .get()
-        .hosts
-        .iter()
-        .filter(|h| h.claude_account_email.as_deref() == Some(email))
-        .map(|h| h.id.clone())
-        .collect();
-    for id in &on_it {
-        app.claude.forget_pushed(id);
-    }
-
-    // One mutation, one SSE frame, and the screen is right. The account's row used to sit in
-    // the published state until the NEXT usage poll rebuilt it, and that poll walks every
-    // remaining account at a 400ms stagger with a 10s timeout each — long enough that a
-    // deleted account stayed on screen looking like the delete had failed.
-    app.store.mutate(|s| {
-        s.claude_accounts
-            .retain(|u| u.provider == Some(wire::Provider::Codex) || u.email != email);
-        for h in &mut s.hosts {
-            if h.claude_account_email.as_deref() == Some(email) {
-                h.claude_account_email = None;
-            }
-        }
-    });
-
-    let bg = app.clone();
-    tokio::spawn(async move { rotate_once(&bg).await });
-    Ok(on_it)
-}
-
-/// Move both of a clone's Claude bindings from `old` to `new`, fleet-wide, in one mutation.
-/// Returns the ids that were running `old`.
-///
-/// Both bindings, because they mean different things and both name the dead account: the pin
-/// (`claude_selection`, an explicit operator choice) and the current assignment
-/// (`claude_account_email`). Moving the pin is also what lets [`delete_account`] through
-/// afterwards, since it refuses while a pin names its target.
-///
-/// Separated from the config write in [`replace_account`] so it can be tested without one:
-/// [`crate::config::save`] writes a fixed relative path, so a test that reached it would drop
-/// a `config.json` in whatever directory it ran in.
-fn repoint_clones(app: &App, old: &str, new: &str) -> Vec<String> {
-    crate::pool::repoint_clones::<crate::pool::ClaudePool>(app, old, new)
-}
-
-/// Hand everything `old_email` holds to `new_email`, then delete `old_email`.
-///
-/// This is what the "sign in again" badge does. Recovering a dead account used to mean
-/// deleting it and importing its replacement by hand, which loses two things the operator
-/// then has to rebuild from memory: which pools it was in, and which clones were pinned to
-/// it by name. Both move here, in one operation, so the replacement lands where the original
-/// stood.
-///
-/// A sign-in as the SAME account is not a replacement — `upsert_account` has already
-/// overwritten the token and cleared the rejection — so it returns early having done
-/// nothing. Returns the ids of clones that moved onto `new_email`.
-pub async fn replace_account(app: &App, old_email: &str, new_email: &str) -> Result<Vec<String>> {
-    if old_email == new_email {
-        return Ok(Vec::new());
-    }
-    if app.claude.get_by_email(old_email).is_none() {
-        bail!("no imported Claude account '{old_email}' to replace");
-    }
-    if app.claude.get_by_email(new_email).is_none() {
-        bail!("'{new_email}' is not an imported Claude account");
-    }
-
-    let mut cfg = app.config();
-    let joined = crate::pool::swap_pool_member(&mut cfg.groups, old_email, new_email);
-    crate::config::save(&cfg).context("saving the replacement's pool membership")?;
-    *app.cfg.write().unwrap() = cfg;
-
-    let moved = repoint_clones(app, old_email, new_email);
-    delete_account(app, old_email).await?;
-    tracing::info!(
-        "replaced Claude account {old_email} with {new_email}: {} clone(s), pool(s) {}",
-        moved.len(),
-        if joined.is_empty() {
-            "none".to_string()
-        } else {
-            joined.join(", ")
-        },
-    );
-
-    // Deliver the new token to everything that just moved. Backgrounded for the same reason
-    // the delete's rotation is: it is one `docker exec` per clone.
-    let bg = app.clone();
-    let email = new_email.to_string();
-    tokio::spawn(async move { push_stale_tokens_for(&bg, Some(&email)).await });
-    Ok(moved)
-}
-
-/// Self-scheduling 10-minute group-rotation loop.
+/// Self-scheduling rotation loop for the Claude side. The loop is
+/// [`crate::pool::run_rotator`]; this entry point is what `main.rs` spawns.
 pub async fn run_rotator(app: App) {
-    // Let the usage poller publish 5h numbers before the first rotation.
-    tokio::time::sleep(Duration::from_secs(30)).await;
-    loop {
-        rotate_once(&app).await;
-        tokio::time::sleep(Duration::from_secs(ROTATE_SECS)).await;
-    }
+    crate::pool::run_rotator::<ClaudePool>(app).await
 }
 
 /// The `~/.claude/.credentials.json` body that runs Claude Code under `token` (the
 /// account's current short-lived access token). The refresh token is left **empty**
 /// and the expiry far-future so the clone's Claude Code never tries to rotate or
 /// abandon the token — it just uses whatever the server last installed; the server
-/// pushes a replacement on every refresh ([`push_stale_tokens`]).
+/// pushes a replacement on every refresh ([`crate::pool::push_stale_tokens`]).
 fn credentials_json(token: &str) -> String {
     format!(
         r#"{{"claudeAiOauth":{{"accessToken":"{token}","refreshToken":"","expiresAt":4102444800000,"scopes":["user:inference","user:profile"],"subscriptionType":"max"}}}}"#
@@ -839,15 +702,13 @@ fn merge_claude_identity(current: Option<&[u8]>, patch: &serde_json::Value) -> I
     }
 }
 
-/// What was last delivered to a clone, as one comparable string: the token AND the identity
-/// that went with it. A rebind can hand a clone a different account whose token happens to
-/// be pushed already, and comparing tokens alone would call that clone current while it
-/// still names the previous account.
-fn push_key(acct: &StoredClaudeAccount) -> String {
-    format!(
-        "{}|{}",
-        fingerprint(&acct.access_token),
-        fingerprint(identity_json(acct).as_deref().unwrap_or(""))
+/// This side's [`crate::pool::push_key_of`]: the access token that was installed, plus the
+/// identity that was installed with it — the whole `~/.claude.json` patch, since every key
+/// in it is delivered. A clone whose identity changed is stale even when its token did not.
+pub(crate) fn push_key(acct: &StoredClaudeAccount) -> String {
+    crate::pool::push_key_of(
+        &acct.access_token,
+        identity_json(acct).as_deref().unwrap_or(""),
     )
 }
 
@@ -856,7 +717,8 @@ fn push_key(acct: &StoredClaudeAccount) -> String {
 /// a running clone with **no** agent-wrapper restart, because Claude Code re-reads both
 /// files at request time.
 /// Best-effort; errors are returned to log. Low-level: callers that target an assigned host
-/// should go through [`push_account_to_clone`] / [`push_stale_tokens`] so the push is recorded.
+/// should go through [`crate::pool::push_account_to_clone`] / [`crate::pool::push_stale_tokens`]
+/// so the push is recorded.
 ///
 /// The token alone used to be the whole push, which left `~/.claude.json` naming whoever the
 /// clone ran before. Measured on CT 105 on 2026-09-04: 11 of 14 readable clones declared an
@@ -915,200 +777,28 @@ pub async fn clear_clone_token(_app: &App, host_id: &str) -> Result<()> {
     crate::home_overlay::remove_clone_home(host_id, ".claude/.credentials.json")
 }
 
-/// Refresh-if-needed and install `email`'s access token into clone `host_id` (== its
-/// container name), recording the push so the reconcile pass doesn't repeat it. If the
-/// refresh rotated the token, fan it out to the account's other clones in the background.
-pub async fn push_account_to_clone(app: &App, host_id: &str, email: &str) -> Result<()> {
-    let (acct, rotated) = fresh_access_token(app, email).await?;
-    let applied = apply_clone_token(app, host_id, &acct).await;
-    if applied.is_ok() {
-        app.claude
-            .pushed
-            .lock()
-            .unwrap()
-            .insert(host_id.to_string(), push_key(&acct));
-    }
-    // Fan out whether or not THIS clone took its copy. The refresh above already happened,
-    // and Anthropic revokes the previous access token the moment it mints a new one — so
-    // every other clone on this account is broken from that instant, and their repair has
-    // nothing to do with whether this one succeeded.
-    //
-    // The distinction is load-bearing rather than theoretical. The rotate pass retries
-    // stopped clones forever, so the clone that happens to trigger a refresh is often one
-    // whose push cannot possibly work. Returning early there stranded the whole account
-    // until the next poll: measured twice on CT 105, 6m42s for `pegasis.personal@gmail.com`
-    // across 19 clones and 4m33s for `me@pegasis.site`, each time because the triggering
-    // clone was stopped.
-    if rotated {
-        let app = app.clone();
-        let email = email.to_string();
-        tokio::spawn(async move { push_stale_tokens_for(&app, Some(&email)).await });
-    }
-    applied
-}
-
-/// Whether a clone assigned `host_email` is in scope for a push restricted to `only`.
-fn in_push_scope(host_email: &str, only: Option<&str>) -> bool {
-    only.is_none_or(|want| want == host_email)
-}
-
-/// Fleet-wide reconcile pass: see [`push_stale_tokens_for`].
-///
-/// Runs at the end of every poll to retry pushes that failed (clone stopped or
-/// unreachable) and to catch clones whose assignment changed out of band. The pushed
-/// map is in-memory, so the first pass after a server restart re-pushes every clone.
-pub async fn push_stale_tokens(app: &App) {
-    push_stale_tokens_for(app, None).await;
-}
-
-/// Give every clone assigned an account that account's current access token, unless
-/// the last successful push already delivered exactly that token. With `only` set,
-/// visit just that account's clones.
-///
-/// Speed is the whole point. A refresh invalidates the previous token immediately, so every
-/// clone still holding it is broken until this reaches it — the agent gets a 401, not a
-/// warning. Serially that window grew with the fleet; this runs
-/// [`PUSH_CONCURRENCY`] at a time and skips clones that cannot receive a push at all, so it
-/// is bounded by the slowest clone rather than by their sum.
-pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
-    let started = std::time::Instant::now();
-    let mut targets: Vec<(String, StoredClaudeAccount)> = Vec::new(); // (host, account)
-    let mut skipped_fresh = 0usize;
-    let mut skipped_no_account = 0usize;
-
-    for host in app.store.get().hosts {
-        let Some(email) = host.claude_account_email.as_deref() else {
-            continue;
-        };
-        // Archived clones stay bound to an account but can never take a push: their
-        // container is stopped or frozen. Leaving them in scope meant eight dead hosts on
-        // CT 105 failing an exec on every pass, forever.
-        if !in_push_scope(email, only) || !host.managed || host.archived {
-            continue;
-        }
-        let Some(acct) = app.claude.get_by_email(email) else {
-            // Bound to an account the store does not have: the clone keeps whatever it has
-            // and nothing here can improve it, but staying silent made it indistinguishable
-            // from a clone that is up to date.
-            skipped_no_account += 1;
-            tracing::warn!(
-                "clone {} is bound to {email}, which is not an imported account; leaving its token alone",
-                host.id
-            );
-            continue;
-        };
-        if app.claude.pushed.lock().unwrap().get(&host.id) == Some(&push_key(&acct)) {
-            skipped_fresh += 1;
-            continue;
-        }
-        targets.push((host.id.clone(), acct));
-    }
-
-    if targets.is_empty() {
-        tracing::debug!(
-            "claude token push{}: nothing to do ({skipped_fresh} already current, {skipped_no_account} unbound)",
-            only.map(|e| format!(" [{e}]")).unwrap_or_default()
-        );
-        return;
-    }
-    tracing::info!(
-        "claude token push{}: {} clone(s) to update ({skipped_fresh} already current, {skipped_no_account} unbound)",
-        only.map(|e| format!(" [{e}]")).unwrap_or_default(),
-        targets.len()
-    );
-
-    let mut ok = 0usize;
-    let mut failed = 0usize;
-    let mut unreachable = 0usize;
-    for chunk in targets.chunks(PUSH_CONCURRENCY) {
-        let results = futures::future::join_all(chunk.iter().map(|(id, acct)| async move {
-            // The push is a plain home write now, which works stopped or running — the
-            // only clone that cannot take one is a deleted one (mount torn down).
-            if !crate::home_overlay::clone_home_present(id) {
-                return (id, acct, None);
-            }
-            (id, acct, Some(apply_clone_token(app, id, acct).await))
-        }))
-        .await;
-
-        for (id, acct, outcome) in results {
-            let email = &acct.email;
-            match outcome {
-                None => {
-                    unreachable += 1;
-                    tracing::debug!("skipping token push to {id}: no live home");
-                }
-                Some(Ok(())) => {
-                    ok += 1;
-                    app.claude
-                        .pushed
-                        .lock()
-                        .unwrap()
-                        .insert(id.clone(), push_key(acct));
-                    tracing::info!("pushed fresh token ({email}) to {id}");
-                }
-                Some(Err(e)) => {
-                    failed += 1;
-                    tracing::warn!(
-                        "pushing token ({email}) to {id} failed (retried next pass): {e}"
-                    );
-                }
-            }
-        }
-    }
-
-    tracing::info!(
-        "claude token push{} done in {:?}: {ok} pushed, {failed} failed, {unreachable} without live home",
-        only.map(|e| format!(" [{e}]")).unwrap_or_default(),
-        started.elapsed()
-    );
-}
-
-/// Self-scheduling poll loop with 429 backoff.
+/// Self-scheduling usage-poll loop for the Claude side. The loop is
+/// [`crate::pool::run_poller`]; this entry point is what `main.rs` spawns, and it names the
+/// poll interval this side answers to.
 pub async fn run_poller(app: App) {
-    const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
-    let mut backoff: u32 = 0;
-    loop {
-        let any429 = match poll_once(&app).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("claude usage poll failed: {e}");
-                false
-            }
-        };
-        let base = Duration::from_secs(wire::CLAUDE_POLL_SECS.max(15));
-        let delay = if any429 {
-            backoff = (backoff + 1).min(8);
-            let escalate = backoff.saturating_sub(2);
-            (base * 2u32.pow(escalate)).min(MAX_BACKOFF)
-        } else {
-            backoff = 0;
-            base
-        };
-        if any429 {
-            tracing::warn!(
-                "claude usage rate-limited (429); next poll in {}s",
-                delay.as_secs()
-            );
-        }
-        tokio::time::sleep(delay).await;
-    }
+    crate::pool::run_poller::<ClaudePool>(app, wire::CLAUDE_POLL_SECS).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     // The refresh-phase rules these tests pin now live in `crate::account`; both providers
     // assert them, and a later pass consolidates the pair.
     use crate::account::{
         REFRESH_LEAD_MS, REFRESH_SPREAD_MS, is_expired, refresh_lead_ms, token_alive,
     };
+    // What is left here is what needs a Claude account to assert: the store, the identity a
+    // clone declares, and Claude's own scoring constants. The provider-neutral rotation
+    // rules are asserted once, in `crate::pool`.
     use crate::pool::{
-        Assignment, ClaudePool, RotationCandidate, assign_rotation, assign_saturated_rotation,
-        eligible_members, is_exhausted, normalize_selection, parse_rfc3339_utc_secs,
-        pick_group_account, repoint_clones, resolve_assignment, swap_pool_member,
+        Assignment, delete_account, eligible_members, is_exhausted, pick_group_account,
+        replace_account, repoint_clones, resolve_assignment,
     };
     use wire::{CloneGroup, RmngClone};
 
@@ -1185,20 +875,6 @@ mod tests {
             fable.resets_at.as_deref(),
             Some("2026-07-24T22:00:00.469890+00:00")
         );
-    }
-
-    // --- groups: rotation assignment ---------------------------------------
-
-    fn acct(email: &str) -> String {
-        email.to_string()
-    }
-    fn clone_host(id: &str, cur: Option<&str>) -> RmngClone {
-        RmngClone {
-            id: id.into(),
-            managed: true,
-            claude_account_email: cur.map(str::to_string),
-            ..Default::default()
-        }
     }
 
     #[test]
@@ -1279,95 +955,6 @@ mod tests {
         assert!(!is_expired(email, now + lead + 5 * 60_000));
     }
 
-    /// An unfiltered pass visits every clone; a filtered one visits only the rotated
-    /// account's, which is what keeps a refresh from rewriting the whole fleet.
-
-    #[test]
-    fn assignment_rule_a_only_group_accounts() {
-        // Every clone is assigned an account from the eligible set, never outside it.
-        let eligible = [acct("a@x"), acct("b@x")];
-        let clones = [clone_host("c1", Some("z@outside")), clone_host("c2", None)];
-        for (_h, picked) in assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new()) {
-            assert!(eligible.contains(&picked), "{picked} not in group");
-        }
-    }
-
-    #[test]
-    fn assignment_rule_b_distinct_when_enough_accounts() {
-        // |eligible| >= |unassigned clones| ⇒ they land on distinct accounts (run
-        // repeatedly: randomized, but the load term forces distinctness here).
-        let eligible = [acct("a@x"), acct("b@x"), acct("c@x")];
-        let clones = [
-            clone_host("c1", None),
-            clone_host("c2", None),
-            clone_host("c3", None),
-        ];
-        for _ in 0..50 {
-            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
-            let mut emails: Vec<_> = got.iter().map(|(_, e)| e.clone()).collect();
-            emails.sort();
-            emails.dedup();
-            assert_eq!(
-                emails.len(),
-                3,
-                "expected 3 distinct accounts, got {emails:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn assignment_rule_c_sticks_to_an_eligible_account() {
-        // One clone on A, two eligible {A,B} ⇒ always stays on A: a switch would
-        // cold-start the clone's prompt cache for zero gain.
-        let eligible = [acct("a@x"), acct("b@x")];
-        let clones = [clone_host("c1", Some("a@x"))];
-        for _ in 0..50 {
-            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
-            assert_eq!(got[0].1, "a@x");
-        }
-    }
-
-    #[test]
-    fn assignment_moves_only_ineligible_and_avoids_keepers() {
-        // c1 keeps its eligible account A; c2 (account dropped from the group) must
-        // move, and lands on B — the keeper on A counts toward A's load.
-        let eligible = [acct("a@x"), acct("b@x")];
-        let clones = [
-            clone_host("c1", Some("a@x")),
-            clone_host("c2", Some("z@gone")),
-        ];
-        for _ in 0..50 {
-            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
-            let by_id: HashMap<_, _> = got.iter().map(|(h, e)| (h.id.clone(), e.clone())).collect();
-            assert_eq!(by_id["c1"], "a@x");
-            assert_eq!(by_id["c2"], "b@x");
-        }
-    }
-
-    #[test]
-    fn assignment_prefers_less_used_account_on_load_tie() {
-        // A fresh clone with two equally-loaded accounts picks the lower 5h usage.
-        let eligible = [acct("hot@x"), acct("cold@x")];
-        let clones = [clone_host("c1", None)];
-        let usage = HashMap::from([(acct("hot@x"), 72.0), (acct("cold@x"), 5.0)]);
-        for _ in 0..50 {
-            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &usage);
-            assert_eq!(got[0].1, "cold@x");
-        }
-    }
-
-    #[test]
-    fn assignment_degrades_with_single_eligible() {
-        // Only one usable account ⇒ all clones get it even though spread can't hold.
-        let eligible = [acct("only@x")];
-        let clones = [
-            clone_host("c1", Some("only@x")),
-            clone_host("c2", Some("old@x")),
-        ];
-        let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
-        assert!(got.iter().all(|(_, e)| e == "only@x"));
-    }
-
     fn stored(email: &str) -> StoredClaudeAccount {
         StoredClaudeAccount {
             id: email.into(),
@@ -1407,16 +994,6 @@ mod tests {
             app.claude.update_account(&stored(m)).unwrap();
         }
         app
-    }
-
-    #[test]
-    fn legacy_none_normalizes_to_auto() {
-        // No tokenless state anymore: "none" reads as auto (lossy — the side resolves
-        // in scope and may now get a token).
-        assert_eq!(normalize_selection(Some("none")), "auto");
-        assert_eq!(normalize_selection(Some("NONE")), "auto");
-        assert_eq!(normalize_selection(None), "auto");
-        assert_eq!(normalize_selection(Some("me@x.com")), "me@x.com");
     }
 
     #[test]
@@ -1670,7 +1247,9 @@ mod tests {
     }
 
     /// A rebind can hand a clone an account whose token was already pushed somewhere else.
-    /// Comparing tokens alone called that clone current while it still named its old account.
+    /// Comparing tokens alone called that clone current while it still named its old
+    /// account. The key's shape is `crate::pool`'s; what this pins is that Claude puts its
+    /// account identity in it.
     #[test]
     fn a_clone_is_stale_when_its_identity_changed_even_if_the_token_did_not() {
         let a = stored("a@x");
@@ -1691,7 +1270,7 @@ mod tests {
                 ..Default::default()
             })
         });
-        let err = delete_account(&app, "a@x").await.unwrap_err();
+        let err = delete_account::<ClaudePool>(&app, "a@x").await.unwrap_err();
         assert!(err.to_string().contains("pinned"), "message: {err}");
         // Aborted before touching the store — the account is untouched.
         assert!(app.claude.emails().contains(&"a@x".to_string()));
@@ -1701,7 +1280,7 @@ mod tests {
     async fn delete_account_removes_token_and_detaches_unpinned_clones() {
         let app = app_with_group(&["a@x", "b@x"]);
         app.store.mutate(|s| s.hosts.push(auto_clone("c1", "a@x")));
-        let moved = delete_account(&app, "a@x").await.unwrap();
+        let moved = delete_account::<ClaudePool>(&app, "a@x").await.unwrap();
         assert_eq!(moved, vec!["c1".to_string()]);
         assert!(
             !app.claude.emails().contains(&"a@x".to_string()),
@@ -1734,7 +1313,7 @@ mod tests {
                 usage_row("a@x", wire::Provider::Codex),
             ];
         });
-        delete_account(&app, "a@x").await.unwrap();
+        delete_account::<ClaudePool>(&app, "a@x").await.unwrap();
 
         let rows = app.store.get().claude_accounts;
         assert!(
@@ -1873,45 +1452,6 @@ mod tests {
         assert_eq!(host.claude_account_email.as_deref(), Some("live@x"));
     }
 
-    #[test]
-    fn a_replacement_inherits_every_pool_the_old_account_sat_in() {
-        let mut pools = vec![
-            CloneGroup {
-                name: "Personal".into(),
-                accounts: vec!["old@x".into(), "other@x".into()],
-            },
-            CloneGroup {
-                name: "Medi".into(),
-                accounts: vec!["old@x".into()],
-            },
-            CloneGroup {
-                name: "Untouched".into(),
-                accounts: vec!["other@x".into()],
-            },
-        ];
-        let joined = swap_pool_member(&mut pools, "old@x", "new@x");
-        assert_eq!(joined, vec!["Personal".to_string(), "Medi".to_string()]);
-        assert_eq!(
-            pools[0].accounts,
-            vec!["other@x".to_string(), "new@x".to_string()]
-        );
-        assert_eq!(pools[1].accounts, vec!["new@x".to_string()]);
-        assert_eq!(
-            pools[2].accounts,
-            vec!["other@x".to_string()],
-            "a pool without it is left alone"
-        );
-
-        // Replacing with an account that is already a member neither duplicates it nor
-        // leaves the old one behind.
-        let mut shared = vec![CloneGroup {
-            name: "Personal".into(),
-            accounts: vec!["old@x".into(), "new@x".into()],
-        }];
-        swap_pool_member(&mut shared, "old@x", "new@x");
-        assert_eq!(shared[0].accounts, vec!["new@x".to_string()]);
-    }
-
     /// A replacement takes over the two things an operator would otherwise have to rebuild
     /// from memory: which clones named the old account, and which ran it.
     #[tokio::test]
@@ -1943,7 +1483,7 @@ mod tests {
         // covered by `a_replacement_inherits_every_pool_the_old_account_sat_in`.
         let moved = repoint_clones::<ClaudePool>(&app, "old@x", "new@x");
         assert_eq!(moved, vec!["pinned".to_string(), "pooled".to_string()]);
-        delete_account(&app, "old@x").await.unwrap();
+        delete_account::<ClaudePool>(&app, "old@x").await.unwrap();
 
         let hosts = app.store.get().hosts;
         let pinned = hosts.iter().find(|h| h.id == "pinned").unwrap();
@@ -1968,7 +1508,7 @@ mod tests {
     async fn replacing_an_account_with_itself_does_nothing() {
         let app = app_with_group(&["a@x", "b@x"]);
         assert!(
-            replace_account(&app, "a@x", "a@x")
+            replace_account::<ClaudePool>(&app, "a@x", "a@x")
                 .await
                 .unwrap()
                 .is_empty()
@@ -2027,111 +1567,8 @@ mod tests {
         );
     }
 
-    fn rotation_candidate(
-        email: &str,
-        five_pct: f64,
-        seven_pct: f64,
-        five_reset: Option<i64>,
-        seven_reset: Option<i64>,
-    ) -> RotationCandidate {
-        RotationCandidate {
-            email: email.to_string(),
-            five_pct,
-            seven_pct,
-            five_reset,
-            seven_reset,
-        }
-    }
-
-    #[test]
-    fn saturated_never_picks_weekly_capped_over_session_capped() {
-        // stuck@x is at the weekly cap (unusable for days) but barely touched its 5h
-        // window; soon@x is only over the 5h session cap and frees up at the next 5h reset.
-        // The clone must land on soon@x — never the account a low 5h number makes look
-        // "least used" while its weekly cap keeps it dark for days.
-        let candidates = [
-            rotation_candidate("stuck@x", 5.0, 97.0, Some(1_000), Some(600_000)),
-            rotation_candidate("soon@x", 85.0, 50.0, Some(2_000), Some(700_000)),
-        ];
-        let clones = [clone_host("c1", Some("stuck@x"))];
-
-        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
-
-        assert_eq!(got[0].1, "soon@x");
-    }
-
-    #[test]
-    fn saturated_prefers_soonest_5h_reset_among_session_capped() {
-        // Both only over the 5h cap (7d has room) → soonest 5h reset frees up first.
-        let candidates = [
-            rotation_candidate("soon@x", 90.0, 50.0, Some(1_000), Some(700_000)),
-            rotation_candidate("late@x", 90.0, 50.0, Some(2_000), Some(700_000)),
-        ];
-        let clones = [clone_host("c1", Some("late@x"))];
-
-        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
-
-        assert_eq!(got[0].1, "soon@x");
-    }
-
-    #[test]
-    fn saturated_prefers_soonest_7d_reset_when_all_weekly_capped() {
-        // Everyone is weekly-capped → the binding window is 7d; soonest weekly reset wins
-        // and the (here deliberately inverted) 5h resets are ignored.
-        let candidates = [
-            rotation_candidate("soon@x", 50.0, 97.0, Some(9_000), Some(500_000)),
-            rotation_candidate("late@x", 50.0, 97.0, Some(1_000), Some(600_000)),
-        ];
-        let clones = [clone_host("c1", Some("late@x"))];
-
-        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
-
-        assert_eq!(got[0].1, "soon@x");
-    }
-
-    #[test]
-    fn saturated_uses_lower_usage_when_binding_reset_missing() {
-        // Both only 5h-capped, no 5h reset timestamp → fall back to the lower 5h usage.
-        let candidates = [
-            rotation_candidate("hot@x", 98.0, 50.0, None, Some(700_000)),
-            rotation_candidate("cool@x", 90.0, 50.0, None, Some(700_000)),
-        ];
-        let clones = [clone_host("c1", Some("hot@x"))];
-
-        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
-
-        assert_eq!(got[0].1, "cool@x");
-    }
-
-    #[test]
-    fn saturated_keeps_current_within_reset_margin() {
-        // Same class (both 5h-capped); current's 5h reset is within the sticky margin of
-        // best's, so the clone keeps its account (avoids a cold prompt-cache switch).
-        let candidates = [
-            rotation_candidate("current@x", 90.0, 50.0, Some(1_800), Some(700_000)),
-            rotation_candidate("best@x", 90.0, 50.0, Some(1_000), Some(700_000)),
-        ];
-        let clones = [clone_host("c1", Some("current@x"))];
-
-        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
-
-        assert_eq!(got[0].1, "current@x");
-    }
-
-    #[test]
-    fn saturated_moves_missing_reset_current_to_known_reset() {
-        // Same class; current has no 5h reset while a peer does → move to the known one.
-        let candidates = [
-            rotation_candidate("unknown@x", 90.0, 50.0, None, Some(700_000)),
-            rotation_candidate("known@x", 94.0, 50.0, Some(1_000), Some(700_000)),
-        ];
-        let clones = [clone_host("c1", Some("unknown@x"))];
-
-        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
-
-        assert_eq!(got[0].1, "known@x");
-    }
-
+    /// Claude's own gate: the five-hour session window as well as the shared weekly cap.
+    /// (The weekly cap itself is asserted for both sides in `crate::pool`.)
     #[test]
     fn exhaustion_threshold_is_80_5h_or_95_7d() {
         assert!(
@@ -2154,79 +1591,5 @@ mod tests {
             !is_exhausted::<ClaudePool>(79.9, 94.9),
             "both under caps is eligible"
         );
-    }
-
-    #[test]
-    fn rfc3339_utc_secs_parses_valid_shapes_and_rejects_malformed() {
-        // Bare Z (Codex's epoch_to_rfc3339 form).
-        assert_eq!(
-            parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"),
-            Some(1_609_459_200)
-        );
-        // The Anthropic usage API's real shape: fractional seconds + `+00:00` offset.
-        assert_eq!(
-            parse_rfc3339_utc_secs("2026-07-24T22:00:00.469890+00:00"),
-            Some(1_784_930_400)
-        );
-        // Fractional seconds are dropped, not rounded.
-        assert_eq!(
-            parse_rfc3339_utc_secs("2021-01-01T00:00:00.5+00:00"),
-            Some(1_609_459_200)
-        );
-        // Non-UTC offsets shift to UTC: -05:00 is 5h later in epoch, +05:30 is earlier.
-        assert_eq!(
-            parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"),
-            Some(1_609_477_200)
-        );
-        assert_eq!(
-            parse_rfc3339_utc_secs("2021-01-01T00:00:00+05:30"),
-            Some(1_609_439_400)
-        );
-        // `±HHMM` (no colon) is accepted too.
-        assert_eq!(
-            parse_rfc3339_utc_secs("2021-01-01T00:00:00-0500"),
-            Some(1_609_477_200)
-        );
-        // No zone → treated as UTC.
-        assert_eq!(
-            parse_rfc3339_utc_secs("2021-01-01T00:00:00"),
-            Some(1_609_459_200)
-        );
-        // Malformed input is rejected, not guessed.
-        assert_eq!(parse_rfc3339_utc_secs("not-a-timestamp"), None);
-        assert_eq!(parse_rfc3339_utc_secs("2021-13-01T00:00:00Z"), None); // month 13
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T25:00:00Z"), None); // hour 25
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00."), None); // bare fraction dot
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00+5:00"), None); // 1-digit hour offset
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00+99:00"), None); // offset hour 99
-        assert_eq!(parse_rfc3339_utc_secs("2021-01-01"), None); // no time
-    }
-
-    // --- "auto" pool ---------------------------------------------------------
-
-    fn host_sel(id: &str, managed: bool, group: Option<&str>, sel: Option<&str>) -> RmngClone {
-        RmngClone {
-            id: id.into(),
-            managed,
-            claude_group: group.map(str::to_string),
-            claude_selection: sel.map(str::to_string),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn auto_pool_is_only_managed_ungrouped_auto_clones() {
-        let hosts = vec![
-            host_sel("auto1", true, None, Some("auto")),        // in
-            host_sel("pinned", true, None, Some("me@x")),       // out: pinned to an email
-            host_sel("legacy", true, None, None),               // out: legacy None == pinned
-            host_sel("grouped", true, Some("g"), Some("auto")), // out: named group handles it
-            host_sel("stopped", false, None, Some("auto")),     // out: unmanaged
-        ];
-        let picked: Vec<String> = crate::pool::auto_pool_clones::<ClaudePool>(&hosts)
-            .into_iter()
-            .map(|h| h.id)
-            .collect();
-        assert_eq!(picked, vec!["auto1"]);
     }
 }

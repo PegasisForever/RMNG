@@ -3,9 +3,14 @@
 //! `claude.rs` and `codex.rs` used to carry this logic twice — same signatures, bodies
 //! differing only in a provider filter, a host field, and one usage window. Every
 //! rotation fix shipped twice by hand, so the core moved here, parameterized by a small
-//! [`PoolProvider`] adapter each side implements. What stays per side: the token stores,
-//! OAuth/refresh, usage polling, and the delete/replace flows (different file formats,
-//! different views).
+//! [`PoolProvider`] adapter each side implements.
+//!
+//! Everything *around* that core was still written twice, and the copies had drifted — one
+//! of the drifts handed Codex clones the wrong account. Token delivery, the delete/replace
+//! lifecycle, the poll and rotate loops, the swap both HTTP routes perform: all of it lives
+//! here now, generic over the same adapter. What stays per side is the adapter itself: the
+//! account struct, the refresh POST, OAuth import, usage parsing, and the file writes that
+//! put a token into a clone's home (different file formats, different identities).
 //!
 //! The one deliberate unification: [`RotationCandidate`] always carries both windows and
 //! the saturated ranking is the Claude class-aware one. For Codex the five-hour window
@@ -13,12 +18,17 @@
 //! reduces exactly to the old Codex order — same behaviour, one code path.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::Duration;
 
-use wire::{CloneGroup, RmngClone};
+use anyhow::{Context, Result, bail};
+use wire::{ClaudeUsage, CloneGroup, RmngClone};
 
+use crate::account::{AccountKind, PUSH_CONCURRENCY, ROTATE_SECS, Store, fingerprint};
 use crate::app::App;
+use crate::claude::StoredClaudeAccount;
 use crate::clone_ops::{rand_u64, shuffle};
+use crate::codex::StoredCodexAccount;
 
 pub(crate) const AUTO: &str = "auto";
 pub(crate) const SESSION_HEADROOM_PCT: f64 = 20.0;
@@ -27,44 +37,131 @@ pub(crate) const RESET_STICKY_MARGIN_SECS: i64 = 15 * 60;
 pub(crate) const UTIL_STICKY_MARGIN_PCT: f64 = 5.0;
 pub(crate) const STAGGER: Duration = Duration::from_millis(400);
 
-/// The per-provider bits the shared core cannot know: which rows are ours, which host
-/// field we bind, how we score, and how we deliver a token. Implemented once per side
+/// The per-provider bits the shared core cannot know: which account store is ours, which
+/// host field we bind, how we score, and how we deliver a token. Implemented once per side
 /// (`ClaudePool` / `CodexPool` below); everything else in this module is generic over it.
-pub(crate) trait PoolProvider {
+///
+/// The delivery methods are declared `-> impl Future + Send` rather than as plain `async
+/// fn`s because the flows built on them are spawned as background tasks (the delete's
+/// re-placement pass, the fan-out after a refresh). A bare `async fn` in a trait promises no
+/// `Send`, so a generic `tokio::spawn` of those flows could not be proven to compile.
+pub(crate) trait PoolProvider: 'static {
+    /// This side's stored account. The 0600 secret store and the whole refresh lifecycle
+    /// come with it ([`crate::account`]), which is what lets the flows below read accounts
+    /// and record pushes without knowing whose token they carry.
+    type Account: AccountKind;
+
+    /// Which published usage rows are ours, and which a delete may take out.
+    ///
+    /// Named rather than spelled as a filter at each site: the two hand-written filters this
+    /// replaces had drifted into each other's negation (`provider == Some(Codex) || email
+    /// != e` against `provider != Some(Codex) || email != e`). That reads as a typo and
+    /// behaves as one the day a third provider arrives.
+    const PROVIDER: wire::Provider;
+    /// Whether this side reports a five-hour session window. Codex has only the weekly one,
+    /// so its snapshots leave the 5h fields empty and every saturated Codex candidate ranks
+    /// as weekly-capped (see the module header).
+    const FIVE_HOUR_WINDOW: bool;
+    /// This side's name in a log line: "claude token push", "codex usage poll failed".
+    /// Operator-facing prose uses the capitalized [`AccountKind::LABEL`] instead, which is
+    /// why both exist — "no imported claude account" would read as a bug.
+    const NAME: &'static str;
+    /// "account" vs "codex account" in op-log lines.
+    const OP_LABEL: &'static str;
+    /// "rotate" vs "codex rotate" in log lines.
+    const LOG_LABEL: &'static str;
+    /// "clone account" vs "codex account" in the unknown-pin warning.
+    fn unknown_label() -> &'static str;
+
+    /// This side's account store on the running server.
+    fn store(app: &App) -> &Store<Self::Account> {
+        <Self::Account as AccountKind>::store(app)
+    }
     /// Emails holding a token that still works (rotation-eligible).
-    fn usable_emails(app: &App) -> Vec<String>;
+    fn usable_emails(app: &App) -> Vec<String> {
+        Self::store(app).usable_emails()
+    }
     /// Every imported email, usable or not (explicit pins resolve against these).
-    fn imported_emails(app: &App) -> Vec<String>;
+    fn imported_emails(app: &App) -> Vec<String> {
+        Self::store(app).emails()
+    }
+    /// Drop the pushed-token record so the next delivery re-pushes.
+    fn forget(app: &App, host_id: &str) {
+        Self::store(app).forget_pushed(host_id);
+    }
     /// Latest usage windows per email, for this provider's rows only.
-    fn snapshots(app: &App) -> HashMap<String, UsageSnapshot>;
+    fn snapshots(app: &App) -> HashMap<String, UsageSnapshot> {
+        let st = app.store.get();
+        st.claude_accounts
+            .iter()
+            .filter(|u| row_provider(u) == Self::PROVIDER)
+            .map(|u| {
+                (
+                    u.email.clone(),
+                    snapshot_of(
+                        Self::FIVE_HOUR_WINDOW
+                            .then(|| {
+                                u.five_hour
+                                    .as_ref()
+                                    .map(|w| (w.pct, w.resets_at.as_deref()))
+                            })
+                            .flatten(),
+                        u.seven_day
+                            .as_ref()
+                            .map(|w| (w.pct, w.resets_at.as_deref())),
+                    ),
+                )
+            })
+            .collect()
+    }
+
     /// The account installed on this clone right now, if any.
     fn host_email(h: &RmngClone) -> Option<&str>;
-    /// Record a new installed account on a host row.
-    fn bind_host(h: &mut RmngClone, email: String);
+    /// Record the account installed on a host row — or, with `None`, that this side has
+    /// none.
+    ///
+    /// Clearing is half of this interface, not an extra: a delete detaches every clone that
+    /// ran the account, and a swap can resolve to no account at all. While this could only
+    /// write `Some`, both of those tails had to stay outside this module and were written
+    /// twice by hand — which is how the delete pair ended up disagreeing about which rows
+    /// they owned.
+    fn set_host_email(h: &mut RmngClone, email: Option<String>);
     /// The operator's selection for this side (`auto` or a pin email).
     fn selection(h: &RmngClone) -> Option<&str>;
-    /// Rewrite the selection (account renames).
+    /// Rewrite the selection (account renames, swaps).
     fn set_selection(h: &mut RmngClone, sel: String);
     /// The pool this side's current pick came from (legacy per-side stickies).
     fn sticky(h: &RmngClone) -> Option<&str>;
-    /// Drop the pushed-token record so the next delivery re-pushes.
-    fn forget(app: &App, host_id: &str);
-    /// Install this side's token into a clone.
-    async fn push(app: &App, host_id: &str, email: &str) -> anyhow::Result<()>;
+    /// Record the pool a pick came from (`None` when it came from no pool).
+    fn set_sticky(h: &mut RmngClone, pool: Option<String>);
+
+    /// What was last delivered to a clone, as one comparable string. See [`push_key_of`]
+    /// for what goes in it and the delivery bug that put the identity there.
+    fn push_key(acct: &Self::Account) -> String;
+    /// `email`'s account, refreshed and persisted first if it is within its refresh lead of
+    /// expiry, plus whether that refresh rotated the token.
+    fn fresh_access_token(
+        app: &App,
+        email: &str,
+    ) -> impl Future<Output = Result<(Self::Account, bool)>> + Send;
+    /// Write this side's token, and the identity that goes with it, into a clone's home.
+    fn apply(
+        app: &App,
+        host_id: &str,
+        acct: &Self::Account,
+    ) -> impl Future<Output = Result<()>> + Send;
     /// Strip this side's credentials from a clone (pending-auto boots tokenless).
-    async fn clear(app: &App, host_id: &str) -> anyhow::Result<()>;
-    /// "account" vs "codex account" in op-log lines.
-    const OP_LABEL: &'static str;
+    fn clear(app: &App, host_id: &str) -> impl Future<Output = Result<()>> + Send;
+    /// One usage poll over every imported account on this side; `true` when the provider
+    /// rate-limited it.
+    fn poll(app: &App) -> impl Future<Output = Result<bool>> + Send;
+
     /// Whether these windows leave no usable headroom.
     fn exhausted(five_pct: f64, seven_pct: f64) -> bool;
-    /// (headroom score, eligible) for an account whith these windows.
+    /// (headroom score, eligible) for an account with these windows.
     fn score_weigh(five_pct: f64, seven_pct: f64) -> (f64, bool);
     /// The window spread-balancing compares (5h for Claude, 7d for Codex).
     fn spread_pct(five_pct: f64, seven_pct: f64) -> f64;
-    /// "clone account" vs "codex account" in the unknown-pin warning.
-    fn unknown_label() -> &'static str;
-    /// "rotate" vs "codex rotate" in log lines.
-    const LOG_LABEL: &'static str;
 }
 
 /// Latest usage windows for one imported account. Sides without a window leave it
@@ -95,37 +192,22 @@ fn snapshot_of(
 }
 
 impl PoolProvider for ClaudePool {
-    fn usable_emails(app: &App) -> Vec<String> {
-        app.claude.usable_emails()
+    type Account = StoredClaudeAccount;
+
+    const PROVIDER: wire::Provider = wire::Provider::Claude;
+    const FIVE_HOUR_WINDOW: bool = true;
+    const NAME: &'static str = "claude";
+    const OP_LABEL: &'static str = "account";
+    const LOG_LABEL: &'static str = "rotate";
+    fn unknown_label() -> &'static str {
+        "clone account"
     }
-    fn imported_emails(app: &App) -> Vec<String> {
-        app.claude.emails()
-    }
-    fn snapshots(app: &App) -> HashMap<String, UsageSnapshot> {
-        let st = app.store.get();
-        st.claude_accounts
-            .iter()
-            .filter(|u| u.provider != Some(wire::Provider::Codex))
-            .map(|u| {
-                (
-                    u.email.clone(),
-                    snapshot_of(
-                        u.five_hour
-                            .as_ref()
-                            .map(|w| (w.pct, w.resets_at.as_deref())),
-                        u.seven_day
-                            .as_ref()
-                            .map(|w| (w.pct, w.resets_at.as_deref())),
-                    ),
-                )
-            })
-            .collect()
-    }
+
     fn host_email(h: &RmngClone) -> Option<&str> {
         h.claude_account_email.as_deref()
     }
-    fn bind_host(h: &mut RmngClone, email: String) {
-        h.claude_account_email = Some(email);
+    fn set_host_email(h: &mut RmngClone, email: Option<String>) {
+        h.claude_account_email = email;
     }
     fn selection(h: &RmngClone) -> Option<&str> {
         h.claude_selection.as_deref()
@@ -136,16 +218,26 @@ impl PoolProvider for ClaudePool {
     fn sticky(h: &RmngClone) -> Option<&str> {
         h.claude_group.as_deref()
     }
-    fn forget(app: &App, host_id: &str) {
-        app.claude.forget_pushed(host_id);
+    fn set_sticky(h: &mut RmngClone, pool: Option<String>) {
+        h.claude_group = pool;
     }
-    async fn push(app: &App, host_id: &str, email: &str) -> anyhow::Result<()> {
-        crate::claude::push_account_to_clone(app, host_id, email).await
+
+    fn push_key(acct: &Self::Account) -> String {
+        crate::claude::push_key(acct)
     }
-    async fn clear(app: &App, host_id: &str) -> anyhow::Result<()> {
+    async fn fresh_access_token(app: &App, email: &str) -> Result<(Self::Account, bool)> {
+        crate::claude::fresh_access_token(app, email).await
+    }
+    async fn apply(app: &App, host_id: &str, acct: &Self::Account) -> Result<()> {
+        crate::claude::apply_clone_token(app, host_id, acct).await
+    }
+    async fn clear(app: &App, host_id: &str) -> Result<()> {
         crate::claude::clear_clone_token(app, host_id).await
     }
-    const OP_LABEL: &'static str = "account";
+    async fn poll(app: &App) -> Result<bool> {
+        crate::claude::poll_once(app).await
+    }
+
     fn exhausted(five_pct: f64, seven_pct: f64) -> bool {
         (100.0 - five_pct) < SESSION_HEADROOM_PCT || seven_pct >= SEVEN_DAY_CAP_PCT
     }
@@ -157,42 +249,25 @@ impl PoolProvider for ClaudePool {
     fn spread_pct(five_pct: f64, _seven_pct: f64) -> f64 {
         five_pct
     }
-    fn unknown_label() -> &'static str {
-        "clone account"
-    }
-    const LOG_LABEL: &'static str = "rotate";
 }
 
 impl PoolProvider for CodexPool {
-    fn usable_emails(app: &App) -> Vec<String> {
-        app.codex.usable_emails()
+    type Account = StoredCodexAccount;
+
+    const PROVIDER: wire::Provider = wire::Provider::Codex;
+    const FIVE_HOUR_WINDOW: bool = false;
+    const NAME: &'static str = "codex";
+    const OP_LABEL: &'static str = "codex account";
+    const LOG_LABEL: &'static str = "codex rotate";
+    fn unknown_label() -> &'static str {
+        "codex account"
     }
-    fn imported_emails(app: &App) -> Vec<String> {
-        app.codex.emails()
-    }
-    fn snapshots(app: &App) -> HashMap<String, UsageSnapshot> {
-        let st = app.store.get();
-        st.claude_accounts
-            .iter()
-            .filter(|u| u.provider == Some(wire::Provider::Codex))
-            .map(|u| {
-                (
-                    u.email.clone(),
-                    snapshot_of(
-                        None,
-                        u.seven_day
-                            .as_ref()
-                            .map(|w| (w.pct, w.resets_at.as_deref())),
-                    ),
-                )
-            })
-            .collect()
-    }
+
     fn host_email(h: &RmngClone) -> Option<&str> {
         h.codex_account_email.as_deref()
     }
-    fn bind_host(h: &mut RmngClone, email: String) {
-        h.codex_account_email = Some(email);
+    fn set_host_email(h: &mut RmngClone, email: Option<String>) {
+        h.codex_account_email = email;
     }
     fn selection(h: &RmngClone) -> Option<&str> {
         h.codex_selection.as_deref()
@@ -203,16 +278,26 @@ impl PoolProvider for CodexPool {
     fn sticky(h: &RmngClone) -> Option<&str> {
         h.codex_group.as_deref()
     }
-    fn forget(app: &App, host_id: &str) {
-        app.codex.forget_pushed(host_id);
+    fn set_sticky(h: &mut RmngClone, pool: Option<String>) {
+        h.codex_group = pool;
     }
-    async fn push(app: &App, host_id: &str, email: &str) -> anyhow::Result<()> {
-        crate::codex::push_account_to_clone(app, host_id, email).await
+
+    fn push_key(acct: &Self::Account) -> String {
+        crate::codex::push_key(acct)
     }
-    async fn clear(app: &App, host_id: &str) -> anyhow::Result<()> {
+    async fn fresh_access_token(app: &App, email: &str) -> Result<(Self::Account, bool)> {
+        crate::codex::fresh_access_token(app, email).await
+    }
+    async fn apply(app: &App, host_id: &str, acct: &Self::Account) -> Result<()> {
+        crate::codex::apply_clone_token(app, host_id, acct).await
+    }
+    async fn clear(app: &App, host_id: &str) -> Result<()> {
         crate::codex::clear_clone_token(app, host_id).await
     }
-    const OP_LABEL: &'static str = "codex account";
+    async fn poll(app: &App) -> Result<bool> {
+        crate::codex::poll_once(app).await
+    }
+
     fn exhausted(_five_pct: f64, seven_pct: f64) -> bool {
         seven_pct >= SEVEN_DAY_CAP_PCT
     }
@@ -222,10 +307,6 @@ impl PoolProvider for CodexPool {
     fn spread_pct(_five_pct: f64, seven_pct: f64) -> f64 {
         seven_pct
     }
-    fn unknown_label() -> &'static str {
-        "codex account"
-    }
-    const LOG_LABEL: &'static str = "codex rotate";
 }
 
 // --- time ------------------------------------------------------------------
@@ -819,7 +900,7 @@ async fn rotate_pool<P: PoolProvider>(
         let (id, bound) = (host.id.clone(), email.clone());
         app.store.mutate(|s| {
             if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-                P::bind_host(h, bound);
+                P::set_host_email(h, Some(bound));
             }
         });
         P::forget(app, &host.id);
@@ -830,7 +911,7 @@ async fn rotate_pool<P: PoolProvider>(
         if host.archived {
             continue;
         }
-        if let Err(e) = P::push(app, &host.id, &email).await {
+        if let Err(e) = push_account_to_clone::<P>(app, &host.id, &email).await {
             tracing::warn!(
                 "{log}[{label}]: {} is now bound to {email}, but installing its token failed \
                  (the next reconcile pass retries): {e}",
@@ -972,7 +1053,7 @@ pub(crate) async fn assign_clone_side<P: PoolProvider>(
         Some(g) => format!("{email} (group {g})"),
         None => email.clone(),
     };
-    match P::push(app, host_id, &email).await {
+    match push_account_to_clone::<P>(app, host_id, &email).await {
         Ok(()) => op_log(app, op_id, format!("{label}: assigned {what}")),
         Err(e) => {
             if matches!(strict, AssignStrictness::Strict) {
@@ -998,8 +1079,8 @@ pub(crate) async fn assign_clone_side<P: PoolProvider>(
 ///
 /// Both bindings, because they mean different things and both name the dead account: the
 /// pin (an explicit operator choice) and the current assignment. Moving the pin is also
-/// what lets [`delete_account`](crate::claude::delete_account)-style guards through
-/// afterwards, since they refuse while a pin names their target.
+/// what lets [`delete_account`] through afterwards, since it refuses while a pin names its
+/// target.
 ///
 /// Separated from the config write so it can be tested without one:
 /// [`crate::config::save`] writes a fixed relative path, so a test that reached it would
@@ -1013,7 +1094,7 @@ pub(crate) fn repoint_clones<P: PoolProvider>(app: &App, old: &str, new: &str) -
                 P::set_selection(h, new.clone());
             }
             if P::host_email(h) == Some(old.as_str()) {
-                P::bind_host(h, new.clone());
+                P::set_host_email(h, Some(new.clone()));
                 moved.push(h.id.clone());
             }
         }
@@ -1045,4 +1126,1021 @@ pub(crate) fn swap_pool_member(pools: &mut [CloneGroup], old: &str, new: &str) -
         pool.accounts.retain(|a| a != old);
     }
     joined
+}
+
+// --- token delivery ----------------------------------------------------------
+
+/// What was last delivered to a clone, as one comparable string: the token AND the identity
+/// that went with it.
+///
+/// A rebind can hand a clone a different account whose token happens to be pushed already,
+/// and comparing tokens alone would call that clone current while it still names the
+/// previous account. Claude's identity is what Claude Code declares to Anthropic on every
+/// request (the account uuid and email in `~/.claude.json`); Codex's is the account id and
+/// the id token it is handed beside the access token in `~/.codex/auth.json`.
+///
+/// Codex compared the bare access token until this became one function. A Codex rebind onto
+/// an account whose token was already pushed therefore read as "already current" on every
+/// later pass as well, so the clone kept running under the account it had before with
+/// nothing left to correct it.
+pub(crate) fn push_key_of(token: &str, identity: &str) -> String {
+    format!("{}|{}", fingerprint(token), fingerprint(identity))
+}
+
+/// Whether a clone assigned `host_email` is in scope for a push restricted to `only`.
+fn in_push_scope(host_email: &str, only: Option<&str>) -> bool {
+    only.is_none_or(|want| want == host_email)
+}
+
+/// Refresh-if-needed and install `email`'s token into clone `host_id` (== its container
+/// name), recording the push so the reconcile pass doesn't repeat it. If the refresh
+/// rotated the token, fan it out to the account's other clones in the background.
+///
+/// The fan-out happens whether or not THIS clone took its copy. The refresh above has
+/// already happened, and the provider revokes the previous access token the moment it mints
+/// a new one — so every other clone on this account is broken from that instant, and their
+/// repair has nothing to do with whether this one succeeded.
+///
+/// The distinction is load-bearing rather than theoretical. The rotate pass retries stopped
+/// clones forever, so the clone that happens to trigger a refresh is often one whose push
+/// cannot possibly work. Returning early there stranded the whole account until the next
+/// poll: measured twice on CT 105, 6m42s for `pegasis.personal@gmail.com` across 19 clones
+/// and 4m33s for `me@pegasis.site`, each time because the triggering clone was stopped.
+pub(crate) async fn push_account_to_clone<P: PoolProvider>(
+    app: &App,
+    host_id: &str,
+    email: &str,
+) -> Result<()> {
+    let (acct, rotated) = P::fresh_access_token(app, email).await?;
+    let applied = P::apply(app, host_id, &acct).await;
+    if applied.is_ok() {
+        P::store(app)
+            .pushed
+            .lock()
+            .unwrap()
+            .insert(host_id.to_string(), P::push_key(&acct));
+    }
+    if rotated {
+        let app = app.clone();
+        let email = email.to_string();
+        tokio::spawn(async move { push_stale_tokens_for::<P>(&app, Some(&email)).await });
+    }
+    applied
+}
+
+/// Fleet-wide reconcile pass: see [`push_stale_tokens_for`].
+///
+/// Runs at the end of every poll to retry pushes that failed (clone stopped or unreachable)
+/// and to catch clones whose assignment changed out of band. The pushed map is in-memory, so
+/// the first pass after a server restart re-pushes every clone.
+pub(crate) async fn push_stale_tokens<P: PoolProvider>(app: &App) {
+    push_stale_tokens_for::<P>(app, None).await;
+}
+
+/// Give every clone assigned an account that account's current access token, unless the last
+/// successful push already delivered exactly that token under exactly that identity (see
+/// [`push_key_of`]). With `only` set, visit just that account's clones.
+///
+/// Speed is the whole point. A refresh invalidates the previous token immediately, so every
+/// clone still holding it is broken until this reaches it — the agent gets a 401, not a
+/// warning. Serially that window grew with the fleet; this runs [`PUSH_CONCURRENCY`] at a
+/// time and skips clones that cannot receive a push at all, so it is bounded by the slowest
+/// clone rather than by their sum.
+pub(crate) async fn push_stale_tokens_for<P: PoolProvider>(app: &App, only: Option<&str>) {
+    let started = std::time::Instant::now();
+    let name = P::NAME;
+    // The account a restricted pass was for, named in every line it logs. Without it the
+    // fan-out after one refresh and a fleet-wide sweep read identically in the log, and only
+    // one of them is evidence that something is wrong.
+    let scope = only.map(|e| format!(" [{e}]")).unwrap_or_default();
+    let mut targets: Vec<(String, P::Account)> = Vec::new(); // (host, account)
+    let mut skipped_fresh = 0usize;
+    let mut skipped_no_account = 0usize;
+
+    for host in app.store.get().hosts {
+        let Some(email) = P::host_email(&host) else {
+            continue;
+        };
+        // Archived clones stay bound to an account but can never take a push: their
+        // container is stopped or frozen. Leaving them in scope meant eight dead hosts on
+        // CT 105 failing an exec on every pass, forever.
+        if !in_push_scope(email, only) || !host.managed || host.archived {
+            continue;
+        }
+        let Some(acct) = P::store(app).get_by_email(email) else {
+            // Bound to an account the store does not have: the clone keeps whatever it has
+            // and nothing here can improve it, but staying silent made it indistinguishable
+            // from a clone that is up to date.
+            skipped_no_account += 1;
+            tracing::warn!(
+                "clone {} is bound to {name} account {email}, which is not imported; \
+                 leaving its token alone",
+                host.id
+            );
+            continue;
+        };
+        if P::store(app).pushed.lock().unwrap().get(&host.id) == Some(&P::push_key(&acct)) {
+            skipped_fresh += 1;
+            continue;
+        }
+        targets.push((host.id.clone(), acct));
+    }
+
+    if targets.is_empty() {
+        tracing::debug!(
+            "{name} token push{scope}: nothing to do ({skipped_fresh} already current, \
+             {skipped_no_account} unbound)"
+        );
+        return;
+    }
+    tracing::info!(
+        "{name} token push{scope}: {} clone(s) to update ({skipped_fresh} already current, \
+         {skipped_no_account} unbound)",
+        targets.len()
+    );
+
+    let (mut ok, mut failed, mut unreachable) = (0usize, 0usize, 0usize);
+    for chunk in targets.chunks(PUSH_CONCURRENCY) {
+        let results = futures::future::join_all(chunk.iter().map(|(id, acct)| async move {
+            // The push is a plain home write now, which works stopped or running — the only
+            // clone that cannot take one is a deleted one (mount torn down).
+            if !crate::home_overlay::clone_home_present(id) {
+                return (id, acct, None);
+            }
+            (id, acct, Some(P::apply(app, id, acct).await))
+        }))
+        .await;
+
+        for (id, acct, outcome) in results {
+            let email = acct.email();
+            match outcome {
+                None => {
+                    unreachable += 1;
+                    tracing::debug!("skipping {name} token push to {id}: no live home");
+                }
+                Some(Ok(())) => {
+                    ok += 1;
+                    P::store(app)
+                        .pushed
+                        .lock()
+                        .unwrap()
+                        .insert(id.clone(), P::push_key(acct));
+                    tracing::info!("pushed fresh {name} token ({email}) to {id}");
+                }
+                Some(Err(e)) => {
+                    failed += 1;
+                    tracing::warn!(
+                        "pushing {name} token ({email}) to {id} failed (retried next pass): {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    tracing::info!(
+        "{name} token push{scope} done in {:?}: {ok} pushed, {failed} failed, \
+         {unreachable} without live home",
+        started.elapsed()
+    );
+}
+
+/// Install both providers' current access tokens into clone `host_id`. `why` names the pass
+/// in anything this logs, since the clone itself cannot say what woke it.
+///
+/// An archived clone is skipped by every push pass while it is down
+/// ([`push_stale_tokens_for`]) and re-bound without a push by the rotator, so the
+/// credentials on its disk are whatever it was archived with — possibly an account that has
+/// since been deleted or gone dark. Without this it runs them until the next poll, up to ten
+/// minutes of 401s on a clone the operator was just told is ready. The gen-2 migration needs
+/// the same repair for the same reason: it stops the fleet, rewrites every home, and starts
+/// it again.
+///
+/// Best-effort on both sides. A failure here is logged and left to the next reconcile pass.
+pub(crate) async fn push_both_sides(app: &App, host_id: &str, why: &str) {
+    let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == host_id) else {
+        return;
+    };
+    push_one_side::<ClaudePool>(app, &host, why).await;
+    push_one_side::<CodexPool>(app, &host, why).await;
+}
+
+async fn push_one_side<P: PoolProvider>(app: &App, host: &RmngClone, why: &str) {
+    let Some(email) = P::host_email(host) else {
+        return;
+    };
+    if let Err(e) = push_account_to_clone::<P>(app, &host.id, email).await {
+        tracing::warn!(
+            "{why} {}: installing {email}'s {} token failed: {e}",
+            host.id,
+            <P::Account as AccountKind>::LABEL
+        );
+    }
+}
+
+// --- account lifecycle -------------------------------------------------------
+
+/// Which side a published usage row belongs to. A row written before the provider field
+/// existed carries none, and it is Claude's — that is what the rotation snapshots have
+/// always read, so the delete path has to agree or a legacy row would outlive its account.
+fn row_provider(u: &ClaudeUsage) -> wire::Provider {
+    u.provider.unwrap_or(wire::Provider::Claude)
+}
+
+/// Delete an imported account by email, then heal the fleet.
+///
+/// Refuses (Err) if any clone is **pinned** to it (its selection names the email) — a pin is
+/// an explicit operator choice, so it must be reassigned first (swap it to another account,
+/// a pool, or `auto`). Clones running the account via `auto`/a pool need no pre-work: once
+/// the token is gone a [`rotate_once`] pass moves them onto a surviving account (its assign
+/// step treats a no-longer-imported account as ineligible).
+///
+/// Returns the ids of clones that were on the account.
+///
+/// **The order of the steps is the contract.** Both sides carried it by hand, and the Codex
+/// copy's own comment said so ("including its ordering") without saying what it guarantees:
+///
+///  1. the pin check runs before anything is written, so a refusal leaves the account and
+///     every clone exactly as they were;
+///  2. the token leaves disk before the published row does, so a usage poll landing in the
+///     middle cannot re-publish an account whose token is already gone;
+///  3. the clones running it are collected before they are detached — after the detach no
+///     row names the account and the list this returns would be empty;
+///  4. the row removal and the detaches are ONE mutation, so the screen is right in one
+///     frame. The account's row used to sit in the published state until the NEXT usage poll
+///     rebuilt it, and that poll walks every remaining account at a 400ms stagger with a 10s
+///     timeout each — long enough that a deleted account stayed on screen looking like the
+///     delete had failed;
+///  5. the re-placement is spawned last, so it sees a store without the account and clones
+///     with nothing bound. It is backgrounded because it walks the whole fleet with a
+///     per-clone home write and the screen must not wait on that. A clone it cannot place —
+///     the account was its pool's only member — simply stays unassigned.
+///
+/// Everything the operator can see is therefore settled by the time this returns: the token
+/// is off disk, the account's row is out of the published state, and no clone still points
+/// at it.
+pub(crate) async fn delete_account<P: PoolProvider>(app: &App, email: &str) -> Result<Vec<String>> {
+    let label = <P::Account as AccountKind>::LABEL;
+    let pinned: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .filter(|h| P::selection(h) == Some(email))
+        .map(|h| h.id.clone())
+        .collect();
+    if !pinned.is_empty() {
+        bail!(
+            "{n} clone(s) are pinned to {email}: {ids}. Reassign them (swap to another \
+             account, a group, or auto) before deleting the account.",
+            n = pinned.len(),
+            ids = pinned.join(", "),
+        );
+    }
+    let account_id = P::store(app)
+        .get_by_email(email)
+        .map(|a| a.id().to_string());
+    if !P::store(app).delete(email)? {
+        bail!("no imported {label} account '{email}'");
+    }
+    if let Some(id) = &account_id {
+        P::store(app).last_good.lock().unwrap().remove(id);
+    }
+
+    // Clones currently running the (now-deleted) account. Drop their pushed-token records so
+    // the re-placement pushes the replacement token.
+    let on_it: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .iter()
+        .filter(|h| P::host_email(h) == Some(email))
+        .map(|h| h.id.clone())
+        .collect();
+    for id in &on_it {
+        P::forget(app, id);
+    }
+
+    app.store.mutate(|s| {
+        // This side's row only. The same email can be imported on both sides, and each is a
+        // separate account with its own token; the two hand-written copies of this filter
+        // had drifted into each other's negation, and one of them read a legacy row with no
+        // provider at all as the other side's.
+        s.claude_accounts
+            .retain(|u| !(row_provider(u) == P::PROVIDER && u.email == email));
+        for h in &mut s.hosts {
+            if P::host_email(h) == Some(email) {
+                P::set_host_email(h, None);
+            }
+        }
+    });
+
+    let bg = app.clone();
+    tokio::spawn(async move { rotate_once::<P>(&bg).await });
+    Ok(on_it)
+}
+
+/// Hand everything `old_email` holds to `new_email`, then delete `old_email`.
+///
+/// This is what the "sign in again" badge does. Recovering a dead account used to mean
+/// deleting it and importing its replacement by hand, which loses two things the operator
+/// then has to rebuild from memory: which pools it was in, and which clones were pinned to
+/// it by name. Both move here, in one operation, so the replacement lands where the original
+/// stood.
+///
+/// A sign-in as the SAME account is not a replacement — the import has already overwritten
+/// the token and cleared the rejection — so it returns early having done nothing. Returns
+/// the ids of clones that moved onto `new_email`.
+pub(crate) async fn replace_account<P: PoolProvider>(
+    app: &App,
+    old_email: &str,
+    new_email: &str,
+) -> Result<Vec<String>> {
+    let label = <P::Account as AccountKind>::LABEL;
+    if old_email == new_email {
+        return Ok(Vec::new());
+    }
+    if P::store(app).get_by_email(old_email).is_none() {
+        bail!("no imported {label} account '{old_email}' to replace");
+    }
+    if P::store(app).get_by_email(new_email).is_none() {
+        bail!("'{new_email}' is not an imported {label} account");
+    }
+
+    let mut cfg = app.config();
+    let joined = swap_pool_member(&mut cfg.groups, old_email, new_email);
+    crate::config::save(&cfg).context("saving the replacement's pool membership")?;
+    *app.cfg.write().unwrap() = cfg;
+
+    let moved = repoint_clones::<P>(app, old_email, new_email);
+    delete_account::<P>(app, old_email).await?;
+    tracing::info!(
+        "replaced {label} account {old_email} with {new_email}: {} clone(s), pool(s) {}",
+        moved.len(),
+        if joined.is_empty() {
+            "none".to_string()
+        } else {
+            joined.join(", ")
+        },
+    );
+
+    // Deliver the new token to everything that just moved. Backgrounded for the same reason
+    // the delete's rotation is: it is one home write per clone.
+    let bg = app.clone();
+    let email = new_email.to_string();
+    tokio::spawn(async move { push_stale_tokens_for::<P>(&bg, Some(&email)).await });
+    Ok(moved)
+}
+
+/// Delete every imported account the merged pool list leaves unclaimed, on both sides.
+///
+/// An account in zero pools is removed (the pool tree's rule) — [`delete_account`] settles
+/// clones onto surviving accounts, and refuses (Err) when a clone pins the account, which
+/// fails the save with that reason instead of stranding the pin.
+pub(crate) async fn sweep_ungrouped(app: &App) -> Result<()> {
+    let claimed: std::collections::HashSet<String> = app
+        .config()
+        .groups
+        .iter()
+        .flat_map(|g| g.accounts.iter().cloned())
+        .collect();
+    sweep_side::<ClaudePool>(app, &claimed).await?;
+    sweep_side::<CodexPool>(app, &claimed).await?;
+    Ok(())
+}
+
+async fn sweep_side<P: PoolProvider>(
+    app: &App,
+    claimed: &std::collections::HashSet<String>,
+) -> Result<()> {
+    for email in P::imported_emails(app) {
+        if claimed.contains(&email) {
+            continue;
+        }
+        tracing::info!(
+            "removing ungrouped {} account {email} (claimed by no pool)",
+            <P::Account as AccountKind>::LABEL
+        );
+        delete_account::<P>(app, &email).await?;
+    }
+    Ok(())
+}
+
+// --- background loops --------------------------------------------------------
+
+/// Self-scheduling usage-poll loop with 429 backoff. `base_secs` is this side's poll
+/// interval (`wire::CLAUDE_POLL_SECS` / `wire::CODEX_POLL_SECS`), floored at 15s because a
+/// misconfigured zero would hammer the provider.
+pub(crate) async fn run_poller<P: PoolProvider>(app: App, base_secs: u64) {
+    const MAX_BACKOFF: Duration = Duration::from_secs(30 * 60);
+    let name = P::NAME;
+    let mut backoff: u32 = 0;
+    loop {
+        let any429 = match P::poll(&app).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("{name} usage poll failed: {e}");
+                false
+            }
+        };
+        let base = Duration::from_secs(base_secs.max(15));
+        let delay = if any429 {
+            backoff = (backoff + 1).min(8);
+            let escalate = backoff.saturating_sub(2);
+            (base * 2u32.pow(escalate)).min(MAX_BACKOFF)
+        } else {
+            backoff = 0;
+            base
+        };
+        if any429 {
+            tracing::warn!(
+                "{name} usage rate-limited (429); next poll in {}s",
+                delay.as_secs()
+            );
+        }
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// Self-scheduling [`ROTATE_SECS`] rotation loop.
+pub(crate) async fn run_rotator<P: PoolProvider>(app: App) {
+    // Let the usage poller publish this side's numbers before the first rotation, or it
+    // would rank every account at 0% and place the whole fleet on one of them.
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    loop {
+        rotate_once::<P>(&app).await;
+        tokio::time::sleep(Duration::from_secs(ROTATE_SECS)).await;
+    }
+}
+
+// --- swapping one side of a clone --------------------------------------------
+
+/// The body both swap routes take. One struct, not one per side: the two were identical
+/// down to the field docs, and a field added to one of them would have gone unnoticed.
+#[derive(serde::Deserialize)]
+pub(crate) struct SwapRequest {
+    pub host: String,
+    /// Account email (a pin — any imported account, even outside the clone's pool),
+    /// `auto` (rotate in scope), or legacy `group:<name>` (rebinds the pool).
+    pub account: String,
+    /// Clone-level pool binding: `Some(name)` binds, `Some("")` unbinds, absent keeps.
+    /// A `group:<name>` account implies the bind.
+    #[serde(default)]
+    pub group: Option<Option<String>>,
+}
+
+/// Why a swap did not happen. The two carry different blame, which is the whole reason they
+/// are separate: `Rejected` is the operator's request to fix, `Undelivered` is a clone
+/// refusing a token that resolved perfectly well.
+pub(crate) enum SwapError {
+    Rejected(String),
+    Undelivered(String),
+}
+
+/// Bind one side of a clone to what `req` asks for: resolve the pool binding, deliver the
+/// token, and write the result onto the clone's row.
+///
+/// Strict delivery ([`AssignStrictness::Strict`]): the operator is watching this one, so a
+/// push that fails fails the request rather than binding a clone to a token it never got.
+pub(crate) async fn swap_side<P: PoolProvider>(
+    app: &App,
+    req: &SwapRequest,
+) -> std::result::Result<SideBinding, SwapError> {
+    let host = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .find(|h| h.id == req.host)
+        .ok_or_else(|| SwapError::Rejected(format!("unknown host '{}'", req.host)))?;
+    if !host.managed {
+        return Err(SwapError::Rejected(format!(
+            "'{}' is not a managed clone",
+            host.id
+        )));
+    }
+    // A `group:<name>` account rebinds the whole clone (both sides draw from it afterwards);
+    // the selection is stored as `auto`. An explicit email overrides this side only — the
+    // clone-level group stays for the other side.
+    //
+    // The helper takes both sides' selections because create and fork carry both. A swap
+    // carries one, and the helper's two selection slots behave identically when the other is
+    // empty, so which slot this side's request travels in makes no difference here.
+    let (bound_group, requested, _) = crate::clone_ops::split_group_binding(
+        Some(req.account.clone()),
+        None,
+        host.group.clone(),
+        req.group.clone(),
+    );
+    crate::clone_ops::validate_group(&app.config(), bound_group.as_deref())
+        .map_err(|e| SwapError::Rejected(e.to_string()))?;
+    let binding = assign_clone_side::<P>(
+        app,
+        None,
+        &host.id,
+        requested.as_deref(),
+        P::host_email(&host),
+        bound_group.as_deref(),
+        AssignStrictness::Strict,
+    )
+    .await
+    .map_err(|e| SwapError::Undelivered(e.to_string()))?
+    .ok_or_else(|| {
+        SwapError::Rejected(format!(
+            "no {} account can take this clone: none is imported, or every one that could \
+             has a token that expired and cannot be refreshed",
+            <P::Account as AccountKind>::LABEL
+        ))
+    })?;
+    let (id, email, pool, selection) = (
+        host.id.clone(),
+        binding.email.clone(),
+        binding.group.clone(),
+        binding.selection.clone(),
+    );
+    app.store.mutate(|s| {
+        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+            P::set_host_email(h, email);
+            P::set_sticky(h, pool);
+            P::set_selection(h, selection);
+            h.group = bound_group.clone();
+        }
+    });
+    Ok(binding)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The rules below are provider-neutral: the pick, the stickiness, the saturated ranking
+    // and the auto pool read the same for both sides. They used to be asserted twice, once
+    // per adapter, and the twins had already started to differ in what they covered rather
+    // than in what they claimed. A provider still appears in each test, because a pool
+    // cannot read a clone's account without knowing which host field holds it — that is all
+    // it contributes here. What genuinely differs stays with the adapter: the scoring
+    // constants, and the per-side host fields themselves.
+
+    fn acct(email: &str) -> String {
+        email.to_string()
+    }
+
+    /// A managed clone already running `cur` on `P`'s side.
+    fn clone_host<P: PoolProvider>(id: &str, cur: Option<&str>) -> RmngClone {
+        let mut h = RmngClone {
+            id: id.into(),
+            managed: true,
+            ..Default::default()
+        };
+        P::set_host_email(&mut h, cur.map(str::to_string));
+        h
+    }
+
+    /// A clone with `P`'s selection and pool binding set (and nothing else), for the auto
+    /// pool's membership rule. A selection of `None` is the legacy shape: no selection at
+    /// all, which reads as pinned.
+    fn host_sel<P: PoolProvider>(
+        id: &str,
+        managed: bool,
+        pool: Option<&str>,
+        sel: Option<&str>,
+    ) -> RmngClone {
+        let mut h = RmngClone {
+            id: id.into(),
+            managed,
+            ..Default::default()
+        };
+        P::set_sticky(&mut h, pool.map(str::to_string));
+        if let Some(sel) = sel {
+            P::set_selection(&mut h, sel.to_string());
+        }
+        h
+    }
+
+    fn rotation_candidate(
+        email: &str,
+        five_pct: f64,
+        seven_pct: f64,
+        five_reset: Option<i64>,
+        seven_reset: Option<i64>,
+    ) -> RotationCandidate {
+        RotationCandidate {
+            email: email.to_string(),
+            five_pct,
+            seven_pct,
+            five_reset,
+            seven_reset,
+        }
+    }
+
+    #[test]
+    fn legacy_none_normalizes_to_auto() {
+        // No tokenless state anymore: "none" reads as auto (lossy — the side resolves
+        // in scope and may now get a token).
+        assert_eq!(normalize_selection(Some("none")), "auto");
+        assert_eq!(normalize_selection(Some("NONE")), "auto");
+        assert_eq!(normalize_selection(None), "auto");
+        assert_eq!(normalize_selection(Some("me@x.com")), "me@x.com");
+    }
+
+    // --- rotation assignment -------------------------------------------------
+
+    #[test]
+    fn assignment_rule_a_only_group_accounts() {
+        // Every clone is assigned an account from the eligible set, never outside it.
+        let eligible = [acct("a@x"), acct("b@x")];
+        let clones = [
+            clone_host::<ClaudePool>("c1", Some("z@outside")),
+            clone_host::<ClaudePool>("c2", None),
+        ];
+        for (_h, picked) in assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new()) {
+            assert!(eligible.contains(&picked), "{picked} not in group");
+        }
+    }
+
+    #[test]
+    fn assignment_rule_b_distinct_when_enough_accounts() {
+        // |eligible| >= |unassigned clones| ⇒ they land on distinct accounts (run
+        // repeatedly: randomized, but the load term forces distinctness here).
+        let eligible = [acct("a@x"), acct("b@x"), acct("c@x")];
+        let clones = [
+            clone_host::<ClaudePool>("c1", None),
+            clone_host::<ClaudePool>("c2", None),
+            clone_host::<ClaudePool>("c3", None),
+        ];
+        for _ in 0..50 {
+            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
+            let mut emails: Vec<_> = got.iter().map(|(_, e)| e.clone()).collect();
+            emails.sort();
+            emails.dedup();
+            assert_eq!(
+                emails.len(),
+                3,
+                "expected 3 distinct accounts, got {emails:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn assignment_rule_c_sticks_to_an_eligible_account() {
+        // One clone on A, two eligible {A,B} ⇒ always stays on A: a switch would
+        // cold-start the clone's prompt cache for zero gain.
+        let eligible = [acct("a@x"), acct("b@x")];
+        let clones = [clone_host::<ClaudePool>("c1", Some("a@x"))];
+        for _ in 0..50 {
+            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
+            assert_eq!(got[0].1, "a@x");
+        }
+    }
+
+    #[test]
+    fn assignment_moves_only_ineligible_and_avoids_keepers() {
+        // c1 keeps its eligible account A; c2 (account dropped from the group) must
+        // move, and lands on B — the keeper on A counts toward A's load.
+        let eligible = [acct("a@x"), acct("b@x")];
+        let clones = [
+            clone_host::<ClaudePool>("c1", Some("a@x")),
+            clone_host::<ClaudePool>("c2", Some("z@gone")),
+        ];
+        for _ in 0..50 {
+            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
+            let by_id: HashMap<_, _> = got.iter().map(|(h, e)| (h.id.clone(), e.clone())).collect();
+            assert_eq!(by_id["c1"], "a@x");
+            assert_eq!(by_id["c2"], "b@x");
+        }
+    }
+
+    #[test]
+    fn assignment_prefers_less_used_account_on_load_tie() {
+        // A fresh clone with two equally-loaded accounts picks the lower spread usage.
+        let eligible = [acct("hot@x"), acct("cold@x")];
+        let clones = [clone_host::<ClaudePool>("c1", None)];
+        let usage = HashMap::from([(acct("hot@x"), 72.0), (acct("cold@x"), 5.0)]);
+        for _ in 0..50 {
+            let got = assign_rotation::<ClaudePool>(&clones, &eligible, &usage);
+            assert_eq!(got[0].1, "cold@x");
+        }
+    }
+
+    #[test]
+    fn assignment_degrades_with_single_eligible() {
+        // Only one usable account ⇒ all clones get it even though spread can't hold.
+        let eligible = [acct("only@x")];
+        let clones = [
+            clone_host::<ClaudePool>("c1", Some("only@x")),
+            clone_host::<ClaudePool>("c2", Some("old@x")),
+        ];
+        let got = assign_rotation::<ClaudePool>(&clones, &eligible, &HashMap::new());
+        assert!(got.iter().all(|(_, e)| e == "only@x"));
+    }
+
+    // --- the saturated fallback ----------------------------------------------
+
+    #[test]
+    fn saturated_never_picks_weekly_capped_over_session_capped() {
+        // stuck@x is at the weekly cap (unusable for days) but barely touched its 5h
+        // window; soon@x is only over the 5h session cap and frees up at the next 5h reset.
+        // The clone must land on soon@x — never the account a low 5h number makes look
+        // "least used" while its weekly cap keeps it dark for days.
+        let candidates = [
+            rotation_candidate("stuck@x", 5.0, 97.0, Some(1_000), Some(600_000)),
+            rotation_candidate("soon@x", 85.0, 50.0, Some(2_000), Some(700_000)),
+        ];
+        let clones = [clone_host::<ClaudePool>("c1", Some("stuck@x"))];
+
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@x");
+    }
+
+    #[test]
+    fn saturated_prefers_soonest_5h_reset_among_session_capped() {
+        // Both only over the 5h cap (7d has room) → soonest 5h reset frees up first.
+        let candidates = [
+            rotation_candidate("soon@x", 90.0, 50.0, Some(1_000), Some(700_000)),
+            rotation_candidate("late@x", 90.0, 50.0, Some(2_000), Some(700_000)),
+        ];
+        let clones = [clone_host::<ClaudePool>("c1", Some("late@x"))];
+
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@x");
+    }
+
+    #[test]
+    fn saturated_prefers_soonest_7d_reset_when_all_weekly_capped() {
+        // Everyone is weekly-capped → the binding window is 7d; soonest weekly reset wins
+        // and the (here deliberately inverted) 5h resets are ignored.
+        let candidates = [
+            rotation_candidate("soon@x", 50.0, 97.0, Some(9_000), Some(500_000)),
+            rotation_candidate("late@x", 50.0, 97.0, Some(1_000), Some(600_000)),
+        ];
+        let clones = [clone_host::<ClaudePool>("c1", Some("late@x"))];
+
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@x");
+    }
+
+    /// The same rule read from the Codex side, where there is no five-hour window at all:
+    /// the class key is constant, so the weekly reset alone decides. This is what pins the
+    /// unified ranking to the order Codex had before the two were merged.
+    #[test]
+    fn saturated_without_a_five_hour_window_reduces_to_the_weekly_order() {
+        let candidates = [
+            rotation_candidate("soon@o", 0.0, 97.0, None, Some(500_000)),
+            rotation_candidate("late@o", 0.0, 96.0, None, Some(600_000)),
+        ];
+        let clones = [clone_host::<CodexPool>("c1", Some("late@o"))];
+
+        let got = assign_saturated_rotation::<CodexPool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@o");
+    }
+
+    #[test]
+    fn saturated_uses_lower_usage_when_binding_reset_missing() {
+        // Both only 5h-capped, no 5h reset timestamp → fall back to the lower 5h usage.
+        let candidates = [
+            rotation_candidate("hot@x", 98.0, 50.0, None, Some(700_000)),
+            rotation_candidate("cool@x", 90.0, 50.0, None, Some(700_000)),
+        ];
+        let clones = [clone_host::<ClaudePool>("c1", Some("hot@x"))];
+
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "cool@x");
+    }
+
+    #[test]
+    fn saturated_keeps_current_within_reset_margin() {
+        // Same class (both 5h-capped); current's 5h reset is within the sticky margin of
+        // best's, so the clone keeps its account (avoids a cold prompt-cache switch).
+        let candidates = [
+            rotation_candidate("current@x", 90.0, 50.0, Some(1_800), Some(700_000)),
+            rotation_candidate("best@x", 90.0, 50.0, Some(1_000), Some(700_000)),
+        ];
+        let clones = [clone_host::<ClaudePool>("c1", Some("current@x"))];
+
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "current@x");
+    }
+
+    /// The other class: both weekly-capped, and the margin holds there too. c1 sits on
+    /// soon@o, whose reset is within the sticky margin of best's — churning it onto late@o
+    /// would buy nothing.
+    #[test]
+    fn saturated_keeps_current_within_reset_margin_in_the_weekly_class() {
+        let candidates = [
+            rotation_candidate("soon@o", 0.0, 97.0, None, Some(500_000)),
+            rotation_candidate("late@o", 0.0, 96.0, None, Some(500_100)),
+        ];
+        let clones = [clone_host::<CodexPool>("c1", Some("soon@o"))];
+
+        let got = assign_saturated_rotation::<CodexPool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "soon@o");
+    }
+
+    #[test]
+    fn saturated_moves_missing_reset_current_to_known_reset() {
+        // Same class; current has no 5h reset while a peer does → move to the known one.
+        let candidates = [
+            rotation_candidate("unknown@x", 90.0, 50.0, None, Some(700_000)),
+            rotation_candidate("known@x", 94.0, 50.0, Some(1_000), Some(700_000)),
+        ];
+        let clones = [clone_host::<ClaudePool>("c1", Some("unknown@x"))];
+
+        let got = assign_saturated_rotation::<ClaudePool>(&clones, &candidates);
+
+        assert_eq!(got[0].1, "known@x");
+    }
+
+    /// The weekly cap is one number for both sides: at 95% an account is out, whoever it
+    /// belongs to. Claude's extra five-hour rule is its own constant and stays with it.
+    #[test]
+    fn the_weekly_cap_is_the_same_for_both_sides() {
+        assert!(!is_exhausted::<ClaudePool>(0.0, 94.9));
+        assert!(is_exhausted::<ClaudePool>(0.0, 95.0));
+        assert!(!is_exhausted::<CodexPool>(0.0, 94.9));
+        assert!(is_exhausted::<CodexPool>(0.0, 95.0));
+    }
+
+    // --- the "auto" pool ------------------------------------------------------
+
+    fn auto_pool_case<P: PoolProvider>() {
+        let hosts = vec![
+            host_sel::<P>("auto1", true, None, Some("auto")), // in
+            host_sel::<P>("pinned", true, None, Some("me@x")), // out: pinned to an email
+            host_sel::<P>("legacy", true, None, None),        // out: legacy None == pinned
+            host_sel::<P>("grouped", true, Some("g"), Some("auto")), // out: its pool handles it
+            host_sel::<P>("stopped", false, None, Some("auto")), // out: unmanaged
+        ];
+        let picked: Vec<String> = auto_pool_clones::<P>(&hosts)
+            .into_iter()
+            .map(|h| h.id)
+            .collect();
+        assert_eq!(picked, vec!["auto1"]);
+    }
+
+    #[test]
+    fn auto_pool_is_only_managed_ungrouped_auto_clones() {
+        auto_pool_case::<ClaudePool>();
+        auto_pool_case::<CodexPool>();
+    }
+
+    /// A grouped clone reads its pool from the clone-level `group`, not only from the
+    /// per-side sticky, so it stays out of the auto pool either way.
+    #[test]
+    fn a_clone_level_pool_also_keeps_a_clone_out_of_the_auto_pool() {
+        let mut host = host_sel::<ClaudePool>("grouped", true, None, Some("auto"));
+        host.group = Some("g".into());
+        assert!(auto_pool_clones::<ClaudePool>(&[host]).is_empty());
+    }
+
+    // --- pool membership ------------------------------------------------------
+
+    #[test]
+    fn a_replacement_inherits_every_pool_the_old_account_sat_in() {
+        let mut pools = vec![
+            CloneGroup {
+                name: "Personal".into(),
+                accounts: vec!["old@x".into(), "other@x".into()],
+            },
+            CloneGroup {
+                name: "Medi".into(),
+                accounts: vec!["old@x".into()],
+            },
+            CloneGroup {
+                name: "Untouched".into(),
+                accounts: vec!["other@x".into()],
+            },
+        ];
+        let joined = swap_pool_member(&mut pools, "old@x", "new@x");
+        assert_eq!(joined, vec!["Personal".to_string(), "Medi".to_string()]);
+        assert_eq!(
+            pools[0].accounts,
+            vec!["other@x".to_string(), "new@x".to_string()]
+        );
+        assert_eq!(pools[1].accounts, vec!["new@x".to_string()]);
+        assert_eq!(
+            pools[2].accounts,
+            vec!["other@x".to_string()],
+            "a pool without it is left alone"
+        );
+
+        // Replacing with an account that is already a member neither duplicates it nor
+        // leaves the old one behind.
+        let mut shared = vec![CloneGroup {
+            name: "Personal".into(),
+            accounts: vec!["old@x".into(), "new@x".into()],
+        }];
+        swap_pool_member(&mut shared, "old@x", "new@x");
+        assert_eq!(shared[0].accounts, vec!["new@x".to_string()]);
+    }
+
+    // --- push scope -----------------------------------------------------------
+
+    /// An unfiltered pass visits every clone; a filtered one visits only the rotated
+    /// account's, which is what keeps a refresh from rewriting the whole fleet.
+    #[test]
+    fn a_filtered_push_pass_visits_only_its_own_account() {
+        assert!(in_push_scope("a@x", None));
+        assert!(in_push_scope("a@x", Some("a@x")));
+        assert!(!in_push_scope("b@x", Some("a@x")));
+    }
+
+    /// A rebind can hand a clone an account whose token was already pushed somewhere else.
+    /// Comparing tokens alone called that clone current while it still named its old
+    /// account, so the identity is part of the key on both sides.
+    #[test]
+    fn the_push_key_separates_two_accounts_sharing_a_token() {
+        assert_ne!(
+            push_key_of("same-token", "account-a"),
+            push_key_of("same-token", "account-b")
+        );
+        assert_ne!(
+            push_key_of("token-1", "account-a"),
+            push_key_of("token-2", "account-a")
+        );
+        assert_eq!(
+            push_key_of("token-1", "account-a"),
+            push_key_of("token-1", "account-a")
+        );
+    }
+
+    // --- published rows -------------------------------------------------------
+
+    /// A row written before the provider field existed is Claude's, which is what the
+    /// rotation snapshots read. The delete path has to agree, or such a row would outlive
+    /// the account it describes.
+    #[test]
+    fn a_row_with_no_provider_belongs_to_claude() {
+        let mut row = ClaudeUsage {
+            id: "a@x".into(),
+            email: "a@x".into(),
+            provider: None,
+            active: false,
+            assignable: None,
+            error: None,
+            stale: None,
+            last_updated: 0,
+            five_hour: None,
+            seven_day: None,
+            fable: None,
+            spend: None,
+            reset_credits: None,
+        };
+        assert_eq!(row_provider(&row), ClaudePool::PROVIDER);
+        row.provider = Some(wire::Provider::Codex);
+        assert_eq!(row_provider(&row), CodexPool::PROVIDER);
+    }
+
+    // --- time -----------------------------------------------------------------
+
+    #[test]
+    fn rfc3339_utc_secs_parses_valid_shapes_and_rejects_malformed() {
+        // Bare Z (Codex's epoch_to_rfc3339 form).
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00Z"),
+            Some(1_609_459_200)
+        );
+        // The Anthropic usage API's real shape: fractional seconds + `+00:00` offset.
+        assert_eq!(
+            parse_rfc3339_utc_secs("2026-07-24T22:00:00.469890+00:00"),
+            Some(1_784_930_400)
+        );
+        // Fractional seconds are dropped, not rounded.
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00.5+00:00"),
+            Some(1_609_459_200)
+        );
+        // Non-UTC offsets shift to UTC: -05:00 is 5h later in epoch, +05:30 is earlier.
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00-05:00"),
+            Some(1_609_477_200)
+        );
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00+05:30"),
+            Some(1_609_439_400)
+        );
+        // `±HHMM` (no colon) is accepted too.
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00-0500"),
+            Some(1_609_477_200)
+        );
+        // No zone → treated as UTC.
+        assert_eq!(
+            parse_rfc3339_utc_secs("2021-01-01T00:00:00"),
+            Some(1_609_459_200)
+        );
+        // Malformed input is rejected, not guessed.
+        assert_eq!(parse_rfc3339_utc_secs("not-a-timestamp"), None);
+        assert_eq!(parse_rfc3339_utc_secs("2021-13-01T00:00:00Z"), None); // month 13
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T25:00:00Z"), None); // hour 25
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00."), None); // bare fraction dot
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00+5:00"), None); // 1-digit hour offset
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01T00:00:00+99:00"), None); // offset hour 99
+        assert_eq!(parse_rfc3339_utc_secs("2021-01-01"), None); // no time
+    }
 }
