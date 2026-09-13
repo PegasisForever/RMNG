@@ -210,9 +210,14 @@ impl Preset {
 /// A preset as shown to the browser: every field of [`Preset`], Linear key included.
 ///
 /// The name is a leftover from when this view withheld the key. It withholds nothing now,
-/// because the browser queries Linear itself and needs a key to do it. What remains of the
-/// redaction is a direction: `PUT /api/config` treats `linear_key` as write-only, so a blank
-/// submission keeps the stored key rather than clearing it.
+/// because the browser queries Linear itself and needs a key to do it, and nothing about the
+/// round trip is one-directional either: `merge_presets` stores whatever `linearKey` the
+/// editor sends, blank included, so a blank submission CLEARS the stored key. This doc used
+/// to claim the opposite — that a blank kept it — which is the more dangerous way to be wrong
+/// about a secret, so read `merge_presets`, not this name, for the rule.
+///
+/// The same applies to every other field here: a row is rebuilt from the JSON it arrives in
+/// and the stored row is not consulted, so a partial row resets what it omits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]

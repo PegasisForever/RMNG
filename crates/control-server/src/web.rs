@@ -1720,6 +1720,14 @@ async fn config_put(
     let merged = config::merge_update(&old, incoming)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     config::save(&merged).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Publish BEFORE the sweep below, not after the handler's work. `sweep_ungrouped` reads
+    // pool membership back off `app.config()`, so while this line sat at the end of the
+    // handler the sweep judged the NEW membership against the OLD config: every account the
+    // caller had just added to a pool still counted as claimed by nobody, and was deleted.
+    // Adding a freshly imported account to a pool could therefore never succeed — the file
+    // ended up correct and the account was gone. Nothing between here and the end wants the
+    // old value: `heal_dangling_pool_bindings` and `restart_required` take `old` explicitly.
+    *app.cfg.write().unwrap() = merged.clone();
     // Account pools are replaced wholesale by this endpoint, so an omitted pool is a deletion —
     // and a clone still naming it would be stranded: `claude::rotate_once` skips a group it
     // cannot find (`continue`), so that clone freezes on whatever account it last held and is
@@ -1776,7 +1784,6 @@ async fn config_put(
             }
         }
     }
-    *app.cfg.write().unwrap() = merged.clone();
     // Propagate any SSH key change to the bastion + running clones immediately.
     if old.ssh.authorized_keys != merged.ssh.authorized_keys {
         // Bound the immediate push: apply_now does Docker calls to running clones; a wedged
@@ -2361,6 +2368,73 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].name, "demo");
         assert_eq!(groups[0].accounts, vec!["a@example.com"]);
+    }
+
+    /// Putting a freshly imported account into a pool must not delete that account.
+    ///
+    /// `sweep_ungrouped` reads pool membership back off `app.config()`, so the merged config
+    /// has to be published BEFORE it runs. While that publish sat at the end of `config_put`,
+    /// the sweep judged the new membership against the OLD config: every account the patch
+    /// had just added still counted as claimed by nobody, and was deleted. The file ended up
+    /// correct and the accounts were gone, which is the worst shape for the failure to take —
+    /// the panel redraws as if it worked. Seen on CT 204: one PUT moving six accounts into
+    /// `Default` left zero accounts behind.
+    #[tokio::test]
+    async fn adding_an_account_to_a_pool_keeps_it() {
+        use crate::pool::PoolProvider;
+
+        // `config::save` writes a RELATIVE `config.json`, so this is the one test that leaves
+        // an artifact in the crate directory. Remove it however the test ends.
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                std::fs::remove_file(crate::config::config_path()).ok();
+            }
+        }
+        let _cleanup = Cleanup;
+
+        let app = test_app();
+        crate::pool::ClaudePool::store(&app)
+            .upsert(crate::claude::StoredClaudeAccount {
+                id: "new@example.com".into(),
+                email: "new@example.com".into(),
+                account_uuid: String::new(),
+                org_uuid: String::new(),
+                org_name: String::new(),
+                active: true,
+                access_token: "sk-ant-oat01-x".into(),
+                refresh_token: String::new(),
+                // Far-future, so nothing here attempts a (network) refresh.
+                expires_at: 4_102_444_800_000,
+                scopes: Vec::new(),
+                last_refresh: None,
+            })
+            .unwrap();
+        // The pool does not list it yet — the state the settings panel is in right after an
+        // import, and the state CT 204 was found in.
+        app.cfg.write().unwrap().groups = vec![wire::CloneGroup {
+            name: "Default".into(),
+            accounts: Vec::new(),
+        }];
+
+        let _ = config_put(
+            State(app.clone()),
+            Json(serde_json::json!({
+                "groups": [{ "name": "Default", "accounts": ["new@example.com"] }]
+            })),
+        )
+        .await
+        .expect("config_put");
+
+        assert_eq!(
+            crate::pool::ClaudePool::store(&app).emails(),
+            vec!["new@example.com".to_string()],
+            "the sweep deleted the account the same patch had just put in the pool"
+        );
+        assert_eq!(
+            app.config().groups[0].accounts,
+            vec!["new@example.com".to_string()],
+        );
     }
 
     // --- POST /api/activate (selection, and the layout that follows it) ---

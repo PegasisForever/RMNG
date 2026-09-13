@@ -1412,7 +1412,6 @@ pub(crate) fn no_pct(_step: &str) -> Option<f64> {
 // tables only ever served the by-kind index that used to sit here. Deleting the index left
 // them with no caller, which is the answer to whether they were load-bearing.
 
-
 /// Discover the shared clone-socket source directory to bind into a new clone at
 /// `/srv/rmng-sock`. From the self-setup env report's sock-mount discovery (the clone source
 /// of our own container's socket mount); empty in dev/test (the bind is then skipped).
