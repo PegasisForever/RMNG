@@ -312,7 +312,17 @@ struct PresetPathRc {
 // --- clone container ------------------------------------------------------------------
 
 /// Progress step → percentage for a clone-container create.
-fn clone_pct(step: &str) -> Option<f64> {
+///
+/// Carried by the create flow's `OpSpec` (see [`crate::operation`]), not looked up from the
+/// operation kind: a flow owns the table it is scored against.
+///
+/// Known gap, left alone deliberately: the fork/build lead-in steps (`snapshot`,
+/// `clone-home`, `build`) have no reading here, so the bar holds at 0 until `create`. They
+/// cannot simply be added below `create`, because `clone_container_gen2_from_tag` re-emits
+/// `queued` (0.0) after them and would drag the bar backwards. An unscored step is benign —
+/// it leaves the bar where it is — so this waits for the create flow's own step keys to be
+/// made unique.
+pub(crate) fn clone_pct(step: &str) -> Option<f64> {
     Some(match step {
         "queued" => 0.0,
         "create" => 20.0,
@@ -595,7 +605,7 @@ async fn clone_container_after_create(
 // --- delete ---------------------------------------------------------------------------
 
 /// Progress step → percentage for a clone delete. Matches the plan's table.
-fn delete_pct(step: &str) -> Option<f64> {
+pub(crate) fn delete_pct(step: &str) -> Option<f64> {
     Some(match step {
         "queued" => 0.0,
         "stop" => 40.0,
@@ -1312,7 +1322,7 @@ pub const CLONE_BINARIES: &[CloneBinary] = &[
 
 // --- archive --------------------------------------------------------------------------
 
-fn archive_pct(step: &str) -> Option<f64> {
+pub(crate) fn archive_pct(step: &str) -> Option<f64> {
     Some(match step {
         "queued" => 0.0,
         "stop" => 75.0,
@@ -1321,7 +1331,7 @@ fn archive_pct(step: &str) -> Option<f64> {
     })
 }
 
-fn unarchive_pct(step: &str) -> Option<f64> {
+pub(crate) fn unarchive_pct(step: &str) -> Option<f64> {
     Some(match step {
         "queued" => 0.0,
         "start" => 60.0,
@@ -1332,10 +1342,17 @@ fn unarchive_pct(step: &str) -> Option<f64> {
 }
 
 /// Progress step → percentage for a gen-2 one-shot migration. Matches the `migrate_one`
-/// step keys.
-fn migrate_pct(step: &str) -> Option<f64> {
+/// step keys, plus the one step the JOB emits before `migrate_one` is called.
+///
+/// `pre-stop` is that step, and it exists because of a drift: `jobs::run_migrate` stops the
+/// source container first (the home copy needs a stable source) and used to emit that as
+/// `stop` — the same key `migrate_one` uses for its LAST step. The bar therefore jumped to
+/// 90% before the migration had copied a byte, then fell back to 0 at `migrate_one`'s
+/// `queued`. Two different moments cannot share one step key.
+pub(crate) fn migrate_pct(step: &str) -> Option<f64> {
     Some(match step {
         "queued" => 0.0,
+        "pre-stop" => 5.0,
         "create" => 10.0,
         "copy" => 30.0,
         "recreate" => 60.0,
@@ -1345,50 +1362,57 @@ fn migrate_pct(step: &str) -> Option<f64> {
     })
 }
 
-// --- op-log pct helpers (exposed for jobs.rs step tables) -----------------------------
-
-/// The clone/pull/commit/delete/archive step→pct tables, exposed so `jobs.rs` maps a streamed step
-/// key to the operation's coarse percentage without re-deriving it. (Monitors-apply is
-/// intentionally NOT an Operation — web.rs streams its `[ct]` lines directly — so there is
-/// no monitors table here.)
-/// Progress step → percentage for a commit-from-clone, kept so old `Commit` ops in state
-/// still render. No new commit ops can be filed: the commit path is deleted.
-fn commit_pct(step: &str) -> Option<f64> {
+/// Progress step → percentage for a gen-2 REBASE (`jobs::run_rebase` → [`rebase_clone`]).
+///
+/// Rebase has no `wire::OperationKind` variant of its own, so it files as `Clone`. It used
+/// to be scored against [`clone_pct`] because of that, and [`clone_pct`] has no `stop` — the
+/// first thing a rebase does (stopping the clone so its home is a stable source) had no
+/// reading on the bar at all. The table now travels with the operation's spec instead of
+/// being derived from its kind, so a borrowed kind can no longer borrow the wrong table.
+///
+/// `queued` is 20 here, not 0: it is emitted by `clone_container_gen2_from_tag` for the
+/// CONTAINER phase, after the image build and the stop, so scoring it as the start of the
+/// operation would drag the bar backwards mid-rebase.
+pub(crate) fn rebase_pct(step: &str) -> Option<f64> {
     Some(match step {
-        "queued" => 0.0,
-        "prepare" => 15.0,
-        "commit" => 40.0,
+        "build" => 5.0,
+        "stop" => 15.0,
+        "queued" => 20.0,
+        "create" => 30.0,
+        "inject" => 45.0,
+        "start" => 60.0,
+        "wait-ready" => 75.0,
+        "ready" => 90.0,
+        // The failure arm: the old tag is being recreated, and the operation ends Error.
+        "rollback" => 95.0,
         "done" => 100.0,
         _ => return None,
     })
 }
-/// Progress step → percentage for the retired gen-1 template pull. Kept so old persisted
-/// `Pull` operations still render; no new ones are created.
-fn pull_pct(step: &str) -> Option<f64> {
-    Some(match step {
-        "queued" => 0.0,
-        "pull" => 2.0,
-        "verify" => 91.0,
-        "done" => 100.0,
-        _ => return None,
-    })
+
+/// The table for a flow with no coarse pct at all: an image build streams its own step lines
+/// as messages, so the bar holds until the runner finishes the operation. Named rather than
+/// left implicit, so a spec always says which table it is scored against.
+pub(crate) fn no_pct(_step: &str) -> Option<f64> {
+    None
 }
 
-pub fn step_pct(kind: wire::OperationKind, step: &str) -> Option<f64> {
-    match kind {
-        wire::OperationKind::Clone => clone_pct(step),
-        wire::OperationKind::Pull => pull_pct(step),
-        wire::OperationKind::Commit => commit_pct(step),
-        wire::OperationKind::Delete => delete_pct(step),
-        wire::OperationKind::Archive => archive_pct(step),
-        wire::OperationKind::Unarchive => unarchive_pct(step),
-        // Self-update has no provision step table — `jobs::run_update` drives its pct directly.
-        wire::OperationKind::Update => None,
-        wire::OperationKind::Migrate => migrate_pct(step),
-        // Prebuild drives its own pct (build streaming has no coarse table).
-        wire::OperationKind::Prebuild => None,
-    }
-}
+// --- op-log pct tables (carried by the flows' OpSpecs) --------------------------------
+//
+// Each table lives next to the code that emits its step keys, and an operation carries the
+// one it is scored against in its `OpSpec` (see `crate::operation`). There is deliberately no
+// by-kind index: one existed, and a rebase filed under `OperationKind::Clone` was scored
+// against the clone table, which has no reading for the `stop` step a rebase opens with.
+// Carrying the table on the spec is what makes that unrepresentable. (Monitors-apply is
+// intentionally NOT an Operation — web.rs streams its `[ct]` lines directly — so there is no
+// monitors table here.)
+//
+// The retired `Commit` and `Pull` kinds have no table. They did, justified as letting old
+// persisted ops still render — but `pct` is a STORED field on the operation row, written as
+// it runs and never recomputed on read, so an old op renders from its own record and the
+// tables only ever served the by-kind index that used to sit here. Deleting the index left
+// them with no caller, which is the answer to whether they were load-bearing.
+
 
 /// Discover the shared clone-socket source directory to bind into a new clone at
 /// `/srv/rmng-sock`. From the self-setup env report's sock-mount discovery (the clone source
@@ -1754,30 +1778,21 @@ mod tests {
 
     #[test]
     fn step_pct_tables_match_plan() {
-        use wire::OperationKind::*;
-        assert_eq!(step_pct(Clone, "queued"), Some(0.0));
-        assert_eq!(step_pct(Clone, "create"), Some(20.0));
-        assert_eq!(step_pct(Clone, "inject"), Some(35.0));
-        assert_eq!(step_pct(Clone, "start"), Some(55.0));
-        assert_eq!(step_pct(Clone, "wait-ready"), Some(75.0));
-        assert_eq!(step_pct(Clone, "ready"), Some(80.0));
-        assert_eq!(step_pct(Clone, "monitors"), Some(85.0));
-        assert_eq!(step_pct(Clone, "accounts"), Some(95.0));
-        assert_eq!(step_pct(Clone, "done"), Some(100.0));
+        assert_eq!(clone_pct("queued"), Some(0.0));
+        assert_eq!(clone_pct("create"), Some(20.0));
+        assert_eq!(clone_pct("inject"), Some(35.0));
+        assert_eq!(clone_pct("start"), Some(55.0));
+        assert_eq!(clone_pct("wait-ready"), Some(75.0));
+        assert_eq!(clone_pct("ready"), Some(80.0));
+        assert_eq!(clone_pct("monitors"), Some(85.0));
+        assert_eq!(clone_pct("accounts"), Some(95.0));
+        assert_eq!(clone_pct("done"), Some(100.0));
 
-        assert_eq!(step_pct(Pull, "queued"), Some(0.0));
-        assert_eq!(step_pct(Pull, "pull"), Some(2.0));
-        assert_eq!(step_pct(Pull, "verify"), Some(91.0));
-        assert_eq!(step_pct(Pull, "done"), Some(100.0));
+        assert_eq!(delete_pct("stop"), Some(40.0));
+        assert_eq!(delete_pct("remove"), Some(75.0));
 
-        assert_eq!(step_pct(Commit, "prepare"), Some(15.0));
-        assert_eq!(step_pct(Commit, "commit"), Some(40.0));
-
-        assert_eq!(step_pct(Delete, "stop"), Some(40.0));
-        assert_eq!(step_pct(Delete, "remove"), Some(75.0));
-
-        // Unknown step keys yield None (jobs.rs leaves the pct unchanged).
-        assert_eq!(step_pct(Clone, "bogus"), None);
+        // Unknown step keys yield None (the runner leaves the pct unchanged).
+        assert_eq!(clone_pct("bogus"), None);
 
         // The clone table must be monotonic non-decreasing in emission order, so the progress
         // bar never jumps backwards across the create → ready → monitors → accounts → done tail.
@@ -1794,9 +1809,52 @@ mod tests {
         ];
         let mut prev = -1.0_f64;
         for step in clone_order {
-            let pct = step_pct(Clone, step).expect("known clone step");
+            let pct = clone_pct(step).expect("known clone step");
             assert!(pct >= prev, "clone step {step} pct {pct} < previous {prev}");
             prev = pct;
         }
+    }
+
+    /// A rebase files as `OperationKind::Clone` (wire has no `Rebase` variant) but carries
+    /// [`rebase_pct`] in its spec, which is the whole point of the table travelling on the
+    /// spec rather than being looked up by kind. The table must cover every step it emits,
+    /// in emission order, without going backwards — `stop` above all, which is the step the
+    /// create table was missing when rebase was scored against it.
+    #[test]
+    fn rebase_table_covers_every_step_the_flow_emits() {
+        // build (derived::ensure_image) → stop (rebase_clone) → the container phase
+        // (clone_container_gen2_from_tag) → done (the runner).
+        let order = [
+            "build",
+            "stop",
+            "queued",
+            "create",
+            "inject",
+            "start",
+            "wait-ready",
+            "ready",
+            "done",
+        ];
+        let mut prev = -1.0_f64;
+        for step in order {
+            let pct = rebase_pct(step).unwrap_or_else(|| panic!("rebase step {step} has no pct"));
+            assert!(
+                pct >= prev,
+                "rebase step {step} pct {pct} < previous {prev}"
+            );
+            prev = pct;
+        }
+        // The failure arm still has a reading, and clone_pct never did.
+        assert!(rebase_pct("rollback").is_some());
+        assert_eq!(clone_pct("stop"), None);
+    }
+
+    /// The job-side pre-stop and `migrate_one`'s final stop are two different moments and
+    /// must not share a step key: they did, and the bar hit 90% before a byte was copied.
+    #[test]
+    fn migrate_pre_stop_scores_below_the_copy() {
+        assert_eq!(migrate_pct("pre-stop"), Some(5.0));
+        assert_eq!(migrate_pct("stop"), Some(90.0));
+        assert!(migrate_pct("pre-stop") < migrate_pct("copy"));
     }
 }

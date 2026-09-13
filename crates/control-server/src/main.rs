@@ -31,6 +31,7 @@ mod mediaplane;
 mod monitor;
 mod naming;
 mod oauth;
+mod operation;
 mod pool;
 mod provision;
 mod shared;

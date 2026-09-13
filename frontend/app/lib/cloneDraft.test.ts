@@ -1,7 +1,9 @@
+// The clone dialog's FORM rules. The operation it starts is followed by `~/lib/useOperation`
+// now, and the lifecycle cases that used to run through this reducer are in
+// `useOperation.test.ts`, where they drive the shared rules directly.
 import { expect, test } from "bun:test";
 
 import {
-  cloneDialogBusy,
   cloneDialogReducer,
   cloneDialogValid,
   cloneRequest,
@@ -13,7 +15,6 @@ import {
   type CloneDialogEvent,
   type CloneDraft,
 } from "./cloneDraft";
-import type { Operation } from "~/lib/types";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
 const preset = (over: Partial<PresetRedacted>): PresetRedacted => ({
@@ -51,18 +52,6 @@ const sources = (...ids: string[]): CloneDialogEvent => ({
   type: "sources",
   ids,
 });
-const op = (status: Operation["status"], message = ""): Operation => ({
-  id: "op1",
-  kind: "clone",
-  target: "pega-we-142",
-  status,
-  step: "start",
-  pct: 55,
-  message,
-  log: [],
-  startedAt: 0,
-});
-
 test("each tab resolves its own preset", () => {
   expect(presetOf(dialog(edit("mode", "plain")))?.name).toBe("work");
   expect(
@@ -171,38 +160,6 @@ test("the Create button waits for what the open tab needs", () => {
   expect(
     cloneDialogValid(dialog(edit("mode", "template"), edit("title", "x"))),
   ).toBe(true);
-});
-
-test("the dialog follows its operation and closes only when it settles", () => {
-  const started = dialog(
-    { type: "starting" },
-    { type: "started", opId: "op1" },
-  );
-  expect(cloneDialogBusy(started)).toBe(true);
-  // Between the POST and the first frame the op is not in the list yet.
-  expect(cloneDialogReducer(started, { type: "op", op: undefined }).done).toBe(
-    false,
-  );
-  const running = cloneDialogReducer(started, {
-    type: "op",
-    op: op("running"),
-  });
-  expect(running.done).toBe(false);
-  expect(cloneDialogReducer(running, { type: "op", op: op("done") }).done).toBe(
-    true,
-  );
-  // Finished ops are pruned seconds later, so one that vanished counts as done.
-  expect(cloneDialogReducer(running, { type: "op", op: undefined }).done).toBe(
-    true,
-  );
-  // A failed op stays failed when it is pruned, rather than closing over its own message.
-  const failed = cloneDialogReducer(running, {
-    type: "op",
-    op: op("error", "no such preset"),
-  });
-  expect(failed.error).toBe("no such preset");
-  const pruned = cloneDialogReducer(failed, { type: "op", op: undefined });
-  expect([pruned.done, cloneDialogBusy(pruned)]).toEqual([false, false]);
 });
 
 test("the request carries the open tab's own fields", () => {

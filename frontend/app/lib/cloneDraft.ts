@@ -1,10 +1,14 @@
-// The clone dialog's model: the form, the config it draws from, the operation it started,
-// and every rule that reads them. No React and no network here — the container feeds it
-// events and renders what comes back, so each rule is a test. The one thing read from outside
-// is the team a new ticket starts on, which is remembered in storage.
+// The clone dialog's model: the form, the config it draws from, and every rule that reads
+// them. No React and no network here — the container feeds it events and renders what comes
+// back, so each rule is a test. The one thing read from outside is the team a new ticket
+// starts on, which is remembered in storage.
+//
+// The operation the dialog starts is NOT here. Following an op from the POST to the frame
+// that settles it is the same machine in three dialogs, so it lives in `~/lib/useOperation`;
+// the only thing it ever wanted from this form is the word for the work it does, which the
+// container hands it. What is left here is the form, which is all this module was named for.
 
 import { startingTeam } from "~/lib/linear/intake";
-import type { Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { CloneRequest } from "~/lib/wire/CloneRequest";
 import type { LinearMeta } from "~/lib/wire/LinearMeta";
@@ -146,14 +150,6 @@ export interface CloneDialog {
  configLoaded: boolean;
  /** Forkable clone ids, oldest first. */
  sources: string[];
- /** The started operation, once the POST answers. */
- opId: string | null;
- starting: boolean;
- seen: boolean;
- failed: boolean;
- /** The operation settled well: the dialog may close. */
- done: boolean;
- error: string | null;
 }
 
 export type CloneDialogEvent =
@@ -161,11 +157,7 @@ export type CloneDialogEvent =
  | { type: "sources"; ids: string[] }
  | {
     [K in keyof CloneDraft]: { type: "edit"; key: K; value: CloneDraft[K] };
-   }[keyof CloneDraft]
- | { type: "starting" }
- | { type: "started"; opId: string }
- | { type: "failed"; message: string }
- | { type: "op"; op: Operation | undefined };
+   }[keyof CloneDraft];
 
 export function emptyCloneDialog(
  ticket = "",
@@ -179,12 +171,6 @@ export function emptyCloneDialog(
   groups: [],
   configLoaded: false,
   sources: [],
-  opId: null,
-  starting: false,
-  seen: false,
-  failed: false,
-  done: false,
-  error: null,
  };
 }
 
@@ -215,35 +201,6 @@ export function cloneDialogReducer(
      ? new Set([...s.touched, e.key as Followed])
      : s.touched,
    });
-  case "starting":
-   // Clear the last attempt so a retry tracks the new op, not the failed one still
-   // sitting in the list for another minute.
-   return {
-    ...s,
-    starting: true,
-    opId: null,
-    seen: false,
-    failed: false,
-    done: false,
-    error: null,
-   };
-  case "started":
-   return { ...s, starting: false, opId: e.opId };
-  case "failed":
-   return { ...s, starting: false, error: e.message };
-  case "op": {
-   const seen = s.seen || !!e.op;
-   const failed = s.failed || e.op?.status === "error";
-   const kind = s.draft.mode === "template" ? "clone" : "fork";
-   return {
-    ...s,
-    seen,
-    failed,
-    error:
-     failed && !s.failed ? e.op?.message || `the ${kind} failed` : s.error,
-    done: opPhase(e.op, seen, failed) === "done",
-   };
-  }
  }
 }
 
@@ -326,11 +283,6 @@ export function cloneDialogValid(s: CloneDialog): boolean {
  return ok && (d.mode === "template" || !!d.source) && !linearKeyMissing(s);
 }
 
-/** A clone is being started, or one is running: the form and both buttons lock. */
-export function cloneDialogBusy(s: CloneDialog): boolean {
- return s.starting || (!!s.opId && !s.failed);
-}
-
 /** What this tab would send. `linear` is Linear's own answer on the ticket tabs; the other
  *  two carry the typed title, which is what names the clone. */
 export function cloneRequest(
@@ -357,24 +309,4 @@ export function cloneRequest(
   runStartupScript: d.runStartupScript,
   rebuild: d.rebuild,
  };
-}
-
-/** What a dialog should do about the operation it started. */
-export type OpPhase = "running" | "done" | "failed";
-
-/**
- * Finished operations are pruned from state shortly after they settle (8s after Done, 60s
- * after Error), so a poll can miss the terminal frame: **an op that vanished after being
- * seen counts as done**, the same rule the CLI's waiter uses. `alreadyFailed` is sticky,
- * because that rule would otherwise close a dialog over its own error message.
- */
-export function opPhase(
- op: Operation | undefined,
- everSeen: boolean,
- alreadyFailed: boolean,
-): OpPhase {
- if (alreadyFailed || op?.status === "error") return "failed";
- if (op?.status === "done") return "done";
- if (!op && everSeen) return "done";
- return "running";
 }

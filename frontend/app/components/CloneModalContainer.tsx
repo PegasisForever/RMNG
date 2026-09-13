@@ -1,8 +1,13 @@
 // The clone dialog, network half: the config read that supplies the presets and pools, the
 // Linear work the ticket tabs need, the POST that starts the clone, and the operation it
 // answers with. The dialog stays open on that operation and closes when it settles, which is
-// why the op list is a prop. The form model is `~/lib/cloneDraft`; the markup is
-// CloneModalView.
+// why the op list is a prop. The form model is `~/lib/cloneDraft`, the operation is
+// `~/lib/useOperation`, and the markup is CloneModalView.
+//
+// Those two are separate on purpose. The form's rules read the form; the operation's rules
+// read the op list, and the only thing they ever wanted from the form is the word for what
+// this tab does — passed in below as `failureLabel`. That one string is the whole seam, and
+// it is not worth keeping a second copy of the op machine inside the form's reducer to save.
 import {
   lazy,
   Suspense,
@@ -16,7 +21,6 @@ import { CloneModalView } from "~/components/CloneModalView";
 import { getConfig } from "~/lib/api";
 import { keyFor, ticketForClone, useAssignee } from "~/lib/linear/intake";
 import {
-  cloneDialogBusy,
   cloneDialogReducer,
   cloneDialogValid,
   cloneRequest,
@@ -28,6 +32,7 @@ import {
   type CloneDraft,
 } from "~/lib/cloneDraft";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
+import { useOperation } from "~/lib/useOperation";
 import type { CloneRequest } from "~/lib/wire/CloneRequest";
 import type { LinearMeta } from "~/lib/wire/LinearMeta";
 import { parseTicketInput } from "~/lib/workspace";
@@ -89,18 +94,27 @@ export function CloneModalContainer({
     dispatch({ type: "sources", ids: sourceIds ? sourceIds.split(" ") : [] });
   }, [sourceIds]);
 
-  const op = state.opId
-    ? operations.find((o) => o.id === state.opId)
-    : undefined;
-  useEffect(() => {
-    if (state.opId) dispatch({ type: "op", op });
-  }, [state.opId, op]);
-
-  const busy = cloneDialogBusy(state);
   // Which key claims the chosen team: it stores an image pasted into the new-ticket body, so
   // the images land in the issue's own workspace, and it answers who can hold the ticket.
   const key = keyFor(state.presets, state.draft.team);
   const { assigneeId } = useAssignee(key, state.draft.team);
+  // The started clone, from the POST to the frame that settles it. `start` is read afresh on
+  // every run, so it sends the form as it stands at the click — including the Linear round
+  // trip the ticket tabs make first, which the dialog is already busy through.
+  const clone = useOperation(
+    operations,
+    () =>
+      ticket().then((linear) =>
+        onStart(state.draft.mode !== "template", cloneRequest(state, linear)),
+      ),
+    {
+      // The template tab builds a clone from an image; the other three fork a live one.
+      failureLabel:
+        state.draft.mode === "template"
+          ? "the clone failed"
+          : "the fork failed",
+    },
+  );
   const editorLoading = (
     <p className="px-3 text-xs text-slate-400 dark:text-slate-500">
       Loading editor…
@@ -123,17 +137,10 @@ export function CloneModalContainer({
     return Promise.resolve(undefined);
   }
 
+  /** The Create button. Whether the form is ready is this module's question; whether an
+   *  attempt is already running is the operation's, and `run` answers that one itself. */
   function submit() {
-    if (!cloneDialogValid(state) || busy) return;
-    dispatch({ type: "starting" });
-    ticket()
-      .then((linear) =>
-        onStart(state.draft.mode !== "template", cloneRequest(state, linear)),
-      )
-      .then(
-        (started) => dispatch({ type: "started", opId: started.id }),
-        (e: Error) => dispatch({ type: "failed", message: e.message }),
-      );
+    if (cloneDialogValid(state)) clone.run();
   }
 
   return (
@@ -164,13 +171,14 @@ export function CloneModalContainer({
         )
       }
       valid={cloneDialogValid(state)}
-      busy={busy}
-      error={state.error}
-      operation={op ?? null}
+      busy={clone.busy}
+      error={clone.error}
+      operation={clone.op ?? null}
       onSubmit={submit}
       // The settled operation is what closes the dialog. `open` goes false, the frame plays
-      // its exit, and `onClose` unmounts once the frames have run.
-      open={!state.done}
+      // its exit, and `onClose` unmounts once the frames have run. A FAILED clone is not
+      // settled for this purpose — the dialog stays up holding its error.
+      open={!clone.done}
       onClose={onClose}
     />
   );

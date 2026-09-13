@@ -227,8 +227,101 @@ pub fn apply_verdict(will_progress: Option<bool>) -> wire::MonitorState {
 }
 
 // ---------------------------------------------------------------------------------------
-// Reading a clone
+// Reading a clone: one interface, four agents
 // ---------------------------------------------------------------------------------------
+
+/// What one agent flavour can tell us about a clone.
+///
+/// Four flavours are read and no two of them publish anything alike: Claude Code keeps a live
+/// session registry, Cursor keeps nothing at all and has to be rebuilt out of the hook stream,
+/// Codex and Pi each write their own transcript and no registry. This is the one shape all
+/// four answer in, so [`read_clone`] merges four readings instead of unpacking four return
+/// types and remembering which gate belongs in front of which.
+#[derive(Debug, Default)]
+pub(crate) struct Reading {
+    /// Every session this flavour found, each already tagged with whether it is alive. A
+    /// flavour that rebuilds its sessions from a transcript says `true`: the transcript is
+    /// the whole of the liveness evidence it has, and [`PiFlavor`] says why that is enough.
+    pub sessions: Vec<Session>,
+    /// This flavour's evidence, in the hook vocabulary every fold below already speaks.
+    /// Claude Code's probe writes these, Cursor's are translated at the door by
+    /// [`read_hook_events`], and Codex and Pi are folded out of their own transcripts.
+    pub events: Vec<HookEvent>,
+    /// Where each of `sessions` is working, keyed by session id, for a flavour that knows.
+    ///
+    /// Pi is the one that does, and this is what matches a background task to the session
+    /// waiting on it: a Pi task carries a `cwd` and no session id, so the directory is the
+    /// only join between the two. Empty for every other flavour, and a session missing from
+    /// it is "nobody said", which [`pi_live_wake`] reads as "take every task".
+    pub cwds: HashMap<String, String>,
+    /// Whether `events` is the clone's whole hook log rather than this flavour's own records.
+    ///
+    /// [`read_clone`] opens the hook log itself when no flavour already has, and it decides
+    /// that on this flag, never on `events` being empty: Codex fills `events` from its
+    /// rollouts without the hook log having been opened, and a clone running both agents
+    /// would then lose every Claude Code event.
+    pub hook_log_read: bool,
+}
+
+/// One agent flavour, read the same way as the other three.
+///
+/// Two functions, because reading a clone is two questions and only the first one is cheap.
+pub(crate) trait AgentFlavor {
+    /// How this flavour is named where a person reads it.
+    const NAME: &'static str;
+
+    /// Cheap check: is this agent even present in the clone? Keeps a clone that does not run
+    /// this flavour from paying for its read.
+    ///
+    /// Load-bearing rather than an optimisation. A clone runs one agent as a rule, so three
+    /// of these four gates close on nearly every clone, and what each closed gate saves is a
+    /// directory walk and a full transcript parse, per clone, on a four-second tick.
+    fn present(root: &Path) -> bool;
+
+    /// Everything this flavour knows about the clone, read only once [`present`] said yes.
+    ///
+    /// [`present`]: AgentFlavor::present
+    fn read(root: &Path) -> Reading;
+}
+
+/// One flavour's gate and read as plain values, so [`read_clone`] can loop over the four
+/// rather than name each one.
+///
+/// [`AgentFlavor`] cannot be a `dyn` object: it carries an associated const and none of its
+/// functions take a receiver. Turning each one into a pair of function pointers is the whole
+/// of the adaptation, and it is what keeps the four readable as one list.
+#[derive(Clone, Copy)]
+struct Flavor {
+    name: &'static str,
+    present: fn(&Path) -> bool,
+    read: fn(&Path) -> Reading,
+}
+
+impl Flavor {
+    fn of<F: AgentFlavor>() -> Self {
+        Self {
+            name: F::NAME,
+            present: F::present,
+            read: F::read,
+        }
+    }
+}
+
+/// Every flavour a clone is read through, in the order it is read.
+///
+/// Claude Code first, because its registry settles most of a fleet on its own. Cursor second,
+/// because it is the one flavour that opens the shared hook log, and reading it here keeps
+/// the log's own events ahead of the two synthesized streams exactly as they have always been
+/// ordered. The order is otherwise free: every fold downstream is scoped to an owner, and no
+/// owner spans two flavours.
+fn flavors() -> [Flavor; 4] {
+    [
+        Flavor::of::<ClaudeCodeFlavor>(),
+        Flavor::of::<CursorFlavor>(),
+        Flavor::of::<CodexFlavor>(),
+        Flavor::of::<PiFlavor>(),
+    ]
+}
 
 /// One record from `~/.claude/sessions/<pid>.json`, Claude Code's own live session registry.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -253,11 +346,6 @@ pub struct Session {
     /// that reused its pid.
     #[serde(default)]
     pub proc_start: String,
-    /// The session's working directory, for Pi sessions only. Pi background tasks carry a
-    /// `cwd` but no session id, so this is what matches a task to the session waiting on
-    /// it. `None` on every other agent. Filled in by [`read_pi_sessions`], never by serde.
-    #[serde(skip)]
-    pub pi_cwd: Option<String>,
     /// Filled in by [`read_sessions`], never by serde.
     #[serde(skip)]
     pub alive: bool,
@@ -298,9 +386,12 @@ fn proc_start(proc: &Path, pid: i64) -> Option<String> {
     tail.split_whitespace().nth(19).map(str::to_string)
 }
 
+/// Where Claude Code keeps its live session registry, under the clone's home.
+const CLAUDE_SESSIONS: &str = "home/rmng/.claude/sessions";
+
 /// Every record in the registry, each tagged with whether its process is still alive.
 pub fn read_sessions(root: &Path) -> Vec<Session> {
-    let dir = root.join("home/rmng/.claude/sessions");
+    let dir = root.join(CLAUDE_SESSIONS);
     let proc = root.join("proc");
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
@@ -337,6 +428,31 @@ pub fn read_sessions(root: &Path) -> Vec<Session> {
         }
     }
     out
+}
+
+/// Claude Code, the one flavour that publishes a registry of its own.
+///
+/// Nothing is folded here and no log is opened: the registry answers both questions this
+/// module asks of a session, which process it is and what it is doing, and it is the reason
+/// three quarters of a fleet settles without anything else being read at all.
+pub(crate) struct ClaudeCodeFlavor;
+
+impl AgentFlavor for ClaudeCodeFlavor {
+    const NAME: &'static str = "claude";
+
+    /// The registry directory. A clone that has never run Claude Code does not have one, and
+    /// [`read_sessions`] already answers the same way by failing its `read_dir`; saying it
+    /// here is what puts this gate where the other three are, in front of the read.
+    fn present(root: &Path) -> bool {
+        root.join(CLAUDE_SESSIONS).is_dir()
+    }
+
+    fn read(root: &Path) -> Reading {
+        Reading {
+            sessions: read_sessions(root),
+            ..Default::default()
+        }
+    }
 }
 
 /// One session's verdict, for everything that can be settled without asking anyone.
@@ -660,6 +776,54 @@ pub fn read_cursor_sessions(root: &Path, events: &[HookEvent], now: f64) -> Vec<
         .collect()
 }
 
+/// Cursor, the flavour whose sessions are rebuilt out of the shared hook log.
+///
+/// Cursor's conversations come out of that log, so a clone running Cursor has to read it
+/// before the verdict rather than after.
+///
+/// **The ordering problem, and how it is settled.** [`read_cursor_sessions`] is the one
+/// reader that needs evidence it does not produce: the hook log, and the clone clock taken
+/// from it. Three ways to fit that behind an interface every flavour satisfies were open:
+///
+/// - An ordering rule on the interface, "read Cursor after whoever opens the hook log". That
+///   is exactly the coupling this interface exists to remove. It cannot be said in a
+///   signature, so nothing enforces it, and the next flavour that needs the log revives it.
+/// - A two-phase read, handing every flavour the merged evidence in a second pass. Three of
+///   the four have nothing to do in a second phase, and it makes the shared interface pay for
+///   one flavour's need.
+/// - Cursor opens the hook log itself, which is what this does.
+///
+/// It costs nothing, because the log was already being read eagerly on exactly this gate, and
+/// the events come back on the [`Reading`] so that nobody reads the file twice (see
+/// [`Reading::hook_log_read`]). It is also the only one of the three that keeps the fold
+/// honest: what Cursor folds over must be the hook log ALONE. Codex's and Pi's events are
+/// synthesized from their own transcripts, and letting them in would raise [`clone_now`]
+/// above the newest hook stamp and move the freshness cut that bounds the work Cursor never
+/// named.
+pub(crate) struct CursorFlavor;
+
+impl AgentFlavor for CursorFlavor {
+    const NAME: &'static str = "cursor";
+
+    /// Cursor actually running, which is two small file reads, so a clone without it never
+    /// opens the hook log at all and leaves the registry fast path untouched.
+    fn present(root: &Path) -> bool {
+        cursor_process(root).is_some()
+    }
+
+    fn read(root: &Path) -> Reading {
+        let events = read_hook_events(root);
+        // Stamped AFTER the log is read, never before, for the reason [`clone_now`] gives.
+        let now = clone_now(&events);
+        Reading {
+            sessions: read_cursor_sessions(root, &events, now),
+            events,
+            hook_log_read: true,
+            ..Default::default()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Codex
 // ---------------------------------------------------------------------------------------
@@ -851,50 +1015,77 @@ fn codex_events(path: &Path, session: &str) -> Vec<HookEvent> {
     out
 }
 
-/// Codex's sessions, shaped so one resolver covers every agent.
+/// Codex, whose sessions are the rollouts its own live processes hold open.
 ///
-/// Like Cursor, Codex publishes no status of its own, so the turn state is read off the
-/// stream instead: a session whose newest turn has a `task_complete` is `idle`, and one whose
-/// newest turn has not is `busy`. `busy` carries the same two states it does everywhere else,
-/// generating or blocked inside a tool call, and [`build_session_view`] separates them with
-/// the in-flight tool set.
-///
-/// Liveness comes from [`codex_rollouts`] rather than from the file, so a session is listed
-/// only while a process actually holds it open.
-pub fn read_codex_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>) {
-    let mut sessions = Vec::new();
-    let mut events = Vec::new();
-    for (pid, path) in codex_rollouts(root) {
-        let Some(id) = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(codex_session_id)
-        else {
-            continue;
-        };
-        let mine = codex_events(&path, id);
-        // Whether the newest turn is still open, decided by which boundary came last in the
-        // file rather than by which carries the later stamp. A rollout is appended to in
-        // order, so its order is the fact; a stamp comparison would additionally be betting
-        // on the clock never stepping back. A rollout with no prompt in it at all is a
-        // session sitting at its first prompt, which is idle.
-        let open = mine
-            .iter()
-            .fold(false, |open, e| match e.hook_event_name.as_str() {
-                "UserPromptSubmit" => true,
-                "Stop" => false,
-                _ => open,
-            });
-        sessions.push(Session {
-            pid,
-            session_id: id.to_string(),
-            status: Some(if open { "busy" } else { "idle" }.to_string()),
-            alive: true,
-            ..Default::default()
-        });
-        events.extend(mine);
+/// Codex brings its own evidence rather than the hook log's: it fires no hooks, and its
+/// rollout carries the same four records the probe would have written.
+pub(crate) struct CodexFlavor;
+
+impl AgentFlavor for CodexFlavor {
+    const NAME: &'static str = "codex";
+
+    /// The sessions directory existing, which is one `stat`, so a clone that has never run
+    /// Codex reads nothing further.
+    ///
+    /// Deliberately NOT `!codex_rollouts(root).is_empty()`, which is the question the gate
+    /// would rather ask: [`codex_rollouts`] runs again inside [`CodexFlavor::read`], so
+    /// asking it here makes a clone that IS running Codex walk `/proc` twice on every
+    /// four-second tick. A clone with a stale sessions directory and no live Codex passes
+    /// this gate and pays for one walk, which is exactly what it paid before adapters
+    /// existed; a clone that never ran Codex now pays nothing at all.
+    fn present(root: &Path) -> bool {
+        root.join(CODEX_SESSIONS).is_dir()
     }
-    (sessions, events)
+
+    /// Codex's sessions, shaped so one resolver covers every agent.
+    ///
+    /// Like Cursor, Codex publishes no status of its own, so the turn state is read off the
+    /// stream instead: a session whose newest turn has a `task_complete` is `idle`, and one whose
+    /// newest turn has not is `busy`. `busy` carries the same two states it does everywhere else,
+    /// generating or blocked inside a tool call, and [`build_session_view`] separates them with
+    /// the in-flight tool set.
+    ///
+    /// Liveness comes from [`codex_rollouts`] rather than from the file, so a session is listed
+    /// only while a process actually holds it open.
+    fn read(root: &Path) -> Reading {
+        let mut sessions = Vec::new();
+        let mut events = Vec::new();
+        for (pid, path) in codex_rollouts(root) {
+            let Some(id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(codex_session_id)
+            else {
+                continue;
+            };
+            let mine = codex_events(&path, id);
+            // Whether the newest turn is still open, decided by which boundary came last in the
+            // file rather than by which carries the later stamp. A rollout is appended to in
+            // order, so its order is the fact; a stamp comparison would additionally be betting
+            // on the clock never stepping back. A rollout with no prompt in it at all is a
+            // session sitting at its first prompt, which is idle.
+            let open = mine
+                .iter()
+                .fold(false, |open, e| match e.hook_event_name.as_str() {
+                    "UserPromptSubmit" => true,
+                    "Stop" => false,
+                    _ => open,
+                });
+            sessions.push(Session {
+                pid,
+                session_id: id.to_string(),
+                status: Some(if open { "busy" } else { "idle" }.to_string()),
+                alive: true,
+                ..Default::default()
+            });
+            events.extend(mine);
+        }
+        Reading {
+            sessions,
+            events,
+            ..Default::default()
+        }
+    }
 }
 
 /// Where the Pi coding agent files a session's transcript, under the clone's home.
@@ -994,216 +1185,238 @@ fn pi_ts(line_ts: Option<&str>, msg_ts: Option<i64>) -> f64 {
         .map_or(0.0, |secs| secs as f64)
 }
 
-/// Pi's sessions, shaped so one resolver covers every agent, plus hook-shaped events for
-/// the shared folds and each session's cwd for matching background tasks.
+/// Pi, which publishes neither a registry nor a status and is read entirely off its
+/// transcripts.
 ///
-/// The mapping mirrors [`read_codex_sessions`]: a `user` message is a `UserPromptSubmit`,
-/// an assistant `toolCall` is a `PreToolUse`, a `toolResult` is a `PostToolUse`. A session
-/// whose newest turn has no reply yet reads `busy` (generating); one sitting inside an
-/// unclosed call also reads `busy`; anything else reads `idle`.
-///
-/// Liveness is approximate: Pi publishes no process registry, so every parsed session with
-/// a user message in it counts as live. A dead session settles `Stuck` from its own status
-/// and costs nothing; a killed-mid-call one asks the model once per cache bucket and the
-/// judge correctly calls its huge quiet hung. The mtime cap bounds the cost.
-pub fn read_pi_sessions(root: &Path) -> (Vec<Session>, Vec<HookEvent>, HashMap<String, String>) {
-    let mut files: Vec<(f64, PathBuf)> = Vec::new();
-    let mut stack = vec![root.join(PI_SESSIONS)];
-    let mut budget = 20_000;
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in entries.flatten() {
-            if budget == 0 {
-                break;
-            }
-            budget -= 1;
-            let path = e.path();
-            if e.file_type().is_ok_and(|t| t.is_dir()) {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().is_none_or(|x| x != "jsonl") {
-                continue;
-            }
-            if path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .and_then(pi_session_id)
-                .is_none()
-            {
-                continue;
-            }
-            // Skip huge transcripts: a multi-MB session costs a full parse every 4s tick.
-            // The live turn is almost always in a small file; subagent bulk lives under
-            // `subagent-artifacts/`, which this walk never enters by name shape anyway.
-            let mtime = e.metadata().and_then(|m| m.modified()).ok();
-            files.push((
-                mtime
-                    .map(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs_f64())
-                            .unwrap_or(0.0)
-                    })
-                    .unwrap_or(0.0),
-                path,
-            ));
-        }
-    }
-    files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    files.truncate(MAX_PI_SESSION_FILES);
-    // Read oldest-first so later files cannot shadow an id they predate; newest wins below.
-    files.reverse();
+/// Pi brings the same shape Codex does: its session file folds into hook-shaped events, and
+/// its `.pi/tasks` metadata answers the dev-server question directly (see [`PiTask`]).
+pub(crate) struct PiFlavor;
 
-    let mut sessions = Vec::new();
-    let mut events = Vec::new();
-    let mut cwds: HashMap<String, String> = HashMap::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for (_, path) in &files {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default();
-        let Some(id) = pi_session_id(stem).map(str::to_string) else {
-            continue;
-        };
-        if !seen.insert(id.clone()) {
-            continue;
-        }
-        let Ok(body) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let mut cwd = String::new();
-        let mut has_user = false;
-        let mut open: HashSet<String> = HashSet::new();
-        let mut last_kind = String::new();
-        for line in body.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let Ok(raw) = serde_json::from_str::<PiLine>(line) else {
+impl AgentFlavor for PiFlavor {
+    const NAME: &'static str = "pi";
+
+    /// The sessions directory existing, so a clone without Pi reads nothing. Behind this gate
+    /// is the widest read of the four: a directory walk over every session Pi has ever run in
+    /// the clone, and a JSONL parse of the newest [`MAX_PI_SESSION_FILES`] of them.
+    fn present(root: &Path) -> bool {
+        root.join(PI_SESSIONS).is_dir()
+    }
+
+    /// Pi's sessions, shaped so one resolver covers every agent, plus hook-shaped events for
+    /// the shared folds and each session's cwd for matching background tasks.
+    ///
+    /// The mapping mirrors [`CodexFlavor::read`]: a `user` message is a `UserPromptSubmit`,
+    /// an assistant `toolCall` is a `PreToolUse`, a `toolResult` is a `PostToolUse`. A session
+    /// whose newest turn has no reply yet reads `busy` (generating); one sitting inside an
+    /// unclosed call also reads `busy`; anything else reads `idle`.
+    ///
+    /// Liveness is approximate: Pi publishes no process registry, so every parsed session with
+    /// a user message in it counts as live. A dead session settles `Stuck` from its own status
+    /// and costs nothing; a killed-mid-call one asks the model once per cache bucket and the
+    /// judge correctly calls its huge quiet hung. The mtime cap bounds the cost.
+    fn read(root: &Path) -> Reading {
+        let mut files: Vec<(f64, PathBuf)> = Vec::new();
+        let mut stack = vec![root.join(PI_SESSIONS)];
+        let mut budget = 20_000;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
                 continue;
             };
-            let ts = pi_ts(
-                raw.timestamp.as_deref(),
-                raw.message.as_ref().and_then(|m| m.timestamp),
-            );
-            match raw.kind.as_deref() {
-                Some("session") => {
-                    if let Some(c) = raw.cwd.filter(|c| !c.is_empty()) {
-                        cwd = c;
-                    }
+            for e in entries.flatten() {
+                if budget == 0 {
+                    break;
                 }
-                Some("message") => {
-                    let Some(msg) = raw.message else { continue };
-                    match msg.role.as_deref() {
-                        Some("user") => {
-                            has_user = true;
-                            last_kind = "user".to_string();
-                            events.push(HookEvent {
-                                hook_event_name: "UserPromptSubmit".into(),
-                                session_id: Some(id.clone()),
-                                ts,
-                                ..Default::default()
-                            });
-                        }
-                        Some("assistant") => {
-                            last_kind = "assistant".to_string();
-                            if let Some(content) = msg.content {
-                                let calls: Vec<PiToolCall> = match content {
-                                    Value::Array(blocks) => blocks
-                                        .iter()
-                                        .filter_map(|b| {
-                                            (b.get("type")?.as_str() == Some("toolCall")).then(
-                                                || PiToolCall {
-                                                    id: b
-                                                        .get("id")
-                                                        .and_then(Value::as_str)
-                                                        .map(str::to_string),
-                                                    name: b
-                                                        .get("name")
-                                                        .and_then(Value::as_str)
-                                                        .map(str::to_string),
-                                                    arguments: b.get("arguments").cloned(),
-                                                },
-                                            )
-                                        })
-                                        .collect(),
-                                    _ => Vec::new(),
-                                };
-                                for c in calls {
-                                    if let Some(cid) = c.id.clone() {
-                                        open.insert(cid.clone());
-                                    }
-                                    events.push(HookEvent {
-                                        hook_event_name: "PreToolUse".into(),
-                                        session_id: Some(id.clone()),
-                                        tool_name: c.name,
-                                        tool_use_id: c.id,
-                                        tool_input: c.arguments.map(|v| v.to_string()),
-                                        ts,
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                        }
-                        Some("toolResult") => {
-                            last_kind = "toolResult".to_string();
-                            if let Some(cid) = msg.tool_call_id.clone() {
-                                open.remove(&cid);
-                            }
-                            events.push(HookEvent {
-                                hook_event_name: "PostToolUse".into(),
-                                session_id: Some(id.clone()),
-                                tool_name: msg.tool_name,
-                                tool_use_id: msg.tool_call_id,
-                                ts,
-                                ..Default::default()
-                            });
-                        }
-                        _ => {}
-                    }
+                budget -= 1;
+                let path = e.path();
+                if e.file_type().is_ok_and(|t| t.is_dir()) {
+                    stack.push(path);
+                    continue;
                 }
-                _ => {}
+                if path.extension().is_none_or(|x| x != "jsonl") {
+                    continue;
+                }
+                if path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(pi_session_id)
+                    .is_none()
+                {
+                    continue;
+                }
+                // Skip huge transcripts: a multi-MB session costs a full parse every 4s tick.
+                // The live turn is almost always in a small file; subagent bulk lives under
+                // `subagent-artifacts/`, which this walk never enters by name shape anyway.
+                let mtime = e.metadata().and_then(|m| m.modified()).ok();
+                files.push((
+                    mtime
+                        .map(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs_f64())
+                                .unwrap_or(0.0)
+                        })
+                        .unwrap_or(0.0),
+                    path,
+                ));
             }
         }
-        if !has_user {
-            continue;
-        }
-        if !cwd.is_empty() {
-            cwds.insert(id.clone(), cwd.clone());
-        }
-        // Generating means the newest turn has a prompt but no reply yet. Pi appends a
-        // session line only when a message completes, so a trailing user message with a
-        // fresh file is an agent mid-generation, not an idle one.
-        let file_quiet = std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .ok()
-            .map(|t| {
-                std::time::SystemTime::now()
-                    .duration_since(t)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(f64::MAX)
-            })
-            .unwrap_or(f64::MAX);
-        let generating = last_kind == "user" && file_quiet <= MOVING_WINDOW_S;
-        sessions.push(Session {
-            session_id: id,
-            status: Some(
-                if !open.is_empty() || generating {
-                    "busy"
-                } else {
-                    "idle"
+        files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        files.truncate(MAX_PI_SESSION_FILES);
+        // Read oldest-first so later files cannot shadow an id they predate; newest wins below.
+        files.reverse();
+
+        let mut sessions = Vec::new();
+        let mut events = Vec::new();
+        let mut cwds: HashMap<String, String> = HashMap::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for (_, path) in &files {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let Some(id) = pi_session_id(stem).map(str::to_string) else {
+                continue;
+            };
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Ok(body) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let mut cwd = String::new();
+            let mut has_user = false;
+            let mut open: HashSet<String> = HashSet::new();
+            let mut last_kind = String::new();
+            for line in body.lines() {
+                if line.trim().is_empty() {
+                    continue;
                 }
-                .to_string(),
-            ),
-            pi_cwd: Some(cwd).filter(|c| !c.is_empty()),
-            alive: true,
+                let Ok(raw) = serde_json::from_str::<PiLine>(line) else {
+                    continue;
+                };
+                let ts = pi_ts(
+                    raw.timestamp.as_deref(),
+                    raw.message.as_ref().and_then(|m| m.timestamp),
+                );
+                match raw.kind.as_deref() {
+                    Some("session") => {
+                        if let Some(c) = raw.cwd.filter(|c| !c.is_empty()) {
+                            cwd = c;
+                        }
+                    }
+                    Some("message") => {
+                        let Some(msg) = raw.message else { continue };
+                        match msg.role.as_deref() {
+                            Some("user") => {
+                                has_user = true;
+                                last_kind = "user".to_string();
+                                events.push(HookEvent {
+                                    hook_event_name: "UserPromptSubmit".into(),
+                                    session_id: Some(id.clone()),
+                                    ts,
+                                    ..Default::default()
+                                });
+                            }
+                            Some("assistant") => {
+                                last_kind = "assistant".to_string();
+                                if let Some(content) = msg.content {
+                                    let calls: Vec<PiToolCall> = match content {
+                                        Value::Array(blocks) => blocks
+                                            .iter()
+                                            .filter_map(|b| {
+                                                (b.get("type")?.as_str() == Some("toolCall")).then(
+                                                    || PiToolCall {
+                                                        id: b
+                                                            .get("id")
+                                                            .and_then(Value::as_str)
+                                                            .map(str::to_string),
+                                                        name: b
+                                                            .get("name")
+                                                            .and_then(Value::as_str)
+                                                            .map(str::to_string),
+                                                        arguments: b.get("arguments").cloned(),
+                                                    },
+                                                )
+                                            })
+                                            .collect(),
+                                        _ => Vec::new(),
+                                    };
+                                    for c in calls {
+                                        if let Some(cid) = c.id.clone() {
+                                            open.insert(cid.clone());
+                                        }
+                                        events.push(HookEvent {
+                                            hook_event_name: "PreToolUse".into(),
+                                            session_id: Some(id.clone()),
+                                            tool_name: c.name,
+                                            tool_use_id: c.id,
+                                            tool_input: c.arguments.map(|v| v.to_string()),
+                                            ts,
+                                            ..Default::default()
+                                        });
+                                    }
+                                }
+                            }
+                            Some("toolResult") => {
+                                last_kind = "toolResult".to_string();
+                                if let Some(cid) = msg.tool_call_id.clone() {
+                                    open.remove(&cid);
+                                }
+                                events.push(HookEvent {
+                                    hook_event_name: "PostToolUse".into(),
+                                    session_id: Some(id.clone()),
+                                    tool_name: msg.tool_name,
+                                    tool_use_id: msg.tool_call_id,
+                                    ts,
+                                    ..Default::default()
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !has_user {
+                continue;
+            }
+            if !cwd.is_empty() {
+                cwds.insert(id.clone(), cwd);
+            }
+            // Generating means the newest turn has a prompt but no reply yet. Pi appends a
+            // session line only when a message completes, so a trailing user message with a
+            // fresh file is an agent mid-generation, not an idle one.
+            let file_quiet = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| {
+                    std::time::SystemTime::now()
+                        .duration_since(t)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(f64::MAX)
+                })
+                .unwrap_or(f64::MAX);
+            let generating = last_kind == "user" && file_quiet <= MOVING_WINDOW_S;
+            sessions.push(Session {
+                session_id: id,
+                status: Some(
+                    if !open.is_empty() || generating {
+                        "busy"
+                    } else {
+                        "idle"
+                    }
+                    .to_string(),
+                ),
+                alive: true,
+                ..Default::default()
+            });
+        }
+        Reading {
+            sessions,
+            events,
+            cwds,
             ..Default::default()
-        });
+        }
     }
-    (sessions, events, cwds)
 }
 
 #[derive(Debug, Default)]
@@ -1797,6 +2010,10 @@ pub struct CloneFacts<'a> {
     stops: HashMap<&'a str, &'a HookEvent>,
     /// The `StopFailure` each session is still sitting on, if any.
     errors: HashMap<&'a str, &'a HookEvent>,
+    /// Where each session is working, as the flavour that read it reported. Only Pi reports
+    /// one, and it is what scopes that session's Pi tasks where the view is built. See
+    /// [`Reading::cwds`] for why the table is here rather than on [`Session`].
+    cwds: HashMap<String, String>,
     /// Every Pi background task under the clone's home. Read once per clone; scoped to a
     /// session by `cwd` where the view is built, never here.
     pi_tasks: Vec<PiTask>,
@@ -1806,7 +2023,12 @@ pub struct CloneFacts<'a> {
 }
 
 impl<'a> CloneFacts<'a> {
-    pub fn read(root: &Path, events: &'a [HookEvent], now: f64) -> Self {
+    pub fn read(
+        root: &Path,
+        events: &'a [HookEvent],
+        cwds: HashMap<String, String>,
+        now: f64,
+    ) -> Self {
         let mut silence = transcript_silence(root, now);
         // The work Cursor never named has no transcript to be silent for, and no entry here
         // reads as `quiet_for_seconds: 1000000000`, which the judge is right to call a dead
@@ -1840,6 +2062,7 @@ impl<'a> CloneFacts<'a> {
             tools,
             stops: latest_live_stop(events),
             errors: current_api_errors(events),
+            cwds,
             pi_tasks,
             pi_outputs,
         }
@@ -1903,7 +2126,7 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
     // either way. No wake flag is shown: the model judges the command alone,
     // exactly like a Claude Code background task.
     {
-        let cwd = session.pi_cwd.as_deref();
+        let cwd = facts.cwds.get(sid).map(String::as_str);
         for t in &facts.pi_tasks {
             let mine = match (cwd.filter(|c| !c.is_empty()), t.cwd.as_str()) {
                 (Some(want), got) if !got.is_empty() => got == want,
@@ -3346,34 +3569,40 @@ impl SessionCase {
 ///
 /// `None` when the home is not reachable. An empty vec when nothing is running in there,
 /// which is a decided clone rather than an unreadable one.
+///
+/// All four agents are read through one interface, so what is left here is the merge and the
+/// decision. Each flavour's gate, and the differently shaped evidence behind it, lives on its
+/// own adapter; see [`AgentFlavor`].
 fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     let root = clone_root(data_dir, id)?;
-    let mut sessions = read_sessions(&root);
-    // Cursor's conversations come out of the hook log, so a clone running Cursor has to read
-    // it before the verdict rather than after. Gated on Cursor actually running, which is two
-    // small file reads, so a clone without it keeps the fast path below untouched.
-    let mut events = Vec::new();
+    let mut sessions: Vec<Session> = Vec::new();
+    let mut events: Vec<HookEvent> = Vec::new();
+    let mut cwds: HashMap<String, String> = HashMap::new();
+    let mut flavor_of: HashMap<String, &'static str> = HashMap::new();
     let mut hooks_read = false;
-    if cursor_process(&root).is_some() {
-        events = read_hook_events(&root);
-        hooks_read = true;
-        let now = clone_now(&events);
-        sessions.extend(read_cursor_sessions(&root, &events, now));
+    for f in flavors() {
+        // The gate is the whole of what a clone not running this agent pays.
+        if !(f.present)(&root) {
+            continue;
+        }
+        let got = (f.read)(&root);
+        hooks_read |= got.hook_log_read;
+        for s in &got.sessions {
+            flavor_of.insert(s.session_id.clone(), f.name);
+        }
+        cwds.extend(got.cwds);
+        sessions.extend(got.sessions);
+        events.extend(got.events);
     }
-    // Codex brings its own evidence rather than the hook log's: it fires no hooks, and its
-    // rollout carries the same four records the probe would have written. Gated on a rollout
-    // being held open, which is one `/proc` walk, so a clone without Codex reads nothing.
-    let (codex, codex_events) = read_codex_sessions(&root);
-    sessions.extend(codex);
-    events.extend(codex_events);
-    // Pi brings the same shape: its session file folds into hook-shaped events, and its
-    // `.pi/tasks` metadata answers the dev-server question directly (see [`PiTask`]).
-    // Gated on the sessions directory existing, so a clone without Pi reads nothing.
-    let (pi, pi_events, _) = read_pi_sessions(&root);
-    let pi_ids: HashSet<String> = pi.iter().map(|s| s.session_id.clone()).collect();
-    sessions.extend(pi);
-    events.extend(pi_events);
     let live: Vec<Session> = sessions.into_iter().filter(|s| s.alive).collect();
+    // Which sessions Pi read, because only those are matched against Pi's task files: a
+    // Claude Code session in the same clone must not be pulled out of the shortcut below by
+    // a wake task belonging to an agent it cannot see.
+    let pi_ids: HashSet<&str> = flavor_of
+        .iter()
+        .filter(|(_, name)| **name == PiFlavor::NAME)
+        .map(|(sid, _)| sid.as_str())
+        .collect();
 
     let settled = |s: &Session| SessionCase {
         session: s.session_id.clone(),
@@ -3392,26 +3621,27 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     // still needs the model to verify the wake claim against the command (a dev server left
     // on default flags claims a wake it will never deliver). A session whose tasks are all
     // terminal or wake-off is unaffected and settles here for free.
-    let pi_tasks_early: Vec<PiTask> = match live.iter().any(|s| pi_ids.contains(&s.session_id)) {
-        true => read_pi_tasks(&root),
-        false => Vec::new(),
-    };
+    let pi_tasks_early: Vec<PiTask> =
+        match live.iter().any(|s| pi_ids.contains(s.session_id.as_str())) {
+            true => read_pi_tasks(&root),
+            false => Vec::new(),
+        };
     let pi_wake_pending = live.iter().any(|s| {
-        pi_ids.contains(&s.session_id)
-            && pi_live_wake(&pi_tasks_early, s.pi_cwd.as_deref()).is_some()
+        pi_ids.contains(s.session_id.as_str())
+            && pi_live_wake(&pi_tasks_early, cwds.get(&s.session_id).map(String::as_str)).is_some()
     });
     if clone_state(&live, true) != Verdict::Ask && !pi_wake_pending {
         return Some(live.iter().map(settled).collect());
     }
 
-    // On the flag, never on the vec being empty: Codex fills it without the hook log having
-    // been opened, and a clone running both agents would then lose every Claude Code event.
+    // The hook log, unless a flavour already opened it. On the flag, never on `events` being
+    // empty: see [`Reading::hook_log_read`].
     if !hooks_read {
         events.extend(read_hook_events(&root));
     }
     let now = clone_now(&events);
     // Read and folded once for the whole clone, however many sessions read from it.
-    let facts = CloneFacts::read(&root, &events, now);
+    let facts = CloneFacts::read(&root, &events, cwds, now);
     let ages = prompt_ages(&events, now);
     Some(
         live.iter()
@@ -3419,8 +3649,12 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
                 // A Pi session with a running wake task always asks, even synthesized idle:
                 // the wake flag is the launcher's claim, and only the model can check it
                 // against the command. The view carries both, plus any foreground call.
-                if pi_ids.contains(&s.session_id)
-                    && pi_live_wake(&facts.pi_tasks, s.pi_cwd.as_deref()).is_some()
+                if pi_ids.contains(s.session_id.as_str())
+                    && pi_live_wake(
+                        &facts.pi_tasks,
+                        facts.cwds.get(&s.session_id).map(String::as_str),
+                    )
+                    .is_some()
                 {
                     return SessionCase {
                         session: s.session_id.clone(),
@@ -3464,7 +3698,23 @@ mod tests {
 
     /// One session's view, with the clone-wide reads and folds done for it.
     fn view_of(root: &Path, s: &Session, events: &[HookEvent], now: f64) -> Value {
-        build_session_view(s, &CloneFacts::read(root, events, now), now)
+        view_of_cwd(root, s, None, events, now)
+    }
+
+    /// The same, for a session whose flavour also reported where it is working. Pi is the one
+    /// that does, and that cwd is what scopes its background tasks to this session.
+    fn view_of_cwd(
+        root: &Path,
+        s: &Session,
+        cwd: Option<&str>,
+        events: &[HookEvent],
+        now: f64,
+    ) -> Value {
+        let mut cwds = HashMap::new();
+        if let Some(cwd) = cwd {
+            cwds.insert(s.session_id.clone(), cwd.to_string());
+        }
+        build_session_view(s, &CloneFacts::read(root, events, cwds, now), now)
     }
 
     #[test]
@@ -3626,10 +3876,21 @@ mod tests {
             &format!("2026-09-08T04-08-03-092Z_{PI_ID}.jsonl"),
             &open,
         );
-        let (sessions, events, cwds) = read_pi_sessions(&root);
+        let Reading {
+            sessions,
+            events,
+            cwds,
+            ..
+        } = PiFlavor::read(&root);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status.as_deref(), Some("busy"));
-        assert_eq!(sessions[0].pi_cwd.as_deref(), Some("/home/rmng/api"));
+        // The cwd rides the reading, not the session record: it belongs to Pi alone, and a
+        // Pi task carries a cwd and no session id, so this table is the only join available.
+        assert_eq!(
+            cwds.get(sessions[0].session_id.as_str())
+                .map(String::as_str),
+            Some("/home/rmng/api")
+        );
         assert_eq!(cwds.get(PI_ID).map(String::as_str), Some("/home/rmng/api"));
         // One open call folds exactly like a Claude PreToolUse without its Post.
         assert_eq!(in_flight_tools(&events).len(), 1);
@@ -3643,7 +3904,9 @@ mod tests {
             &format!("2026-09-08T04-08-03-092Z_{PI_ID}.jsonl"),
             &closed,
         );
-        let (sessions, events, _) = read_pi_sessions(&root);
+        let Reading {
+            sessions, events, ..
+        } = PiFlavor::read(&root);
         assert_eq!(sessions[0].status.as_deref(), Some("idle"));
         assert!(in_flight_tools(&events).is_empty());
         let _ = std::fs::remove_dir_all(&root);
@@ -3781,7 +4044,6 @@ mod tests {
         let s = Session {
             session_id: "pi-sid".into(),
             status: Some("busy".into()),
-            pi_cwd: Some("/home/rmng/api".into()),
             alive: true,
             ..Default::default()
         };
@@ -3793,7 +4055,7 @@ mod tests {
             ts: 1000.0,
             ..Default::default()
         }];
-        let view = view_of(&root, &s, &events, 1100.0);
+        let view = view_of_cwd(&root, &s, Some("/home/rmng/api"), &events, 1100.0);
         let tasks = view
             .pointer("/background_tasks")
             .and_then(Value::as_array)
@@ -3999,7 +4261,7 @@ mod tests {
             "the hook fold alone sees all three"
         );
 
-        let facts = CloneFacts::read(&root, &events, 2000.0);
+        let facts = CloneFacts::read(&root, &events, HashMap::new(), 2000.0);
         let owners: Vec<Option<&str>> = facts.tools.iter().map(|t| t.agent_id.as_deref()).collect();
         assert_eq!(
             owners,
@@ -4025,7 +4287,12 @@ mod tests {
         let mut pre = event("PreToolUse", "s", None);
         pre.tool_use_id = Some("t1".into());
         let events = [pre];
-        assert_eq!(CloneFacts::read(&root, &events, 2000.0).tools.len(), 1);
+        assert_eq!(
+            CloneFacts::read(&root, &events, HashMap::new(), 2000.0)
+                .tools
+                .len(),
+            1
+        );
 
         // A transcript that stops mid-turn is not an interrupt either.
         write_transcript(
@@ -4033,12 +4300,22 @@ mod tests {
             "s",
             &[r#"{"type":"user","message":{"content":"do the thing"}}"#],
         );
-        assert_eq!(CloneFacts::read(&root, &events, 2000.0).tools.len(), 1);
+        assert_eq!(
+            CloneFacts::read(&root, &events, HashMap::new(), 2000.0)
+                .tools
+                .len(),
+            1
+        );
 
         // Nor is a session with no transcript at all, which is a Cursor conversation the
         // extension has not named yet.
         let bare = fake_clone("quoted-bare");
-        assert_eq!(CloneFacts::read(&bare, &events, 2000.0).tools.len(), 1);
+        assert_eq!(
+            CloneFacts::read(&bare, &events, HashMap::new(), 2000.0)
+                .tools
+                .len(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&bare);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4058,7 +4335,12 @@ mod tests {
         );
         let mut pre = event("PreToolUse", "s", None);
         pre.tool_use_id = Some("t1".into());
-        assert_eq!(CloneFacts::read(&root, &[pre], 2000.0).tools.len(), 1);
+        assert_eq!(
+            CloneFacts::read(&root, &[pre], HashMap::new(), 2000.0)
+                .tools
+                .len(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5021,7 +5303,9 @@ mod tests {
         // append is the only exact map from a running process to the session it is running.
         let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
         let root = fake_codex("codex-live", 4242, id, &[CODEX_PROMPT, CODEX_DONE]);
-        let (sessions, events) = read_codex_sessions(&root);
+        let Reading {
+            sessions, events, ..
+        } = CodexFlavor::read(&root);
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, id, "the file name carries the id");
         assert_eq!(sessions[0].pid, 4242);
@@ -5031,7 +5315,7 @@ mod tests {
         // A rollout nobody holds open is over, whatever it says. That is what keeps a Codex
         // killed mid-turn from reading as working until somebody deletes the file.
         std::fs::remove_dir_all(root.join("proc")).unwrap();
-        assert!(read_codex_sessions(&root).0.is_empty());
+        assert!(CodexFlavor::read(&root).sessions.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5040,13 +5324,13 @@ mod tests {
         let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
         let open = fake_codex("codex-open", 1, id, &[CODEX_PROMPT]);
         assert_eq!(
-            read_codex_sessions(&open).0[0].status.as_deref(),
+            CodexFlavor::read(&open).sessions[0].status.as_deref(),
             Some("busy")
         );
 
         let closed = fake_codex("codex-closed", 1, id, &[CODEX_PROMPT, CODEX_DONE]);
         assert_eq!(
-            read_codex_sessions(&closed).0[0].status.as_deref(),
+            CodexFlavor::read(&closed).sessions[0].status.as_deref(),
             Some("idle")
         );
 
@@ -5058,7 +5342,7 @@ mod tests {
             id,
             &[CODEX_PROMPT, CODEX_DONE, CODEX_PROMPT],
         );
-        let (sessions, _) = read_codex_sessions(&again);
+        let sessions = CodexFlavor::read(&again).sessions;
         assert_eq!(
             sessions[0].status.as_deref(),
             Some("busy"),
@@ -5068,7 +5352,7 @@ mod tests {
         // A session sitting at its very first prompt has nothing outstanding.
         let fresh = fake_codex("codex-fresh", 1, id, &[]);
         assert_eq!(
-            read_codex_sessions(&fresh).0[0].status.as_deref(),
+            CodexFlavor::read(&fresh).sessions[0].status.as_deref(),
             Some("idle")
         );
         for r in [open, closed, again, fresh] {
@@ -5083,7 +5367,7 @@ mod tests {
         // `PreToolUse` nobody posted, and the existing fold already knows what it means.
         let id = "019fe02b-cb2c-7ec0-8a48-77d87c7f057f";
         let waiting = fake_codex("codex-waiting", 1, id, &[CODEX_PROMPT, CODEX_CALL]);
-        let (_, events) = read_codex_sessions(&waiting);
+        let events = CodexFlavor::read(&waiting).events;
         let live = in_flight_tools(&events);
         assert_eq!(live.len(), 1);
         assert_eq!(live[0].tool_name.as_deref(), Some("exec"));
@@ -5102,7 +5386,7 @@ mod tests {
             id,
             &[CODEX_PROMPT, CODEX_CALL, CODEX_OUTPUT],
         );
-        assert!(in_flight_tools(&read_codex_sessions(&answered).1).is_empty());
+        assert!(in_flight_tools(&CodexFlavor::read(&answered).events).is_empty());
         for r in [waiting, answered] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -5117,7 +5401,9 @@ mod tests {
             id,
             &[CODEX_PROMPT, CODEX_CALL, CODEX_OUTPUT, CODEX_DONE],
         );
-        let (sessions, events) = read_codex_sessions(&root);
+        let Reading {
+            sessions, events, ..
+        } = CodexFlavor::read(&root);
         let now = 1786172541.0 + 30.0;
         let view = view_of(&root, &sessions[0], &events, now);
         assert_eq!(view["session"]["status"], "idle");
@@ -5148,8 +5434,53 @@ mod tests {
             fds.join("42"),
         )
         .unwrap();
-        assert!(read_codex_sessions(&root).0.is_empty());
+        assert!(CodexFlavor::read(&root).sessions.is_empty());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Each gate answers for its own agent and for nobody else's. The gates are what keep a
+    /// clone running one agent from paying for the other three on every tick.
+    #[test]
+    fn a_flavour_gate_opens_only_for_its_own_agent() {
+        // A bare root: nothing has ever run in this clone.
+        let bare = pi_root("gates-bare");
+        assert!(!ClaudeCodeFlavor::present(&bare));
+        assert!(!CursorFlavor::present(&bare));
+        assert!(!CodexFlavor::present(&bare));
+        assert!(!PiFlavor::present(&bare));
+
+        // `fake_clone` writes the Claude Code registry directory and nothing else.
+        let claude = fake_clone("gates-claude");
+        assert!(ClaudeCodeFlavor::present(&claude));
+        assert!(!CursorFlavor::present(&claude));
+        assert!(!CodexFlavor::present(&claude));
+        assert!(!PiFlavor::present(&claude));
+
+        let cursor = fake_clone("gates-cursor");
+        write_cursor(&cursor, 900, &["/usr/share/cursor/cursor"]);
+        assert!(CursorFlavor::present(&cursor));
+        assert!(!CodexFlavor::present(&cursor));
+
+        // A rollout under the sessions directory. Liveness is NOT the gate's question — it is
+        // the read's, which is what keeps a Codex clone from walking `/proc` twice a tick.
+        let codex = fake_codex(
+            "gates-codex",
+            4242,
+            "019fe02b-cb2c-7ec0-8a48-77d87c7f057f",
+            &[CODEX_PROMPT],
+        );
+        assert!(CodexFlavor::present(&codex));
+        assert!(!CursorFlavor::present(&codex));
+
+        let pi = pi_root("gates-pi");
+        write_pi_session(&pi, "--home-rmng-api--", &format!("t_{PI_ID}.jsonl"), "");
+        assert!(PiFlavor::present(&pi));
+        assert!(!ClaudeCodeFlavor::present(&pi));
+        assert!(!CodexFlavor::present(&pi));
+
+        for r in [bare, claude, cursor, codex, pi] {
+            let _ = std::fs::remove_dir_all(r);
+        }
     }
 
     #[test]

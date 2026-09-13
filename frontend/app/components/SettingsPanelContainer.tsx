@@ -18,6 +18,7 @@ import {
   type SettingsDraft,
 } from "~/lib/settingsDraft";
 import type { ClaudeUsage, Operation } from "~/lib/types";
+import { useOperation } from "~/lib/useOperation";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
@@ -112,13 +113,17 @@ export function SettingsPanelContainer({
   const [serverStatus, setServerStatus] = useState<UpdateStatus | null>(null);
   const [serverMsg, setServerMsg] = useState<string | null>(null);
   // The in-flight self-update op, followed through the SSE frames so its progress renders
-  // inline here rather than only in the sidebar. The server restarts itself partway through,
-  // so the stream drops and the op may not come back — `updateOp` simply goes undefined and
-  // the last message stands. Kept until the panel closes; there's nothing to close here.
-  const [updateOpId, setUpdateOpId] = useState<string | null>(null);
-  const updateOp = updateOpId
-    ? operations.find((o) => o.id === updateOpId)
-    : undefined;
+  // inline here rather than only in the sidebar. Same rules as the two dialogs that follow
+  // an op — `~/lib/useOperation` — and the panel had none of them before: it held a bare op
+  // id, so a FAILED update read exactly like a running one and left the Update button dead
+  // for the life of the panel.
+  //
+  // The server restarts itself partway through a good update, so the stream drops and the op
+  // may never come back. That is precisely the pruned-op rule: an op that was seen and then
+  // vanished has settled, so the panel says so instead of waiting forever.
+  const update = useOperation(operations, updateServer, {
+    failureLabel: "the update failed",
+  });
   // Shared cosmetic ordering for the two account lists (drag to reorder). The rail's usage
   // panel reads the same store, so a reorder here reflects there live — persistence and
   // notification both happen in the store. Bucketed per provider because that is the
@@ -148,6 +153,14 @@ export function SettingsPanelContainer({
       .catch((e) => setServerMsg(`✗ ${(e as Error).message}`));
   }, [getUpdateStatus]);
 
+  // The panel has ONE message slot for the check, the update and the restart, so the
+  // update's verdict is written into it rather than derived: a later check has to be able to
+  // speak over a finished update, which a derived message could never let it do.
+  useEffect(() => {
+    if (update.phase === "failed") setServerMsg(`✗ ${update.error}`);
+    if (update.phase === "done") setServerMsg("updated — reconnecting shortly");
+  }, [update.phase, update.error]);
+
   function updateDraft<K extends keyof SettingsDraft>(
     key: K,
     value: SettingsDraft[K],
@@ -172,7 +185,7 @@ export function SettingsPanelContainer({
     }
   }
 
-  async function doUpdate() {
+  function doUpdate() {
     if (
       !confirm(
         "Update the control-server now?\n\nIt will pull the latest image and restart itself. The UI will briefly disconnect and reconnect; running clones are unaffected.",
@@ -180,11 +193,7 @@ export function SettingsPanelContainer({
     )
       return;
     setServerMsg("updating… the server will restart shortly");
-    try {
-      setUpdateOpId((await updateServer()).id);
-    } catch (e) {
-      setServerMsg(`✗ ${(e as Error).message}`);
-    }
+    update.run();
   }
 
   async function doRestart() {
@@ -256,8 +265,8 @@ export function SettingsPanelContainer({
       onClose={onClose}
       serverStatus={serverStatus}
       serverMessage={serverMsg}
-      updateOperation={updateOp ?? null}
-      updateDisabled={!serverStatus?.available || !!updateOpId}
+      updateOperation={update.op ?? null}
+      updateDisabled={!serverStatus?.available || update.busy}
       onCheckUpdate={checkUpdate}
       onUpdateServer={doUpdate}
       onRestartServer={doRestart}

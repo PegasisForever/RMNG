@@ -5,13 +5,15 @@
 // Two things live here and nowhere below: the config read that supplies the presets,
 // and the operation the POST returns. The dialog stays open on that operation and
 // closes only when it settles, which is why the op list is a prop rather than
-// something the View could ever have. The markup is RebaseModalView.
-import { useCallback, useEffect, useState } from "react";
+// something the View could ever have. Following that op is `~/lib/useOperation`, the
+// same rules the clone dialog and the settings panel run on. The markup is
+// RebaseModalView.
+import { useEffect, useState } from "react";
 
 import { RebaseModalView } from "~/components/RebaseModalView";
 import { getConfig } from "~/lib/api";
-import { opPhase } from "~/lib/cloneDraft";
 import type { Operation } from "~/lib/types";
+import { useOperation } from "~/lib/useOperation";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
 export function RebaseModalContainer({
@@ -35,10 +37,11 @@ export function RebaseModalContainer({
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
   const [preset, setPreset] = useState(currentPreset ?? "");
   const [rebuild, setRebuild] = useState(false);
-  // The started rebase operation: its id once the POST returns, plus a local error.
-  const [opId, setOpId] = useState<string | null>(null);
-  const [starting, setStarting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // The started rebase, from the POST to the frame that settles it. `start` is read afresh
+  // on every run, so it carries the preset and the checkbox as they stand at the click.
+  const rebase = useOperation(operations, () => onRebase(preset, rebuild), {
+    failureLabel: "the rebase failed",
+  });
 
   useEffect(() => {
     getConfig()
@@ -56,40 +59,11 @@ export function RebaseModalContainer({
     preset !== "" &&
     (presets.length === 0 || presets.some((p) => p.name === preset));
 
-  // --- operation tracking (same rules as the template dialog) ---------------------------
-  // Finished ops are PRUNED from state a few seconds after they land, so an op that
-  // disappears having previously been seen counts as done. A sticky failed flag keeps
-  // the error message from being closed out from under when the failed op is pruned.
-  const op = opId ? operations.find((o) => o.id === opId) : undefined;
-  const [opSeen, setOpSeen] = useState(false);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    if (op) setOpSeen(true);
-    if (op?.status === "error") {
-      setFailed(true);
-      setError(op.message || "the rebase failed");
-    }
-  }, [op]);
-  // The settled operation is what closes the dialog: `open` goes false, the frame plays its
-  // exit, and `onClose` unmounts once the frames have run.
-  const done = !!opId && opPhase(op, opSeen, failed) === "done";
-
-  const busy = starting || (!!opId && !failed);
-
-  const submit = useCallback(() => {
-    if (!valid || busy) return;
-    // Clear the previous attempt so a retry after a failure tracks the NEW op, not the old
-    // failed one (which is still in `operations` for another minute before it's pruned).
-    setError(null);
-    setOpId(null);
-    setOpSeen(false);
-    setFailed(false);
-    setStarting(true);
-    onRebase(preset, rebuild)
-      .then((started) => setOpId(started.id))
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setStarting(false));
-  }, [valid, busy, preset, rebuild, onRebase]);
+  /** The Rebase button. Whether the form is ready is this module's question; whether an
+   *  attempt is already running is the operation's, and `run` answers that one itself. */
+  function submit() {
+    if (valid) rebase.run();
+  }
 
   return (
     <RebaseModalView
@@ -100,11 +74,14 @@ export function RebaseModalContainer({
       rebuild={rebuild}
       onRebuildChange={setRebuild}
       valid={valid}
-      busy={busy}
-      error={error}
-      operation={op ?? null}
+      busy={rebase.busy}
+      error={rebase.error}
+      operation={rebase.op ?? null}
       onSubmit={submit}
-      open={!done}
+      // The settled operation is what closes the dialog: `open` goes false, the frame plays
+      // its exit, and `onClose` unmounts once the frames have run. A FAILED rebase is not
+      // settled for this purpose — the dialog stays up holding its error.
+      open={!rebase.done}
       onClose={onClose}
     />
   );
