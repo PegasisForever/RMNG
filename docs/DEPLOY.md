@@ -69,7 +69,7 @@ What each piece is for:
 | `-v /srv/rmng-homes:/srv/rmng-homes:shared` | the clone-home datasets (gen-2). Load-bearing: datasets are created from inside this container, and only a **shared** bind propagates their mounts into dockerd's namespace (plus server-side home reads/writes). Omit it and the first create fails with `bind source path does not exist` |
 | `-p 9000:9000` and `-p 9001:9001` | the web API and video ports |
 | `-p 9005:9005` | the port-forward data plane (viewer↔clone TCP splice) |
-| `-p 445:445` | the two SMB shares: `clones` browses every running clone's `/home/rmng`, and `shared` is the one pool every clone sees at `/home/rmng/shared` |
+| `-p 445:445` | the two SMB shares: `clones` browses every running clone's `/home/rmng`, and `shared` is the one pool every clone sees at `~/shared` |
 | `-p 2222:2222` | the SSH bastion — jump host for `ssh`/`scp`/`rsync`/VSCode Remote-SSH into any clone's own `sshd` (see [SSH into clones](#ssh-into-clones)) |
 
 **There are zero `-e` configuration flags, by design.** `config.json` (edited via the
@@ -390,7 +390,7 @@ front of the whole fleet.
 | Where | Path |
 | --- | --- |
 | Over SMB | `smb://<docker-host>/shared`, same `rmng`/`rmng` credential as `clones` |
-| Inside every clone | `/home/rmng/shared` |
+| Inside every clone | `/shared`, reached as `~/shared` (symlink) |
 | On the control-server and the Docker host | `<homes>/.shared` (e.g. `/srv/rmng-homes/.shared`) — the one pool path both see, because the homes bind is shared |
 
 Read-write from every side. The pool's root is owned by the clone user (uid **1000**), so a
@@ -410,8 +410,9 @@ Four consequences worth knowing:
 2. It appears under the `clones` share too, at `smb://<host>/clones/<id>/shared`, because it
    genuinely sits inside each clone's home. A recursive copy of `clones` will read it once per
    clone.
-3. A clone's own `/home/rmng/shared` is the pool from first boot — no reconciler delay.
-4. Anything a clone already kept at `~/shared` is hidden while the pool is mounted over it. The
+3. A clone's own `~/shared` is the pool from first boot — no reconciler delay.
+4. A clone that already kept files at `~/shared` keeps them: the symlink only ever replaces an
+   EMPTY directory, so such a clone stays on a real directory and does not see the pool. The
    files are untouched and come back if the mount goes away, but they are not in the pool.
 
 ## SSH into clones

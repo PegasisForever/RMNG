@@ -5,8 +5,8 @@
 //! an SMB client browsing `\\<host>\clones` sees every clone's home side by side.
 //!
 //! `shared` is rooted at the `<homes>/.shared` pool, which `shared.rs` mounts into every
-//! clone at `/home/rmng/shared`. Writing there over SMB puts the file in front of every clone at once,
-//! and a clone writing to its own `/home/rmng/shared` puts it back on this share. It is a plain
+//! clone at `~/shared`. Writing there over SMB puts the file in front of every clone at once,
+//! and a clone writing to its own `~/shared` puts it back on this share. It is a plain
 //! directory, so it needs none of the `/proc` traversal machinery below.
 //!
 //! `force user = root` makes smbd *traverse* those `/proc/<pid>/root` symlinks: the clone's

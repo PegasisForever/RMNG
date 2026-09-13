@@ -860,6 +860,8 @@ pub async fn clone_container_gen2_from_tag(
         "overlay merged view must be an absolute bind source"
     );
     crate::home_overlay::ensure_mounted(&dataset, &digest, &merged).await?;
+    // `~/clones` and `~/shared` point at the two mounts, which live outside the home.
+    crate::home_overlay::ensure_home_links(crate::zfs::HOMES_DIR, hostname);
 
     on_progress("create", &format!("creating container {hostname}"));
     let spec = CreateSpec {

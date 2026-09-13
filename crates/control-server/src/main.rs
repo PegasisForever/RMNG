@@ -306,7 +306,7 @@ async fn main() -> Result<()> {
             // used, which is what stops a new clone inheriting a retired one's history.
             tokio::spawn(ledger::run(app_for_bg.clone()));
             // The shared pool: one dir at <homes>/.shared (daemon-visible, unlike
-            // anything under data/), bound into every clone at /home/rmng/shared
+            // anything under data/), bound into every clone at /shared (~/shared)
             // from first boot (see CreateSpec::shared_dir) and served as the
             // `shared` SMB share. Ensured here once; the bind needs no upkeep. A pool
             // failure aborts startup: booting clones without it silently breaks the

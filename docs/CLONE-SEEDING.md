@@ -90,9 +90,11 @@ Mounts (create-spec binds, present from first boot — always mounted, no empty 
 
 - Home overlay merged view → `/home/rmng` (template home as shared lower layer,
   per-clone dataset as upper).
-- Merged-view root `<homes>/.merged` → `/home/rmng/clones`, `rslave` (every home
-  visible side by side; see GEN2-CLONES.md §3.6 for why not the homes parent).
-- Shared pool `<homes>/.shared` → `/home/rmng/shared` (daemon-visible path —
+- Merged-view root `<homes>/.merged` → `/clones`, `rslave`, reached as `~/clones`
+  through an in-home symlink (every home visible side by side; see GEN2-CLONES.md §3.6
+  for why not the homes parent, and why not under the home).
+- Shared pool `<homes>/.shared` → `/shared`, reached as `~/shared` through an in-home
+  symlink (daemon-visible path —
   anything inside the server's `data/` volume is container-private and Docker
   rejects it as a bind source).
 - Clone media socket dir.

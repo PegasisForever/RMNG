@@ -1,4 +1,5 @@
-//! The shared pool: `<homes>/.shared`, bound into every clone at `/home/rmng/shared`
+//! The shared pool: `<homes>/.shared`, bound into every clone at `/shared` (reached as
+//! `~/shared` through an in-home symlink)
 //! and served as the `shared` SMB share beside `clones` (see [`crate::smb`]). One flat pool:
 //! every clone sees the same bytes and so does an SMB client, so a file dropped anywhere
 //! appears everywhere. Read-write from both sides, which is what the root directory's
@@ -22,7 +23,7 @@ use std::path::{Path, PathBuf};
 /// The clone user's uid and gid (see [`crate::docker::CLONE_USER`]). The pool's root directory
 /// carries this owner so a clone writing through the mount and smbd writing through the
 /// `shared` share both land as the same user.
-const CLONE_UID: u32 = 1000;
+pub(crate) const CLONE_UID: u32 = 1000;
 
 /// The directory holding the shared pool (`<homes>/.shared`). `pub(crate)` so smb.rs
 /// single-sources the `shared` share path from it, as it already does for `hosts`.
@@ -31,9 +32,11 @@ pub(crate) fn shared_root() -> PathBuf {
     Path::new(crate::zfs::HOMES_DIR).join(".shared")
 }
 
-/// Where the pool appears inside every clone.
+/// Where the pool appears inside every clone. Outside the home for the same reason the
+/// browse root is (see `home_overlay::HOME_LINKS`): a mount under the home puts a row in
+/// GNOME's file-manager sidebar. `~/shared` is a symlink to this.
 pub(crate) fn clone_target() -> String {
-    format!("/home/{}/shared", crate::docker::CLONE_USER)
+    "/shared".to_string()
 }
 
 /// The pool as an absolute host path for the container bind. Lexical only (no symlink
@@ -78,8 +81,10 @@ mod tests {
     }
 
     #[test]
-    fn clone_target_is_under_the_clone_users_home() {
-        assert_eq!(clone_target(), "/home/rmng/shared");
+    fn clone_target_is_outside_the_clone_users_home() {
+        // Under the home it would be one more row in every clone's GNOME sidebar.
+        assert_eq!(clone_target(), "/shared");
+        assert!(!clone_target().starts_with(&format!("/home/{}", crate::docker::CLONE_USER)));
     }
 
     #[test]

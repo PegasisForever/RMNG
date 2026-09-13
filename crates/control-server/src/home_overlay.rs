@@ -77,7 +77,7 @@ fn work_dir(dataset: &Path) -> PathBuf {
 }
 
 /// The directory holding every clone's merged view, one entry per clone with a live
-/// home. Bound into every clone at `/home/rmng/clones` (see [`crate::docker::CreateSpec::browse_root`])
+/// home. Bound into every clone at `/clones` (see [`crate::docker::CreateSpec::browse_root`])
 /// and the target of every `<data_dir>/hosts` link the SMB share serves, so all three
 /// browse paths show one directory.
 pub fn merged_root(homes: &str) -> PathBuf {
@@ -87,6 +87,71 @@ pub fn merged_root(homes: &str) -> PathBuf {
 /// The merged view bound at `/home/rmng`.
 pub fn merged_dir(homes: &str, id: &str) -> PathBuf {
     merged_root(homes).join(id)
+}
+
+/// The two directories a clone browses that are NOT its own files, and where each is
+/// really mounted. Both mounts sit OUTSIDE the home on purpose: GNOME's file manager
+/// puts a sidebar row on every mount whose path is under the home directory, and each
+/// sibling home is its own overlay mount — so mounting the browse root inside the home
+/// gave a clone one sidebar row per clone in the fleet. Measured in a CT 204 clone: a
+/// mount under the home is listed, the same mount outside it is not.
+///
+/// [`ensure_home_links`] keeps `~/clones` and `~/shared` working as symlinks to these,
+/// so nothing that uses the familiar paths has to change.
+const HOME_LINKS: [(&str, &str); 2] = [("clones", "/clones"), ("shared", "/shared")];
+
+/// Point `~/clones` and `~/shared` at the mounts outside the home. Idempotent, and safe
+/// on a home that has never seen them.
+///
+/// The entry it replaces is the empty mountpoint directory Docker invented back when the
+/// binds landed inside the home. `remove_dir` is non-recursive, so a directory holding
+/// anything at all is left exactly as it is and only logged: whatever a clone put there
+/// is the clone's, and losing it to a cosmetic fix would be a bad trade.
+pub fn ensure_home_links(homes: &str, id: &str) {
+    let home = merged_dir(homes, id);
+    for (name, target) in HOME_LINKS {
+        let path = home.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(md) if md.file_type().is_symlink() => {
+                if std::fs::read_link(&path).is_ok_and(|t| t == Path::new(target)) {
+                    continue;
+                }
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(target: "overlay", "{id}: keeping ~/{name}: {e}");
+                    continue;
+                }
+            }
+            Ok(md) if md.is_dir() => {
+                if let Err(e) = std::fs::remove_dir(&path) {
+                    tracing::warn!(
+                        target: "overlay",
+                        "{id}: ~/{name} is a non-empty directory, leaving it ({e})"
+                    );
+                    continue;
+                }
+            }
+            Ok(_) => {
+                tracing::warn!(target: "overlay", "{id}: ~/{name} is a file, leaving it");
+                continue;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(target: "overlay", "{id}: reading ~/{name}: {e}");
+                continue;
+            }
+        }
+        if let Err(e) = std::os::unix::fs::symlink(target, &path) {
+            tracing::warn!(target: "overlay", "{id}: linking ~/{name} -> {target}: {e}");
+            continue;
+        }
+        // The link itself belongs to the clone user, like everything else in the home.
+        // Traversal reads the TARGET's permissions, so this is tidiness, not access.
+        let _ = std::os::unix::fs::lchown(
+            &path,
+            Some(crate::shared::CLONE_UID),
+            Some(crate::shared::CLONE_UID),
+        );
+    }
 }
 
 /// Direct filesystem IO into a clone's live home (the merged view). The server holds
@@ -482,8 +547,15 @@ pub async fn remount_all(app: App) {
             // Restarting the container is what re-binds it to the live overlay.
             Ok(true) => remounted.push(id.clone()),
             Ok(false) => {}
-            Err(e) => tracing::warn!(target: "overlay", "remount: {id}: {e:#}"),
+            Err(e) => {
+                tracing::warn!(target: "overlay", "remount: {id}: {e:#}");
+                continue;
+            }
         }
+        // The home is live: repoint `~/clones` / `~/shared` at the mounts outside it.
+        // Here rather than only on create, so a fleet that predates the move is fixed
+        // by one boot instead of a recreate.
+        ensure_home_links(homes, id);
     }
     for id in &remounted {
         match app.docker.is_running(id).await {
@@ -578,7 +650,44 @@ mod tests {
         );
     }
 
-    /// The browse root bound at `/home/rmng/clones` is `.merged`, never the homes
+    /// `~/clones` and `~/shared` become symlinks to the mounts, which now live outside
+    /// the home. The empty mountpoint directory Docker left behind is replaced; a
+    /// directory with anything in it is the clone's and survives untouched.
+    #[test]
+    fn home_links_replace_the_empty_mountpoints_but_never_a_used_directory() {
+        let homes = std::env::temp_dir().join(format!("rmng-links-{}", std::process::id()));
+        let home = merged_dir(&homes.to_string_lossy(), "pega-x");
+        std::fs::create_dir_all(home.join("clones")).unwrap();
+        std::fs::create_dir_all(home.join("shared")).unwrap();
+        std::fs::write(home.join("shared/keep-me"), b"x").unwrap();
+
+        ensure_home_links(&homes.to_string_lossy(), "pega-x");
+
+        assert_eq!(
+            std::fs::read_link(home.join("clones")).unwrap(),
+            Path::new("/clones")
+        );
+        // `shared` held a file, so it is still the directory it was.
+        assert!(home.join("shared").is_dir());
+        assert!(home.join("shared/keep-me").exists());
+
+        // Idempotent, and it creates a link that was never there.
+        std::fs::remove_dir_all(home.join("shared")).unwrap();
+        ensure_home_links(&homes.to_string_lossy(), "pega-x");
+        ensure_home_links(&homes.to_string_lossy(), "pega-x");
+        assert_eq!(
+            std::fs::read_link(home.join("clones")).unwrap(),
+            Path::new("/clones")
+        );
+        assert_eq!(
+            std::fs::read_link(home.join("shared")).unwrap(),
+            Path::new("/shared")
+        );
+
+        let _ = std::fs::remove_dir_all(&homes);
+    }
+
+    /// The browse root bound at `/clones` is `.merged`, never the homes
     /// parent. Binding the parent showed each clone its siblings' ZFS dataset dirs —
     /// `~/clones/<id>/upper` and `/work` instead of the home — and kept showing the
     /// leftover mountpoint dir of every deleted clone.

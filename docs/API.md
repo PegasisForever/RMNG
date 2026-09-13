@@ -667,7 +667,7 @@ operator opened the clone.
 
 | What | Was late by | Symptom |
 | --- | --- | --- |
-| `/home/rmng/shared`, the shared folder | up to 15 s | the folder is missing, then appears |
+| `~/shared`, the shared folder | up to 15 s | the folder is missing, then appears |
 | `data/hosts/<id>`, the home symlink | up to 15 s | no SMB browse, no file API, no token counts, no activity signal |
 | The bastion's `PermitOpen` entry | up to 10 s | `ssh -J` to the clone is refused |
 | The `~/.codex/config.toml` MCP tables | up to 30 s | Codex starts with no managed servers |

@@ -297,8 +297,9 @@ pub struct CreateSpec {
     /// (only meaningful for flows that bring their own).
     pub home_dir: Option<String>,
     /// The merged-view root on the CT (e.g. `/srv/rmng-homes/.merged`), bound at
-    /// `/home/rmng/clones` so every clone sees every home. Always mounted alongside
-    /// `home_dir`.
+    /// `/clones` so every clone sees every home. Always mounted alongside `home_dir`,
+    /// and reached as `~/clones` through the symlink `home_overlay::ensure_home_links`
+    /// keeps in the home.
     ///
     /// This is the `.merged` root, NOT the homes parent: the parent holds one ZFS
     /// *dataset* dir per clone, whose contents are the overlay's `upper`/`work` pair
@@ -313,7 +314,8 @@ pub struct CreateSpec {
     /// dangle whole; `.merged` is what every one of its links points into.
     pub browse_root: String,
     /// Shared pool dir on the CT (absolute host path, e.g.
-    /// `/srv/rmng-homes/.shared`), bound at `/home/rmng/shared`. Always mounted.
+    /// `/srv/rmng-homes/.shared`), bound at `/shared`. Always mounted, and reached as
+    /// `~/shared` through the symlink in the home.
     pub shared_dir: String,
 }
 
@@ -1554,11 +1556,16 @@ impl DockerCtl {
                 ..Default::default()
             });
             mounts.push(Mount {
-                target: Some("/home/rmng/clones".to_string()),
+                target: Some("/clones".to_string()),
                 source: Some(spec.browse_root.clone()),
                 typ: Some(MountTypeEnum::BIND),
                 // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
                 // copies straight across any home. No `read_only` here.
+                //
+                // NOT under `/home/rmng`. GNOME's file manager lists every mount whose
+                // path is under the home directory, and each sibling home below this
+                // one is its own overlay mount, so a clone's sidebar grew a row per
+                // clone in the fleet. `~/clones` is a symlink to here.
                 //
                 // `rslave` is load-bearing. Every sibling's home is its own overlay
                 // mount UNDER this source, and a default (private) bind copies only

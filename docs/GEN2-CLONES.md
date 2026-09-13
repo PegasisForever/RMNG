@@ -91,8 +91,8 @@ source and makes rebase a swap of the lower under the same upper.
 The mounts die with a CT reboot (host mounts outlive containers, not reboots), so boot
 re-establishes every clone's merged view (`home_overlay::remount_all`).
 
-Three further binds beyond gen-1: `<homes>/.merged` at `/home/rmng/clones` (§3.6),
-`<homes>/.shared` at `/home/rmng/shared`, and the unchanged per-clone `rmng-dind-*` /
+Three further binds beyond gen-1: `<homes>/.merged` at `/clones` (§3.6),
+`<homes>/.shared` at `/shared`, and the unchanged per-clone `rmng-dind-*` /
 `rmng-ctd-*` volumes. Everything else (privileged, cpu/mem, shm, `rmng-sock`, lxcfs
 binds, `rmng` bridge) is unchanged. Record the base image tag plus dataset name on the
 clone row (new optional fields on `RmngClone`, serde-defaulted so old `state.json`
@@ -152,11 +152,20 @@ Point `data/hosts/<id>` at the clone's MERGED view (`<homes>/.merged/<id>`) for 
 clone. Same SMB share, works while stopped. The `/proc/<pid>/root` reader is deleted
 with the rest of gen-1.
 
-Every clone also mounts `<homes>/.merged` at `/home/rmng/clones`, so any clone reaches
-any other home at `~/clones/<id>`. This replaces `cp`/`sync`: read or copy straight
+Every clone also mounts `<homes>/.merged` at `/clones`, reached as `~/clones/<id>`, so
+any clone reaches any other home. This replaces `cp`/`sync`: read or copy straight
 across, no server round-trip. Accepted: every clone can read every home including
-tokens, and each clone also sees itself at `~/clones/<self>`. Keep an empty `clones`
-dir in the dataset so the mountpoint always exists.
+tokens, and each clone also sees itself at `~/clones/<self>`.
+
+Both this and the shared pool mount OUTSIDE the home, with `~/clones` and `~/shared`
+left as symlinks (`home_overlay::ensure_home_links`, applied at create and to the whole
+fleet at boot). GNOME's file manager puts a sidebar row on every mount whose path is
+under the home directory, and each sibling home is its own overlay mount — so mounting
+the browse root at `~/clones` gave every clone's Files window one row per clone in the
+fleet, eleven rows on CT 204. Measured in a clone: a mount under the home is listed, the
+same mount outside it is not, and so is one whose path holds a dot component. Removing
+GNOME's disk monitor does NOT help — GIO falls back to a built-in monitor with the same
+rule.
 
 Mount the `.merged` root, not the homes parent. The parent holds one ZFS *dataset* dir
 per clone, and a dataset dir contains the overlay's `upper`/`work` pair, not a home —
