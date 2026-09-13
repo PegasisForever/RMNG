@@ -9,7 +9,12 @@
 //! `docker.homes_parent` config (default `tank/rmng/homes`). Every path is validated
 //! to stay under that parent: the outer CT runs privileged with `/dev/zfs`, so CT
 //! root could destroy any pool dataset. All ZFS calls in the server go through this
-//! module — no raw `zfs destroy` elsewhere.
+//! module — no raw `zfs` invocation elsewhere.
+//!
+//! This is the implementation, not the interface: [`crate::clone_home::CloneHome`] owns
+//! a clone's home and is what callers hold. Everything below it is `pub(crate)` and
+//! called from there, so no caller has to know that a dataset name and a dataset
+//! directory are two different strings.
 //!
 //! Mount visibility: a dataset created from inside a container mounts only in that
 //! container's mount namespace, invisible to dockerd. So `create`/`clone` pin
@@ -59,12 +64,14 @@ pub fn ensure_dev_zfs() {
 }
 
 /// CT-side path of a clone's home dataset dir.
-pub fn dataset_dir(clone_id: &str) -> String {
+/// Reached through [`crate::clone_home::CloneHome::dataset_dir`].
+pub(crate) fn dataset_dir(clone_id: &str) -> String {
     format!("{HOMES_DIR}/{clone_id}")
 }
 
 /// Dataset name for a clone id under `parent`.
-pub fn dataset_name(parent: &str, clone_id: &str) -> String {
+/// Reached through [`crate::clone_home::CloneHome::dataset`].
+pub(crate) fn dataset_name(parent: &str, clone_id: &str) -> String {
     format!("{parent}/{clone_id}")
 }
 
@@ -116,7 +123,7 @@ fn run(args: &[&str]) -> Result<String> {
 /// `zfs create -o mountpoint=<HOMES_DIR>/<clone-id> <parent>/<clone-id>`.
 /// The pinned mountpoint keeps the dataset visible under the homes bind mount
 /// (children would otherwise auto-mount at the pool path, e.g. `/rpool/...`).
-pub fn create(parent: &str, clone_id: &str) -> Result<()> {
+pub(crate) fn create(parent: &str, clone_id: &str) -> Result<()> {
     let ds = dataset_name(parent, clone_id);
     check_dataset(parent, &ds)?;
     let mp = format!("mountpoint={}", dataset_dir(clone_id));
@@ -125,13 +132,9 @@ pub fn create(parent: &str, clone_id: &str) -> Result<()> {
 }
 
 /// Ensure `dataset` is mounted at its recorded mountpoint. Idempotent.
-///
-/// A CT reboot leaves every per-clone dataset UNMOUNTED. There is deliberately no
-/// `zfsutils-linux` inside the CT (its `zfs-dkms` cannot build under a shared kernel), so
-/// nothing runs the usual `zfs mount -a` at boot — the server is the only thing that can.
-/// Skipping this let `home_overlay::remount_all` stack an overlay on an empty directory
-/// and hand every clone a pristine template home while its real one sat unmounted.
-pub fn ensure_mounted(dataset: &str) -> Result<()> {
+/// Why the server has to do this at all:
+/// [`crate::clone_home::CloneHome::ensure_mounted`].
+pub(crate) fn ensure_mounted(dataset: &str) -> Result<()> {
     if dataset.is_empty() || dataset.contains(['\0', ' ', '\n']) {
         anyhow::bail!("zfs: refusing to mount {dataset:?}");
     }
@@ -143,7 +146,7 @@ pub fn ensure_mounted(dataset: &str) -> Result<()> {
 }
 
 /// `zfs snapshot <parent>/<clone-id>@<snap>`.
-pub fn snapshot(parent: &str, clone_id: &str, snap: &str) -> Result<String> {
+pub(crate) fn snapshot(parent: &str, clone_id: &str, snap: &str) -> Result<String> {
     let full = format!("{}@{snap}", dataset_name(parent, clone_id));
     check_snapshot(parent, &full)?;
     run(&["snapshot", &full])?;
@@ -152,7 +155,7 @@ pub fn snapshot(parent: &str, clone_id: &str, snap: &str) -> Result<String> {
 
 /// `zfs clone -o mountpoint=<HOMES_DIR>/<new-id> <snapshot> <parent>/<new-id>`.
 /// Returns the new dataset name.
-pub fn clone_dataset(parent: &str, snapshot: &str, new_id: &str) -> Result<String> {
+pub(crate) fn clone_dataset(parent: &str, snapshot: &str, new_id: &str) -> Result<String> {
     check_snapshot(parent, snapshot)?;
     let dst = dataset_name(parent, new_id);
     check_dataset(parent, &dst)?;
@@ -170,7 +173,7 @@ pub fn clone_dataset(parent: &str, snapshot: &str, new_id: &str) -> Result<Strin
 /// an empty directory, so a destroy that silently left data behind is kept, not deleted.
 /// Best-effort — a leftover directory is cosmetic, and failing the delete over one would
 /// be worse.
-pub fn destroy(parent: &str, clone_id: &str, recursive: bool) -> Result<()> {
+pub(crate) fn destroy(parent: &str, clone_id: &str, recursive: bool) -> Result<()> {
     let ds = dataset_name(parent, clone_id);
     check_dataset(parent, &ds)?;
     if recursive {
@@ -186,10 +189,25 @@ pub fn destroy(parent: &str, clone_id: &str, recursive: bool) -> Result<()> {
     Ok(())
 }
 
+/// `zfs get origin` for a clone's dataset: the snapshot it was cloned from, if any.
+/// `None` for a fresh dataset (origin `-`) and on any error. Read-only and unvalidated
+/// on purpose — it destroys nothing, so a name outside `parent` can only produce a
+/// useless answer, not damage.
+/// Reached through [`crate::clone_home::CloneHome::origin`].
+pub(crate) fn origin(parent: &str, clone_id: &str) -> Option<String> {
+    let ds = dataset_name(parent, clone_id);
+    let v = run(&["get", "-H", "-o", "value", "origin", &ds]).ok()?;
+    if v.is_empty() || v == "-" {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 /// `zfs destroy <snapshot>` when no remaining clone dataset was cloned from it.
 /// Origin snapshots pair 1:1 with fork clones, so a plain destroy suffices; a busy
 /// snapshot (still referenced) surfaces as an error for the caller to keep.
-pub fn destroy_snapshot_if_unreferenced(parent: &str, snapshot: &str) -> Result<()> {
+pub(crate) fn destroy_snapshot_if_unreferenced(parent: &str, snapshot: &str) -> Result<()> {
     check_snapshot(parent, snapshot)?;
     run(&["destroy", snapshot])?;
     Ok(())

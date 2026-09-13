@@ -19,12 +19,19 @@
 //! Mounts die with a CT reboot (not with container stop/remove — host mounts outlive
 //! containers), so boot re-establishes them ([`remount_all`]). No skeleton GC yet: one
 //! copy per published template; noted for later.
+//!
+//! This is the implementation of the overlay, not the interface to a clone's home:
+//! [`crate::clone_home::CloneHome`] owns the path derivations below and is what callers
+//! hold. The exceptions are the direct home-file IO (`read_clone_home` and friends),
+//! which is addressed by id and home-relative path and belongs to no single home, and
+//! [`remount_all`], the boot pass over all of them.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 
 use crate::app::App;
+use crate::clone_home::CloneHome;
 
 const SKEL_DIR: &str = ".skeleton";
 const MERGED_DIR: &str = ".merged";
@@ -62,17 +69,19 @@ fn digest_path(digest: &str) -> String {
 }
 
 /// Exported home of one image (overlay lower).
-pub fn skeleton_dir(homes: &str, digest: &str) -> PathBuf {
+fn skeleton_dir(homes: &str, digest: &str) -> PathBuf {
     Path::new(homes).join(SKEL_DIR).join(digest_path(digest))
 }
 
 /// The clone's read-write delta inside its dataset.
-pub fn upper_dir(dataset: &Path) -> PathBuf {
+/// Reached through [`CloneHome::upper`].
+pub(crate) fn upper_dir(dataset: &Path) -> PathBuf {
     dataset.join(UPPER_DIR)
 }
 
 /// Overlay workdir: same filesystem as the upper, outside it.
-fn work_dir(dataset: &Path) -> PathBuf {
+/// Reached through [`CloneHome::work`].
+pub(crate) fn work_dir(dataset: &Path) -> PathBuf {
     dataset.join(WORK_DIR)
 }
 
@@ -80,12 +89,13 @@ fn work_dir(dataset: &Path) -> PathBuf {
 /// home. Bound into every clone at `/clones` (see [`crate::docker::CreateSpec::browse_root`])
 /// and the target of every `<data_dir>/hosts` link the SMB share serves, so all three
 /// browse paths show one directory.
-pub fn merged_root(homes: &str) -> PathBuf {
+pub(crate) fn merged_root(homes: &str) -> PathBuf {
     Path::new(homes).join(MERGED_DIR)
 }
 
 /// The merged view bound at `/home/rmng`.
-pub fn merged_dir(homes: &str, id: &str) -> PathBuf {
+/// Reached through [`CloneHome::merged`].
+pub(crate) fn merged_dir(homes: &str, id: &str) -> PathBuf {
     merged_root(homes).join(id)
 }
 
@@ -107,8 +117,9 @@ const HOME_LINKS: [(&str, &str); 2] = [("clones", "/clones"), ("shared", "/share
 /// binds landed inside the home. `remove_dir` is non-recursive, so a directory holding
 /// anything at all is left exactly as it is and only logged: whatever a clone put there
 /// is the clone's, and losing it to a cosmetic fix would be a bad trade.
-pub fn ensure_home_links(homes: &str, id: &str) {
-    let home = merged_dir(homes, id);
+/// `home` is the merged view — [`CloneHome::merged`] — not a homes root plus an id:
+/// this module no longer derives that path for anyone.
+pub(crate) fn ensure_home_links(home: &Path, id: &str) {
     for (name, target) in HOME_LINKS {
         let path = home.join(name);
         match std::fs::symlink_metadata(&path) {
@@ -369,7 +380,7 @@ fn unpack_skeleton(tar_bytes: &[u8], dest: &Path) -> Result<()> {
 /// Export `/home/rmng` of `image_tag` into the shared skeleton dir, once per image id.
 /// Returns the digest. Best-effort callers treat failure as fatal: without a lower there
 /// is no home to mount.
-pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
+pub(crate) async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     let digest = app.docker.image_id(image_tag).await?;
     // One export per digest at a time. Every clone of one preset resolves to the SAME
     // image, so concurrent migrations all land here together — and the body below wipes
@@ -422,15 +433,6 @@ pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     Ok(digest)
 }
 
-/// Make sure a dataset holds the overlay upper + work dirs.
-pub fn ensure_layout(dataset: &Path) -> Result<()> {
-    std::fs::create_dir_all(upper_dir(dataset))
-        .with_context(|| format!("mkdir {}", upper_dir(dataset).display()))?;
-    std::fs::create_dir_all(work_dir(dataset))
-        .with_context(|| format!("mkdir {}", work_dir(dataset).display()))?;
-    Ok(())
-}
-
 fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Result<()> {
     std::fs::create_dir_all(merged).with_context(|| format!("mkdir {}", merged.display()))?;
     let opts = format!(
@@ -452,7 +454,7 @@ fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Resu
 
 /// Best-effort unmount (lazy detach: open files — tails, smbd — keep working). Missing
 /// mount is fine.
-pub fn unmount_merged(merged: &Path) {
+fn unmount_merged(merged: &Path) {
     match nix::mount::umount2(merged, nix::mount::MntFlags::MNT_DETACH) {
         Ok(()) => {}
         Err(nix::errno::Errno::EINVAL) => {} // not mounted
@@ -461,20 +463,22 @@ pub fn unmount_merged(merged: &Path) {
 }
 
 /// Tear down one clone's merged view (delete path): unmount, then remove the dir so no
-/// dangling mountpoint survives. The dataset itself is the caller's business.
-pub fn teardown_merged(homes: &str, id: &str) {
-    let merged = merged_dir(homes, id);
-    unmount_merged(&merged);
-    let _ = std::fs::remove_dir(&merged);
+/// dangling mountpoint survives. The dataset itself is the caller's business — see
+/// [`CloneHome::teardown`], which is how this is reached.
+pub(crate) fn teardown_merged(merged: &Path) {
+    unmount_merged(merged);
+    let _ = std::fs::remove_dir(merged);
 }
 
 /// Mount (or remount, when the lower changed, e.g. rebase) one clone's home overlay.
-/// Idempotent: an already-correct mount is left alone.
+/// Idempotent: an already-correct mount is left alone. The upper and work dirs must
+/// already exist ([`CloneHome::ensure_layout`]) — the migration fills the upper long
+/// before there is an image to mount over it, so ensuring them here too would be a
+/// second owner for one rule.
 /// Returns `true` when this call ESTABLISHED the mount (as opposed to finding it already
 /// correct). A container bound before that moment captured the bare mountpoint and needs
 /// restarting — see [`remount_all`].
-pub async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) -> Result<bool> {
-    ensure_layout(dataset)?;
+pub(crate) async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) -> Result<bool> {
     let homes = merged
         .parent()
         .and_then(|p| p.parent())
@@ -494,37 +498,37 @@ pub async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) -> Resu
 
 /// Re-establish every managed clone's overlay after a reboot (mounts do not survive
 /// one; containers do not need to run). Best-effort per clone; a missing image warns.
-pub async fn remount_all(app: App) {
-    // A clone's dataset is always `<parent>/<id>`, whichever way its home was made, so
-    // the recorded name is fully derivable — and a create between 2026-09-11 and this
-    // commit recorded the bare id instead. Repair those rows here rather than trusting
-    // them: the reader below is the boot remount, and a name it cannot open leaves the
-    // clone on the template home.
-    let parent = app.config().docker.homes_parent.clone();
+///
+/// Fleet-wide, so it lives here rather than on [`CloneHome`]: it builds one home per
+/// managed gen-2 row and asks each to come up. No path is derived in this function.
+pub(crate) async fn remount_all(app: App) {
+    // A clone's home is always `<parent>/<id>`, whichever way it was made, so the name
+    // recorded on the row is fully derivable — and a create between 2026-09-11 and the
+    // move to `CloneHome` recorded the bare id instead. Nothing reads that value any
+    // more (only its presence marks a gen-2 clone), but a deployed fleet still carries
+    // the bad rows, so correct them here rather than leaving `state.json` holding a lie.
     let mut repaired: Vec<(String, String)> = Vec::new();
-    let rows: Vec<(String, String, Option<String>)> = app
+    let mut rows: Vec<(CloneHome, Option<String>)> = Vec::new();
+    for h in app
         .store
         .get()
         .hosts
         .into_iter()
-        .filter(|h| h.managed && h.dataset.is_some())
-        .map(|h| {
-            let recorded = h
-                .dataset
-                .clone()
-                .expect("managed clone passed the is_some filter without a dataset");
-            let canonical = crate::zfs::dataset_name(&parent, &h.id);
-            if recorded != canonical {
-                tracing::warn!(
-                    target: "overlay",
-                    "remount: {} recorded dataset {recorded}, correcting to {canonical}",
-                    h.id
-                );
-                repaired.push((h.id.clone(), canonical.clone()));
-            }
-            (h.id, canonical, h.base_tag)
-        })
-        .collect();
+        .filter(|h| h.managed && crate::clone_home::is_gen2(h))
+    {
+        let home = CloneHome::of(&app, &h.id);
+        let canonical = home.dataset();
+        if h.dataset.as_deref() != Some(canonical.as_str()) {
+            tracing::warn!(
+                target: "overlay",
+                "remount: {} recorded dataset {:?}, correcting to {canonical}",
+                h.id,
+                h.dataset,
+            );
+            repaired.push((h.id.clone(), canonical));
+        }
+        rows.push((home, h.base_tag));
+    }
     if !repaired.is_empty() {
         app.store.mutate(|s| {
             for (id, dataset) in &repaired {
@@ -534,53 +538,32 @@ pub async fn remount_all(app: App) {
             }
         });
     }
-    // Mount paths come from HOMES_DIR (the mountpoint), never the dataset name.
-    let homes = crate::zfs::HOMES_DIR;
     // Clones whose overlay this pass established: their containers, if already running,
     // are bound to the bare mountpoint and must be restarted.
     let mut remounted: Vec<String> = Vec::new();
-    for (id, dataset, tag) in &rows {
-        // A CT reboot leaves the per-clone datasets UNMOUNTED: nothing inside the CT runs
-        // `zfs mount -a` (there is deliberately no zfsutils here, see PROXMOX-LXC.md).
-        // Building the overlay first would stack it on an empty directory and hand the
-        // clone a pristine template home while its real one sits unmounted — which is
-        // exactly what CT 204 did after its first reboot.
-        if let Err(e) = crate::zfs::ensure_mounted(dataset) {
-            tracing::warn!(target: "overlay", "remount: mounting {dataset} for {id}: {e:#}");
+    for (home, tag) in &rows {
+        let id = home.id();
+        // Dataset first, overlay second. A CT reboot leaves the per-clone datasets
+        // UNMOUNTED (see [`CloneHome::ensure_mounted`]), and building the overlay on an
+        // unmounted dataset stacks it on an empty directory — the clone then gets a
+        // pristine template home while its real one sits there unmounted.
+        if let Err(e) = home.ensure_mounted() {
+            tracing::warn!(target: "overlay", "remount: mounting the dataset for {id}: {e:#}");
             continue;
         }
         let Some(tag) = tag.as_deref().filter(|t| !t.trim().is_empty()) else {
             tracing::warn!(target: "overlay", "remount: {id} has no recorded image; skipping");
             continue;
         };
-        let digest = match ensure_skeleton(&app, tag).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(target: "overlay", "remount: skeleton for {id}: {e:#}");
-                continue;
-            }
-        };
-        // `dataset` is the ZFS NAME (`pool/rmng-homes/<id>`); the overlay needs the
-        // DIRECTORY. Passing the name gave overlayfs a relative `upperdir` that resolved
-        // to nothing, so every clone silently came up on the bare skeleton.
-        let dataset_dir = std::path::PathBuf::from(crate::zfs::dataset_dir(id));
-        match ensure_mounted(&dataset_dir, &digest, &merged_dir(homes, id)).await {
-            // Mounted just now: a container that Docker already started bound the bare
-            // mountpoint, and its bind is PRIVATE, so this mount will never propagate into
-            // it. On a CT reboot the clones routinely win that race — measured at 84 ms —
-            // and come up showing the template home with the real one nowhere in sight.
-            // Restarting the container is what re-binds it to the live overlay.
-            Ok(true) => remounted.push(id.clone()),
+        match home.ensure_overlay(&app, tag).await {
+            // Mounted just now: a container Docker already started bound the bare
+            // mountpoint through a PRIVATE bind, so this mount will never reach it. On a
+            // CT reboot the clones routinely win that race — measured at 84 ms — and come
+            // up showing the template home. Restarting re-binds them to the live overlay.
+            Ok(true) => remounted.push(id.to_string()),
             Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(target: "overlay", "remount: {id}: {e:#}");
-                continue;
-            }
+            Err(e) => tracing::warn!(target: "overlay", "remount: {id}: {e:#}"),
         }
-        // The home is live: repoint `~/clones` / `~/shared` at the mounts outside it.
-        // Here rather than only on create, so a fleet that predates the move is fixed
-        // by one boot instead of a recreate.
-        ensure_home_links(homes, id);
     }
     for id in &remounted {
         match app.docker.is_running(id).await {
@@ -686,7 +669,7 @@ mod tests {
         std::fs::create_dir_all(home.join("shared")).unwrap();
         std::fs::write(home.join("shared/keep-me"), b"x").unwrap();
 
-        ensure_home_links(&homes.to_string_lossy(), "pega-x");
+        ensure_home_links(&home, "pega-x");
 
         assert_eq!(
             std::fs::read_link(home.join("clones")).unwrap(),
@@ -698,8 +681,8 @@ mod tests {
 
         // Idempotent, and it creates a link that was never there.
         std::fs::remove_dir_all(home.join("shared")).unwrap();
-        ensure_home_links(&homes.to_string_lossy(), "pega-x");
-        ensure_home_links(&homes.to_string_lossy(), "pega-x");
+        ensure_home_links(&home, "pega-x");
+        ensure_home_links(&home, "pega-x");
         assert_eq!(
             std::fs::read_link(home.join("clones")).unwrap(),
             Path::new("/clones")

@@ -3,6 +3,7 @@
 //! One tokio service binding the video plane, web API + SSE + static frontend, port-forward
 //! data plane (9005), and SSH bastion; `smbd` serves retained clone homes on port 445.
 
+mod account;
 mod agentlog;
 mod app;
 mod assets;
@@ -11,6 +12,7 @@ mod buildinfra;
 mod cgroup;
 mod chat;
 mod claude;
+mod clone_home;
 mod clone_ops;
 mod clone_plan;
 mod clone_reconcile;

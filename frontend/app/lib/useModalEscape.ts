@@ -10,6 +10,12 @@
 // is on top. The stack is module-level rather than context because modals mount from
 // several unrelated places (the route, the settings panel) and threading a provider through all
 // of them buys nothing here.
+//
+// Every dialog reaches Escape through `ModalShell`, the one module that draws a dialog frame,
+// which is what keeps the stack's order the same as the z order the operator sees. The other
+// callers are the open dropdown popups (`DropdownSelect`, `PrioritySelect`), which take the
+// top slot for as long as they are open so Escape shuts the popup rather than the dialog it
+// was opened inside.
 import { useEffect } from "react";
 
 /** Mounted modals, oldest first. The last entry owns Escape. */
@@ -42,8 +48,8 @@ export function __popModal(token: symbol) {
  * Close `onClose` when Escape is pressed, but only while this modal is the topmost one.
  *
  * `enabled` gates the *handling*, not the stack membership: a modal that suppresses Escape
- * while an operation is in flight (the clone dialog's `busy`) must still hold its stack slot,
- * or Escape would fall through and close the dialog underneath it instead.
+ * while an operation is in flight (`ModalShell`'s `dismissible`) must still hold its stack
+ * slot, or Escape would fall through and close the dialog underneath it instead.
  */
 export function useModalEscape(onClose: () => void, enabled = true) {
   useEffect(() => {

@@ -12,7 +12,7 @@
 // It renders from props alone. Every server call lives in ImportAccountModalContainer, and
 // every state the operator can reach here is a prop, so all of them are stories.
 import { DropdownSelect } from "~/components/DropdownSelect";
-import { useModalEscape } from "~/lib/useModalEscape";
+import { ModalShell } from "~/components/ModalShell";
 
 const input =
   "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500";
@@ -29,9 +29,9 @@ export function ImportAccountModalView({
   onProviderChange,
   onPastedChange,
   onGroupChange,
+  open = true,
   onClose,
   onImport,
-  closing = false,
 }: {
   provider: "claude" | "codex";
   /** The URL to open, once the server has answered. Null while it is being asked for. */
@@ -52,173 +52,161 @@ export function ImportAccountModalView({
   onProviderChange: (provider: "claude" | "codex") => void;
   onPastedChange: (pasted: string) => void;
   onGroupChange: (group: string) => void;
+  /** The dialog is on screen. The container flips it false when the sign-in lands, and the
+   *  dialog plays its exit before the unmount rather than blinking out. */
+  open?: boolean;
+  /** The dialog is finished: unmount it, or hand the account it landed to the page. The exit
+   *  frames have already played. */
   onClose: () => void;
   onImport: () => void;
-  /** Exit is playing: the overlay swaps its entry classes for the reverse mirrors. */
-  closing?: boolean;
 }) {
   const canImport = !importing && pasted.trim().length > 0;
 
-  // Escape closes regardless of focus: a document-level listener, since the backdrop click
-  // does not close and nothing here autofocuses. On open the focus is still on the button
-  // that launched this, so a React `onKeyDown` on the panel would never fire.
-  //
-  // Stacking matters. This dialog can be opened FROM the settings panel, which is itself
-  // Escape-closable. The stack is LIFO, so whichever modal mounted last owns Escape, which
-  // is this one. Its z-60 must stay above the panel's z-50 to match.
-  useModalEscape(onClose);
-
   return (
-    <div
-      className={
-        "fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/30 p-4 " +
-        (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")
-      }
-    >
-      {/* Backdrop is inert: clicking it must not close the dialog, only Cancel and Escape do. */}
-      <div
-        className={
-          "max-h-[90vh] w-full max-w-md overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " +
-          (closing ? "rmng-modal-out" : "rmng-modal-in")
-        }
-      >
-        <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-          {replacing
-            ? "Replace account"
-            : provider === "codex"
-              ? "Add Codex account"
-              : "Add Claude account"}
-        </h3>
-        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          {replacing ? (
-            <>
-              Sign in to whichever account takes over from{" "}
-              <span className="font-medium text-slate-700 dark:text-slate-200">
-                {replacing}
-              </span>
-              . It inherits that account&rsquo;s pools and every clone bound to
-              it, and the old account is then deleted. Signing in as the same
-              account just repairs its token.
-            </>
-          ) : (
-            <>
-              Sign in to the provider here. This server keeps the account and
-              hands short-lived tokens to clones.
-            </>
-          )}
-        </p>
-
-        {/* Replacing fixes the provider: it is the dead account's, and a sign-in to the other
-            one could not stand in for it. */}
-        {replacing ? null : (
-          <div className="my-3 flex gap-2">
-            {(["claude", "codex"] as const).map((p) => (
-              <button
-                key={p}
-                type="button"
-                onClick={() => onProviderChange(p)}
-                className={
-                  "rounded px-3 py-1 text-sm " +
-                  (provider === p
-                    ? "bg-slate-800 text-white dark:bg-slate-600 dark:text-white"
-                    : "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300")
-                }
-              >
-                {p === "claude" ? "Claude" : "Codex"}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {loginUrl ? (
-          <>
-            <p className="text-xs text-slate-600 dark:text-slate-300">
-              1. Open this URL and sign in:
-            </p>
-            <a
-              href={loginUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-1 block break-all rounded-md bg-slate-50 px-3 py-2 text-xs text-emerald-700 underline dark:bg-slate-900 dark:text-emerald-400"
-            >
-              {loginUrl}
-            </a>
-            <p className="mt-3 text-xs text-slate-600 dark:text-slate-300">
-              2. The page it lands on will fail to load. That is expected. Copy
-              its whole address and paste it here:
-            </p>
-            <input
-              value={pasted}
-              onChange={(e) => onPastedChange(e.target.value)}
-              placeholder={
-                provider === "codex"
-                  ? "http://localhost:1455/auth/callback?code=…"
-                  : "http://localhost:54545/callback?code=…"
-              }
-              spellCheck={false}
-              className={input}
-            />
-          </>
-        ) : (
-          <p className="text-xs text-slate-400 dark:text-slate-500">
-            Preparing the sign-in…
+    // The `over` rung, because this dialog can be opened FROM the settings panel, which is
+    // itself Escape-closable. The Escape stack is LIFO, so whichever dialog mounted last owns
+    // the key — this one — and the z order has to match what the stack already decides.
+    <ModalShell size="sm" layer="over" open={open} onExited={onClose}>
+      {(close) => (
+        <>
+          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+            {replacing
+              ? "Replace account"
+              : provider === "codex"
+                ? "Add Codex account"
+                : "Add Claude account"}
+          </h3>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            {replacing ? (
+              <>
+                Sign in to whichever account takes over from{" "}
+                <span className="font-medium text-slate-700 dark:text-slate-200">
+                  {replacing}
+                </span>
+                . It inherits that account&rsquo;s pools and every clone bound
+                to it, and the old account is then deleted. Signing in as the
+                same account just repairs its token.
+              </>
+            ) : (
+              <>
+                Sign in to the provider here. This server keeps the account and
+                hands short-lived tokens to clones.
+              </>
+            )}
           </p>
-        )}
 
-        {/* Replacing inherits the pools of the account being replaced, so there is nothing to
-            pick here and picking would only fight that. */}
-        {replacing ? null : (
-          <>
-            <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
-              Pool
-              <DropdownSelect
-                rows={[
-                  { value: "", label: "No pool" },
-                  ...groups.map((g) => ({ value: g, label: g })),
-                ]}
-                value={group}
-                onChange={onGroupChange}
-                disabled={groups.length === 0}
-                label="Pool"
+          {/* Replacing fixes the provider: it is the dead account's, and a sign-in to the other
+            one could not stand in for it. */}
+          {replacing ? null : (
+            <div className="my-3 flex gap-2">
+              {(["claude", "codex"] as const).map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => onProviderChange(p)}
+                  className={
+                    "rounded px-3 py-1 text-sm " +
+                    (provider === p
+                      ? "bg-slate-800 text-white dark:bg-slate-600 dark:text-white"
+                      : "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300")
+                  }
+                >
+                  {p === "claude" ? "Claude" : "Codex"}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {loginUrl ? (
+            <>
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                1. Open this URL and sign in:
+              </p>
+              <a
+                href={loginUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-1 block break-all rounded-md bg-slate-50 px-3 py-2 text-xs text-emerald-700 underline dark:bg-slate-900 dark:text-emerald-400"
+              >
+                {loginUrl}
+              </a>
+              <p className="mt-3 text-xs text-slate-600 dark:text-slate-300">
+                2. The page it lands on will fail to load. That is expected.
+                Copy its whole address and paste it here:
+              </p>
+              <input
+                value={pasted}
+                onChange={(e) => onPastedChange(e.target.value)}
+                placeholder={
+                  provider === "codex"
+                    ? "http://localhost:1455/auth/callback?code=…"
+                    : "http://localhost:54545/callback?code=…"
+                }
+                spellCheck={false}
                 className={input}
               />
-            </label>
-            <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
-              {groups.length === 0
-                ? "No pools configured for this provider. The account can still be pinned to a clone by name."
-                : "A clone bound to this pool can be handed the account by the rotator. Outside a pool it has to be pinned by name."}
+            </>
+          ) : (
+            <p className="text-xs text-slate-400 dark:text-slate-500">
+              Preparing the sign-in…
             </p>
-          </>
-        )}
+          )}
 
-        {error ? (
-          <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-600 dark:bg-rose-950/40 dark:text-rose-400">
-            {error}
-          </p>
-        ) : null}
+          {/* Replacing inherits the pools of the account being replaced, so there is nothing to
+            pick here and picking would only fight that. */}
+          {replacing ? null : (
+            <>
+              <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
+                Pool
+                <DropdownSelect
+                  rows={[
+                    { value: "", label: "No pool" },
+                    ...groups.map((g) => ({ value: g, label: g })),
+                  ]}
+                  value={group}
+                  onChange={onGroupChange}
+                  disabled={groups.length === 0}
+                  label="Pool"
+                  className={input}
+                />
+              </label>
+              <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
+                {groups.length === 0
+                  ? "No pools configured for this provider. The account can still be pinned to a clone by name."
+                  : "A clone bound to this pool can be handed the account by the rotator. Outside a pool it has to be pinned by name."}
+              </p>
+            </>
+          )}
 
-        <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onImport}
-            disabled={!canImport}
-            className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
-          >
-            {importing
-              ? "Finishing…"
-              : replacing
-                ? `Replace ${replacing}`
-                : "Finish sign-in"}
-          </button>
-        </div>
-      </div>
-    </div>
+          {error ? (
+            <p className="mt-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-600 dark:bg-rose-950/40 dark:text-rose-400">
+              {error}
+            </p>
+          ) : null}
+
+          <div className="mt-4 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => close()}
+              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onImport}
+              disabled={!canImport}
+              className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+            >
+              {importing
+                ? "Finishing…"
+                : replacing
+                  ? `Replace ${replacing}`
+                  : "Finish sign-in"}
+            </button>
+          </div>
+        </>
+      )}
+    </ModalShell>
   );
 }

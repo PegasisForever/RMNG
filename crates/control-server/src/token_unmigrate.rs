@@ -34,15 +34,18 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::app::App;
 
 /// Presence of this file (relative to `data_dir`) means the reverse migration already ran.
 /// Deliberately distinct from the forward migration's `.token-migration-done`.
 const STAMP: &str = ".token-unmigration-done";
-const CLAUDE_STORE: &str = "claude-accounts.json";
-const CODEX_STORE: &str = "codex-accounts.json";
+/// The Claude store's own file name, taken from the store rather than retyped. Named here
+/// only because this module's tests stage a boot-time file before the store loads it.
+#[cfg(test)]
+const CLAUDE_STORE: &str =
+    <crate::claude::StoredClaudeAccount as crate::account::AccountKind>::FILE;
 /// The per-group instance root the forward migration wrote into: `<data_dir>/cliproxy/<group>/auth/`.
 const CLIPROXY_DIR: &str = "cliproxy";
 
@@ -87,56 +90,50 @@ struct Recovered {
     expires_at: i64,
 }
 
-// --- the old store shapes we must write -------------------------------------------------
+// --- the store shapes we must write -----------------------------------------------------
 
-/// Old `claude-accounts.json` entry. Mirrors `claude::StoredClaudeAccount` — kept as its own
-/// local type so this migration stays readable as a pure data transform, and so a later change
-/// to the live struct can't silently alter what gets written here.
-#[derive(Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeAccount {
-    id: String,
-    email: String,
-    org_uuid: String,
-    org_name: String,
-    active: bool,
-    access_token: String,
-    refresh_token: String,
-    /// Epoch **milliseconds** (the auth-dir stores RFC3339 seconds).
-    expires_at: i64,
-    scopes: Vec<String>,
-}
-
-/// Old `codex-accounts.json` entry. Mirrors `codex::StoredCodexAccount`.
-#[derive(Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct CodexAccount {
-    id: String,
-    email: String,
-    account_id: String,
-    plan: String,
-    active: bool,
-    access_token: String,
-    id_token: String,
-    refresh_token: String,
-    expires_at: i64,
-}
-
-#[derive(Serialize, Default)]
-struct ClaudeStoreFile {
-    accounts: Vec<ClaudeAccount>,
-}
-
-#[derive(Serialize, Default)]
-struct CodexStoreFile {
-    accounts: Vec<CodexAccount>,
-}
+// There are no local copies of the store shapes here any more.
+//
+// This module used to carry its own `ClaudeAccount` / `CodexAccount` / `*StoreFile` structs,
+// with a comment saying they were kept separate "so a later change to the live struct can't
+// silently alter what gets written here". That is backwards: a recovered account IS a live
+// account, and the copies had already drifted — the Claude one had no `accountUuid`, the field
+// `claude::identity_json` needs before a clone can name its own account to Anthropic. The
+// migration now builds the real account structs and hands them to the real store writer
+// ([`crate::account::Store::save`]), so what it writes is by construction what the process
+// reads back.
 
 /// The scopes a Claude OAuth subscription login carries. The auth-dir file does not record
 /// them, and the old store's consumers only ever read them back out verbatim, so seeding the
 /// standard pair keeps the restored store self-consistent.
 fn default_claude_scopes() -> Vec<String> {
     vec!["user:inference".to_string(), "user:profile".to_string()]
+}
+
+/// One recovered credential as the LIVE Claude account struct.
+///
+/// The `accountUuid` is deliberately empty: the auth-dir never recorded the account's own uuid
+/// at Anthropic, and `claude::identity_json` refuses to name an account without one, so a clone
+/// on a recovered account keeps whatever identity it already had instead of being told it is
+/// somebody else. The usage poller backfills the uuid from the profile endpoint within one
+/// pass, and the account is complete from then on.
+fn recovered_claude_account(r: &Recovered) -> crate::claude::StoredClaudeAccount {
+    crate::claude::StoredClaudeAccount {
+        // The old id is `{email}|{org_uuid}`; the auth-dir never recorded an org, so the
+        // uuid half is empty. Stable and unique per email, which is all the store needs.
+        id: format!("{}|", r.email),
+        email: r.email.clone(),
+        account_uuid: String::new(),
+        org_uuid: String::new(),
+        org_name: String::new(),
+        active: false,
+        access_token: r.access_token.clone(),
+        refresh_token: r.refresh_token.clone(),
+        expires_at: r.expires_at,
+        scopes: default_claude_scopes(),
+        // A migration is not a refresh. The first one to run writes the record.
+        last_refresh: None,
+    }
 }
 
 // --- parsing ----------------------------------------------------------------------------
@@ -288,21 +285,6 @@ fn dedupe(recovered: Vec<Recovered>) -> Vec<Recovered> {
 }
 
 // --- writing ----------------------------------------------------------------------------
-
-/// Serialize `body` to `path` with `0600` permissions, via a temp file + rename so a crash
-/// mid-write can't leave a truncated token store behind.
-fn write_store(path: &Path, body: &impl Serialize) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    let mut bytes = serde_json::to_vec_pretty(body).map_err(std::io::Error::other)?;
-    bytes.push(b'\n');
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
 
 fn write_stamp(path: &Path) -> std::io::Result<()> {
     std::fs::write(path, b"unmigrated\n")?;
@@ -481,28 +463,16 @@ pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
     let recovered = dedupe(scan_auth_dirs(&data_path));
     let antigravity = recovered.iter().filter(|r| r.kind == "antigravity").count();
 
-    let claude: Vec<ClaudeAccount> = recovered
+    let claude: Vec<crate::claude::StoredClaudeAccount> = recovered
         .iter()
         .filter(|r| r.kind == "claude")
-        .map(|r| ClaudeAccount {
-            // The old id is `{email}|{org_uuid}`; the auth-dir never recorded an org, so the
-            // uuid half is empty. Stable and unique per email, which is all the store needs.
-            id: format!("{}|", r.email),
-            email: r.email.clone(),
-            org_uuid: String::new(),
-            org_name: String::new(),
-            active: false,
-            access_token: r.access_token.clone(),
-            refresh_token: r.refresh_token.clone(),
-            expires_at: r.expires_at,
-            scopes: default_claude_scopes(),
-        })
+        .map(recovered_claude_account)
         .collect();
 
-    let codex: Vec<CodexAccount> = recovered
+    let codex: Vec<crate::codex::StoredCodexAccount> = recovered
         .iter()
         .filter(|r| r.kind == "codex")
-        .map(|r| CodexAccount {
+        .map(|r| crate::codex::StoredCodexAccount {
             id: format!("codex:{}", r.account_id),
             email: r.email.clone(),
             account_id: r.account_id.clone(),
@@ -512,6 +482,8 @@ pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
             id_token: r.id_token.clone(),
             refresh_token: r.refresh_token.clone(),
             expires_at: r.expires_at,
+            // A migration is not a refresh. The first one to run writes the record.
+            last_refresh: None,
         })
         .collect();
 
@@ -537,17 +509,17 @@ pub fn unmigrate_group_proxy_tokens(app: &App, pools_before: &PoolSnapshot) {
     //    retries — the auth-dir files are only ever read, never consumed.
     let claude_count = claude.len();
     let codex_count = codex.len();
+    // Through each store's own writer: same 0600 temp-file-and-rename, same serialization, and
+    // no second definition of the file shape to keep in step by hand.
     if !claude.is_empty() {
-        let path = data_path.join(CLAUDE_STORE);
-        if let Err(e) = write_store(&path, &ClaudeStoreFile { accounts: claude }) {
-            tracing::error!(target: "token_unmigrate", "writing {} failed: {e}; will retry next boot", path.display());
+        if let Err(e) = app.claude.save(&claude) {
+            tracing::error!(target: "token_unmigrate", "writing {} failed: {e:#}; will retry next boot", app.claude.path.display());
             return;
         }
     }
     if !codex.is_empty() {
-        let path = data_path.join(CODEX_STORE);
-        if let Err(e) = write_store(&path, &CodexStoreFile { accounts: codex }) {
-            tracing::error!(target: "token_unmigrate", "writing {} failed: {e}; will retry next boot", path.display());
+        if let Err(e) = app.codex.save(&codex) {
+            tracing::error!(target: "token_unmigrate", "writing {} failed: {e:#}; will retry next boot", app.codex.path.display());
             return;
         }
     }
@@ -898,22 +870,14 @@ mod tests {
         assert!(store.get_by_email("stale@x.com").is_some());
 
         // What the migration writes afterwards: the recovered set, which does NOT contain the
-        // stale account and DOES contain one the boot snapshot never had.
-        write_store(
-            &path,
-            &ClaudeStoreFile {
-                accounts: vec![ClaudeAccount {
-                    id: "fresh@x.com|".into(),
-                    email: "fresh@x.com".into(),
-                    access_token: "NEW".into(),
-                    refresh_token: "NEWR".into(),
-                    expires_at: 2,
-                    scopes: default_claude_scopes(),
-                    ..Default::default()
-                }],
-            },
-        )
-        .unwrap();
+        // stale account and DOES contain one the boot snapshot never had. Through the live
+        // store's own writer, which is the point — the migration can no longer write a shape
+        // the running process would not read back.
+        let mut fresh = rec("claude", "fresh@x.com", "g");
+        fresh.access_token = "NEW".into();
+        fresh.refresh_token = "NEWR".into();
+        fresh.expires_at = 2;
+        store.save(&[recovered_claude_account(&fresh)]).unwrap();
 
         // Before the reload the process is still on the boot snapshot — this is the bug.
         assert!(store.get_by_email("fresh@x.com").is_none());
@@ -1014,25 +978,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(CLAUDE_STORE);
-        write_store(
-            &path,
-            &ClaudeStoreFile {
-                accounts: vec![ClaudeAccount {
-                    id: "a@b.com|".into(),
-                    email: "a@b.com".into(),
-                    access_token: "AT".into(),
-                    refresh_token: "RT".into(),
-                    expires_at: 1_609_459_200_000,
-                    scopes: default_claude_scopes(),
-                    ..Default::default()
-                }],
-            },
-        )
-        .unwrap();
+        let mut row = rec("claude", "a@b.com", "g");
+        row.expires_at = 1_609_459_200_000;
+        let store = crate::claude::ClaudeStore::load(dir.to_str().unwrap());
+        store.save(&[recovered_claude_account(&row)]).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "a token store must never be world-readable");
         let body = std::fs::read_to_string(&path).unwrap();
-        // camelCase keys — the restored `claude.rs` deserializes exactly these.
+        // camelCase keys — written by the same store `claude.rs` reads back.
         assert!(body.contains("\"accessToken\": \"AT\""));
         assert!(body.contains("\"refreshToken\": \"RT\""));
         assert!(body.contains("\"expiresAt\": 1609459200000"));

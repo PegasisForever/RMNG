@@ -10,7 +10,6 @@ import { useCallback, useEffect, useState } from "react";
 
 import { RebaseModalView } from "~/components/RebaseModalView";
 import { getConfig } from "~/lib/api";
-import { useModalExit } from "~/lib/useModalExit";
 import { opPhase } from "~/lib/cloneDraft";
 import type { Operation } from "~/lib/types";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
@@ -40,7 +39,6 @@ export function RebaseModalContainer({
   const [opId, setOpId] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { closing, beginExit } = useModalExit();
 
   useEffect(() => {
     getConfig()
@@ -72,11 +70,9 @@ export function RebaseModalContainer({
       setError(op.message || "the rebase failed");
     }
   }, [op]);
-  useEffect(() => {
-    if (!opId) return;
-    if (opPhase(op, opSeen, failed) === "done") beginExit(onClose);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [opId, op, opSeen, failed]);
+  // The settled operation is what closes the dialog: `open` goes false, the frame plays its
+  // exit, and `onClose` unmounts once the frames have run.
+  const done = !!opId && opPhase(op, opSeen, failed) === "done";
 
   const busy = starting || (!!opId && !failed);
 
@@ -108,8 +104,8 @@ export function RebaseModalContainer({
       error={error}
       operation={op ?? null}
       onSubmit={submit}
-      closing={closing}
-      onClose={() => beginExit(onClose)}
+      open={!done}
+      onClose={onClose}
     />
   );
 }

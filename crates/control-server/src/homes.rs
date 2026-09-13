@@ -3,9 +3,9 @@
 //! on the Docker host itself via the `rmng-data` volume at
 //! `/var/lib/docker/volumes/rmng-data/_data/hosts/…`).
 //!
-//! Gen-2: each clone's home is its own ZFS dataset, bind-mounted at `/home/rmng` and
-//! visible on the CT at `/srv/rmng-homes/<id>`, so the browse entry is a plain symlink
-//! `<data_dir>/hosts/<id>` → `/srv/rmng-homes/<id>`. It exists running or stopped — no
+//! Gen-2: each clone's home is its own overlay over its own ZFS dataset, bound at
+//! `/home/rmng` and visible on the CT as the merged view, so the browse entry is a plain
+//! symlink `<data_dir>/hosts/<id>` → [`CloneHome::merged`]. It exists running or stopped — no
 //! PID chasing, no `pid: "host"` requirement. The retired `/proc/<pid>/root` reader is
 //! gone (see stage 4 deletions for the rest of gen-1).
 //!
@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use wire::RmngClone;
 
 use crate::app::App;
+use crate::clone_home::CloneHome;
 use crate::files::is_safe_id;
 
 /// The directory holding one symlink per managed clone home (`<data_dir>/hosts`).
@@ -27,12 +28,6 @@ use crate::files::is_safe_id;
 /// exactly where the reconciler writes links, so the two can never diverge).
 pub(crate) fn hosts_root(data_dir: &str) -> PathBuf {
     Path::new(data_dir).join("hosts")
-}
-
-/// The clone's home on the CT: its overlay merged view. Plain directory once mounted,
-/// present whether the clone runs or not — this is what makes stopped-clone browsing work.
-fn clone_home(id: &str) -> PathBuf {
-    crate::home_overlay::merged_dir(crate::zfs::HOMES_DIR, id)
 }
 
 /// Names present under `hosts/` that no longer belong to a maintained clone and should be
@@ -100,11 +95,14 @@ fn prune_stale(root: &Path, desired: &HashSet<String>) {
     }
 }
 
-/// Point `hosts/<id>` at one clone's dataset dir. True when linked: the dataset exists
-/// and the symlink is in place. False (deleted/pre-migration clone, missing dataset):
-/// the caller prunes any stale entry.
-async fn ensure_for(_app: &App, root: &Path, id: &str) -> bool {
-    let target = clone_home(id);
+/// Point `hosts/<id>` at one clone's home. True when linked: the home is mounted and the
+/// symlink is in place. False (deleted/pre-migration clone, nothing mounted): the caller
+/// prunes any stale entry.
+async fn ensure_for(app: &App, root: &Path, id: &str) -> bool {
+    // The clone's home on the CT is its overlay merged view: a plain directory once
+    // mounted, present whether the clone runs or not — which is what makes stopped-clone
+    // browsing work.
+    let target = CloneHome::of(app, id).merged();
     if !target.is_dir() {
         return false;
     }
@@ -190,7 +188,7 @@ mod tests {
     fn clone_home_targets_the_merged_view() {
         // Gen-2: the browse link points at the overlay merged view, running or not.
         assert_eq!(
-            clone_home("c1"),
+            CloneHome::new("tank/rmng/homes", "c1").merged(),
             PathBuf::from("/srv/rmng-homes/.merged/c1")
         );
     }

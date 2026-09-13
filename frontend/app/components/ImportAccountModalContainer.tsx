@@ -13,7 +13,6 @@ import { useEffect, useState } from "react";
 
 import { ImportAccountModalView } from "~/components/ImportAccountModalView";
 import { beginLogin, completeLogin } from "~/lib/api";
-import { useModalExit } from "~/lib/useModalExit";
 
 export function ImportAccountModalContainer({
   groupNames,
@@ -41,7 +40,10 @@ export function ImportAccountModalContainer({
   const [pasted, setPasted] = useState("");
   const [group, setGroup] = useState(initialGroup ?? "");
   const [importing, setImporting] = useState(false);
-  const { closing, beginExit } = useModalExit();
+  // The account the sign-in landed, once it has. It closes the dialog (`open` goes false) and
+  // it is what the close then hands to the page, so the exit frames run in front of the
+  // refresh rather than being cut off by it.
+  const [imported, setImported] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const groups = groupNames;
@@ -66,7 +68,7 @@ export function ImportAccountModalContainer({
     setImporting(true);
     setError(null);
     completeLogin(provider, pasted.trim(), group, replacing?.email ?? "")
-      .then((r) => beginExit(() => onImported(r.email)))
+      .then((r) => setImported(r.email))
       .catch((e: Error) => {
         setError(e.message);
         setImporting(false);
@@ -86,8 +88,8 @@ export function ImportAccountModalContainer({
       onProviderChange={setProvider}
       onPastedChange={setPasted}
       onGroupChange={setGroup}
-      closing={closing}
-      onClose={() => beginExit(onClose)}
+      open={imported === null}
+      onClose={() => (imported ? onImported(imported) : onClose())}
       onImport={submit}
     />
   );

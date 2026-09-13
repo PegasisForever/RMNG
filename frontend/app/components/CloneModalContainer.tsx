@@ -14,7 +14,6 @@ import {
 
 import { CloneModalView } from "~/components/CloneModalView";
 import { getConfig } from "~/lib/api";
-import { useModalExit } from "~/lib/useModalExit";
 import { keyFor, ticketForClone, useAssignee } from "~/lib/linear/intake";
 import {
   cloneDialogBusy,
@@ -67,9 +66,6 @@ export function CloneModalContainer({
   const [state, dispatch] = useReducer(cloneDialogReducer, null, () =>
     emptyCloneDialog(initialTicket, initialSource),
   );
-  // Every close (Cancel, Escape, op settled) plays the exit frames first: the delayed
-  // callback unmounts the dialog only once they have run.
-  const { closing, beginExit } = useModalExit();
   const onDraftChange = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>
       dispatch({ type: "edit", key, value } as CloneDialogEvent),
@@ -99,10 +95,6 @@ export function CloneModalContainer({
   useEffect(() => {
     if (state.opId) dispatch({ type: "op", op });
   }, [state.opId, op]);
-  useEffect(() => {
-    if (state.done) beginExit(onClose);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.done]);
 
   const busy = cloneDialogBusy(state);
   // Which key claims the chosen team: it stores an image pasted into the new-ticket body, so
@@ -176,8 +168,10 @@ export function CloneModalContainer({
       error={state.error}
       operation={op ?? null}
       onSubmit={submit}
-      closing={closing}
-      onClose={() => beginExit(onClose)}
+      // The settled operation is what closes the dialog. `open` goes false, the frame plays
+      // its exit, and `onClose` unmounts once the frames have run.
+      open={!state.done}
+      onClose={onClose}
     />
   );
 }

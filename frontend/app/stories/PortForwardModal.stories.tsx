@@ -28,7 +28,8 @@ const meta: Meta<typeof PortForwardModal> = {
     busy: false,
     error: null,
     onClose: () => {},
-    onSubmit: () => {},
+    // Resolving is what closes the dialog, so the story's save lands rather than hanging.
+    onSubmit: () => Promise.resolve(),
   },
 };
 export default meta;

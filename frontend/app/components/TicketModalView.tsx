@@ -21,10 +21,10 @@
 import { useState, type ReactNode } from "react";
 
 import { DropdownSelect } from "~/components/DropdownSelect";
+import { ModalShell } from "~/components/ModalShell";
 import { PrioritySelect } from "~/components/PrioritySelect";
 import type { TeamKey } from "~/lib/cloneDraft";
 import type { TicketPerson } from "~/lib/linear/people";
-import { useModalEscape } from "~/lib/useModalEscape";
 
 /** What the dialog sends. `priority` follows Linear: 1 urgent, 2 high, 3 medium, 4 low. */
 export interface NewTicket {
@@ -56,9 +56,8 @@ export interface TicketModalViewProps {
   /** The markdown editor for the body, as a slot: the real one is browser-only and
    *  lazy-loaded, so the container decides when and how it mounts. */
   descriptionEditor: ReactNode;
+  /** The dialog is finished: unmount it. The exit frames have already played. */
   onClose: () => void;
-  /** Exit is playing: the overlay swaps its entry classes for the reverse mirrors. */
-  closing?: boolean;
   /** Open it. Rejecting leaves the dialog up with the message; resolving closes it. */
   onCreate: (ticket: NewTicket) => Promise<unknown>;
 }
@@ -75,16 +74,11 @@ export function TicketModalView({
   descriptionEditor,
   onClose,
   onCreate,
-  closing = false,
 }: TicketModalViewProps) {
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useModalEscape(() => {
-    if (!busy) onClose();
-  });
 
   const chosen = teams.find((t) => t.key === team);
   // Linear refuses a team whose preset carries no key, so the dialog says so first.
@@ -94,7 +88,7 @@ export function TicketModalView({
   const assignee = people.find((p) => p.id === assigneeId);
   const canSubmit = !busy && !keyMissing && team !== "" && title.trim() !== "";
 
-  const submit = () => {
+  const submit = (close: () => void) => {
     if (!canSubmit) return;
     setBusy(true);
     setError(null);
@@ -105,7 +99,7 @@ export function TicketModalView({
       ...(priority > 0 ? { priority } : {}),
       ...(assigneeId !== "" ? { assigneeId } : {}),
     })
-      .then(() => onClose())
+      .then(() => close())
       .catch((e: Error) => {
         setError(e.message);
         setBusy(false);
@@ -122,169 +116,161 @@ export function TicketModalView({
   const label = "block text-xs font-medium text-slate-500 dark:text-slate-400";
 
   return (
-    // Backdrop is inert, like the clone dialog's: only Cancel and Escape close this, and
-    // neither does while a create is in flight.
-    <div
-      className={
-        "fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 " +
-        (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")
-      }
-    >
-      <div
-        className={
-          "flex max-h-[90vh] w-full max-w-lg flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-xl dark:border-slate-700 dark:bg-slate-800 " +
-          (closing ? "rmng-modal-out" : "rmng-modal-in")
-        }
-      >
-        <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
-          New ticket
-        </h3>
+    // Neither Cancel nor Escape closes this while a create is in flight, so both are held by
+    // the same `busy`: the button below, and `dismissible` for the key.
+    <ModalShell size="lg" dismissible={!busy} onExited={onClose}>
+      {(close) => (
+        <>
+          <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
+            New ticket
+          </h3>
 
-        <div className="min-h-0 shrink space-y-3 overflow-y-auto pr-0.5 pt-3">
-          {/* The three properties of the ticket that are not its text, on one line and in
+          <div className="min-h-0 shrink space-y-3 overflow-y-auto pr-0.5 pt-3">
+            {/* The three properties of the ticket that are not its text, on one line and in
               three equal columns. A grid rather than three flexed children: they are the same
               width because they are one row of fields, not because their contents happen to
               balance. */}
-          <div className="grid grid-cols-3 gap-2">
-            <label className={`${label} min-w-0`}>
-              Team key
-              <DropdownSelect
-                rows={
-                  teams.length === 0
-                    ? [{ value: "", label: "None", disabled: true }]
-                    : teams.map((t) => ({
-                        value: t.key,
-                        label: `${t.key.toUpperCase()} · ${t.preset.name}`,
-                      }))
-                }
-                value={team}
-                onChange={onTeamChange}
-                disabled={busy || teams.length === 0}
-                label="Team key"
-                className={field}
-              />
-            </label>
+            <div className="grid grid-cols-3 gap-2">
+              <label className={`${label} min-w-0`}>
+                Team key
+                <DropdownSelect
+                  rows={
+                    teams.length === 0
+                      ? [{ value: "", label: "None", disabled: true }]
+                      : teams.map((t) => ({
+                          value: t.key,
+                          label: `${t.key.toUpperCase()} · ${t.preset.name}`,
+                        }))
+                  }
+                  value={team}
+                  onChange={onTeamChange}
+                  disabled={busy || teams.length === 0}
+                  label="Team key"
+                  className={field}
+                />
+              </label>
 
-            {/* Not a `<select>`: the priority is read as a glyph everywhere else on the board,
+              {/* Not a `<select>`: the priority is read as a glyph everywhere else on the board,
                 and an option element can hold nothing but text. */}
-            <div className={`${label} min-w-0`}>
-              Priority
-              <PrioritySelect
-                value={priority}
-                onChange={setPriority}
-                disabled={busy}
-                className={field}
-              />
+              <div className={`${label} min-w-0`}>
+                Priority
+                <PrioritySelect
+                  value={priority}
+                  onChange={setPriority}
+                  disabled={busy}
+                  className={field}
+                />
+              </div>
+
+              <label className={`${label} min-w-0`}>
+                Assignee
+                <DropdownSelect
+                  rows={
+                    peopleLoading || people.length === 0
+                      ? [
+                          {
+                            value: "",
+                            label: peopleLoading ? "Loading…" : "You",
+                            disabled: true,
+                          },
+                        ]
+                      : people.map((person) => ({
+                          value: person.id,
+                          label: person.isViewer ? "You" : person.name,
+                        }))
+                  }
+                  value={assigneeId}
+                  onChange={onAssigneeChange}
+                  disabled={busy || peopleLoading || people.length === 0}
+                  label="Assignee"
+                  className={field}
+                />
+              </label>
             </div>
 
-            <label className={`${label} min-w-0`}>
-              Assignee
-              <DropdownSelect
-                rows={
-                  peopleLoading || people.length === 0
-                    ? [
-                        {
-                          value: "",
-                          label: peopleLoading ? "Loading…" : "You",
-                          disabled: true,
-                        },
-                      ]
-                    : people.map((person) => ({
-                        value: person.id,
-                        label: person.isViewer ? "You" : person.name,
-                      }))
-                }
-                value={assigneeId}
-                onChange={onAssigneeChange}
-                disabled={busy || peopleLoading || people.length === 0}
-                label="Assignee"
+            {/* Both warnings are about the team, and both sit under the row rather than inside
+              its narrowest column, where either would wrap to four lines. */}
+            {teams.length === 0 ? (
+              <p className="text-[11px] text-red-600 dark:text-red-400">
+                No preset declares a team key. Add ticket-id prefixes to a
+                preset in Settings.
+              </p>
+            ) : null}
+
+            {keyMissing ? (
+              <p className="text-[11px] text-red-600 dark:text-red-400">
+                Preset “{chosen?.preset.name}” has no Linear API key. Add it in
+                Settings, or pick a team whose preset has one.
+              </p>
+            ) : null}
+
+            <label className={label}>
+              Title
+              <input
+                autoFocus
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submit(close);
+                }}
+                disabled={busy}
+                placeholder="Short ticket title"
                 className={field}
               />
             </label>
-          </div>
 
-          {/* Both warnings are about the team, and both sit under the row rather than inside
-              its narrowest column, where either would wrap to four lines. */}
-          {teams.length === 0 ? (
-            <p className="text-[11px] text-red-600 dark:text-red-400">
-              No preset declares a team key. Add ticket-id prefixes to a preset
-              in Settings.
-            </p>
-          ) : null}
-
-          {keyMissing ? (
-            <p className="text-[11px] text-red-600 dark:text-red-400">
-              Preset “{chosen?.preset.name}” has no Linear API key. Add it in
-              Settings, or pick a team whose preset has one.
-            </p>
-          ) : null}
-
-          <label className={label}>
-            Title
-            <input
-              autoFocus
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-              }}
-              disabled={busy}
-              placeholder="Short ticket title"
-              className={field}
-            />
-          </label>
-
-          <div className={label}>
-            Description
-            {/* `px-3` matches the inputs above, so the body starts where the title does. The
+            <div className={label}>
+              Description
+              {/* `px-3` matches the inputs above, so the body starts where the title does. The
                 editor brings no side padding of its own (see `ticket-description` in app.css),
                 which is what leaves this box free to set its own. */}
-            <div className="mt-1 min-h-[10rem] rounded-md border border-slate-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
-              {descriptionEditor}
+              <div className="mt-1 min-h-[10rem] rounded-md border border-slate-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
+                {descriptionEditor}
+              </div>
             </div>
-          </div>
 
-          {/* The state is not the operator's to choose, so it is stated rather than offered as
+            {/* The state is not the operator's to choose, so it is stated rather than offered as
               a disabled field. The assignee is theirs, and picking anybody else takes the new
               ticket straight out of the column that opened it, which is worth saying before
               the click and not after. */}
-          <p className="text-[11px] text-slate-400 dark:text-slate-500">
-            Opens as Todo, assigned to{" "}
-            {assignee && !assignee.isViewer ? assignee.name : "you"}.
-          </p>
-          {assignee && !assignee.isViewer ? (
-            <p className="text-[11px] text-amber-600 dark:text-amber-400">
-              This column lists the tickets assigned to you, so it will not
-              appear in it.
+            <p className="text-[11px] text-slate-400 dark:text-slate-500">
+              Opens as Todo, assigned to{" "}
+              {assignee && !assignee.isViewer ? assignee.name : "you"}.
             </p>
-          ) : null}
+            {assignee && !assignee.isViewer ? (
+              <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                This column lists the tickets assigned to you, so it will not
+                appear in it.
+              </p>
+            ) : null}
 
-          {error ? (
-            <p className="rounded-md bg-red-50 px-2 py-1.5 text-xs text-red-700 dark:bg-red-950 dark:text-red-300">
-              {error}
-            </p>
-          ) : null}
-        </div>
+            {error ? (
+              <p className="rounded-md bg-red-50 px-2 py-1.5 text-xs text-red-700 dark:bg-red-950 dark:text-red-300">
+                {error}
+              </p>
+            ) : null}
+          </div>
 
-        <div className="mt-4 flex shrink-0 justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={busy}
-            className="cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-400 dark:hover:bg-slate-700"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={submit}
-            disabled={!canSubmit}
-            className="cursor-pointer rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-          >
-            {busy ? "Creating…" : "Create ticket"}
-          </button>
-        </div>
-      </div>
-    </div>
+          <div className="mt-4 flex shrink-0 justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => close()}
+              disabled={busy}
+              className="cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-400 dark:hover:bg-slate-700"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => submit(close)}
+              disabled={!canSubmit}
+              className="cursor-pointer rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+            >
+              {busy ? "Creating…" : "Create ticket"}
+            </button>
+          </div>
+        </>
+      )}
+    </ModalShell>
   );
 }

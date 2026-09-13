@@ -10,7 +10,6 @@ import { useEffect, useState } from "react";
 
 import type { SettingsCategory } from "~/components/SettingsNav";
 import { SettingsPanelView } from "~/components/SettingsPanelView";
-import { useModalExit } from "~/lib/useModalExit";
 import { useAccountOrder } from "~/lib/accountOrder";
 import type { BoardColumn } from "~/lib/board";
 import {
@@ -127,7 +126,6 @@ export function SettingsPanelContainer({
   // independent.
   const { acctOrder, setAcctOrder } = useAccountOrder();
 
-  const { closing, beginExit } = useModalExit();
   function load(c: AppConfigRedacted) {
     setConfig(c);
     setDraft(settingsDraftFrom(c));
@@ -255,8 +253,7 @@ export function SettingsPanelContainer({
       saving={saving}
       saved={saved}
       onSave={save}
-      closing={closing}
-      onClose={() => beginExit(onClose)}
+      onClose={onClose}
       serverStatus={serverStatus}
       serverMessage={serverMsg}
       updateOperation={updateOp ?? null}

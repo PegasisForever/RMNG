@@ -147,7 +147,9 @@ body {
    already-finished same-name animation does not restart it, so the exit silently never
    ran (the dialog just hung frozen until the unmount timer fired). The name change from
    `-in` to `-out` is what restarts the animation; keep the two blocks' values mirrored
-   by hand. The JS delay in `useModalExit` must cover the 200ms below. */
+   by hand. `ModalShell` is the only module that applies these four classes, and it owns the
+   delay that waits them out: its `MODAL_ANIMATION_MS` mirrors the 200ms below, and
+   `MODAL_EXIT_MS` must cover it. */
 @keyframes rmng-backdrop-out {
   from {
     opacity: 1;

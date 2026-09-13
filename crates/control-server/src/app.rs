@@ -21,6 +21,9 @@ pub struct App {
     /// Claude accounts: the 0600 OAuth secret store + last-good usage cache. The server owns
     /// each account's refresh lifecycle and pushes only short-lived access tokens into clones
     /// (see [`crate::claude`]) — nothing that can refresh ever leaves this process.
+    ///
+    /// Both stores are the same [`crate::account::Store`] under a different account kind; the
+    /// two fields are the seam that lets one refresh lifecycle serve both providers.
     pub claude: Arc<ClaudeStore>,
     /// Codex (ChatGPT) accounts — the sibling of [`Self::claude`] (see [`crate::codex`]).
     pub codex: Arc<CodexStore>,

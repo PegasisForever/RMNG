@@ -363,12 +363,12 @@ async fn run_clone(app: App, op_id: String, plan: ClonePlan) {
     }
 
     let daemon_up = app.media.is_connected(id);
-    // Both home sources land on `<parent>/<id>` — `zfs::create` for a fresh clone,
-    // `zfs::clone_dataset` for a fork — so the row records that, never the bare id. A
-    // bare id parses as a pool name: every later `zfs` call on the row fails, and the
-    // one that matters is the boot remount, which then leaves the clone showing the
-    // template home with its real one unmounted.
-    let dataset = crate::zfs::dataset_name(&app.config().docker.homes_parent, id);
+    // Recorded so the row reads as gen-2 (`clone_home::is_gen2`). The VALUE is derivable
+    // and nothing reads it back — it comes off the clone's own home here so that the row
+    // and every later path agree by construction. Writing it by hand is what once put the
+    // bare id in this field, and a bare id parses as a pool name: the boot remount then
+    // failed and left the clone showing the template home with its real one unmounted.
+    let dataset = crate::clone_home::CloneHome::of(&app, id).dataset();
     let linear = plan.linear.clone().unwrap_or_default();
     let ticket_url = linear.ticket_url.clone();
     app.store.mutate(|s| {
@@ -878,7 +878,7 @@ pub fn start_migrate(app: &App, host_id: &str) -> Result<Operation, JobError> {
     if !row.managed {
         return Err(JobError(format!("'{host_id}' is not a managed clone")));
     }
-    if row.dataset.is_some() {
+    if crate::clone_home::is_gen2(&row) {
         return Err(JobError(format!("'{host_id}' is already a gen-2 clone")));
     }
     if st
@@ -926,7 +926,8 @@ async fn run_migrate(app: App, op_id: String, host_id: String) {
     // gen-1 create wrote; re-injecting would only rewrite identical content.
     match migrate_one(&app, &host_id, &base, &env, "", "", row.headless, progress).await {
         Ok(report) => {
-            let dataset = crate::zfs::dataset_name(&app.config().docker.homes_parent, &host_id);
+            // Presence is the gen-2 marker; the value comes off the clone's own home.
+            let dataset = crate::clone_home::CloneHome::of(&app, &host_id).dataset();
             app.store.mutate(|s| {
                 if let Some(h) = s.hosts.iter_mut().find(|h| h.id == host_id) {
                     h.dataset = Some(dataset);
@@ -979,8 +980,9 @@ const MIGRATE_CONCURRENCY: usize = 4;
 /// Migrate `ids`, up to [`MIGRATE_CONCURRENCY`] at a time. Returns (passed, failed ids).
 ///
 /// Success is read off the ROW, not the operation: a finished op is pruned 8 s later
-/// ([`PRUNE_DONE_MS`]), which a 5 s poll can easily miss — and the row's `dataset` is the
-/// authoritative record that the clone is gen-2 now.
+/// ([`PRUNE_DONE_MS`]), which a 5 s poll can easily miss — and the row carrying a dataset
+/// at all ([`crate::clone_home::is_gen2`]) is the authoritative record that the clone is
+/// gen-2 now.
 async fn migrate_pass(app: &App, ids: Vec<String>) -> (usize, Vec<String>) {
     use futures::StreamExt;
     let results = futures::stream::iter(ids.into_iter().map(|id| {
@@ -994,7 +996,7 @@ async fn migrate_pass(app: &App, ids: Vec<String>) -> (usize, Vec<String>) {
                         .get()
                         .hosts
                         .iter()
-                        .any(|h| h.id == id && h.dataset.is_some());
+                        .any(|h| h.id == id && crate::clone_home::is_gen2(h));
                     if migrated { Ok(()) } else { Err(id) }
                 }
                 Err(e) => {
@@ -1018,7 +1020,8 @@ async fn migrate_pass(app: &App, ids: Vec<String>) -> (usize, Vec<String>) {
     (pass, failed)
 }
 
-/// Boot one-shot: migrate every gen-1 row (managed, no dataset) to gen-2,
+/// Boot one-shot: migrate every gen-1 row (managed, no dataset — see
+/// [`crate::clone_home::is_gen2`]) to gen-2,
 /// [`MIGRATE_CONCURRENCY`] at a time. No gen-1 rows ⇒ no-op. Runs under the whole-LXC
 /// backup: per-clone failures log and continue with one retry at the end; the fleet
 /// (non-archived) starts after the window, with stored account tokens re-pushed onto the
@@ -1032,7 +1035,7 @@ pub async fn migrate_all_on_boot(app: App) -> bool {
         .get()
         .hosts
         .into_iter()
-        .filter(|h| h.managed && h.dataset.is_none())
+        .filter(|h| h.managed && !crate::clone_home::is_gen2(h))
         .map(|h| h.id)
         .collect();
     if gen1.is_empty() {
@@ -1070,7 +1073,7 @@ pub async fn migrate_all_on_boot(app: App) -> bool {
         .get()
         .hosts
         .into_iter()
-        .filter(|h| h.managed && !h.archived && h.dataset.is_some())
+        .filter(|h| h.managed && !h.archived && crate::clone_home::is_gen2(h))
     {
         if let Err(e) = app.docker.start_container(&h.id).await {
             tracing::warn!("migrate: starting {} failed: {e} (continuing)", h.id);

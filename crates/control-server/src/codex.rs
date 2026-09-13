@@ -6,16 +6,23 @@
 //! empty refresh token, and re-pushes on every rotation. Importing harvests the OAuth
 //! triple from a clone already signed in to Codex via ChatGPT, then clears the clone's
 //! auth.json so its CLI can never rotate the refresh token the server now owns.
+//!
+//! The store and the refresh lifecycle are NOT here, and they no longer come from `claude.rs`
+//! either. Both sides share one module ([`crate::account`]); this one is the adapter: the
+//! account struct, the refresh POST, the usage/auto-reset specifics, and token delivery. What
+//! used to make this file depend on Claude's internals — `RefreshRecord`, `token_alive`,
+//! `grant_rejected`, even `PUSH_CONCURRENCY` — is neutral vocabulary there now.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use wire::{ClaudeUsage, ClaudeUsageWindow};
 
+use crate::account::{
+    AccountKind, FETCH_TIMEOUT, PUSH_CONCURRENCY, ROTATE_SECS, RefreshFailure, RefreshRecord,
+    Store, account_usable, fingerprint, refresh_status_is_fatal,
+};
 use crate::app::App;
 use crate::clone_ops::{now_ms, rand_u64, snippet};
 
@@ -23,15 +30,6 @@ const USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CONSUME_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
 const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-/// Refresh an access token this far before its expiry (must exceed the worst-case
-/// poll gap). Matches claude's lead.
-const REFRESH_LEAD_MS: i64 = 2 * 60 * 60 * 1000;
-/// Per-account offset added on top of [`REFRESH_LEAD_MS`] so accounts imported together
-/// do not all come due in the same second. Matches claude's spread; see the reasoning on
-/// `claude::REFRESH_SPREAD_MS`.
-const REFRESH_SPREAD_MS: i64 = 90 * 60 * 1000;
-const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-const ROTATE_SECS: u64 = 600;
 /// Auto-reset only fires when every account's 7d window is at least this far from
 /// resetting (spec: "more than 24h from the next 7d reset").
 const RESET_MIN_HEADROOM_SECS: i64 = 24 * 3600;
@@ -68,146 +66,110 @@ pub struct StoredCodexAccount {
     #[serde(default)]
     pub expires_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_refresh: Option<crate::claude::RefreshRecord>,
+    pub last_refresh: Option<RefreshRecord>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct AccountsFile {
-    #[serde(default)]
-    accounts: Vec<StoredCodexAccount>,
-}
+/// The Codex side of the shared account store: one 0600 file of [`StoredCodexAccount`],
+/// the refresh lifecycle in [`crate::account`].
+pub(crate) type CodexStore = Store<StoredCodexAccount>;
 
-pub struct CodexStore {
-    accounts: Mutex<Vec<StoredCodexAccount>>,
-    last_good: Mutex<HashMap<String, ClaudeUsage>>,
-    path: PathBuf,
-    polling: Mutex<bool>,
-    refresh_gate: tokio::sync::Mutex<()>,
-    pushed: Mutex<HashMap<String, String>>,
-}
+impl AccountKind for StoredCodexAccount {
+    const FILE: &'static str = "codex-accounts.json";
+    const LABEL: &'static str = "Codex";
+    /// A test elsewhere in the crate points this side's store at a disposable file.
+    const PATH_ENV: Option<&'static str> = Some("RMNG_CODEX_ACCOUNTS_FILE");
 
-impl CodexStore {
-    pub fn load(data_dir: &str) -> Self {
-        let path = std::env::var("RMNG_CODEX_ACCOUNTS_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| Path::new(data_dir).join("codex-accounts.json"));
-        let accounts = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<AccountsFile>(&s).ok())
-            .map(|f| f.accounts)
-            .unwrap_or_default();
-        Self {
-            accounts: Mutex::new(accounts),
-            last_good: Mutex::new(HashMap::new()),
-            path,
-            polling: Mutex::new(false),
-            refresh_gate: tokio::sync::Mutex::new(()),
-            pushed: Mutex::new(HashMap::new()),
-        }
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn email(&self) -> &str {
+        &self.email
+    }
+    fn expires_at(&self) -> i64 {
+        self.expires_at
+    }
+    fn refresh_token(&self) -> &str {
+        &self.refresh_token
+    }
+    fn last_refresh(&self) -> Option<&RefreshRecord> {
+        self.last_refresh.as_ref()
+    }
+    fn set_last_refresh(&mut self, r: RefreshRecord) {
+        self.last_refresh = Some(r);
+    }
+    fn store(app: &App) -> &Store<Self> {
+        &app.codex
     }
 
-    /// Re-read the on-disk store into memory, discarding the current snapshot.
+    /// The refresh itself. Returns the fingerprint of the token the reply carried, empty when
+    /// it carried none.
     ///
-    /// Exists for exactly one caller: the reverse migration
-    /// ([`crate::token_unmigrate`]) writes this file AFTER `App::new` has already loaded it, so
-    /// without a reload the process would keep running on whatever was there before — and the
-    /// first refresh would persist that stale snapshot back over the freshly recovered
-    /// credentials, then the stamp would stop it ever being retried. The recovery is silent and
-    /// permanent, so the reload is not optional.
-    pub fn reload_from_disk(&self) {
-        let fresh = std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<AccountsFile>(&s).ok())
-            .map(|f| f.accounts)
-            .unwrap_or_default();
-        *self.accounts.lock().unwrap() = fresh;
-        // Anything recorded as pushed refers to a token from the previous snapshot; forcing a
-        // re-push is the safe direction (idempotent) versus leaving a clone on a dead token.
-        self.pushed.lock().unwrap().clear();
-    }
-
-    fn save(&self, accounts: &[StoredCodexAccount]) -> Result<()> {
-        if let Some(d) = self.path.parent() {
-            std::fs::create_dir_all(d).ok();
+    /// The OAuth response carries no `expires_in`, so expiry is decoded from the new access
+    /// token's JWT ([`set_expiry_from_access`]) — the one real difference from Claude's POST.
+    async fn refresh(http: &reqwest::Client, acct: &mut Self) -> Result<String, RefreshFailure> {
+        let before = fingerprint(&acct.refresh_token);
+        let resp = http
+            .post(OAUTH_TOKEN_URL)
+            .timeout(FETCH_TIMEOUT)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({
+                "grant_type": "refresh_token",
+                "refresh_token": acct.refresh_token,
+                "client_id": OAUTH_CLIENT_ID,
+            }))
+            .send()
+            .await
+            .with_context(|| {
+                format!(
+                    "refresh {} (rt {before}) never got a reply, so the token may be spent",
+                    acct.email
+                )
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(RefreshFailure {
+                error: anyhow::anyhow!(
+                    "refresh {} (rt {before}){}",
+                    status.as_u16(),
+                    snippet(&text)
+                ),
+                rejected: refresh_status_is_fatal(status.as_u16()),
+            });
         }
-        let tmp = self
-            .path
-            .with_extension(format!("tmp.{}", std::process::id()));
-        let body = serde_json::to_string_pretty(&AccountsFile {
-            accounts: accounts.to_vec(),
-        })? + "\n";
-        std::fs::write(&tmp, body)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).ok();
+        let data: RefreshResp = resp.json().await.with_context(|| {
+            format!(
+                "refresh {} (rt {before}) was accepted but its reply could not be read, \
+                 so the token is spent and its replacement is lost",
+                acct.email
+            )
+        })?;
+        if let Some(a) = data.access_token {
+            acct.access_token = a;
         }
-        std::fs::rename(&tmp, &self.path)?;
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Vec<StoredCodexAccount> {
-        self.accounts.lock().unwrap().clone()
-    }
-
-    fn get_by_email(&self, email: &str) -> Option<StoredCodexAccount> {
-        self.accounts
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|a| a.email == email)
-            .cloned()
-    }
-
-    /// Emails of every imported account. Membership, not usability: an account whose
-    /// refresh chain is dead is still imported. Use [`Self::usable_emails`] to pick one
-    /// for a clone.
-    pub(crate) fn emails(&self) -> Vec<String> {
-        self.accounts
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|a| a.email.clone())
-            .collect()
-    }
-
-    /// Emails whose stored token still works: the accounts a clone may be handed. See
-    /// [`account_usable`].
-    pub(crate) fn usable_emails(&self) -> Vec<String> {
-        let now = now_ms();
-        self.accounts
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|a| account_usable(a, now))
-            .map(|a| a.email.clone())
-            .collect()
-    }
-
-    fn update_account(&self, acct: &StoredCodexAccount) -> Result<()> {
-        let mut accounts = self.accounts.lock().unwrap();
-        match accounts.iter_mut().find(|a| a.id == acct.id) {
-            Some(existing) => *existing = acct.clone(),
-            None => accounts.push(acct.clone()),
+        if let Some(i) = data.id_token {
+            acct.id_token = i;
         }
-        self.save(&accounts)
-    }
-
-    pub fn forget_pushed(&self, host_id: &str) {
-        self.pushed.lock().unwrap().remove(host_id);
-    }
-
-    /// Remove every imported account matching `email` and persist. Returns whether any
-    /// were present. The Codex twin of [`crate::claude::ClaudeStore::delete`].
-    fn delete(&self, email: &str) -> Result<bool> {
-        let mut accounts = self.accounts.lock().unwrap();
-        let before = accounts.len();
-        accounts.retain(|a| a.email != email);
-        if accounts.len() == before {
-            return Ok(false);
-        }
-        self.save(&accounts)?;
-        Ok(true)
+        // Same single-use rule as Claude: a reply with no replacement leaves the store holding
+        // a spent token, and the account dies at the next refresh rather than at this one.
+        let after = match data.refresh_token {
+            Some(r) => {
+                let after = fingerprint(&r);
+                acct.refresh_token = r;
+                tracing::info!("refreshed codex {}: rt {before} -> {after}", acct.email);
+                after
+            }
+            None => {
+                tracing::error!(
+                    "refreshed codex {}: the reply carried NO refresh_token, so the store keeps \
+                     the one it just spent (rt {before}). This account fails its next refresh.",
+                    acct.email
+                );
+                String::new()
+            }
+        };
+        set_expiry_from_access(acct);
+        Ok(after)
     }
 }
 
@@ -220,41 +182,14 @@ pub(crate) fn test_delete(app: &App, email: &str) {
     app.codex.delete(email).unwrap();
 }
 
-/// Replaces by **email**, not by `id`, for the reason spelled out in
-/// [`crate::claude::upsert_account`]: every caller looks an account up by email and takes the
-/// first match, so a second record under the same email is unreachable and answers for the
-/// one that is reachable.
+/// Replaces by **email**, not by `id`, for the reason spelled out on [`Store::upsert`]: every
+/// caller looks an account up by email and takes the first match, so a second record under the
+/// same email is unreachable and answers for the one that is reachable.
 pub fn upsert_account(app: &App, stored: StoredCodexAccount) -> Result<()> {
-    let mut accts = app.codex.accounts.lock().unwrap();
-    accts.retain(|a| a.id != stored.id && a.email != stored.email);
-    accts.push(stored);
-    accts.sort_by(|a, b| a.email.cmp(&b.email));
-    app.codex.save(&accts)?;
-    Ok(())
+    app.codex.upsert(stored)
 }
 
 // --- token refresh + push -------------------------------------------------
-
-/// FNV-1a over `s`, kept identical to Claude's so refresh phases are stable across
-/// restarts (`DefaultHasher` is not stable across Rust releases).
-fn stable_hash(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= u64::from(*b);
-        h = h.wrapping_mul(0x100_0000_01b3);
-    }
-    h
-}
-
-/// How long before expiry `email`'s token is refreshed: the shared floor plus that
-/// account's own offset within [`REFRESH_SPREAD_MS`].
-fn refresh_lead_ms(email: &str) -> i64 {
-    REFRESH_LEAD_MS + (stable_hash(email) % REFRESH_SPREAD_MS as u64) as i64
-}
-
-fn is_expired(email: &str, expires_at: i64) -> bool {
-    now_ms() + refresh_lead_ms(email) >= expires_at
-}
 
 /// Set `acct.expires_at` from its access-token JWT `exp` claim; if the token isn't a
 /// decodable JWT, fall back to a conservative 55-minute lifetime so the account still
@@ -274,148 +209,22 @@ struct RefreshResp {
     refresh_token: Option<String>,
 }
 
-/// Refresh `acct`'s access token unconditionally (rotates the single-use refresh token).
-/// The OAuth response carries no `expires_in`, so expiry is decoded from the new access
-/// token's JWT. Mutates `acct` in place; the caller persists.
-/// Refresh `acct` in place. Every exit is logged AND written to `acct.last_refresh`, for
-/// the reason given on [`crate::claude::RefreshRecord`]: the log dies with the container,
-/// and the line that says whether the token rotated is the whole diagnosis six hours later.
-async fn refresh_account(http: &reqwest::Client, acct: &mut StoredCodexAccount) -> Result<()> {
-    let before = crate::claude::fingerprint(&acct.refresh_token);
-    let out = refresh_inner(http, acct, &before).await;
-    acct.last_refresh = Some(crate::claude::RefreshRecord {
-        at: now_ms(),
-        ok: out.is_ok(),
-        rt_before: before,
-        rt_after: match &out {
-            Ok(after) => after.clone(),
-            Err(_) => String::new(),
-        },
-        error: out.as_ref().err().map(|e| format!("{:#}", e.error)),
-        rejected: out.as_ref().err().is_some_and(|e| e.rejected),
-    });
-    out.map(|_| ()).map_err(|e| e.error)
-}
-
-/// The refresh itself. Returns the fingerprint of the token the reply carried, empty when
-/// it carried none.
-async fn refresh_inner(
-    http: &reqwest::Client,
-    acct: &mut StoredCodexAccount,
-    before: &str,
-) -> std::result::Result<String, crate::claude::RefreshFailure> {
-    let resp = http
-        .post(OAUTH_TOKEN_URL)
-        .timeout(FETCH_TIMEOUT)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "grant_type": "refresh_token",
-            "refresh_token": acct.refresh_token,
-            "client_id": OAUTH_CLIENT_ID,
-        }))
-        .send()
-        .await
-        .with_context(|| {
-            format!(
-                "refresh {} (rt {before}) never got a reply, so the token may be spent",
-                acct.email
-            )
-        })?;
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(crate::claude::RefreshFailure {
-            error: anyhow::anyhow!(
-                "refresh {} (rt {before}){}",
-                status.as_u16(),
-                snippet(&text)
-            ),
-            rejected: crate::claude::refresh_status_is_fatal(status.as_u16()),
-        });
-    }
-    let data: RefreshResp = resp.json().await.with_context(|| {
-        format!(
-            "refresh {} (rt {before}) was accepted but its reply could not be read, \
-             so the token is spent and its replacement is lost",
-            acct.email
-        )
-    })?;
-    if let Some(a) = data.access_token {
-        acct.access_token = a;
-    }
-    if let Some(i) = data.id_token {
-        acct.id_token = i;
-    }
-    // Same single-use rule as Claude: a reply with no replacement leaves the store holding
-    // a spent token, and the account dies at the next refresh rather than at this one.
-    let after = match data.refresh_token {
-        Some(r) => {
-            let after = crate::claude::fingerprint(&r);
-            acct.refresh_token = r;
-            tracing::info!("refreshed codex {}: rt {before} -> {after}", acct.email);
-            after
-        }
-        None => {
-            tracing::error!(
-                "refreshed codex {}: the reply carried NO refresh_token, so the store keeps \
-                 the one it just spent (rt {before}). This account fails its next refresh.",
-                acct.email
-            );
-            String::new()
-        }
-    };
-    set_expiry_from_access(acct);
-    Ok(after)
-}
-
-/// `email`'s current account, refreshed (and persisted) first if within
-/// [`REFRESH_LEAD_MS`] of expiry. Returns `(account, rotated)`.
+/// `email`'s current account, refreshed (and persisted) first if within its refresh lead of
+/// expiry. Returns `(account, rotated)`.
 ///
-/// Runs in its own task with the refresh gate inside it, so a disconnected HTTP client
-/// cannot abandon a rotation half-done. `claude::fresh_access_token` carries the reasoning,
-/// and this side has the same two cancellable callers in `/api/codex/{refresh,swap}` plus
-/// the stuck detector.
+/// Runs in its own task with the refresh gate inside it, so a disconnected HTTP client cannot
+/// abandon a rotation half-done. [`crate::account::refresh_and_persist`] carries the reasoning,
+/// and this side has the same two cancellable callers in `/api/codex/{refresh,swap}` plus the
+/// stuck detector. Spawning here rather than there keeps the spawned future concrete, which is
+/// what lets the lifecycle itself stay generic.
 pub async fn fresh_access_token(app: &App, email: &str) -> Result<(StoredCodexAccount, bool)> {
     let app = app.clone();
     let email = email.to_string();
-    tokio::spawn(async move { refresh_and_persist(&app, &email).await })
-        .await
-        .context("the codex refresh task did not finish")?
-}
-
-async fn refresh_and_persist(app: &App, email: &str) -> Result<(StoredCodexAccount, bool)> {
-    let _gate = app.codex.refresh_gate.lock().await;
-    let mut acct = app
-        .codex
-        .get_by_email(email)
-        .with_context(|| format!("no imported Codex account for '{email}'"))?;
-    if !is_expired(&acct.email, acct.expires_at) {
-        return Ok((acct, false));
-    }
-    // A rejected grant is retried by nobody. See `claude::fresh_access_token`, which carries
-    // the reasoning and the measurement: the repair is a sign-in, and that clears the record.
-    if let Some(rec) = acct.last_refresh.as_ref().filter(|r| r.rejected) {
-        let why = rec.error.as_deref().unwrap_or("no reason recorded");
-        anyhow::bail!(
-            "{email}'s codex refresh token was rejected, so no refresh is attempted until it \
-             is signed in again: {why}"
-        );
-    }
-    if let Err(e) = refresh_account(&app.http, &mut acct).await {
-        // Persist the attempt even though it failed: every failing path leaves the tokens
-        // untouched, so this writes back the record and nothing else.
-        if let Err(w) = app.codex.update_account(&acct) {
-            tracing::warn!("recording {}'s failed codex refresh: {w:#}", acct.email);
-        }
-        return Err(e);
-    }
-    app.codex.update_account(&acct).with_context(|| {
-        format!(
-            "persisting {}'s refreshed token failed, so the rotation exists only in memory",
-            acct.email
-        )
-    })?;
-    Ok((acct, true))
+    tokio::spawn(async move {
+        crate::account::refresh_and_persist::<StoredCodexAccount>(&app, &email).await
+    })
+    .await
+    .context("the codex refresh task did not finish")?
 }
 
 /// The `~/.codex/auth.json` body that runs codex under `acct`'s current tokens. The
@@ -598,7 +407,7 @@ pub async fn push_stale_tokens_for(app: &App, only: Option<&str>) {
     );
 
     let (mut ok, mut failed, mut unreachable) = (0usize, 0usize, 0usize);
-    for chunk in targets.chunks(crate::claude::PUSH_CONCURRENCY) {
+    for chunk in targets.chunks(PUSH_CONCURRENCY) {
         let results = futures::future::join_all(chunk.iter().map(|(id, email, acct)| async move {
             // Plain home write now: works stopped or running, skips only deleted clones.
             if !crate::home_overlay::clone_home_present(id) {
@@ -894,14 +703,6 @@ fn choose_reset_target(
 }
 
 /// Drop marks whose 7d window has already elapsed (account is now in a new window).
-/// Whether this account can be handed to a clone: it holds a token that has not expired AND
-/// its refresh chain has not been rejected. The Codex twin of `crate::claude::account_usable`
-/// — see there for why expiry alone is not enough.
-fn account_usable(acct: &StoredCodexAccount, now: i64) -> bool {
-    crate::claude::token_alive(acct.expires_at, now)
-        && !crate::claude::grant_rejected(acct.last_refresh.as_ref())
-}
-
 fn prune_marks(marks: &mut Vec<wire::CodexResetMark>, now_secs: i64) {
     marks.retain(|m| m.window_resets_at > now_secs);
 }
@@ -1222,6 +1023,8 @@ pub async fn run_poller(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use crate::pool::{
         CodexPool, RotationCandidate, assign_rotation, assign_saturated_rotation, auto_pool_clones,
         is_exhausted,
@@ -1274,7 +1077,7 @@ mod tests {
         let app = App::new(store, wire::AppConfig::default(), &dir.to_string_lossy());
         let mut acct = sample_account();
         acct.expires_at = 0; // long expired, so a refresh is due
-        acct.last_refresh = Some(crate::claude::RefreshRecord {
+        acct.last_refresh = Some(RefreshRecord {
             at: 1,
             ok: false,
             rt_before: "beef".into(),

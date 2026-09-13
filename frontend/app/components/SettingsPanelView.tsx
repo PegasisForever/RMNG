@@ -8,9 +8,11 @@
 // whether first-run setup has finished, what the last save said about needing a restart, and
 // the control-server's own version.
 //
-// This file owns the panel's frame: the header, the two banners, the rail, and the footer.
-// Which sections make up a category is `SettingsPanes`, and the rail's list is `SettingsNav`.
+// This file owns what is inside the panel: the heading, the two banners, the rail, and the
+// footer. The panel itself — backdrop, box, Escape, exit frames — is `ModalShell`. Which
+// sections make up a category is `SettingsPanes`, and the rail's list is `SettingsNav`.
 
+import { ModalShell } from "~/components/ModalShell";
 import {
   SETTINGS_CATEGORIES,
   SettingsNav,
@@ -28,7 +30,6 @@ import type { BoardColumn } from "~/lib/board";
 import type { SettingsDraft } from "~/lib/settingsDraft";
 import { orderedAccounts } from "~/lib/accountOrder";
 import type { ClaudeUsage, Operation } from "~/lib/types";
-import { useModalEscape } from "~/lib/useModalEscape";
 import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
@@ -73,9 +74,8 @@ export interface SettingsPanelViewProps {
   /** The post-save confirmation, which the container clears after a beat. */
   saved: boolean;
   onSave: () => void;
+  /** The panel is finished: unmount it. The exit frames have already played. */
   onClose: () => void;
-  /** Exit is playing: the overlay swaps its entry classes for the reverse mirrors. */
-  closing?: boolean;
 
   /** The control-server's own version and update-available answer. */
   serverStatus: UpdateStatus | null;
@@ -124,7 +124,6 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
     saved,
     onSave,
     onClose,
-    closing = false,
     serverStatus,
     serverMessage,
     updateOperation,
@@ -142,12 +141,6 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
     onDeleteBoardColumn,
     onReorderBoardColumns,
   } = props;
-
-  // Escape closes. Stacked: the import modal opens ON TOP of this panel (z-60 over z-50),
-  // and without the stack one Escape would close both — losing the panel as collateral for
-  // dismissing the dialog above it. The stack is LIFO, so the import modal (mounted later)
-  // owns Escape while it is up; this panel takes it back when the dialog unmounts.
-  useModalEscape(onClose);
 
   // Board columns are optional, so the rail offers that category only when there are some.
   const categories = SETTINGS_CATEGORIES.filter(
@@ -211,101 +204,95 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
   }
 
   return (
-    <div
-      className={
-        "fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 p-4 " +
-        (closing ? "rmng-backdrop-out" : "rmng-backdrop-in")
-      }
-    >
-      {/* Backdrop is inert — clicking it must not close the panel, only the ✕/Cancel
-          buttons and Escape (handled above) do. */}
-      <div
-        className={
-          "flex max-h-[90vh] h-[42rem] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl " +
-          (closing ? "rmng-modal-out" : "rmng-modal-in")
-        }
-      >
-        {draft ? (
-          // No title bar: the heading lives atop the left column over the rail, and the
-          // footer Close (plus Escape) is the way out. Rail beside pane on a
-          // desktop-width panel, rail above pane on a phone, where a 11rem column would
-          // leave the fields too narrow to type in.
-          <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-            <div className="shrink-0 border-b border-slate-100 dark:border-slate-800 sm:w-44 sm:border-b-0 sm:border-r">
-              <h2 className="px-4 pt-4 pb-1 text-base font-semibold text-slate-900 dark:text-slate-100">
-                Settings
-              </h2>
-              <SettingsNav
-                categories={categories}
-                active={active.id}
-                onSelect={onCategoryChange}
-              />
-            </div>
-            <div className="flex min-h-0 flex-1 flex-col">
-              {/* Banners sit atop the pane column, so a save error stays on screen
+    // The sign-in dialog opens ON TOP of this panel, on the `over` rung. The Escape stack is
+    // LIFO, so that dialog owns Escape while it is up and the panel takes it back when the
+    // dialog unmounts — without it one press would close both, losing the panel as collateral.
+    <ModalShell size="panel" onExited={onClose}>
+      {(close) => (
+        <>
+          {draft ? (
+            // No title bar: the heading lives atop the left column over the rail, and the
+            // footer Close (plus Escape) is the way out. Rail beside pane on a
+            // desktop-width panel, rail above pane on a phone, where a 11rem column would
+            // leave the fields too narrow to type in.
+            <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
+              <div className="shrink-0 border-b border-slate-100 dark:border-slate-800 sm:w-44 sm:border-b-0 sm:border-r">
+                <h2 className="px-4 pt-4 pb-1 text-base font-semibold text-slate-900 dark:text-slate-100">
+                  Settings
+                </h2>
+                <SettingsNav
+                  categories={categories}
+                  active={active.id}
+                  onSelect={onCategoryChange}
+                />
+              </div>
+              <div className="flex min-h-0 flex-1 flex-col">
+                {/* Banners sit atop the pane column, so a save error stays on screen
                   whichever category it came from. */}
-              {error ? (
-                <div className="mx-5 mt-4 rounded border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-400">
-                  {error}
-                </div>
-              ) : null}
-              {restartRequired ? (
-                <div className="mx-5 mt-4 flex items-center gap-3 rounded border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-400">
-                  <span>
-                    Changed port/socket/video settings need a restart to apply.
-                  </span>
-                  <button
-                    type="button"
-                    onClick={onRestartServer}
-                    className="rounded border border-amber-400 dark:border-amber-700 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
-                  >
-                    Restart control-server
-                  </button>
-                </div>
-              ) : null}
+                {error ? (
+                  <div className="mx-5 mt-4 rounded border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-400">
+                    {error}
+                  </div>
+                ) : null}
+                {restartRequired ? (
+                  <div className="mx-5 mt-4 flex items-center gap-3 rounded border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-400">
+                    <span>
+                      Changed port/socket/video settings need a restart to
+                      apply.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={onRestartServer}
+                      className="rounded border border-amber-400 dark:border-amber-700 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+                    >
+                      Restart control-server
+                    </button>
+                  </div>
+                ) : null}
 
-              {/* One pane scrolls, not the whole panel, so the rail stays put while a long
+                {/* One pane scrolls, not the whole panel, so the rail stays put while a long
                 section (the two prompts, the preset list) runs past the bottom edge. The
                 first section drops its rule: it would sit right under the rail's top border
                 and read as a doubled line. */}
-              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5 [&>section:first-child]:border-t-0 [&>section:first-child]:pt-0">
-                {renderPane(draft)}
+                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5 [&>section:first-child]:border-t-0 [&>section:first-child]:pt-0">
+                  {renderPane(draft)}
+                </div>
               </div>
             </div>
-          </div>
-        ) : (
-          <p className="flex-1 py-8 text-center text-sm text-slate-400 dark:text-slate-500">
-            Loading…
-          </p>
-        )}
+          ) : (
+            <p className="flex-1 py-8 text-center text-sm text-slate-400 dark:text-slate-500">
+              Loading…
+            </p>
+          )}
 
-        {/* Footer — a flex sibling of the pane, so it's always pinned flush to the panel's
+          {/* Footer — a flex sibling of the pane, so it's always pinned flush to the panel's
             bottom edge. Only shown once the config has loaded. */}
-        {draft ? (
-          <div className="flex items-center justify-end gap-2 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-800 px-5 py-3">
-            {saved ? (
-              <span className="mr-auto text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                Saved ✓
-              </span>
-            ) : null}
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded border border-slate-300 dark:border-slate-600 px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
-            >
-              Close
-            </button>
-            <button
-              type="button"
-              onClick={onSave}
-              disabled={saving}
-              className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
-            >
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
-        ) : null}
-      </div>
-    </div>
+          {draft ? (
+            <div className="flex items-center justify-end gap-2 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-800 px-5 py-3">
+              {saved ? (
+                <span className="mr-auto text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                  Saved ✓
+                </span>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => close()}
+                className="rounded border border-slate-300 dark:border-slate-600 px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={onSave}
+                disabled={saving}
+                className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-700 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+              >
+                {saving ? "Saving…" : "Save"}
+              </button>
+            </div>
+          ) : null}
+        </>
+      )}
+    </ModalShell>
   );
 }

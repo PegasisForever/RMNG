@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 use wire::EnvVar;
 
 use crate::app::App;
+use crate::clone_home::CloneHome;
 use crate::docker::{CLONE_USER, CreateSpec, TarEntry};
 
 /// The clone user's uid/gid inside every image (created uid 1000 by `template/setup/30-user.sh`
@@ -650,17 +651,17 @@ pub async fn delete_clone(
     // unmount the overlay (it pins the dataset busy), and then destroy the dataset;
     // the dataset itself lives or dies by the ZFS destroy below.
     crate::homes::remove_link(app, host_id).await;
-    crate::home_overlay::teardown_merged(crate::zfs::HOMES_DIR, host_id);
+    let home = CloneHome::of(app, host_id);
+    home.teardown();
     if let Some(row) = gen2_row(app, host_id) {
-        if row.dataset.is_some() {
+        if crate::clone_home::is_gen2(&row) {
             on_progress("remove", "destroying the home dataset");
-            let parent = homes_parent(app);
-            let origin = dataset_origin(&parent, host_id);
-            match crate::zfs::destroy(&parent, host_id, false) {
+            // Read the origin BEFORE the destroy: afterwards there is nothing left to ask.
+            let origin = home.origin();
+            match home.destroy(false) {
                 Ok(()) => {
-                    if let Some(snap) = origin.filter(|s| s != "-") {
-                        if let Err(e) = crate::zfs::destroy_snapshot_if_unreferenced(&parent, &snap)
-                        {
+                    if let Some(snap) = origin {
+                        if let Err(e) = home.drop_snapshot(&snap) {
                             tracing::warn!(
                                 "delete {host_id}: keeping origin snapshot {snap}: {e} (non-fatal)"
                             );
@@ -739,32 +740,6 @@ fn gen2_row(app: &App, id: &str) -> Option<wire::RmngClone> {
     app.store.get().hosts.iter().find(|h| h.id == id).cloned()
 }
 
-/// Configured ZFS homes parent (`docker.homes_parent`, default `tank/rmng/homes`).
-/// Read fresh per call — immediate-apply, never cached.
-fn homes_parent(app: &App) -> String {
-    app.config().docker.homes_parent.clone()
-}
-
-/// `zfs get origin` for a clone's dataset: the snapshot it was cloned from, if any.
-/// `None` for fresh datasets (origin `-`) and on any error. Provision-local (one `zfs`
-/// invocation, no destroy) so the wrapper module needs no read API.
-fn dataset_origin(parent: &str, clone_id: &str) -> Option<String> {
-    let ds = crate::zfs::dataset_name(parent, clone_id);
-    let out = std::process::Command::new("zfs")
-        .args(["get", "-H", "-o", "value", "origin", &ds])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if v.is_empty() || v == "-" {
-        None
-    } else {
-        Some(v)
-    }
-}
-
 /// `remove_image(tag)` when no remaining clone row (other than `except_id`) references it.
 /// Best-effort: logs, never fails the caller (a 409 means still in use — keep it).
 async fn purge_image_if_unused(app: &App, except_id: &str, tag: &str) {
@@ -797,8 +772,9 @@ async fn destroy_half_built_clone(app: &App, hostname: &str, created_dataset: bo
         .ok();
     if created_dataset {
         // Unmount first: the merged view pins the dataset busy.
-        crate::home_overlay::teardown_merged(crate::zfs::HOMES_DIR, hostname);
-        if let Err(e) = crate::zfs::destroy(&homes_parent(app), hostname, false) {
+        let home = CloneHome::of(app, hostname);
+        home.teardown();
+        if let Err(e) = home.destroy(false) {
             tracing::warn!("cleanup for {hostname}: keeping dataset: {e} (non-fatal)");
         }
     }
@@ -833,14 +809,14 @@ pub async fn clone_container_gen2_from_tag(
     docker.ensure_network().await?;
 
     on_progress("create", &format!("creating home dataset for {hostname}"));
-    let parent = cfg.docker.homes_parent.clone();
+    let clone_home = CloneHome::of(app, hostname);
     let created_dataset = match home {
         HomeSource::Create => {
-            crate::zfs::create(&parent, hostname)?;
+            clone_home.create_dataset()?;
             true
         }
         HomeSource::CloneFromSnapshot(ref snap) => {
-            crate::zfs::clone_dataset(&parent, snap, hostname)?;
+            clone_home.clone_dataset_from(snap)?;
             true
         }
         HomeSource::Reuse => false,
@@ -850,18 +826,8 @@ pub async fn clone_container_gen2_from_tag(
     // The dataset holds upper/ + work/; the skeleton (template home for this image)
     // is shared. The merged view binds at /home/rmng, so the template home layer
     // shows through on fresh datasets and user files persist in the upper.
-    let dataset = std::path::PathBuf::from(crate::zfs::dataset_dir(hostname));
-    let digest = crate::home_overlay::ensure_skeleton(app, &tag).await?;
-    // NB: mount paths come from HOMES_DIR (the mountpoint), not `parent` (the ZFS
-    // dataset name) — the daemon rejects relative bind sources.
-    let merged = crate::home_overlay::merged_dir(crate::zfs::HOMES_DIR, hostname);
-    debug_assert!(
-        merged.is_absolute(),
-        "overlay merged view must be an absolute bind source"
-    );
-    crate::home_overlay::ensure_mounted(&dataset, &digest, &merged).await?;
-    // `~/clones` and `~/shared` point at the two mounts, which live outside the home.
-    crate::home_overlay::ensure_home_links(crate::zfs::HOMES_DIR, hostname);
+    clone_home.ensure_overlay(app, &tag).await?;
+    let merged = clone_home.merged();
 
     on_progress("create", &format!("creating container {hostname}"));
     let spec = CreateSpec {
@@ -875,9 +841,7 @@ pub async fn clone_container_gen2_from_tag(
         memory_mb: cfg.docker.clone_memory_mb,
         sock_source: sock_source_dir(app).await,
         home_dir: Some(merged.to_string_lossy().into_owned()),
-        browse_root: crate::home_overlay::merged_root(crate::zfs::HOMES_DIR)
-            .display()
-            .to_string(),
+        browse_root: crate::clone_home::browse_root().display().to_string(),
         // Absolute host path (the pool lives under the homes parent, which the daemon
         // sees through the shared homes bind); ensured at server startup.
         shared_dir: crate::shared::shared_host_dir(),
@@ -953,14 +917,11 @@ pub async fn fork_clone(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let snap = crate::zfs::snapshot(
-        &homes_parent(app),
-        source_id,
-        &format!("fork-{new_id}-{ts}"),
-    )?;
+    let src_home = CloneHome::of(app, source_id);
+    let snap = src_home.snapshot(&format!("fork-{new_id}-{ts}"))?;
     on_progress("clone-home", &format!("cloning home for {new_id}"));
-    if let Err(e) = crate::zfs::clone_dataset(&homes_parent(app), &snap, new_id) {
-        let _ = crate::zfs::destroy_snapshot_if_unreferenced(&homes_parent(app), &snap);
+    if let Err(e) = CloneHome::of(app, new_id).clone_dataset_from(&snap) {
+        let _ = src_home.drop_snapshot(&snap);
         return Err(e);
     }
     let built = async {
@@ -983,7 +944,7 @@ pub async fn fork_clone(
         Ok(tag) => Ok(tag),
         Err(e) => {
             destroy_half_built_clone(app, new_id, true).await;
-            let _ = crate::zfs::destroy_snapshot_if_unreferenced(&homes_parent(app), &snap);
+            let _ = src_home.drop_snapshot(&snap);
             Err(e)
         }
     }
@@ -1115,8 +1076,9 @@ pub async fn migrate_one(
         Ok(report) => Ok(report),
         Err(e) => {
             // One-shot window under a whole-LXC backup: leave no half-built dataset.
-            crate::home_overlay::teardown_merged(crate::zfs::HOMES_DIR, host_id);
-            let _ = crate::zfs::destroy(&homes_parent(app), host_id, false);
+            let home = CloneHome::of(app, host_id);
+            home.teardown();
+            let _ = home.destroy(false);
             Err(e)
         }
     }
@@ -1140,13 +1102,14 @@ async fn migrate_one_inner(
     on_progress: &mut impl FnMut(&str, &str),
 ) -> Result<MigrateReport> {
     on_progress("create", "creating the home dataset");
-    crate::zfs::create(&homes_parent(app), host_id)?;
+    let home = CloneHome::of(app, host_id);
+    home.create_dataset()?;
 
     on_progress("copy", "copying /home/rmng out of the old container");
     // Into the overlay upper: the merged view then shows old home over the new base.
-    let dataset = std::path::PathBuf::from(crate::zfs::dataset_dir(host_id));
-    crate::home_overlay::ensure_layout(&dataset)?;
-    let upper = crate::home_overlay::upper_dir(&dataset);
+    // No overlay yet — the recreate below mounts it, on top of what lands here.
+    home.ensure_layout()?;
+    let upper = home.upper();
     // Streamed, not buffered: the archive goes daemon -> extractor without ever being a
     // whole home in memory, so several clones can migrate at once (see
     // `jobs::migrate_all_on_boot`). The byte count is tallied off the stream itself.
