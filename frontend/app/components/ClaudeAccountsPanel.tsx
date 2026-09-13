@@ -115,7 +115,19 @@ export function groupAccounts(
   groups: CloneGroup[],
 ): AccountSection[] {
   const out: AccountSection[] = [];
-  const byEmail = new Map(ordered.map((a) => [a.email, a]));
+  // A pool member is an EMAIL, and one address can be imported on BOTH providers, so a
+  // single member can claim two rows. The server already reads it that way: `eligible_members`
+  // filters the pool's emails against each provider's own store, and `sweep_ungrouped` matches
+  // by email across both. Keyed by email alone this map held one row per address — whichever
+  // arrived last — so the other provider's row went unclaimed and drew under "Ungrouped"
+  // while being a full member of the pool. Seen on CT 204, where hello@talktomedi.com is
+  // imported on both sides and the Claude half showed as ungrouped.
+  const byEmail = new Map<string, ClaudeUsage[]>();
+  for (const a of ordered) {
+    const rows = byEmail.get(a.email);
+    if (rows) rows.push(a);
+    else byEmail.set(a.email, [a]);
+  }
   const claimed = new Set<string>();
   for (const group of groups) {
     // One section per pool holding BOTH providers' members: a pool is one binding now,
@@ -125,8 +137,7 @@ export function groupAccounts(
     // nothing rather than an empty row.
     const accounts: ClaudeUsage[] = [];
     for (const email of group.accounts) {
-      const row = byEmail.get(email);
-      if (row) {
+      for (const row of byEmail.get(email) ?? []) {
         accounts.push(row);
         claimed.add(row.id);
       }

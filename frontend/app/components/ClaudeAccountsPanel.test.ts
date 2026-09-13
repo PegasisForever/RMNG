@@ -70,6 +70,24 @@ test("member order follows the pool, not the incoming rows", () => {
   expect(out[0].accounts.map((a) => a.email)).toEqual(["alex@example.com", "sam@example.com"]);
 });
 
+test("one member email claims the row on both providers", () => {
+  // The same address imported on both sides is one pool member, and the server reads it that
+  // way — `eligible_members` filters the pool's emails against each provider's own store. The
+  // panel used to key its lookup by email alone, so only the row that happened to arrive last
+  // was claimed and the other drew under "Ungrouped" despite being a full member. CT 204 hit
+  // this with hello@talktomedi.com on Claude and Codex.
+  const shared = "hello@talktomedi.com";
+  const asClaude = account(shared);
+  const asCodex = account(shared, "codex");
+
+  const out = groupAccounts([asClaude, asCodex], [{ name: "Default", accounts: [shared] }]);
+
+  expect(out).toHaveLength(1);
+  expect(out[0].name).toBe("Default");
+  expect(out[0].accounts.map((a) => a.provider)).toEqual(["claude", "codex"]);
+  expect(out.filter((s) => s.name === null)).toEqual([]);
+});
+
 test("a pool member with no imported row draws nothing", () => {
   const out = groupAccounts([alex], [{ name: "pooled", accounts: ["alex@example.com", "stale@x.com"] }]);
 
