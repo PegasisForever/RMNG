@@ -135,7 +135,7 @@ impl Clipboard {
             "serving serial={} mime={} ({} bytes)", r.serial, r.mime_type, bytes.len());
         let data = ClipboardData { serial: r.serial, mime_type: r.mime_type, bytes };
         if let Ok(json) = serde_json::to_string(&ClipboardMsg::Data(data)) {
-            send_tagged(&shared.writer, 1, &json);
+            shared.writer.send_clipboard_data(&json);
         }
     }
 

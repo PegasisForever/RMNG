@@ -52,9 +52,7 @@ pub fn show(mtm: MainThreadMarker, shared: &Arc<Shared>) -> bool {
         tracing::warn!("settings: config save failed: {e}");
     }
     // Drop the live connection so the net thread's parked read returns and it reconnects.
-    if let Some(s) = shared.writer.lock().unwrap().as_ref() {
-        let _ = s.shutdown(std::net::Shutdown::Both);
-    }
+    shared.writer.disconnect();
     tracing::info!("settings: server address set to {text}");
     true
 }

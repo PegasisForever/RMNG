@@ -32,14 +32,16 @@ pub fn run(shared: Arc<Shared>) {
                 if let Err(e) = wire::net::set_keepalive(&rd) {
                     tracing::warn!("keepalive setup failed: {e}");
                 }
-                if let Ok(w) = rd.try_clone() {
-                    *shared.writer.lock().unwrap() = Some(w);
+                if let Err(e) = rd.try_clone().and_then(|w| shared.writer.connect(w)) {
+                    tracing::warn!("cannot start viewer writer: {e}");
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
                 }
                 shared.connected.store(true, Ordering::Relaxed);
                 (shared.wake)(Wake::View);
                 tracing::info!("connected to {cur}");
                 serve(&shared, BufReader::new(rd), &mut decoders);
-                *shared.writer.lock().unwrap() = None;
+                shared.writer.disconnect();
                 shared.connected.store(false, Ordering::Relaxed);
                 (shared.wake)(Wake::View);
                 tracing::info!("disconnected; retrying (server force-IDRs on reconnect)");

@@ -31,10 +31,10 @@
 //! **`RIDEV_INPUTSINK`** makes the registration deliver raw input even while our message-only
 //! window is not the foreground window — which it never is, since it is not a real window.
 
-use std::io::Write;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use viewer_core::outbound::Writer;
 
 use gtk4::gdk;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -71,20 +71,11 @@ const REASSERT_MS: u32 = 250;
 /// Sentinel for "no previous absolute sample yet" in [`Ctx::last_abs_x`] / `last_abs_y`.
 const NO_SAMPLE: i32 = i32::MIN;
 
-/// The viewer's input write half (port-1 socket); shared with the GTK thread.
-type Writer = Arc<Mutex<Option<TcpStream>>>;
-
 /// Frame one input message to the server: `[0u8][u32be len][json]` (tag 0 = input).
 /// Mirrors `pointer_lock.rs` (Wayland) byte-for-byte — same framing, same JSON shape.
 fn send_relative(writer: &Writer, dx: f64, dy: f64) {
     let json = format!(r#"{{"kind":"pointer_relative","dx":{dx},"dy":{dy}}}"#);
-    if let Some(g) = writer.lock().unwrap().as_mut() {
-        let hdr = (json.len() as u32).to_be_bytes();
-        let _ = g
-            .write_all(&[0u8])
-            .and_then(|_| g.write_all(&hdr))
-            .and_then(|_| g.write_all(json.as_bytes()));
-    }
+    writer.send(0, &json);
 }
 
 /// State shared between the GTK thread (which flips `engaged` and records where the cursor was

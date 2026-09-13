@@ -33,6 +33,7 @@ virtual key with no `interpretKeyEvents:` text-input mangling.
 | [`window.rs`](src/window.rs) | the `NSView` subclass (direct mouse/keyboard input, letterbox inverse) + its `NSWindow` |
 | [`app.rs`](src/app.rs) | `NSApplication`, the net-thread → main-thread wake hop, window reconcile from `ViewSpec`, draw-on-frame |
 | [`shared.rs`](src/shared.rs) | state shared net-thread ⇄ main thread, and the viewer→server framing |
+| [`outbound.rs`](../viewer-core/src/outbound.rs) | bounded outgoing queue and socket writer; motion coalescing, input priority, connection cancellation |
 | [`terminal.rs`](src/terminal.rs) | the headless-clone tmux view: an `alacritty_terminal` grid per session, painted with `NSAttributedString`, with a tab strip |
 | [`clipboard.rs`](src/clipboard.rs) | `NSPasteboard` ⇄ the broker's rich + lazy offer/request/data protocol |
 | [`pointer.rs`](src/pointer.rs) | pointer lock: `CGAssociateMouseAndMouseCursorPosition` + an `NSEvent` monitor for relative deltas |
@@ -49,6 +50,9 @@ The net thread reads port 1 and decodes; VideoToolbox hands back an IOSurface-ba
 dispatched to the main queue. The main thread owns every AppKit and Metal object and does the
 texture creation, render, and input. `WinCtx` is `Rc` (main-thread only); only `Shared` crosses
 threads.
+
+Outgoing messages use the [shared background writer](../viewer-core/README.md#outgoing-writes),
+so socket backpressure does not block AppKit.
 
 ## Colour
 
@@ -89,3 +93,20 @@ cargo run -p viewer-macos --example window-layout-check -- -AppleWindowTabbingMo
 
 The tab preference override applies only to the check process. Omit `--windowed` from the
 second command to also check fullscreen with the system's "always prefer tabs" policy.
+
+## Keyboard release regression checks
+
+The keyboard monitor forwards releases before AppKit can swallow Command-modified key-ups.
+Window and first-responder resignation also release held input immediately, covering focus
+changes that begin and end between housekeeping ticks. These paths keep a missed release from
+leaving the remote desktop's key repeat running after a paste shortcut.
+
+On a logged-in macOS desktop, run the native checks sequentially:
+
+```sh
+cargo run -p viewer-macos --example keyboard-release-check
+cargo run -p viewer-macos --example focus-release-check
+```
+
+They use real viewer views and AppKit dispatch/focus changes, capture outgoing input on a
+loopback connection, and require no server or clipboard content.

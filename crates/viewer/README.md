@@ -6,7 +6,7 @@ them zero-copy, and captures input back. macOS has its own client,
 [`viewer-macos`](../viewer-macos/README.md) (AppKit + Metal + VideoToolbox, no GTK); this crate
 `compile_error!`s there rather than hand a Mac a degraded GTK binary. What the two share lives in
 [`viewer-core`](../viewer-core): the wire protocol, drag routing, the auto-lock policy, the
-terminal colour scheme and encoders, and the config file.
+terminal colour scheme and encoders, the outgoing writer, and the config file.
 
 It runs in two modes over one shared core: a **GUI**
 mode and a first-class **headless** mode for testing (see
@@ -189,6 +189,15 @@ GL elements their own context, exactly as the validate harness already gets one.
   primary display's. GTK's own Windows scale factor is still integer (`dpi / 96` truncated), so
   on a 125% or 150% monitor the viewer draws 1:1 and reads physically smaller than other
   applications there. On a 100% monitor it is exact.
+
+## Outgoing writes
+
+The GUI and headless modes use the [shared background writer](../viewer-core/README.md#outgoing-writes).
+Keyboard, pointer, terminal, clipboard, and forward-status messages are enqueued without waiting
+for socket I/O. Wayland relative-pointer callbacks and Windows Raw Input use the same writer,
+preserving framing and key/button order across threads. Queued clipboard data yields to input;
+a payload already being transmitted must finish first. Disconnects and address changes cancel
+the writer and discard pending messages before reconnecting.
 
 ## Headless mode (first-class)
 

@@ -4,7 +4,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,8 +15,7 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType,
-    NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSTextField,
-    NSWindow, NSWindowStyleMask,
+    NSMenu, NSMenuItem, NSTextField, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     ns_string, MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
@@ -39,7 +37,8 @@ use crate::render::{Overlay, Renderer};
 use crate::shared::{CursorEntry, Shared, Wake, WakeQueue, WakeSet};
 use crate::terminal::{TermCallbacks, TerminalView};
 use crate::window::{
-    install_window_delegate, make_video_view, make_window_shell, SharedLayout, ViewerView, WinCtx,
+    install_keyboard_monitor, install_window_delegate, make_video_view, make_window_shell,
+    SharedLayout, ViewerView, WinCtx,
 };
 
 /// How often the housekeeping tick runs: auto pointer-lock reconcile, cursor shape, clipboard,
@@ -114,9 +113,8 @@ struct AppState {
     clipboard: Clipboard,
     /// Target for menu and tab-strip actions (AppKit holds targets unretained).
     delegate: Retained<Delegate>,
-    /// Keeps the ⌘Q / ⌘, event monitor installed for as long as the app runs; removing it is
-    /// what would put those chords back on the menu (see [`install_menu_chord_monitor`]).
-    _menu_chord_monitor: Option<Retained<AnyObject>>,
+    /// Keeps key releases and mapped menu shortcuts routed to the focused video view.
+    _keyboard_monitor: Option<Retained<AnyObject>>,
 }
 
 thread_local! {
@@ -449,8 +447,8 @@ impl AppState {
 
     /// Housekeeping: focus loss, auto pointer-lock, the remote cursor shape, and the clipboard.
     fn tick(&mut self) {
-        // 1. Focus loss releases every key/button this window holds, so nothing sticks down on
-        //    the remote after a Cmd+Tab away.
+        // 1. Fallback for focus-loss cleanup. AppKit resignation callbacks release immediately,
+        //    including transitions that begin and end between ticks.
         let mut has_target = false;
         for e in self.windows.values() {
             let is_key = e.window.isKeyWindow();
@@ -744,76 +742,6 @@ fn install_menu(mtm: MainThreadMarker, app: &NSApplication, delegate: &Delegate)
     app.setMainMenu(Some(&main));
 }
 
-/// Carbon kVKs of the two keys the app menu claims as ⌘-equivalents.
-const KVK_Q: u32 = 0x0C;
-const KVK_COMMA: u32 = 0x2B;
-
-/// Let ⌘Q and ⌘, reach the remote instead of the menu.
-///
-/// AppKit runs a menu item's key equivalent from `sendEvent:`, *before* the event is offered to
-/// the first responder — so with the Cmd↔Ctrl swap on, the two chords [`install_menu`] claims
-/// could never be typed at the remote as Ctrl+Q / Ctrl+, and ⌘Q killed the viewer mid-session.
-/// An `NSEvent` local monitor runs earlier still: it sees the event before `sendEvent:` is
-/// called at all.
-///
-/// It is focus-aware and deliberately narrow. The chords are taken only while a video view is
-/// the first responder of the key window *and* the swap is on — i.e. only when the remote is
-/// listening for them. A terminal window, the startup window and the settings dialog keep the
-/// stock ⌘Q and ⌘,, and both menu items stay clickable everywhere, so the viewer never becomes
-/// impossible to quit. With the swap off, Cmd is not standing in for the remote's Ctrl and the
-/// chords carry no remote meaning worth taking the local ones for.
-///
-/// A stolen event is *consumed* and handed to the view here, so it is delivered exactly once —
-/// passing it through instead would hand it straight back to the menu, which is the bug.
-fn install_menu_chord_monitor() -> Option<Retained<AnyObject>> {
-    let block = RcBlock::new(|event: NonNull<NSEvent>| -> *mut NSEvent {
-        // SAFETY: AppKit hands the monitor a live event of one of the masked types.
-        let ev = unsafe { event.as_ref() };
-        let kvk = ev.keyCode() as u32;
-        if (kvk != KVK_Q && kvk != KVK_COMMA)
-            || !ev.modifierFlags().contains(NSEventModifierFlags::Command)
-        {
-            return event.as_ptr();
-        }
-        let mut target: Option<Retained<ViewerView>> = None;
-        with_state(|s| {
-            if !s.cmd_is_ctrl {
-                return;
-            }
-            target = s
-                .windows
-                .values()
-                .filter(|e| e.window.isKeyWindow())
-                .find_map(|e| e.video().map(|(view, _)| view.clone()))
-                .filter(|view| view.owns_keystrokes());
-        });
-        // The state borrow is released before dispatching: `keyDown:` runs the whole forwarding
-        // path, and re-entering `with_state` from under it would panic on the second borrow.
-        let Some(view) = target else { return event.as_ptr() };
-        if ev.r#type() == NSEventType::KeyUp {
-            // macOS withholds `keyUp:` from the responder chain while Cmd is held, so the
-            // release has to come from here too or Q would stay down on the remote forever.
-            view.keyUp(ev);
-        } else {
-            view.keyDown(ev);
-        }
-        std::ptr::null_mut()
-    });
-    // SAFETY: called on the main thread, where the block also runs; the handler returns either
-    // the event it was given or null, which is the contract the monitor requires.
-    let monitor = unsafe {
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-            NSEventMask::KeyDown | NSEventMask::KeyUp,
-            &block,
-        )
-    };
-    if monitor.is_none() {
-        // Not fatal: the viewer keeps working, the two chords just stay local (⌘Q quits).
-        tracing::warn!("⌘Q/⌘, monitor install failed; those chords will not reach the remote");
-    }
-    monitor
-}
-
 /// Run the GUI: build the app state, install it in the main-thread thread-local, show the startup
 /// window, start the housekeeping tick, and enter the AppKit run loop.
 pub fn run(shared: Arc<Shared>) -> Result<()> {
@@ -841,7 +769,7 @@ pub fn run(shared: Arc<Shared>) -> Result<()> {
         was_locked: false,
         clipboard: Clipboard::new(mtm),
         delegate: delegate.clone(),
-        _menu_chord_monitor: install_menu_chord_monitor(),
+        _keyboard_monitor: install_keyboard_monitor(mtm),
     };
     // Show the startup window immediately: the net thread may connect before the first spec.
     state.startup = Some(make_startup_window(mtm));

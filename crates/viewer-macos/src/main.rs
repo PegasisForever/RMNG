@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     }
     let headless = args.iter().any(|a| a == "--headless");
 
-    let writer: Writer = Arc::new(Mutex::new(None));
+    let writer = Writer::default();
     let forwards = {
         let writer = writer.clone();
         let report: StatusReport = Arc::new(move |msg: ForwardStatusMsg| {

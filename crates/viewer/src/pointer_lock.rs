@@ -13,9 +13,7 @@
 //! Ported from `../../gtk/src/pointer_lock.rs`.
 
 use std::cell::RefCell;
-use std::io::Write;
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
+use viewer_core::outbound::Writer;
 
 use gdk4_wayland::prelude::*;
 use gdk4_wayland::{WaylandDisplay, WaylandSeat};
@@ -34,25 +32,16 @@ use wayland_protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v
     Event as RelEvent, ZwpRelativePointerV1,
 };
 
-/// The viewer's input write half (port-1 socket); shared with the GTK thread.
-type Writer = Arc<Mutex<Option<TcpStream>>>;
-
 /// Frame one input message to the server: `[0u8][u32be len][json]` (tag 0 = input).
 fn send_relative(writer: &Writer, dx: f64, dy: f64) {
     static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if n % 100 == 0 {
         tracing::debug!("pointer-lock: relative motion #{n} dx={dx} dy={dy} (writer {})",
-            if writer.lock().unwrap().is_some() { "connected" } else { "MISSING" });
+            if writer.is_connected() { "connected" } else { "MISSING" });
     }
     let json = format!(r#"{{"kind":"pointer_relative","dx":{dx},"dy":{dy}}}"#);
-    if let Some(g) = writer.lock().unwrap().as_mut() {
-        let hdr = (json.len() as u32).to_be_bytes();
-        let _ = g
-            .write_all(&[0u8])
-            .and_then(|_| g.write_all(&hdr))
-            .and_then(|_| g.write_all(json.as_bytes()));
-    }
+    writer.send(0, &json);
 }
 
 /// State owned by the background Wayland dispatch thread: accumulates sub-pixel

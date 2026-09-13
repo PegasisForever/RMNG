@@ -12,20 +12,22 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationPresentationOptions, NSBackingStoreType, NSCursor, NSEvent,
-    NSEventModifierFlags, NSResponder, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSResponder, NSTrackingArea, NSTrackingAreaOptions,
+    NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWindowTabbingMode,
 };
 use objc2_foundation::{
-    MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    MainThreadMarker, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use objc2_core_graphics::{kCGColorSpaceSRGB, CGColorSpace};
 use objc2_quartz_core::CAMetalLayer;
@@ -292,6 +294,17 @@ define_class!(
         #[unsafe(method(acceptsFirstResponder))]
         fn accepts_first_responder(&self) -> bool {
             true
+        }
+
+        #[unsafe(method(resignFirstResponder))]
+        fn resign_first_responder(&self) -> bool {
+            // A view can lose keyboard ownership while its window stays key. Release at the
+            // actual transition, since polling the window's key status cannot observe this.
+            let accepted: bool = unsafe { msg_send![super(self), resignFirstResponder] };
+            if accepted {
+                self.release_all();
+            }
+            accepted
         }
 
         #[unsafe(method(acceptsFirstMouse:))]
@@ -597,8 +610,8 @@ impl ViewerView {
     }
 
     /// Is this view the first responder of its window — i.e. are typed keys actually on their
-    /// way to the remote right now? What the ⌘Q / ⌘, monitor asks before stealing those chords
-    /// from the menu (see `app::install_menu_chord_monitor`).
+    /// way to the remote right now? The keyboard monitor checks this before taking events
+    /// from AppKit (see [`install_keyboard_monitor`]).
     pub fn owns_keystrokes(&self) -> bool {
         let Some(fr) = self.window().and_then(|w| w.firstResponder()) else {
             return false;
@@ -620,6 +633,59 @@ impl ViewerView {
         let layer = self.layer().expect("viewer view must be layer-backed");
         layer.downcast::<CAMetalLayer>().expect("layer must be a CAMetalLayer")
     }
+}
+
+/// Preserve remote key releases and the mapped ⌘Q / ⌘, shortcuts before AppKit dispatch.
+///
+/// AppKit can discard `keyUp:` while Command is held, even when it delivered `keyDown:`.
+/// The remote repeats held keys itself, so a lost V-up leaves it repeating after physical release.
+/// Route every key-up directly to the focused video view, regardless of its current modifiers
+/// or the Cmd/Ctrl swap. `keyUp:` only releases keys that view actually forwarded.
+///
+/// Key-down interception stays limited to the two app-menu shortcuts when the swap is on.
+/// Other downs keep normal dispatch; terminal, settings, and other responders keep all their
+/// native keyboard handling. Consumed events must not continue through AppKit a second time.
+pub fn install_keyboard_monitor(mtm: MainThreadMarker) -> Option<Retained<AnyObject>> {
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        // SAFETY: AppKit supplies a live event of one of the monitored types.
+        let ev = unsafe { event.as_ref() };
+        let is_up = ev.r#type() == NSEventType::KeyUp;
+        let is_menu_chord = matches!(ev.keyCode(), 0x0C | 0x2B) // Q / comma
+            && ev.modifierFlags().contains(NSEventModifierFlags::Command);
+        if !is_up && !is_menu_chord {
+            return event.as_ptr();
+        }
+        // Read AppKit's actual focus, without borrowing AppState: focus callbacks may run
+        // synchronously while reconciliation already has the state mutably borrowed.
+        let target = NSApplication::sharedApplication(mtm)
+            .keyWindow()
+            .and_then(|window| window.contentView())
+            .and_then(|view| view.downcast::<ViewerView>().ok())
+            .filter(|view| view.owns_keystrokes());
+        let Some(view) = target else {
+            return event.as_ptr();
+        };
+        if is_up {
+            view.keyUp(ev);
+        } else if view.ctx().is_some_and(|ctx| ctx.cmd_is_ctrl) {
+            view.keyDown(ev);
+        } else {
+            return event.as_ptr();
+        }
+        std::ptr::null_mut()
+    });
+    // SAFETY: installed and invoked on the main thread; the handler returns the input event
+    // or null, as required by the local-monitor contract. The caller retains its handle.
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+            NSEventMask::KeyDown | NSEventMask::KeyUp,
+            &block,
+        )
+    };
+    if monitor.is_none() {
+        tracing::warn!("keyboard monitor install failed; Command shortcuts may lose key releases");
+    }
+    monitor
 }
 
 /// A bare viewer window: titled, resizable, no content yet. The shell is stable for the
@@ -695,6 +761,25 @@ define_class!(
     unsafe impl NSObjectProtocol for WindowDelegate {}
 
     unsafe impl NSWindowDelegate for WindowDelegate {
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, notification: &NSNotification) {
+            // A loss and return can both happen between housekeeping ticks. Use the window
+            // notification directly; consulting AppState here would reenter its borrow when
+            // reconciliation creates another window and synchronously changes focus.
+            let Some(window) = notification
+                .object()
+                .and_then(|o| o.downcast::<NSWindow>().ok())
+            else {
+                return;
+            };
+            if let Some(view) = window
+                .contentView()
+                .and_then(|v| v.downcast::<ViewerView>().ok())
+            {
+                view.release_all();
+            }
+        }
+
         #[unsafe(method(windowShouldClose:))]
         fn window_should_close(&self, _sender: &NSWindow) -> bool {
             // Closing any window means "done with the viewer", as it does in GTK (`app.quit()`

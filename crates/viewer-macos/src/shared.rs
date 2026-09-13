@@ -5,8 +5,6 @@
 //! viewer (`crates/viewer/src/main.rs`), minus GTK.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
-use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU8};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -18,8 +16,7 @@ use wire::viewer::ViewSpec;
 
 use crate::decoder::DecodedFrame;
 
-/// Input/clipboard write half (None while disconnected).
-pub type Writer = Arc<Mutex<Option<TcpStream>>>;
+pub use viewer_core::outbound::Writer;
 /// The server `host:port`, edited live by the Settings dialog, re-read on every reconnect.
 pub type ServerAddr = Arc<Mutex<String>>;
 
@@ -189,22 +186,7 @@ impl WakeQueue {
 /// viewer → server framing: `[u8 tag][u32be len][json]`. tag 0 = input, 1 = clipboard,
 /// 2 = forward status, 3 = terminal input, 4 = terminal resize, 5 = new terminal session.
 pub fn send_tagged(writer: &Writer, tag: u8, json: &str) {
-    // One guard for the whole op (a second lock on the error path would self-deadlock), and one
-    // contiguous write so TCP_NODELAY emits a single segment per event.
-    let mut guard = writer.lock().unwrap();
-    if let Some(g) = guard.as_mut() {
-        let body = json.as_bytes();
-        let mut frame = Vec::with_capacity(1 + 4 + body.len());
-        frame.push(tag);
-        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        frame.extend_from_slice(body);
-        if g.write_all(&frame).is_err() {
-            // Dead link surfaced on the write side: shut the shared socket so the net thread's
-            // parked read returns now and the reconnect loop starts immediately.
-            let _ = g.shutdown(std::net::Shutdown::Both);
-            *guard = None;
-        }
-    }
+    writer.send(tag, json);
 }
 
 /// An input event (tag 0) for the selected clone.

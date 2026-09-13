@@ -41,6 +41,7 @@ use viewer_core::{auto_lock, config, forward};
 // Cross-window drag routing is shared with the native macOS viewer: one copy of the geometry,
 // so a fix to how a drag crosses the seam lands in both clients at once.
 use viewer_core::drag_route::{route_drag, Screen};
+use viewer_core::outbound::Writer;
 mod glunpack;
 mod headless;
 mod terminal;
@@ -57,8 +58,7 @@ mod pointer_lock;
 mod pointer_lock;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod pointer_lock {
-    use std::net::TcpStream;
-    use std::sync::{Arc, Mutex};
+    use viewer_core::outbound::Writer;
 
     use gtk4::gdk;
 
@@ -66,7 +66,7 @@ mod pointer_lock {
     pub struct PointerLock;
 
     impl PointerLock {
-        pub fn new(_display: &gdk::Display, _writer: Arc<Mutex<Option<TcpStream>>>) -> Option<Self> {
+        pub fn new(_display: &gdk::Display, _writer: Writer) -> Option<Self> {
             None
         }
         pub fn is_engaged(&self) -> bool {
@@ -85,7 +85,7 @@ mod vk_evdev;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::TcpStream;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -275,8 +275,6 @@ fn admit_au(src: &AppSrc, mid: u32, au: &[u8]) -> bool {
     true
 }
 
-/// Input/clipboard write half (None while disconnected).
-type Writer = Arc<Mutex<Option<TcpStream>>>;
 /// The server `host:port`, shared GTK main thread (Settings dialog writes) → net
 /// thread (reads on each reconnect). Editable at runtime; persisted via [`config`].
 type ServerAddr = Arc<Mutex<String>>;
@@ -340,7 +338,7 @@ fn run_gui() -> Result<()> {
     // edits it live); `RMNG_VIDEO` only seeds the default on first run.
     let addr: ServerAddr = Arc::new(Mutex::new(config::load().server_addr));
     let aus: VideoAus = Arc::new(Mutex::new(VecDeque::new()));
-    let writer: Writer = Arc::new(Mutex::new(None));
+    let writer = Writer::default();
     // Port-forward manager: reports status back as port-1 tag-2 frames via `writer`.
     let fwd_mgr: Arc<forward::ForwardManager> = {
         let writer = writer.clone();
@@ -382,8 +380,10 @@ fn run_gui() -> Result<()> {
                         if let Err(e) = wire::net::set_keepalive(&rd) {
                             tracing::warn!("keepalive setup failed: {e}");
                         }
-                        if let Ok(w) = rd.try_clone() {
-                            *writer.lock().unwrap() = Some(w);
+                        if let Err(e) = rd.try_clone().and_then(|w| writer.connect(w)) {
+                            tracing::warn!("cannot start viewer writer: {e}");
+                            std::thread::sleep(Duration::from_secs(1));
+                            continue;
                         }
                         tracing::info!("connected to {cur}");
                         // Buffer the read half: one recv fills the buffer so the per-frame
@@ -539,7 +539,7 @@ fn run_gui() -> Result<()> {
                                 q.push_back((mid, au));
                             }
                         }
-                        *writer.lock().unwrap() = None;
+                        writer.disconnect();
                         tracing::info!("disconnected; retrying (server force-IDRs on reconnect)");
                     }
                     Err(e) => tracing::warn!("connect {cur} failed: {e}"),
@@ -1419,7 +1419,7 @@ fn make_startup_window(app: &gtk4::Application, addr: &ServerAddr, writer: &Writ
             if weak.upgrade().is_none() {
                 return glib::ControlFlow::Break;
             }
-            let text = if writer.lock().unwrap().is_some() {
+            let text = if writer.is_connected() {
                 "Connected — waiting for video…".to_string()
             } else {
                 format!("Connecting to {}…", addr.lock().unwrap())
@@ -1492,9 +1492,7 @@ pub(crate) fn show_server_addr_dialog(parent: &gtk4::ApplicationWindow, addr: &S
             }
             // Drop the current connection so the net thread's blocking read returns; it
             // then loops, re-reads the shared address, and connects to the new server.
-            if let Some(s) = writer.lock().unwrap().as_ref() {
-                let _ = s.shutdown(std::net::Shutdown::Both);
-            }
+            writer.disconnect();
             dialog.close();
         }
     };
@@ -2335,7 +2333,7 @@ fn serve_request(clipboard: &gdk::Clipboard, writer: &Writer, r: ClipboardReques
             tracing::debug!(target: "clip", "serving serial={serial} mime={mime} ({} bytes)", bytes.len());
             let data = ClipboardData { serial, mime_type: mime, bytes };
             if let Ok(json) = serde_json::to_string(&ClipboardMsg::Data(data)) {
-                send_tagged(&writer, 1, json);
+                writer.send_clipboard_data(&json);
             }
         }
     };
@@ -2367,29 +2365,7 @@ fn serve_request(clipboard: &gdk::Clipboard, writer: &Writer, r: ClipboardReques
 
 /// viewer → server framing: `[u8 tag][u32be len][json]`. tag 0 = input, 1 = clipboard.
 fn send_tagged(writer: &Writer, tag: u8, json: String) {
-    // Hold one guard for the whole op: a second `writer.lock()` on the error path
-    // below would self-deadlock (the guard from this `if let` is still alive).
-    let mut guard = writer.lock().unwrap();
-    if let Some(g) = guard.as_mut() {
-        // One contiguous `[tag][u32be len][json]` write: with TCP_NODELAY, three separate
-        // write_all calls can emit three tiny segments per input event, adding round-trip
-        // jitter on a real link. Coalescing → one syscall, one segment.
-        let body = json.as_bytes();
-        let mut frame = Vec::with_capacity(1 + 4 + body.len());
-        frame.push(tag);
-        frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        frame.extend_from_slice(body);
-        if g.write_all(&frame).is_err() {
-            // Dead link surfaced on the write side (TCP_USER_TIMEOUT bounds this to
-            // ~20 s). Shut the shared socket down so the net thread's parked read_exact
-            // returns now and the reconnect loop starts immediately, instead of waiting
-            // out the read-side keepalive window; then drop the write half. (The reader
-            // owns a `try_clone` of the same kernel socket, so this unblocks it too —
-            // the same mechanism the Settings dialog uses to repoint live.)
-            let _ = g.shutdown(std::net::Shutdown::Both);
-            *guard = None;
-        }
-    }
+    writer.send(tag, &json);
 }
 
 fn send(writer: &Writer, json: String) {

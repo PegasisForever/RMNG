@@ -1,7 +1,8 @@
 //! `viewer-core` — the toolkit-free pieces every RMNG viewer front-end shares: the persisted
 //! config, the auto pointer-lock policy, the port-forward listeners, the Carbon kVK → evdev
 //! table, how a macOS modifier's up/down state is read from an event's flag word, and which
-//! monitor a drag that left its window's edge has been pulled onto.
+//! monitor a drag that left its window's edge has been pulled onto, and the bounded outgoing
+//! socket writer shared by UI and pointer-lock threads.
 //! The GTK viewer (`crates/viewer`) and the native macOS viewer (`crates/viewer-macos`)
 //! both build on it; nothing here touches a window, a socket beyond plain `std::net`, or a
 //! platform framework.
@@ -12,4 +13,5 @@ pub mod drag_route;
 pub mod forward;
 pub mod kvk_evdev;
 pub mod kvk_modifiers;
+pub mod outbound;
 pub mod terminal;

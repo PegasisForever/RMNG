@@ -161,7 +161,7 @@ pub fn run() -> Result<()> {
 
     // Port-forward manager (shared across reconnects). Its status closure frames each
     // update as a port-1 tag-2 `ForwardStatusMsg` over the current write half.
-    let writer: crate::Writer = Arc::new(Mutex::new(None));
+    let writer = crate::Writer::default();
     let fwd_mgr: Arc<ForwardManager> = {
         let writer = writer.clone();
         let report: StatusReport = Arc::new(move |msg: ForwardStatusMsg| {
@@ -194,8 +194,10 @@ pub fn run() -> Result<()> {
             Ok(mut stream) => {
                 stream.set_nodelay(true).ok();
                 // Write half for viewer→server frames (forward status, tag 2).
-                if let Ok(w) = stream.try_clone() {
-                    *writer.lock().unwrap() = Some(w);
+                if let Err(e) = stream.try_clone().and_then(|w| writer.connect(w)) {
+                    tracing::warn!("cannot start viewer writer: {e}");
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
                 }
                 tracing::info!("connected; decoding (headless) …");
                 let mut tag = [0u8; 1];
@@ -268,7 +270,7 @@ pub fn run() -> Result<()> {
                         break;
                     }
                 }
-                *writer.lock().unwrap() = None;
+                writer.disconnect();
                 tracing::info!("disconnected; retrying");
             }
             Err(e) => tracing::warn!("connect {addr} failed: {e}"),
