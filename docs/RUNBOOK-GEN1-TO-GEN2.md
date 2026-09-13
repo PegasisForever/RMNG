@@ -41,7 +41,7 @@ largest, has the most rows, and is the only one with rows that cannot migrate (�
 CT 105 also publishes 9002 and 9003 with nothing behind them. Drop them from the new run
 command.
 
-Budget: copy ≈ 30 min (104), 3 h (105), 4 h 30 m (106), plus the per-clone migration in §5.6.
+Budget: copy ≈ 30 min (104), 3 h (105), 4 h 30 m (106), plus the per-clone migration in §5.7.
 
 ---
 
@@ -106,6 +106,17 @@ explicitly.
 
 `PATH` needs no special handling. It used to, with per-shell rc drop-ins, only so fish would
 find a node installed by nvm inside the home. Put node in the preset Dockerfile instead.
+
+One gap to know about: a bare `docker exec` does not run PAM, so it gets none of this — that
+is the one entry path `/etc/environment` does not reach on its own. The server's own exec
+handles it the same way you should:
+
+```sh
+docker exec -u rmng <clone> bash -lc 'set -a; . /etc/environment; set +a; <cmd>'
+```
+
+Without the source line a debugging `docker exec` sees an empty environment and can mislead
+you into thinking the delivery failed. The agent, SSH and the desktop are all fine.
 
 This needs a server built after the preset-vars change. The image logs its revision on boot —
 `docker logs rmng | grep "running image revision"` — and the Settings preset card shows an
@@ -481,7 +492,7 @@ ssh root@10.0.0.100 'pct push 205 /root/ct205-config.py /root/ct205-config.py
 ```
 
 Read the printed Dockerfile before moving on — it decides the image every clone is about to be
-rebuilt on, and after §5.6 has run, changing it costs a rebase of the whole fleet. The printed
+rebuilt on, and after §5.7 has run, changing it costs a rebase of the whole fleet. The printed
 var names are the ones each clone will get in `/etc/environment`.
 
 The default `homesParent` is `tank/rmng/homes`, which fits nobody here; a first create with
@@ -501,7 +512,51 @@ ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
 
 Every image, container and volume from §5.1 must be listed.
 
-### 5.6 Boot the gen-2 server
+### 5.6 Build the preset images BEFORE the server boots
+
+The gen-2 server files its `Migrate` ops the moment it starts, so there is no window to press
+Rebuild in the UI — the first clone of each preset ends up pulling the template and building
+the image while it migrates. That is where "the first clone takes several minutes longer"
+comes from, and it puts a network pull inside the window: a slow or failed pull is then a
+failed migration rather than a step you retry on its own.
+
+Build them here instead, with the server still stopped. The derived tag is a pure function of
+the Dockerfile text, so a tag built by hand is the exact one the migration looks for, and it
+finds it already present.
+
+```python
+import json, subprocess
+
+def fnv1a64(b):
+    h = 0xcbf29ce484222325
+    for x in b:
+        h ^= x
+        h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+c = json.load(open("/var/lib/docker/volumes/rmng-data/_data/config.json"))
+for p in c["presets"]:
+    text = p["dockerfile"]
+    tag = "rmng-p-%016x" % fnv1a64(text.rstrip().encode())   # matches wire::dockerfile_tag
+    print("==", p["name"], "->", tag)
+    subprocess.run(["docker", "build", "--pull", "-t", tag, "-"],
+                   input=text.encode(), check=True)
+```
+
+```sh
+ssh root@10.0.0.100 'pct push 205 /root/ct205-prebuild.py /root/ct205-prebuild.py
+                     pct exec 205 -- python3 /root/ct205-prebuild.py
+                     pct exec 205 -- docker images --format "{{.Repository}}" | grep rmng-p'
+```
+
+`--pull` on purpose: this is the one moment a fresh base is wanted, and it is outside the
+window's critical path. `rstrip()` matches the `trim_end()` the server canonicalizes with —
+without it a trailing newline gives a different tag and the migration builds anyway.
+
+Check the tag it prints against the one a clone ends up on (§7.1 `baseTag`). If they differ,
+the text changed between the two steps and the build was wasted, not wrong.
+
+### 5.7 Boot the gen-2 server
 
 The old run flags plus the homes bind. `:shared` propagation is load-bearing — the datasets
 are created from inside this container, and only a shared bind propagates their mounts into
@@ -540,16 +595,16 @@ vanished from the UI. The run ends with one summary line:
 gen-2 migration: 6 passed, 2 failed (haoran-rep-norow-arch, haoran-rep-norow-live), 3 started
 ```
 
-**The first clone takes several minutes longer than the rest** while the daemon pulls the
-current published template. Every later clone reuses the tag — all gen-1 presets resolve to
-the same default Dockerfile text, so the whole fleet shares one build. Do not restart
-anything while it looks stuck.
+With §5.6 done there is no build in here at all: every clone finds its tag already present
+and goes straight to copying its home. Skip §5.6 and the first clone of each preset stalls for
+several minutes while the daemon pulls the template and builds — do not restart anything while
+it looks stuck.
 
 If the server is killed mid-migration, the half-built dataset is orphaned and the next pass
 fails with `cannot create '<parent>/<id>': dataset already exists`. That failure cleans up
 after itself and the retry succeeds; `zfs destroy <parent>/<id>` clears it directly.
 
-### 5.7 Restart the control-server once, after the last op
+### 5.8 Restart the control-server once, after the last op
 
 **Required, not hygiene.** The `data/hosts/<id>` symlinks — read by the `clones` SMB share,
 the ledger, the token scanner and the stuck detector — are written by a one-shot boot pass
@@ -749,6 +804,33 @@ the way out.
 
 ---
 
+### 7.7 Account pools — check every account is in one
+
+The gen-2 config fold can leave the pool list holding one empty `Default` while every imported
+account sits outside it. CT 204 came up exactly that way, and it is not cosmetic: with no
+account in any pool the rotator has nothing to choose from and logs
+`rotate: pool 'auto' has no under-cap account` for every clone, forever.
+
+```sh
+ssh root@10.0.0.100 'pct exec 205 -- python3 - <<PY
+import json
+d = "/var/lib/docker/volumes/rmng-data/_data/data"
+c = json.load(open("/var/lib/docker/volumes/rmng-data/_data/config.json"))
+pooled = {e for g in c["groups"] for e in g["accounts"]}
+for side in ("claude", "codex"):
+    rows = json.load(open(f"{d}/{side}-accounts.json"))
+    rows = rows if isinstance(rows, list) else rows.get("accounts", [])
+    loose = sorted({r["email"] for r in rows} - pooled)
+    print(side, "ungrouped:", loose or "none")
+PY'
+```
+
+Fix it in Settings by adding the listed addresses to a pool. One pool covers both providers —
+membership is by email, so an address imported on both sides needs one entry, not two.
+
+`grep "rotate\[auto\]" ` in the server log afterwards: a working pool logs real moves
+(`ivan-dev-705 a@x -> b@y`), not the `no under-cap account` line.
+
 ## 8. After the window
 
 ### 8.1 Tell people the new address
@@ -777,13 +859,71 @@ ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
 Do not `docker image prune -a`: it would take `pegasis0/rmng-template:latest` and the derived
 tag out from under the running clones.
 
-### 8.3 Inner Docker re-pulls
+### 8.3 Inner Docker re-pulls, and the `medi` compose stack
 
 Each clone's inner Docker starts empty — the `rmng-dind-*` and `rmng-ctd-*` volumes are
 deleted during migration. The first inner build or `docker run` in each clone re-pulls
 through the `rmng-registry` mirror. Expect one slow first build per clone.
 
----
+**The `medi` clones run a compose stack, and it is not lost.** Both halves live in the home,
+which the migration carries across untouched:
+
+    ~/Dev/docker-compose.yaml     the stack (mysql, redis, minio, redisinsight, and the
+                                  research/voice services)
+    ~/Dev/dev_data/               its bind-mounted data — mysql, redis and s3 state
+
+Only the *images* go, with the dind volume. So there is nothing to rebuild and nothing to
+re-copy: bring the existing file back up, per clone that used it.
+
+```sh
+ssh root@10.0.0.100 'pct exec 205 -- docker exec -u rmng <clone> bash -lc "
+  cd ~/Dev && docker compose up -d && docker compose ps"'
+```
+
+Ports are published inside the clone, so several clones running it at once do not collide.
+`research-core` pulls from `mediumai.azurecr.io`, which needs a registry login the mirror
+cannot supply — expect that one service to fail on a clone that has not logged in, and the
+rest of the stack to come up regardless.
+
+Do not run this for every clone by reflex. Check `~/Dev/dev_data` exists first; a clone that
+never used the stack should not have one created.
+
+### 8.4 Remove nvm — after the rebase, not before
+
+The clone homes carry a whole nvm stack that predates the image having node: `~/.nvm`
+(≈150 MB on CT 104, ≈580 MB on CT 105), a `fisher` plugin set (`fabioantunes/fish-nvm`, plus
+`edc/bass`, which is only there because fish-nvm needs it), and three lines in `~/.bashrc`.
+
+The fish plugin is the part that matters. It installs `node`, `npm`, `npx` and `yarn`
+**functions**, and a fish function shadows the real binary — so a clone keeps resolving node
+through nvm no matter what the image ships.
+
+**Order is not optional.** node comes from the image (§1.1), and the home is what has nvm, so
+a clone stripped before it is rebased has no node at all. Rebase every clone onto the preset
+image first, confirm `/usr/bin/node` answers, and only then remove.
+
+```sh
+ssh root@10.0.0.100 'pct exec 205 -- docker exec -u rmng <clone> bash -lc "command -v node"'
+# must print /usr/bin/node, not /home/rmng/.nvm/...
+```
+
+Removal, per home — the merged view, so it works on stopped and archived clones too:
+
+```sh
+d=/srv/rmng-homes/.merged/<clone>
+rm -rf "$d/.nvm"
+rm -f "$d"/.config/fish/functions/{nvm,node,npm,npx,yarn,__nvm_run,nvm_alias_command,nvm_alias_function,bass,fisher}.fish
+rm -f "$d"/.config/fish/functions/__bass.py
+rm -f "$d"/.config/fish/completions/{nvm,fisher}.fish
+rm -f "$d/.config/fish/fish_plugins"
+sed -i '/NVM_DIR/d; /nvm.sh/d; /nvm bash_completion/d' "$d/.bashrc"
+sed -i '/_fisher_/d' "$d/.config/fish/fish_variables"
+```
+
+`fish_variables` holds fisher's bookkeeping (`_fisher_plugins` and one `_fisher_<owner>_files`
+per plugin). Leaving it behind makes a future `fisher` think the plugins are still installed.
+
+A shell that is already open keeps the functions it loaded; they go on the next one.
 
 ## 9. Rollback
 
