@@ -161,7 +161,15 @@ pub fn clone_dataset(parent: &str, snapshot: &str, new_id: &str) -> Result<Strin
     Ok(dst)
 }
 
-/// `zfs destroy [-r] <parent>/<clone-id>`.
+/// `zfs destroy [-r] <parent>/<clone-id>`, then drop the mountpoint directory.
+///
+/// ZFS creates `<HOMES_DIR>/<clone-id>` to mount the dataset on but does not remove it on
+/// destroy, so without this every deleted clone left an empty directory behind in the
+/// homes parent — visible for good in `smb://<host>/clones` and in every clone's
+/// `/home/rmng/clones`. `remove_dir` is non-recursive on purpose: it can only succeed on
+/// an empty directory, so a destroy that silently left data behind is kept, not deleted.
+/// Best-effort — a leftover directory is cosmetic, and failing the delete over one would
+/// be worse.
 pub fn destroy(parent: &str, clone_id: &str, recursive: bool) -> Result<()> {
     let ds = dataset_name(parent, clone_id);
     check_dataset(parent, &ds)?;
@@ -169,6 +177,11 @@ pub fn destroy(parent: &str, clone_id: &str, recursive: bool) -> Result<()> {
         run(&["destroy", "-r", &ds])?;
     } else {
         run(&["destroy", &ds])?;
+    }
+    if let Err(e) = std::fs::remove_dir(dataset_dir(clone_id)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(target: "zfs", "keeping mountpoint dir for {clone_id}: {e}");
+        }
     }
     Ok(())
 }

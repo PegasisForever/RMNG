@@ -76,9 +76,17 @@ fn work_dir(dataset: &Path) -> PathBuf {
     dataset.join(WORK_DIR)
 }
 
+/// The directory holding every clone's merged view, one entry per clone with a live
+/// home. Bound into every clone at `/home/rmng/clones` (see [`crate::docker::CreateSpec::browse_root`])
+/// and the target of every `<data_dir>/hosts` link the SMB share serves, so all three
+/// browse paths show one directory.
+pub fn merged_root(homes: &str) -> PathBuf {
+    Path::new(homes).join(MERGED_DIR)
+}
+
 /// The merged view bound at `/home/rmng`.
 pub fn merged_dir(homes: &str, id: &str) -> PathBuf {
-    Path::new(homes).join(MERGED_DIR).join(id)
+    merged_root(homes).join(id)
 }
 
 /// Direct filesystem IO into a clone's live home (the merged view). The server holds
@@ -567,6 +575,22 @@ mod tests {
         assert_eq!(
             skeleton_dir("/srv/rmng-homes", "sha256:ab"),
             Path::new("/srv/rmng-homes/.skeleton/sha256-ab")
+        );
+    }
+
+    /// The browse root bound at `/home/rmng/clones` is `.merged`, never the homes
+    /// parent. Binding the parent showed each clone its siblings' ZFS dataset dirs —
+    /// `~/clones/<id>/upper` and `/work` instead of the home — and kept showing the
+    /// leftover mountpoint dir of every deleted clone.
+    #[test]
+    fn the_browse_root_is_the_merged_dir_not_the_homes_parent() {
+        let homes = "/srv/rmng-homes";
+        assert_eq!(merged_root(homes), Path::new("/srv/rmng-homes/.merged"));
+        assert_ne!(merged_root(homes), Path::new(homes));
+        // Every clone's home sits directly under it, so the bind shows homes.
+        assert_eq!(
+            merged_dir(homes, "pega-x"),
+            merged_root(homes).join("pega-x")
         );
     }
 

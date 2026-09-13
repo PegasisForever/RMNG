@@ -873,7 +873,9 @@ pub async fn clone_container_gen2_from_tag(
         memory_mb: cfg.docker.clone_memory_mb,
         sock_source: sock_source_dir(app).await,
         home_dir: Some(merged.to_string_lossy().into_owned()),
-        homes_dir: crate::zfs::HOMES_DIR.to_string(),
+        browse_root: crate::home_overlay::merged_root(crate::zfs::HOMES_DIR)
+            .display()
+            .to_string(),
         // Absolute host path (the pool lives under the homes parent, which the daemon
         // sees through the shared homes bind); ensured at server startup.
         shared_dir: crate::shared::shared_host_dir(),
@@ -1156,7 +1158,13 @@ async fn migrate_one_inner(
             tokio_util::io::StreamReader::new(stream),
             handle,
         );
-        extract_home_tar(CountingReader { inner: reader, tally }, &dest)
+        extract_home_tar(
+            CountingReader {
+                inner: reader,
+                tally,
+            },
+            &dest,
+        )
     })
     .await
     .context("the home extract task did not finish")??;
@@ -1651,14 +1659,18 @@ mod tests {
         dir.set_gid(1000);
         dir.set_entry_type(tar::EntryType::Directory);
         dir.set_cksum();
-        builder.append_data(&mut dir, "rmng/", std::io::empty()).unwrap();
+        builder
+            .append_data(&mut dir, "rmng/", std::io::empty())
+            .unwrap();
         let mut file = tar::Header::new_gnu();
         file.set_size(body.len() as u64);
         file.set_mode(0o644);
         file.set_uid(1000);
         file.set_gid(1000);
         file.set_cksum();
-        builder.append_data(&mut file, "rmng/owned", &body[..]).unwrap();
+        builder
+            .append_data(&mut file, "rmng/owned", &body[..])
+            .unwrap();
         let archive = builder.into_inner().unwrap();
 
         let dest = std::env::temp_dir().join(format!("rmng-own-{}", std::process::id()));
@@ -1667,7 +1679,11 @@ mod tests {
         extract_home_tar(&archive[..], &dest.to_string_lossy()).unwrap();
         use std::os::unix::fs::MetadataExt;
         let md = std::fs::metadata(dest.join("owned")).unwrap();
-        assert_eq!((md.uid(), md.gid()), (1000, 1000), "archived owner must survive");
+        assert_eq!(
+            (md.uid(), md.gid()),
+            (1000, 1000),
+            "archived owner must survive"
+        );
         let _ = std::fs::remove_dir_all(&dest);
     }
 
@@ -1687,7 +1703,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dest);
         std::fs::create_dir_all(&dest).unwrap();
         let err = extract_home_tar(&archive[..], &dest.to_string_lossy()).unwrap_err();
-        assert!(format!("{err:#}").contains("outside the dataset"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("outside the dataset"),
+            "{err:#}"
+        );
         let _ = std::fs::remove_dir_all(&dest);
     }
 

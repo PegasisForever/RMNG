@@ -296,10 +296,22 @@ pub struct CreateSpec {
     /// bound at `/home/rmng`. Always `Some` from the create path; `None` mounts no home
     /// (only meaningful for flows that bring their own).
     pub home_dir: Option<String>,
-    /// Gen-2 homes parent dir on the CT (e.g. `/srv/rmng-homes`), bound at
+    /// The merged-view root on the CT (e.g. `/srv/rmng-homes/.merged`), bound at
     /// `/home/rmng/clones` so every clone sees every home. Always mounted alongside
     /// `home_dir`.
-    pub homes_dir: String,
+    ///
+    /// This is the `.merged` root, NOT the homes parent: the parent holds one ZFS
+    /// *dataset* dir per clone, whose contents are the overlay's `upper`/`work` pair
+    /// rather than a home, and it keeps the mountpoint dir of any clone whose dataset
+    /// was destroyed. `.merged` holds exactly one entry per clone with a live home, and
+    /// each entry IS that home.
+    ///
+    /// It is the same view `smb://<host>/clones` serves, and deliberately not the same
+    /// *directory*: that share's root (`<data_dir>/hosts`, see [`crate::homes`]) is a
+    /// farm of symlinks into `<homes>/.merged`, and those targets are absolute paths
+    /// that resolve only inside the server container. Bound into a clone the farm would
+    /// dangle whole; `.merged` is what every one of its links points into.
+    pub browse_root: String,
     /// Shared pool dir on the CT (absolute host path, e.g.
     /// `/srv/rmng-homes/.shared`), bound at `/home/rmng/shared`. Always mounted.
     pub shared_dir: String,
@@ -1543,10 +1555,22 @@ impl DockerCtl {
             });
             mounts.push(Mount {
                 target: Some("/home/rmng/clones".to_string()),
-                source: Some(spec.homes_dir.clone()),
+                source: Some(spec.browse_root.clone()),
                 typ: Some(MountTypeEnum::BIND),
                 // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
                 // copies straight across any home. No `read_only` here.
+                //
+                // `rslave` is load-bearing. Every sibling's home is its own overlay
+                // mount UNDER this source, and a default (private) bind copies only
+                // the mounts that exist the moment the container starts: a clone
+                // created later shows up as an empty directory here, forever. As a
+                // slave of the CT's `<homes>` peer group this view tracks the CT —
+                // homes appear as clones are created and vanish as they are deleted —
+                // while mounts made inside the clone still never escape to the CT.
+                bind_options: Some(MountBindOptions {
+                    propagation: Some(MountBindOptionsPropagationEnum::RSLAVE),
+                    ..Default::default()
+                }),
                 ..Default::default()
             });
         }

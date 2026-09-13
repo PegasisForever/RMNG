@@ -1425,7 +1425,9 @@ actually migrated:
   `LINEAR_API_KEY` and `ANTHROPIC_MODEL`, and nothing else.
 - The container binds were the gen-2 shape: `.merged/<id> → /home/rmng`,
   `/srv/rmng-homes → /home/rmng/clones`, `.shared → /home/rmng/shared`, plus the fresh
-  `rmng-dind-*` / `rmng-ctd-*` volumes.
+  `rmng-dind-*` / `rmng-ctd-*` volumes. (That middle bind was wrong and this rehearsal
+  did not catch it — it browses the ZFS dataset dirs, not the homes. Builds after this
+  runbook bind `/srv/rmng-homes/.merged` with `rslave`; see GEN2-CLONES.md §3.6.)
 
 **Fake accounts do exercise the token re-push.** The old rehearsal note said they could
 not. They can, with two properties:

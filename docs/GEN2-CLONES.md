@@ -91,7 +91,7 @@ source and makes rebase a swap of the lower under the same upper.
 The mounts die with a CT reboot (host mounts outlive containers, not reboots), so boot
 re-establishes every clone's merged view (`home_overlay::remount_all`).
 
-Three further binds beyond gen-1: `<homes>` at `/home/rmng/clones` (§3.6),
+Three further binds beyond gen-1: `<homes>/.merged` at `/home/rmng/clones` (§3.6),
 `<homes>/.shared` at `/home/rmng/shared`, and the unchanged per-clone `rmng-dind-*` /
 `rmng-ctd-*` volumes. Everything else (privileged, cpu/mem, shm, `rmng-sock`, lxcfs
 binds, `rmng` bridge) is unchanged. Record the base image tag plus dataset name on the
@@ -152,12 +152,25 @@ Point `data/hosts/<id>` at the clone's MERGED view (`<homes>/.merged/<id>`) for 
 clone. Same SMB share, works while stopped. The `/proc/<pid>/root` reader is deleted
 with the rest of gen-1.
 
-Every clone also mounts the homes parent dir at `/home/rmng/clones`, so any clone
-reaches any other home at `~/clones/<id>`. One mount per clone, new ids appear
-automatically, deleted ids vanish with their dataset. This replaces `cp`/`sync`:
-read or copy straight across, no server round-trip. Accepted: every clone can read
-every home including tokens, and each clone also sees itself at `~/clones/<self>`.
-Keep an empty `clones` dir in the dataset so the mountpoint always exists.
+Every clone also mounts `<homes>/.merged` at `/home/rmng/clones`, so any clone reaches
+any other home at `~/clones/<id>`. This replaces `cp`/`sync`: read or copy straight
+across, no server round-trip. Accepted: every clone can read every home including
+tokens, and each clone also sees itself at `~/clones/<self>`. Keep an empty `clones`
+dir in the dataset so the mountpoint always exists.
+
+Mount the `.merged` root, not the homes parent. The parent holds one ZFS *dataset* dir
+per clone, and a dataset dir contains the overlay's `upper`/`work` pair, not a home —
+mounting it shows `~/clones/<id>/upper/...` instead of `~/clones/<id>/...`, and keeps
+showing the mountpoint dir of every clone whose dataset has been destroyed. `.merged`
+holds exactly one entry per clone with a live home, and each entry IS that home: the
+same set `data/hosts` links to, so the SMB share and this bind show one view.
+
+The bind must be `rslave`. Each sibling home is its own overlay mount *under* the
+source, and Docker's default private bind copies only the mounts that exist when the
+container starts: a clone created later appears as an empty directory and stays empty
+for the life of the container. As a slave of the CT's `<homes>` peer group the view
+tracks the CT — homes appear as clones are created, vanish as they are deleted — while
+mounts made inside a clone still never escape to the CT.
 
 ## 4. Migration (one shot, per CT)
 
