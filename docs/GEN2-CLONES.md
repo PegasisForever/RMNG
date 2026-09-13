@@ -65,8 +65,8 @@ push goes over SMB. Partial-dir copy has no replacement: fork takes the whole ho
   `.skeleton/`, `.shared/` and `.merged/` (plain dirs in the parent), and by every
   fork. Create the parent with `dedup=blake3` and leave `compression`/`recordsize`
   alone: dedup matches blocks as written, so a different compression algorithm matches
-  nothing, and dedup covers only blocks written after it is switched on. Full
-  reasoning and measurements: `RUNBOOK-GEN1-TO-GEN2.md` §3.2a.
+  nothing, and dedup covers only blocks written after it is switched on.
+  `RUNBOOK-GEN1-TO-GEN2.md` §3.1 has the create command.
 - The rmng container bind-mounts the homes dir shared
   (`-v /srv/rmng-homes:/srv/rmng-homes:shared`). LOAD-BEARING: datasets are
   created from inside that container, and only a shared bind propagates their
@@ -214,8 +214,8 @@ Stage 4 — deleting the gen-1 code — happens after a clean pass on all three 
 
 ## 5. Prerequisites (in order)
 
-1. Rehearse on SPARE CTs, never the live CT first. The recipe and the three rounds it
-   was run through are in [RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md) §9.
+1. Rehearse on SPARE CTs, never the live CT first. A replica must mirror the source CT's
+   lxcfs state, or it proves less than it appears to.
 2. Create the homes dataset, mount it into the CT, smoke-test snapshot/clone/destroy
    timing from inside the CT.
 3. Land the store dataset plus base-tag fields, then create/fork/rebase/delete for gen-2.
