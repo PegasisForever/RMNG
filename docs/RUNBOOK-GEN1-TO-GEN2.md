@@ -8,9 +8,15 @@ clone keeps it on a ZFS dataset outside the container. The new control-server ca
 gen-1 clones, so each CT gets one window: build a new privileged CT, move the Docker state
 into it, start the new server, and let it rewrite every clone.
 
-**Status.** CT 104 is done — it is now CT 204 (`ivan-rmng`, 10.0.0.125). CT 105 and CT 106
-are outstanding. One item is still open on CT 204: its `tailscale serve` config was not
-restored (§6.3).
+**Status.** CT 104 is done — it is now CT 204 (`ivan-rmng`, LAN 10.0.0.235, tailnet
+100.116.208.33 / `ivan-rmng.tail8d43a5.ts.net`), migrated 2026-09-13 on
+`pegasis0/rmng:latest` = `1c12458`, 8 of 8 clones passed. CT 105 and CT 106 are outstanding.
+One item is open on CT 204: `tailscale serve` is not set, because Serve is disabled for that
+tailnet and enabling it needs a browser (§6.3). The dashboard answers on both addresses
+meanwhile.
+
+CT 104 itself is stopped, `onboot 0`, docker and tailscale disabled, snapshot `pre-gen2-redo`,
+and is the rollback (§9).
 
 **Order: CT 104, then CT 105, then CT 106.** Smallest first; CT 106 last because it is the
 largest, has the most rows, and is the only one with rows that cannot migrate (§3.4).
@@ -19,7 +25,7 @@ largest, has the most rows, and is the only one with rows that cannot migrate (�
 
 | | CT 104 → 204 | CT 105 → 205 | CT 106 → 206 |
 | --- | --- | --- | --- |
-| IP | 10.0.0.206 | 10.0.0.15 | 10.0.0.180 |
+| IP of the OLD CT | 10.0.0.206 | 10.0.0.15 | 10.0.0.180 |
 | rootfs used | 101 GB | 612 GB | 917 GB |
 | Docker | 29.7.2 / containerd.io 2.3.3 | 29.6.1 / containerd.io 2.2.5 | 29.6.1 / containerd.io 2.2.5 |
 | clone rows | 8 | 30 | 104 |
@@ -134,14 +140,26 @@ ssh root@10.0.0.100 'zpool list -o name,size,alloc,free,cap,dedup rpool'
 Dedup makes the copy cheap in practice — CT 104's 98 GB grew the pool by 24 GiB — but only
 when dedup is on **before** the write. §3.1 and §5.2 set it at the two moments that matter.
 
-### 2.3 Raise the host inotify limit
+### 2.3 Raise the host inotify limit — and persist it
 
-A CT that exhausts `fs.inotify.max_user_watches` will not finish booting.
+A CT that exhausts the host's inotify budget will not finish booting. The failure names
+neither inotify nor the limit: `systemd-networkd` exits `code: 28 (No space left on device)`,
+restarts five times, gives up, and the CT comes up with **no IP at all**. Nothing is out of
+disk.
 
 ```sh
 ssh root@10.0.0.100 'sysctl -w fs.inotify.max_user_watches=2000000
-  echo fs.inotify.max_user_watches=2000000 > /etc/sysctl.d/99-rmng-inotify.conf'
+  sysctl -w fs.inotify.max_user_instances=1048576
+  printf "fs.inotify.max_user_watches=2000000\nfs.inotify.max_user_instances=1048576\n" \
+    > /etc/sysctl.d/99-rmng-inotify.conf'
 ```
+
+Write the file, not just the live value — this host was found back at the 65536 default with
+no `/etc/sysctl.d` entry, so a `sysctl -w` alone had been lost. Check
+`sysctl fs.inotify.max_user_watches` before every window; 14 running CTs is enough to hit it.
+
+Recovery, if a CT is already stuck this way: raise the limit, then
+`pct exec <id> -- systemctl reset-failed && systemctl restart systemd-networkd`. No reboot.
 
 ### 2.4 Delete the container-less rows (CT 106 only) — not optional
 
@@ -160,8 +178,15 @@ curl -s -XPOST http://<new-ct-ip>:9000/api/delete \
 
 ### 2.5 Write the preset Dockerfiles
 
-Decide the content now (§1.1, §1.2). Gen-1 presets have no Dockerfile field, so the text can
-only be set after the new server boots — but every clone builds from it during the window.
+Decide the content now (§1.1, §1.2). A gen-1 preset has no Dockerfile field, but the gen-2
+server reads one straight out of `config.json` — so §5.4 writes it into the moved file while
+the server is still stopped, and the migration then builds every clone from it in the same
+pass.
+
+Do not put this off until after the window. `migrate_one` resolves the image through
+`preset_dockerfile(row.presetName)`; if the field is still empty the whole fleet migrates onto
+the bare `FROM pegasis0/rmng-template:latest` default, and putting the vars back afterwards
+costs a rebase and a rebuild of every clone.
 
 ---
 
@@ -225,6 +250,16 @@ render node is not optional — the setup wizard requires it and the video plane
 
 `10:249` is the ZFS device node; use whatever `ls -l /dev/zfs` printed. Do **not** bind-mount
 the host's `/dev/zfs` with `lxc.mount.entry` — that breaks nested container mount joins.
+
+Then turn on dedup, before the CT is started and before anything is written to it:
+
+```sh
+ssh root@10.0.0.100 'zfs set dedup=blake3 rpool/data/subvol-205-disk-0
+                     zfs get -o property,value,source dedup,compression rpool/data/subvol-205-disk-0'
+```
+
+Dedup covers only blocks written after it is on, so the earliest possible moment is the right
+one — that way Docker and its images dedup too, not just the §5.3 copy.
 
 ### 3.3 First boot
 
@@ -310,21 +345,27 @@ file across (see `PROXMOX-LXC.md` §2c) and `systemctl reload docker`.
 
 ---
 
-## 4. Tailscale — release the name
+## 4. Tailscale — stop the old daemon and take its identity
 
-Each CT is its own node on its own tailnet, and the new CT must take the old one's name.
-Tailscale appends `-1` to a name already claimed by a live node, so the old node has to go
+Each CT is its own node on its own tailnet, and the new CT does not re-enrol — it takes over
+the old node (§6.1). Two daemons must never hold one node key at once, so the old one stops
 first. Do this at the same time as §5.1.
 
 ```sh
-ssh root@10.0.0.100 'pct exec 105 -- bash -lc "
+ssh root@10.0.0.100 '
+pct exec 105 -- bash -lc "
   tailscale serve status          # record it — §6.3 puts it back
+  tailscale status --json | head -20   # record the node name and tailnet IP
   tailscale down
-  systemctl disable --now tailscaled
-"'
+  systemctl disable --now tailscaled"
+# the node identity; §6.1 unpacks it into the new CT
+pct exec 105 -- tar cf - --numeric-owner -C /var/lib tailscale > /root/ct105-tailscale.tar
+'
 ```
 
-Leave the node in the tailnet admin console for now; removing it there is part of §7.
+Take the tar **after** the daemon is down, so the state file is not being written as it is
+read. Leave the node in the tailnet admin console — with the identity moved there is nothing
+to remove, and deleting it there would revoke the key the new CT is about to use.
 
 ---
 
@@ -367,12 +408,14 @@ mixes two stores.
 ssh root@10.0.0.100 '
   pct exec 205 -- bash -lc "systemctl stop docker.socket docker containerd
                             rm -rf /var/lib/docker /var/lib/containerd"
-  # Required, and required NOW — dedup covers only blocks written after it is on.
-  zfs set dedup=blake3 rpool/data/subvol-205-disk-0
+  # Set in §3.2. Confirm it, do not discover it here — dedup never applies retroactively.
   zfs get -o property,value,source dedup,compression rpool/data/subvol-205-disk-0
   zpool list -Hp -o alloc rpool          # note this number, compare after §5.3
 '
 ```
+
+`dedup blake3 local` is the only acceptable answer. If it says `off`, the CT has to be rebuilt
+from §3.2 — there is no way to dedup what is already written.
 
 The homes parent got its own `dedup=blake3` in §3.1. These are two separate datasets.
 
@@ -393,25 +436,58 @@ them as the same numbers. No ownership fix step.
 
 `tar` prints `socket ignored` warnings for X11, samba and buildkit sockets. Expected.
 
-### 5.4 Point the config at the homes dataset, and capture the preset vars
+### 5.4 Point the config at the homes dataset, capture the vars, write the Dockerfiles
 
-The old API drops unknown keys, so this cannot be a `PUT`. Edit the moved file with the
-server still stopped — and capture the `vars` in the same pass, because the gen-2 server
-drops that retired field the first time it rewrites `config.json`.
+Three edits to the moved `config.json`, all with the server still stopped. The old API drops
+unknown keys, so none of this can be a `PUT`.
 
-```sh
-ssh root@10.0.0.100 'pct exec 205 -- python3 - <<PY
+Put the script in a file and `pct push` it — a `<<PY` heredoc through `ssh` and `pct exec`
+mangles the quoting.
+
+```python
 import json
-path = "/var/lib/docker/volumes/rmng-data/_data/config.json"
-c = json.load(open(path))
-c["docker"]["homesParent"] = "rpool/rmng-homes-105"
+
+PATH = "/var/lib/docker/volumes/rmng-data/_data/config.json"
+HOMES_PARENT = "rpool/rmng-homes-105"          # the dataset created in §3.1
+
+c = json.load(open(PATH))
+c["docker"]["homesParent"] = HOMES_PARENT
+
+# The gen-2 server drops `vars` the first time it rewrites config.json, so capture it now.
+# §5.8 reads this file back.
 json.dump({p["name"]: p.get("vars", []) for p in c.get("presets", [])},
           open("/root/preset-vars.json", "w"), indent=2)
-json.dump(c, open(path, "w"), indent=2)
+
+def dockerfile_for(entries):
+    lines = ["FROM pegasis0/rmng-template:latest", "",
+             "# Carried across from the gen-1 preset `vars` field, which gen-2 retired."]
+    for e in entries:
+        key, value = e["key"], e["value"]
+        assert '"' not in value and "$" not in value, f"{key} needs quoting by hand"
+        lines.append(f'ENV {key}="{value}"')
+    return "\n".join(lines) + "\n"
+
+for p in c.get("presets", []):
+    p["dockerfile"] = dockerfile_for(p.get("vars", []))
+
+json.dump(c, open(PATH, "w"), indent=2)
 print("homesParent =", c["docker"]["homesParent"])
-print(open("/root/preset-vars.json").read())
-PY'
+for p in c.get("presets", []):
+    print(f"--- {p['name']} ---"); print(p["dockerfile"])
 ```
+
+```sh
+ssh root@10.0.0.100 'pct push 205 /root/ct205-config.py /root/ct205-config.py
+                     pct exec 205 -- python3 /root/ct205-config.py'
+```
+
+A gen-1 `vars` entry is `{"key": ..., "value": ...}`. Print the result and read it before
+moving on — the Dockerfile text decides the image every clone is about to be rebuilt on, and
+after §5.6 has run, changing it costs a rebase of the whole fleet.
+
+Every var becomes an `ENV`, `PATH` included: a Dockerfile `ENV` reaches `docker exec` shells,
+which is the carrier that needs `PATH`. The home file in §5.8 is the other carrier and
+excludes it (§1.2).
 
 The default `homesParent` is `tank/rmng/homes`, which fits nobody here; a first create with
 the wrong parent fails with `no such pool`.
@@ -436,8 +512,14 @@ The old run flags plus the homes bind. `:shared` propagation is load-bearing —
 are created from inside this container, and only a shared bind propagates their mounts into
 dockerd's namespace.
 
+**Rename the moved gen-1 server first.** §5.3 brought the old `rmng` container across with
+everything else, so `docker run --name rmng` would fail with `Conflict. The container name
+"/rmng" is already in use`. Renaming rather than deleting keeps it as the in-CT rollback.
+
 ```sh
 ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
+docker rename rmng rmng-gen1
+docker update --restart=no rmng-gen1        # it must never come back on its own
 docker pull pegasis0/rmng:latest
 docker run -d --name rmng --privileged --init --pid=host --restart unless-stopped \
   -p 445:445 -p 2222:2222 -p 9000:9000 -p 9001:9001 -p 9005:9005 \
@@ -491,11 +573,15 @@ ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
 
 ### 5.8 Restore the preset vars to the agent
 
-Write the values captured in §5.4 into every clone's home, `PATH` excluded (§1.2):
+§5.4 already put every var into the image as an `ENV`, which covers `docker exec` shells. The
+agent runs under `systemd --user`, which ignores the container's `Config.Env`, so it needs the
+home file as well. `PATH` is excluded here and here only (§1.2).
 
-```sh
-ssh root@10.0.0.100 'pct exec 205 -- python3 - <<PY
+Push it as a file, the same as §5.4:
+
+```python
 import json, os, pathlib, urllib.request
+
 vars_by_preset = json.load(open("/root/preset-vars.json"))
 state = json.load(urllib.request.urlopen("http://127.0.0.1:9000/api/state"))
 for h in state["hosts"]:
@@ -511,8 +597,14 @@ for h in state["hosts"]:
     for p in (f, d, d.parent):
         os.chown(p, 1000, 1000)
     print("wrote", f)
-PY'
 ```
+
+```sh
+ssh root@10.0.0.100 'pct push 205 /root/ct205-env.py /root/ct205-env.py
+                     pct exec 205 -- python3 /root/ct205-env.py'
+```
+
+Write through `.merged`, not `upper` — the merged view is the path the clone has bound.
 
 Archived clones get the file too; it applies when they are unarchived. Then pick the agent up
 on the running clones:
@@ -534,24 +626,44 @@ docker exec -u rmng <clone> bash -lc \
 
 ---
 
-## 6. Tailscale — join the new CT
+## 6. Tailscale — move the node to the new CT
 
-### 6.1 Install and join
+### 6.1 Install, and carry the node identity across
 
-`tailscale up` prints a URL that has to be opened and approved in a browser signed in to that
-CT's tailnet. Nothing else in this runbook needs a person at a keyboard.
+Do **not** run a bare `tailscale up`. It would enrol a *new* node, which needs a browser
+approval and gets the name back only because §4 freed it. Move the old CT's
+`/var/lib/tailscale` instead: the new CT then *is* the same node — same tailnet IP, same
+name, same ACL grants — and no person is needed at a keyboard.
+
+Save the state in §4, in the same step that stops the old daemon:
 
 ```sh
-ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
-export DEBIAN_FRONTEND=noninteractive
-curl -fsSL https://tailscale.com/install.sh | sh
-systemctl enable --now tailscaled
-tailscale up --hostname=pega-rmng
-"'
+ssh root@10.0.0.100 'pct exec 105 -- tar cf - --numeric-owner -C /var/lib tailscale \
+                     > /root/ct105-tailscale.tar'
 ```
 
-Use the same hostname the old CT had (`ivan-rmng`, `pega-rmng`, `haoran-rmng`). The CT needs
-`/dev/net/tun`, which §3.2 already passed in.
+Reading through the old CT and writing through the new one keeps the uids right, the same way
+§5.3 does — the old CT is unprivileged, the new one is not.
+
+```sh
+ssh root@10.0.0.100 '
+pct exec 205 -- bash -lc "export DEBIAN_FRONTEND=noninteractive
+                          curl -fsSL https://tailscale.com/install.sh | sh
+                          systemctl stop tailscaled
+                          rm -rf /var/lib/tailscale"
+pct exec 205 -- tar xf - --numeric-owner -C /var/lib < /root/ct105-tailscale.tar
+pct exec 205 -- bash -lc "systemctl enable --now tailscaled
+                          tailscale status | head -3"
+'
+```
+
+The old daemon must already be down (§4) — two daemons on one node key fight over the
+netmap. Expect the old tailnet IP back with no login prompt. The CT needs `/dev/net/tun`,
+which §3.2 already passed in.
+
+If the state is lost or refused, fall back to enrolling fresh — `tailscale up
+--hostname=pega-rmng`, using the same hostname the old CT had (`ivan-rmng`, `pega-rmng`,
+`haoran-rmng`) — and approve the printed URL in a browser signed in to that CT's tailnet.
 
 ### 6.2 Accept the tailnet DNS
 
@@ -566,10 +678,14 @@ All three CTs run with `accept-dns=true`. Without it the tailnet resolver has no
 public names stop resolving while `*.ts.net` names keep working — the opposite of the failure
 you would expect.
 
-### 6.3 Restore `tailscale serve`
+### 6.3 Set `tailscale serve`
 
-Only CT 105 has a serve config today, and **CT 204 is missing the one CT 104 had** — restore
-it there too.
+Set it on every CT, whatever §4 recorded. `tailscale serve` config lives in the tailnet's
+policy for that node, not in `/var/lib/tailscale`, so it does **not** travel with the identity
+moved in §6.1 — a CT that had one before the window comes up without it.
+
+This is also the step that makes the LAN address change in §8.1 harmless: the serve URL is
+stable across the move, the DHCP lease is not.
 
 ```sh
 ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
@@ -581,6 +697,13 @@ ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
 Expect `https://<hostname>.<tailnet>.ts.net (tailnet only)` proxying `/` to
 `http://127.0.0.1:9000`. That URL is how people reach the dashboard; confirm it loads before
 telling anyone the migration is done.
+
+**If it answers `Serve is not enabled on your tailnet`**, the feature is off for the whole
+tailnet and no command fixes it — someone has to open the printed
+`https://login.tailscale.com/f/serve?node=…` link and enable it. This is the one step in the
+runbook that needs a person at a browser, and it is not on the critical path: the dashboard is
+already reachable over the tailnet at `http://<tailnet-ip>:9000` without it. Each CT has its
+own tailnet, so enabling it on one says nothing about the next.
 
 ---
 
@@ -690,11 +813,11 @@ the way out.
 
 ### 8.1 Tell people the new address
 
-The new CT takes a fresh DHCP lease, so its LAN address changes. The Tailscale name does not
-(§6), so anyone using `https://<hostname>.<tailnet>.ts.net` needs no change — which is the
-reason to finish §6.3 before announcing anything.
-
-Remove the old node from the tailnet admin console once the new one is answering.
+The new CT takes a fresh DHCP lease, so its LAN address changes. The Tailscale name and
+tailnet IP do not (§6.1 moves the node itself), so anyone using
+`https://<hostname>.<tailnet>.ts.net` needs no change — which is the reason to finish §6.3
+before announcing anything. Do not remove the old node in the tailnet admin console: it is
+the same node, and deleting it revokes the key the new CT now runs on.
 
 The old CT stays **stopped and not destroyed** until the new one has run a full working day.
 
@@ -733,3 +856,33 @@ CT and its homes dataset.
 old CT looks wrong when it comes up.
 
 There is nothing finer than this — no per-clone rollback, no partial undo.
+
+### 9.1 Three things that bite on the way back
+
+**The old CT's stored Claude tokens are dead if the new one ran.** A refresh token is
+single-use: every refresh the new server did replaced the copy the old CT is holding. Roll
+back a day later and those accounts fail on first use, and a rejected grant marks the account
+dead. So before starting the old server, copy the new CT's accounts file over the old one's:
+
+```sh
+ssh root@10.0.0.100 '
+D=/rpool/data/subvol-105-disk-0/var/lib/docker/volumes/rmng-data/_data/data
+pct exec 205 -- cat /var/lib/docker/volumes/rmng-data/_data/data/claude-accounts.json > /tmp/ca.json
+cp -a $D/claude-accounts.json $D/claude-accounts.json.stale
+cp /tmp/ca.json $D/claude-accounts.json
+chown 100000:100000 $D/claude-accounts.json   # the old CT is unprivileged; 0 inside is 100000 outside
+chmod 600 $D/claude-accounts.json'
+```
+
+Do it with the old CT **stopped**, so nothing refreshes the stale copies first. Codex tokens
+do not rotate on refresh, so they need no such repair.
+
+**Start `rmng` before the two infra containers.** The server holds a static `10.99.0.2` on the
+`rmng` docker network; `rmng-registry` and `rmng-buildkit` take the next free address. Start
+them first and one of them gets `.2`, and the server then fails with `failed to set up
+container networking: Address already in use` — which reads like a port clash and is not one.
+Ports 445/2222/9000/9001/9005 will all test free while this happens.
+
+**`pct rollback` leaves the rootfs unmounted.** Anything you want to edit from the host
+(the accounts file above) needs `zfs mount rpool/data/subvol-<id>-disk-0` first; without it
+the path simply does not exist and the error says nothing about mounting.
