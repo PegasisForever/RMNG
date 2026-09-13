@@ -69,7 +69,7 @@ run 19 of those 26.
 ### What this changes from my earlier analysis
 
 | Previously reported | Corrected |
-|---|---|
+| --- | --- |
 | CT 105 on `2df6370`, ~110-commit hop | CT 105 on `9ec205a`, **26-commit hop** |
 | CT 105 predates CLIProxyAPI | CT 105 is **mid-CLIProxyAPI, in-process proxy** (pre-sidecar-split) |
 | Sidecar `rmng-cliproxy` must be removed | **No sidecar exists on CT 105** — verified `docker ps -a --filter name=rmng-cliproxy` is empty. The proxy runs *in-process*; it dies when the container is replaced. `DEPLOY.md`'s "Upgrading a fleet that ran the retired `rmng-cliproxy` sidecar" step 1 is a **no-op here**, and its stated ordering rationale (stop the sidecar before copying credentials so a background refresh can't invalidate a copy) **does not protect CT 105** — see §2.7. |
@@ -248,7 +248,7 @@ pre-image was `Personal` or `Medi` as a **failed gate**, not a cosmetic nit.
 Every dimension, and whether CT 106's run actually exercised it.
 
 | # | Dimension | CT 106 | CT 105 | Exercised by CT 106? |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 2.1 | **Credential pools** | 1 (`Default`) | **3** (`Default`, `Medi`, `Personal`) | **NO — the critical gap** |
 | 2.2 | Clones (running) | 8 | **33** | Partially — 4× scale |
 | 2.3 | State entries | 8, 0 archived | **39, 6 archived** | NO — no archived rows |
@@ -405,6 +405,7 @@ the listener held inode 1015894425 while the file on disk was 1368574*"). Curren
 **1** clone is connected. Any clone that restarts today can never reconnect its video.
 
 Two operational consequences:
+
 - **This is an argument for doing the upgrade**, not against it — `a532bb5` is the
   fix, and recreating the container re-binds the socket cleanly.
 - **`/srv/rmng-sock` on CT 105 is polluted with 28 GB of unrelated directories**
@@ -629,9 +630,7 @@ docker save rmng:8b49f7a | ssh root@10.0.0.100 'pct exec 105 -- docker load'
 > through a pipe is the part I am least sure of. If it misbehaves, the safe fallback
 > is `docker save … | ssh root@10.0.0.100 'cat > /tmp/rmng-8b49f7a.tar'` then
 > `pct push 105 /tmp/rmng-8b49f7a.tar /tmp/rmng.tar` and
-> `pct exec 105 -- docker load -i /tmp/rmng.tar`. Note CT 120 already runs a
-> locally-built `rmng:3a7cb70`, so local-tag deployment is an established pattern
-> on this fleet.
+> `pct exec 105 -- docker load -i /tmp/rmng.tar`.
 
 Then repoint the config at the local tag **before** the swap, so the server's own
 update machinery doesn't later pull `:latest` out from under you:
@@ -642,6 +641,7 @@ pct exec 105 -- curl -s -X PUT -H 'content-type: application/json' \
 ```
 
 **Gate 4.1 — PASS:**
+
 ```sh
 pct exec 105 -- docker image inspect rmng:8b49f7a \
   --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
@@ -652,11 +652,6 @@ pct exec 105 -- docker image inspect rmng:8b49f7a \
 > CT 106 first (it is smaller, already migrated, and a 7-commit hop `0ec84a1..HEAD`
 > that includes the media-socket fix it will eventually want), or tell CT 106's
 > operator not to press Update. Do not leave it to chance.
->
-> Note also that `3a7cb70` on CT 120 is **not an ancestor of HEAD**
-> (`git merge-base --is-ancestor 3a7cb70 HEAD` → false) — it is a pre-rebase variant
-> missing `a532bb5`, differing in `docker.rs` + `media/src/sock.rs`. **CT 120 has not
-> tested the media-socket fix.** Do not treat CT 120 as having validated `8b49f7a`.
 
 ### 4.2 Quiesce — **the most under-rated step**
 
@@ -670,10 +665,12 @@ swap:
 2. Let long-running autonomous loops reach a checkpoint. There is no API to drain
    them; this is a human judgement call.
 3. Confirm no server-side operation is running:
+
    ```sh
    pct exec 105 -- sh -c "docker exec rmng grep -o '\"operations\": *\[[^]]*\]' /data/data/state.json | head -c 200"
    # PASS: "operations": []   (a running pull/commit must finish first)
    ```
+
    Verified `[]` at time of writing.
 
 ### 4.3 Stop the server and take the quiesced backup
@@ -744,7 +741,7 @@ pct exec 105 -- grep -iE 'token_unmigrate|repointed|carried|Antigravity|more tha
 **Gate 4.5 — PASS requires all of:**
 
 | Expected line | Why |
-|---|---|
+| --- | --- |
 | `repointed N clone(s) at their former pool and M at 'auto'` | **N should be ≈39, M ≈0.** N=0/M=39 is the `47f3c3a` regression recurring — **FAIL, roll back.** |
 | `carried K preset pool default(s) across` | K ≥ 4 (4 presets × Claude; Codex won't carry, §2.6) |
 | `codex account hello@talktomedi.com appears in more than one group` ×2 | Confirms dedup ran (§2.6). **Absence = FAIL** |
@@ -789,6 +786,7 @@ Also confirm the pools rebuilt:
 pct exec 105 -- sh -c "docker exec rmng grep -oE '\"(cloneGroups|codexGroups)\"' /data/config.json"
 # PASS: both present
 ```
+
 Expect `cloneGroups` = `Medi` + `Personal` (+ possibly `Default`), `codexGroups` =
 `Default` only.
 
@@ -810,6 +808,7 @@ Confirm no identity re-mint (§2.10):
 pct exec 105 -- sh -c "docker exec rmng grep -c routerKeys /data/data/cliproxy-instances.json"
 pct exec 105 -- docker inspect pega-dev-268 --format '{{json .Config.Env}}' | grep -o 'RMNG_PROXY_KEY=.\{0,12\}'
 ```
+
 **PASS:** the key prefix still matches `$BK/rmng-container-inspect.json`-era values
 for at least two clones. A changed key means `3e80459` failed and every clone lost
 its identity — sub-clone detection and clone↔clone SSH break silently.
@@ -834,6 +833,7 @@ pct exec 105 -- docker ps --format '{{.Names}}' | grep -v '^rmng' | wc -l
 ```
 
 Media socket (the §2.11 pre-existing fault, now expected fixed):
+
 ```sh
 pct exec 105 -- sh -c "docker exec rmng cat /proc/net/unix | grep rmng-sock; \
   ls -i /var/lib/docker/volumes/rmng-sock/_data/clones.sock"
@@ -863,6 +863,7 @@ they were written, so re-run this gate at T+2 min before declaring pass); no
 
 Also confirm operator settings survived (`0456b6b`) — on CT 106
 `model_reasoning_effort = "high"` was correctly preserved:
+
 ```sh
 pct exec 105 -- docker exec pega-dev-268 cat /home/rmng/.codex/config.toml
 # PASS: managed [mcp_servers.*] tables present; no model_provider/[model_providers.rmng];
@@ -890,6 +891,7 @@ shell worked while chat did not — the split that "wastes an afternoon"):
 Send a one-line chat message from the RMNG dashboard to a clone and confirm the
 reply arrives.
 ```
+
 **PASS: the reply arrives.** Do this on **one clone per pool** — a `Personal` clone
 and `pega-dev-207` (`Medi`) — so both pools' credentials are proven, which CT 106
 structurally could not do.
@@ -899,7 +901,6 @@ structurally could not do.
 ```sh
 pct exec 105 -- docker logs rmng 2>&1 | grep -i agentlog
 # PASS: "agent-log scanner started (tokens + activity, every 15s)"
-#   (verified present on CT 120 at 3a7cb70)
 
 sleep 60
 pct exec 105 -- sh -c "docker exec rmng grep -o 'cloneTokens.\{0,300\}' /data/data/state.json"
@@ -919,7 +920,7 @@ since it is a genuinely new capability rather than a restored one.
 ## 5. Verification gates — summary
 
 | Gate | Command | PASS | On FAIL |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 3.5 | `docker image inspect rmng:rollback-9ec205a` | `9ec205a` | **Stop.** Rollback not armed |
 | 3.6 | 4 backup checks | all 4 | **Stop.** Fix backup |
 | 4.1 | `docker image inspect rmng:8b49f7a` | `8b49f7a` | Re-transfer image |
