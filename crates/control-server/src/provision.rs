@@ -189,17 +189,30 @@ pub(crate) fn clone_key_env_vars(app: &App, host_id: &str) -> Vec<EnvVar> {
     }]
 }
 
-/// The preset's Linear key as `LINEAR_API_KEY` (auths the clone's `linear` MCP).
-/// The key stays OUT of the preset Dockerfile (which may hold other secrets, baked
-/// into the image) and is injected at runtime instead.
+/// The preset's own [`wire::Preset::vars`], then its Linear key as `LINEAR_API_KEY` (auths the
+/// clone's `linear` MCP).
+///
+/// Both are injected at runtime rather than baked into the preset Dockerfile. An image `ENV`
+/// reaches `docker exec` and nothing else: systemd is PID 1 in a clone and does not hand its
+/// own environment to the services it starts, so an `ENV` never reaches an SSH login or the
+/// desktop session. `/etc/environment` — where these end up — reaches all of them.
+///
+/// The Linear key goes last so a preset cannot shadow it with a `vars` row of the same name;
+/// `etc_environment_conf` lets the last duplicate win.
 pub(crate) fn preset_env_vars(p: &wire::Preset) -> Vec<EnvVar> {
-    if p.linear_key.is_empty() {
-        return Vec::new();
+    let mut out: Vec<EnvVar> = p
+        .vars
+        .iter()
+        .filter(|v| !v.key.is_empty())
+        .cloned()
+        .collect();
+    if !p.linear_key.is_empty() {
+        out.push(EnvVar {
+            key: "LINEAR_API_KEY".into(),
+            value: p.linear_key.clone(),
+        });
     }
-    vec![EnvVar {
-        key: "LINEAR_API_KEY".into(),
-        value: p.linear_key.clone(),
-    }]
+    out
 }
 
 /// The full var list a NEW clone's `/etc/environment` is built from, in precedence order
@@ -245,68 +258,6 @@ pub(crate) fn clone_etc_environment_conf(vars: &[EnvVar]) -> String {
     let mut all = base_session_env_vars();
     all.extend(vars.iter().cloned());
     etc_environment_conf(&all)
-}
-
-/// Shell-rc files that prepend a preset's `PATH` dirs for interactive shells. The Rust port
-/// of the deleted `clone.sh::write_preset_path_rc`.
-///
-/// A preset `PATH` needs more than `/etc/environment`: interactive shells rewrite `PATH` on
-/// startup (login bash re-runs `/etc/profile`, which hard-resets it; fish rebuilds `$PATH`).
-/// Mirror the template's `rmng-local-bin` blocks: prepend the preset's dirs inside
-/// fish (`conf.d`), login sh/bash (`profile.d`), and non-login interactive bash
-/// (`/etc/bash.bashrc`). We always PREPEND (never replace) so the shell keeps its system dirs
-/// even if the preset set `PATH` outright, and drop any `$PATH` token; dirs are reversed so
-/// the listed order wins (each is prepended in turn).
-///
-/// Returns the `(fish_conf, profile_sh, bashrc_dropin)` tuple, or `None` when the preset
-/// has no `PATH` var (or it has no usable dirs). All three are whole files (idempotent by
-/// overwrite): fish + profile land in their drop-in dirs, and the bashrc one lands in
-/// `/etc/bash.bashrc.d/`, which the template sources from the baked `/etc/bash.bashrc`.
-fn preset_path_rc(env_text: &str) -> Option<PresetPathRc> {
-    // Last PATH=… line wins (mirrors the shell taking the final assignment).
-    let path_val = env_text
-        .lines()
-        .filter_map(|l| l.strip_prefix("PATH="))
-        .next_back()?;
-    // Reversed, quoted, `$PATH`/empty tokens dropped — the fish/sh loops each PREPEND in
-    // turn, so reversing makes the listed left-to-right order win.
-    let mut rev: Vec<String> = Vec::new();
-    for seg in path_val.split(':') {
-        match seg {
-            "" | "$PATH" | "${PATH}" => continue,
-            _ => rev.insert(0, format!("\"{seg}\"")),
-        }
-    }
-    if rev.is_empty() {
-        return None;
-    }
-    let dirs = rev.join(" ");
-
-    let fish = format!(
-        "for d in {dirs}\n    if not contains -- \"$d\" $PATH\n        set -gx PATH \"$d\" $PATH\n    end\nend\n"
-    );
-    let profile = format!(
-        "# rmng env preset: prepend the preset PATH dirs for login sh/bash.\n\
-         for d in {dirs}; do\n  case \":$PATH:\" in\n    *\":$d:\"*) : ;;\n    *) PATH=\"$d:$PATH\" ;;\n  esac\ndone\n"
-    );
-    // Whole file for the `/etc/bash.bashrc.d/` drop-in the template sources: overwrite
-    // replaces any prior preset, no markers needed.
-    let bashrc = format!(
-        "# rmng env preset: prepend preset PATH dirs for non-login interactive bash.\n\
-         for d in {dirs}; do\n  case \":$PATH:\" in\n    *\":$d:\"*) : ;;\n    *) PATH=\"$d:$PATH\" ;;\n  esac\ndone\n"
-    );
-    Some(PresetPathRc {
-        fish,
-        profile,
-        bashrc,
-    })
-}
-
-/// The three shell-rc payloads a preset `PATH` needs (see [`preset_path_rc`]).
-struct PresetPathRc {
-    fish: String,
-    profile: String,
-    bashrc: String,
 }
 
 // --- clone container ------------------------------------------------------------------
@@ -429,8 +380,7 @@ async fn clone_container_after_create(
     // `rmng clone self` named that clone and a sub clone created from a terminal would have
     // nested under it. Gen-2 images are built from Dockerfiles and carry no clone identity.
     let preset_conf = clone_etc_environment_conf(env);
-    let path_rc = preset_path_rc(&preset_conf);
-    let mut identity: Vec<TarEntry> = vec![
+    let identity: Vec<TarEntry> = vec![
         // Fresh random machine-id per clone. The template blanks it (a baked id would give
         // the whole fleet one identity), and systemd-in-docker does NOT persist a generated
         // id into an empty writable /etc/machine-id (it runs with a transient one; seen live
@@ -453,33 +403,7 @@ async fn clone_container_after_create(
             gid: 0,
         },
     ];
-    if let Some(rc) = &path_rc {
-        identity.push(TarEntry {
-            path: "etc/fish/conf.d/rmng-preset-path.fish".into(),
-            data: rc.fish.clone().into_bytes(),
-            mode: 0o644,
-            uid: 0,
-            gid: 0,
-        });
-        identity.push(TarEntry {
-            path: "etc/profile.d/rmng-preset-path.sh".into(),
-            data: rc.profile.clone().into_bytes(),
-            mode: 0o644,
-            uid: 0,
-            gid: 0,
-        });
-        identity.push(TarEntry {
-            path: "etc/bash.bashrc.d/rmng-preset-path.sh".into(),
-            data: rc.bashrc.clone().into_bytes(),
-            mode: 0o644,
-            uid: 0,
-            gid: 0,
-        });
-    }
-    on_progress(
-        "inject",
-        "injecting machine-id + preset env + PATH rc (pre-boot)",
-    );
+    on_progress("inject", "injecting machine-id + preset env (pre-boot)");
     bins.extend(identity);
 
     // Render content before boot. Merge-owned files use the mounted home as their base,
@@ -693,25 +617,6 @@ pub async fn delete_clone(
 
 // --- gen-2 clones ---------------------------------------------------------------------
 
-/// Create-time env keys that belong in a gen-2 clone's `/etc/environment`. Static preset
-/// vars live in the profile Dockerfile lines (stage 3); only per-clone dynamic keys are
-/// injected here. `ANTHROPIC_MODEL` is seeded at create (same value the reconciler
-/// enforces) so fresh clones have a model before the first reconcile pass.
-const GEN2_DYNAMIC_KEYS: [&str; 4] = [
-    "RMNG_CONTROL_URL",
-    "RMNG_PROXY_KEY",
-    "ANTHROPIC_MODEL",
-    "LINEAR_API_KEY",
-];
-
-/// Filter create-time env down to the dynamic keys a gen-2 clone injects.
-fn gen2_dynamic_env(env: &[EnvVar]) -> Vec<EnvVar> {
-    env.iter()
-        .filter(|v| GEN2_DYNAMIC_KEYS.contains(&v.key.as_str()))
-        .cloned()
-        .collect()
-}
-
 /// Full Dockerfile text of the named preset (config). Unknown, unnamed, or empty ⇒
 /// the default base Dockerfile. Every create/fork/migrate resolves its image from
 /// this — never from a caller-supplied base.
@@ -864,13 +769,16 @@ pub async fn clone_container_gen2_from_tag(
         }
     };
 
-    // Dynamic keys only: static preset env moved to the profile Dockerfile lines.
-    let dyn_env = gen2_dynamic_env(env);
+    // The FULL env, not a filtered subset. There used to be a `GEN2_DYNAMIC_KEYS` allowlist
+    // here, from when a preset's static vars were meant to live in its Dockerfile: it let four
+    // keys through and dropped the rest. That also made this path disagree with the resync in
+    // `clone_reconcile`, which never filtered — so the two writers of the SAME file composed
+    // different contents, and `compose_clone_env` asks them to stay identical.
     match clone_container_after_create(
         app,
         &container,
         hostname,
-        &dyn_env,
+        env,
         agent_playbook,
         global_prompt,
         headless,
@@ -1449,35 +1357,6 @@ mod tests {
     }
 
     #[test]
-    fn gen2_dynamic_env_keeps_model_and_linear_keys() {
-        // Model and Linear credentials must reach first boot and content rendering;
-        // static keys stay out (they bake into the image).
-        let env = |key: &str| wire::EnvVar {
-            key: key.into(),
-            value: "v".into(),
-        };
-        let got: Vec<String> = gen2_dynamic_env(&[
-            env("RMNG_CONTROL_URL"),
-            env("RMNG_PROXY_KEY"),
-            env("ANTHROPIC_MODEL"),
-            env("LINEAR_API_KEY"),
-            env("SOME_STATIC"),
-        ])
-        .into_iter()
-        .map(|v| v.key)
-        .collect();
-        assert_eq!(
-            got,
-            vec![
-                "RMNG_CONTROL_URL",
-                "RMNG_PROXY_KEY",
-                "ANTHROPIC_MODEL",
-                "LINEAR_API_KEY"
-            ]
-        );
-    }
-
-    #[test]
     fn provision_uses_ssh_clone_entries_contract() {
         // Guards that provision's SSH injection targets the clone-user .ssh path (the template
         // pre-creates it 700). If this path ever changes, StrictModes will reject the key.
@@ -1716,6 +1595,99 @@ mod tests {
         assert_eq!(body.matches("XDG_CURRENT_DESKTOP=").count(), 1);
     }
 
+    /// A preset's vars are delivered by the server, not baked into the image, because an image
+    /// `ENV` reaches `docker exec` and nothing else — systemd is PID 1 in a clone and does not
+    /// hand its own environment to the services it starts, so an SSH login and the desktop
+    /// session both miss it. `/etc/environment` reaches all three, and this is what puts them
+    /// there.
+    #[test]
+    fn preset_vars_reach_etc_environment_and_cannot_shadow_the_linear_key() {
+        let p = wire::Preset {
+            name: "medi".into(),
+            linear_key: "lin_api_real".into(),
+            vars: vec![
+                EnvVar {
+                    key: "TURBO_TEAM".into(),
+                    value: "talktomedi".into(),
+                },
+                // A blank value is a real setting: `KEY=` clears an inherited value.
+                EnvVar {
+                    key: "BLANK".into(),
+                    value: String::new(),
+                },
+                // A preset must not be able to hand its clones someone else's Linear key by
+                // naming the variable itself — the real key is appended after these.
+                EnvVar {
+                    key: "LINEAR_API_KEY".into(),
+                    value: "lin_api_impostor".into(),
+                },
+                // Defence in depth: `merge_presets` already drops blank keys on save, so this
+                // row can only come from a hand-edited config.json.
+                EnvVar {
+                    key: String::new(),
+                    value: "orphan".into(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let body = clone_etc_environment_conf(&preset_env_vars(&p));
+        assert!(body.contains("TURBO_TEAM=talktomedi\n"), "{body}");
+        assert!(body.contains("BLANK=\n"), "{body}");
+        assert!(body.contains("LINEAR_API_KEY=lin_api_real\n"), "{body}");
+        assert!(!body.contains("lin_api_impostor"), "{body}");
+        assert_eq!(body.matches("LINEAR_API_KEY=").count(), 1, "{body}");
+        assert!(!body.contains("=orphan"), "{body}");
+        // The base desktop session is still underneath them.
+        assert!(body.contains("XDG_CURRENT_DESKTOP=GNOME\n"), "{body}");
+    }
+
+    /// The create path must compose the same `/etc/environment` the resync does. They are two
+    /// writers of one file, so a key either of them omits flips on the next pass.
+    ///
+    /// A `GEN2_DYNAMIC_KEYS` allowlist used to sit between this and the create-time write,
+    /// passing four keys and dropping everything else — which silently meant a preset's vars
+    /// reached a clone only on the first resync, ~30 s after it booted, and never at all if the
+    /// create path was the only writer.
+    #[test]
+    fn create_time_env_carries_the_preset_vars_through() {
+        let p = wire::Preset {
+            name: "medi".into(),
+            vars: vec![EnvVar {
+                key: "TURBO_TEAM".into(),
+                value: "talktomedi".into(),
+            }],
+            ..Default::default()
+        };
+        let composed = compose_clone_env(
+            vec![EnvVar {
+                key: "RMNG_CONTROL_URL".into(),
+                value: "http://rmng-control:9000".into(),
+            }],
+            vec![EnvVar {
+                key: "RMNG_PROXY_KEY".into(),
+                value: "k".into(),
+            }],
+            &preset_env_vars(&p),
+        );
+        let keys: Vec<&str> = composed.iter().map(|v| v.key.as_str()).collect();
+        assert!(keys.contains(&"TURBO_TEAM"), "{keys:?}");
+        assert!(keys.contains(&"RMNG_CONTROL_URL"), "{keys:?}");
+        assert!(keys.contains(&"RMNG_PROXY_KEY"), "{keys:?}");
+        assert!(keys.contains(&"ANTHROPIC_MODEL"), "{keys:?}");
+    }
+
+    /// A preset with no vars and no key contributes nothing — the clone keeps only the base
+    /// session env.
+    #[test]
+    fn a_preset_with_nothing_set_adds_no_env() {
+        let p = wire::Preset {
+            name: "bare".into(),
+            ..Default::default()
+        };
+        assert_eq!(preset_env_vars(&p), Vec::new());
+    }
+
     /// The tmux server a headless clone boots with is the environment every agent typed into a pane
     /// inherits, fixed for the life of the server. `/etc/environment` is sourced into it, so the
     /// retired keys have to be unset AFTER that source, not before.
@@ -1731,47 +1703,6 @@ mod tests {
         assert!(script.contains("window-size latest"), "{script}");
         // Gen-2 images carry no stale Config.Env, so no key cancellations remain.
         assert!(!script.contains("unset "), "stale cancellation:\n{script}");
-    }
-
-    #[test]
-    fn preset_path_rc_none_without_path() {
-        assert!(preset_path_rc("FOO=1\nBAR=2\n").is_none());
-        // A PATH with only $PATH / empty tokens yields no usable dirs → None.
-        assert!(preset_path_rc("PATH=$PATH\n").is_none());
-        assert!(preset_path_rc("PATH=:\n").is_none());
-    }
-
-    #[test]
-    fn preset_path_rc_reverses_and_prepends() {
-        // Listed order a:b (a first) → reversed so each prepend leaves a in front.
-        let rc = preset_path_rc("PATH=/opt/a/bin:/opt/b/bin:$PATH\n").unwrap();
-        // Reversed → "/opt/b/bin" then "/opt/a/bin" in the loop dir list.
-        assert!(
-            rc.fish.contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""),
-            "fish: {}",
-            rc.fish
-        );
-        assert!(
-            rc.profile
-                .contains("for d in \"/opt/b/bin\" \"/opt/a/bin\""),
-            "profile: {}",
-            rc.profile
-        );
-        // fish prepends with the contains-guard.
-        assert!(rc.fish.contains("set -gx PATH \"$d\" $PATH"));
-        // sh/bash use the case-guard prepend.
-        assert!(rc.profile.contains("*) PATH=\"$d:$PATH\" ;;"));
-        // bashrc drop-in is a whole file (overwrite-idempotent, no markers).
-        assert!(rc.bashrc.contains("for d in"));
-        assert!(!rc.bashrc.contains(">>>"));
-    }
-
-    #[test]
-    fn preset_path_rc_takes_last_path_line() {
-        // The LAST PATH= line wins (mirrors shell assignment order).
-        let rc = preset_path_rc("PATH=/first\nFOO=1\nPATH=/second:$PATH\n").unwrap();
-        assert!(rc.fish.contains("\"/second\""), "{}", rc.fish);
-        assert!(!rc.fish.contains("\"/first\""), "{}", rc.fish);
     }
 
     #[test]

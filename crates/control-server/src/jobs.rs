@@ -567,8 +567,9 @@ async fn run_delete(app: App, op: OpHandle, host_id: String) -> anyhow::Result<F
 // --- shared gen-2 inputs --------------------------------------------------------------------
 
 /// Everything a gen-2 fork/rebase/migrate needs from the source row's preset: the clone's
-/// full session env (control URL + per-clone identity key + preset vars; the gen-2 create
-/// path filters it to dynamic keys for inject and static keys for the image build).
+/// full session env — control URL, per-clone identity key, and the preset's own vars. It is
+/// used whole: the create path writes all of it to `/etc/environment`, which is the one
+/// carrier an SSH login, the desktop session and the agent all read.
 async fn gen2_create_env(
     app: &App,
     preset_name: Option<&str>,

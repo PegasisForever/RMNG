@@ -23,6 +23,7 @@ const preset = (over: Partial<PresetRedacted>): PresetRedacted => ({
   linearKey: "lin_api_fixture",
   group: "pooled",
   defaultForkClone: "",
+  vars: [],
   agentPlaybook: "",
   globalPrompt: "",
   startupScript: "",

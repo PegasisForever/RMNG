@@ -62,13 +62,18 @@ fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
                 let Some(name) = r.get("name").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                // Retired: presets carry a full Dockerfile now; legacy vars are dropped.
                 cfg.presets.push(wire::Preset {
                     name: name.to_string(),
                     labels: Vec::new(),
                     linear_key: String::new(),
                     // Blank = no opinion; a legacy env-only preset never had an account default.
                     group: String::new(),
+                    // An `envPresets` row was nothing BUT its vars, so dropping them left an
+                    // empty preset. They are a live field again, so carry them.
+                    vars: serde_json::from_value(
+                        r.get("vars").cloned().unwrap_or(serde_json::Value::Null),
+                    )
+                    .unwrap_or_default(),
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
                     ..Default::default()
@@ -236,6 +241,10 @@ mod tests {
             Preset {
                 name: "med".into(),
                 linear_key: "OLD-MED".into(),
+                vars: vec![EnvVar {
+                    key: "STALE".into(),
+                    value: "1".into(),
+                }],
                 ..Default::default()
             },
             Preset {
@@ -249,7 +258,10 @@ mod tests {
         let incoming = serde_json::json!({
             "presets": [
                 { "name": "med", "labels": [" Backend ", ""], "linearKey": "",
-                  "dockerfile": "FROM base:x", "startupScript": "echo hi" },
+                  "dockerfile": "FROM base:x", "startupScript": "echo hi",
+                  "vars": [{ "key": " TURBO_TEAM ", "value": "talktomedi" },
+                           { "key": "", "value": "dropped" },
+                           { "key": "BLANK", "value": "" }] },
                 { "name": "new", "labels": [], "linearKey": "NEW-KEY", "vars": [] },
             ],
         });
@@ -263,9 +275,58 @@ mod tests {
         assert_eq!(merged.presets[1].name, "new");
         assert_eq!(merged.presets[1].linear_key, "NEW-KEY");
         assert!(!merged.presets.iter().any(|p| p.name == "gone")); // omitted → deleted
+        // Vars replace wholesale, like labels: the stored STALE row is gone because the patch
+        // did not send it. The key is trimmed, a blank-key row is dropped (the editor's "add"
+        // button makes one), and a blank VALUE survives — `KEY=` is a real setting that clears
+        // an inherited value, not an instruction to leave the variable out.
+        assert_eq!(
+            merged.presets[0].vars,
+            vec![
+                EnvVar {
+                    key: "TURBO_TEAM".into(),
+                    value: "talktomedi".into()
+                },
+                EnvVar {
+                    key: "BLANK".into(),
+                    value: String::new()
+                },
+            ]
+        );
+        assert_eq!(merged.presets[1].vars, vec![]);
         // No `presets` field at all → unchanged.
         let untouched = merge_update(&base, serde_json::json!({})).unwrap();
         assert_eq!(untouched.presets, base.presets);
+    }
+
+    /// A gen-1 `config.json` carries its preset env in `presets[].vars`. That field was retired
+    /// when preset env moved into the Dockerfile, so a gen-1 → gen-2 migration silently dropped
+    /// it and the vars had to be scraped out and written back by hand (the old runbook §5.4 and
+    /// §5.8). It is a live field again, so the migration just reads it.
+    #[test]
+    fn a_gen_1_config_keeps_its_preset_vars() {
+        let gen1 = serde_json::json!({
+            "presets": [{
+                "name": "Medi",
+                "labels": ["Dev"],
+                "linearKey": "lin_api_x",
+                "vars": [
+                    { "key": "TURBO_API", "value": "http://10.0.0.101:3000" },
+                    { "key": "TURBO_TEAM", "value": "talktomedi" }
+                ]
+            }]
+        });
+        let cfg: AppConfig = serde_json::from_value(gen1).unwrap();
+        assert_eq!(
+            cfg.presets[0]
+                .vars
+                .iter()
+                .map(|v| (v.key.as_str(), v.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("TURBO_API", "http://10.0.0.101:3000"),
+                ("TURBO_TEAM", "talktomedi"),
+            ]
+        );
     }
 
     #[test]
@@ -963,6 +1024,32 @@ fn merge_presets(_base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire
         } else {
             group
         };
+        // Environment variables, replaced wholesale by what the editor sends. Rows with a
+        // blank key are dropped (the editor's "add" button makes an empty pair, and a
+        // half-filled one must not reach `/etc/environment`); the key is trimmed because a
+        // stray space would write a variable no shell can name. The value is kept verbatim,
+        // spaces included, and a blank value is a real setting — `KEY=` clears an inherited
+        // one rather than meaning "unset".
+        let vars: Vec<wire::EnvVar> = r
+            .get("vars")
+            .and_then(|v| v.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|v| {
+                        let key = v.get("key")?.as_str()?.trim().to_string();
+                        if key.is_empty() {
+                            return None;
+                        }
+                        let value = v
+                            .get("value")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        Some(wire::EnvVar { key, value })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         out.push(wire::Preset {
             name,
             labels,
@@ -974,6 +1061,7 @@ fn merge_presets(_base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire
                 .unwrap_or("")
                 .trim()
                 .to_string(),
+            vars,
             claude_account: String::new(),
             codex_account: String::new(),
             agent_playbook,

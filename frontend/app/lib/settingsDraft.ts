@@ -56,6 +56,11 @@ export interface PresetDraft {
   group: string;
   /** Default fork source (a clone id, or "" for the oldest forkable clone). */
   defaultForkClone: string;
+  /** Environment variables for every clone of this preset. The server writes them into the
+   *  clone's /etc/environment, which is what an SSH login, the desktop session and the agent
+   *  all read — a Dockerfile ENV reaches only `docker exec`. Edited as rows, so a half-typed
+   *  pair is a normal intermediate state and the blank-key rows are dropped on save. */
+  vars: { key: string; value: string }[];
   agentPlaybook: string;
   globalPrompt: string;
   startupScript: string;
@@ -98,6 +103,7 @@ export function newPreset(group = ""): PresetDraft {
     linearKey: "",
     group,
     defaultForkClone: "",
+    vars: [],
     agentPlaybook: "",
     globalPrompt: "",
     startupScript: "",
@@ -147,6 +153,7 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       linearKey: p.linearKey,
       group: presetGroupOf(p, fallback),
       defaultForkClone: p.defaultForkClone ?? "",
+      vars: (p.vars ?? []).map((v) => ({ key: v.key, value: v.value })),
       agentPlaybook: p.agentPlaybook,
       globalPrompt: p.globalPrompt,
       startupScript: p.startupScript ?? "",
@@ -252,6 +259,9 @@ export function settingsPatch(
         // Blank = oldest forkable clone; a stale id survives the round trip and falls
         // back at use time, so renaming a clone never silently repoints a preset.
         defaultForkClone: p.defaultForkClone.trim(),
+        // Sent whole, blank-key rows included: the server drops those and trims the keys, so
+        // the form does not have to police a row the operator is still typing.
+        vars: p.vars,
         agentPlaybook: p.agentPlaybook,
         globalPrompt: p.globalPrompt,
         startupScript: p.startupScript,

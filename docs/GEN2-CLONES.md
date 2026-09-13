@@ -140,11 +140,23 @@ marks one.
 
 ### 3.5 Env and presets
 
-All static env lives in the preset Dockerfile. The `/etc/environment` writer
-(`provision.rs` `clone_etc_environment_conf`) writes dynamic keys plus `LINEAR_API_KEY`
-only. Presets keep their name, Linear identity (a regular visible field now — blank
-clears it), account selection, ticket auto-select, Dockerfile, and playbook/prompt
-appends. No preset vars: the field is gone, old files ignore it.
+Env is the server's job, not the image's. A preset carries a `vars` list, and
+`provision.rs` `clone_etc_environment_conf` writes it into the clone's `/etc/environment`
+at create and on every resync — so an edit reaches a running fleet without a rebuild or a
+rebase, and `clone_reconcile` restarts the agent when the file really changed.
+
+`/etc/environment` is the only carrier that reaches every way into a clone. systemd is PID 1
+there and does not hand its own environment to the services it starts, so a Dockerfile `ENV`
+reaches `docker exec` and nothing else — not an SSH login, not the desktop. `/etc/environment`
+is read by `pam_env` for SSH logins AND for the lingering user manager (through the
+`/usr/lib/environment.d/99-environment.conf` symlink, so the GNOME session and every unit
+under it inherit it), and the exec that starts the agent sources it explicitly.
+
+`PATH` is not special-cased. It was, with per-shell rc drop-ins, only so fish would find a
+node installed by nvm inside the home; clones take node from the image now.
+
+Presets also keep their name, Linear identity (a regular visible field — blank clears it),
+account selection, ticket auto-select, Dockerfile, and playbook/prompt appends.
 
 ### 3.6 Homes browsing plus cross-clone view
 

@@ -139,6 +139,26 @@ pub struct Preset {
     /// Non-secret.
     #[serde(default)]
     pub default_fork_clone: String,
+    /// Environment variables every clone of this preset gets, delivered by the server rather
+    /// than baked into the image.
+    ///
+    /// They land in the clone's `/etc/environment`, which is the one carrier that reaches
+    /// every way into a clone: `pam_env` loads it for SSH logins AND for the lingering user
+    /// manager (so the GNOME session and every unit under it inherit it), and the exec that
+    /// starts the agent sources it explicitly because `docker exec` does not run PAM. A
+    /// Dockerfile `ENV` reaches only `docker exec`, which is why this is a preset field and
+    /// not Dockerfile text.
+    ///
+    /// Rewritten on create and on every per-clone resync, so an edit here reaches a running
+    /// fleet without a rebuild or a rebase; `clone_reconcile` restarts the agent when the
+    /// file actually changes. May hold secrets: `/etc/environment` is 0644 inside the clone,
+    /// which the operator already owns.
+    ///
+    /// `PATH` is NOT special-cased. It used to be, with shell-rc drop-ins per shell, purely
+    /// so fish would find a node installed by nvm inside the home; clones take node from the
+    /// image now.
+    #[serde(default)]
+    pub vars: Vec<EnvVar>,
     /// Retired per-provider defaults (split-pool era). Parse-only: never written back.
     /// A `group:<pool>` value migrates into [`Preset::group`] on load; an email/`auto`
     /// pin is dropped (pins now live on the clone, not the preset).
@@ -181,6 +201,7 @@ impl Default for Preset {
             linear_key: String::new(),
             group: String::new(),
             default_fork_clone: String::new(),
+            vars: Vec::new(),
             claude_account: String::new(),
             codex_account: String::new(),
             agent_playbook: String::new(),
@@ -199,6 +220,7 @@ impl Preset {
             linear_key: self.linear_key.clone(),
             group: self.group.clone(),
             default_fork_clone: self.default_fork_clone.clone(),
+            vars: self.vars.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
             startup_script: self.startup_script.clone(),
@@ -233,6 +255,9 @@ pub struct PresetRedacted {
     pub group: String,
     /// Default fork source: a clone id, or empty for the oldest forkable clone.
     pub default_fork_clone: String,
+    /// The preset's environment variables, verbatim. The editor is the only way to set them,
+    /// so it has to read back what is stored — same reasoning as `linear_key`.
+    pub vars: Vec<EnvVar>,
     pub agent_playbook: String,
     pub global_prompt: String,
     pub startup_script: String,
@@ -796,6 +821,7 @@ mod tests {
                     linear_key: "lin_api_secret".into(),
                     group: "pooled".into(),
                     default_fork_clone: String::new(),
+                    vars: Vec::new(),
                     claude_account: String::new(),
                     codex_account: String::new(),
                     agent_playbook: String::new(),

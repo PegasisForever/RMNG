@@ -9,8 +9,9 @@ gen-1 clones, so each CT gets one window: build a new privileged CT, move the Do
 into it, start the new server, and let it rewrite every clone.
 
 **Status.** CT 104 is done — it is now CT 204 (`ivan-rmng`, LAN 10.0.0.235, tailnet
-100.116.208.33 / `ivan-rmng.tail8d43a5.ts.net`), migrated 2026-09-13 on
-`pegasis0/rmng:latest` = `1c12458`, 8 of 8 clones passed. CT 105 and CT 106 are outstanding.
+100.116.208.33 / `ivan-rmng.tail8d43a5.ts.net`), migrated 2026-09-13 on `1c12458`, 8 of 8
+clones passed, and since moved forward to a build carrying the preset-vars change (§1.2).
+CT 105 and CT 106 are outstanding.
 One item is open on CT 204: `tailscale serve` is not set, because Serve is disabled for that
 tailnet and enabling it needs a browser (§6.3). The dashboard answers on both addresses
 meanwhile.
@@ -88,20 +89,27 @@ Then choose, per CT:
 A local-only tag cannot work: preset builds force `--pull`, and the CT's `rmng-registry` is a
 pull-through proxy that refuses pushes.
 
-### 1.2 The preset vars
+### 1.2 The preset vars — nothing to decide
 
-Gen-2 has no preset `vars` field, and it writes only dynamic keys into `/etc/environment`.
-Two carriers are needed, because they reach different processes:
+Gen-2 carries a preset `vars` list of its own, with the same `{key, value}` shape gen-1 used,
+so a gen-1 `config.json` keeps its vars simply by being read. There is no capture step and no
+restore step: the server writes them into each clone's `/etc/environment` at create and on
+every resync.
 
-- **Dockerfile `ENV` lines**, for every var including `PATH`. Reaches `docker exec` shells.
-- **`~/.config/environment.d/10-rmng-preset.conf` in each clone's home**, for every var
-  **except `PATH`**. This is the one the agent sees: it runs under `systemd --user`, which
-  takes its environment from the user manager, not from the container's `Config.Env`.
+Do **not** transcribe them into the preset Dockerfile. A Dockerfile `ENV` reaches `docker exec`
+and nothing else — systemd is PID 1 in a clone and does not hand its own environment to the
+services it starts, so an `ENV` never reaches an SSH login or the desktop session.
+`/etc/environment` reaches all three: `pam_env` loads it for SSH logins and for the lingering
+user manager (through the `/usr/lib/environment.d/99-environment.conf` symlink, so the GNOME
+session and every unit under it inherit it), and the exec that starts the agent sources it
+explicitly.
 
-Exclude `PATH` from the home file deliberately. Gen-1 did not apply the preset `PATH` to the
-agent unit either, and setting it here drops `/opt/rmng/bin` from the agent's PATH.
+`PATH` needs no special handling. It used to, with per-shell rc drop-ins, only so fish would
+find a node installed by nvm inside the home. Put node in the preset Dockerfile instead.
 
-§5.4 captures the values and §5.8 writes the file.
+This needs a server built after the preset-vars change. The image logs its revision on boot —
+`docker logs rmng | grep "running image revision"` — and the Settings preset card shows an
+"Environment variables" editor when it is new enough.
 
 ---
 
@@ -436,10 +444,12 @@ them as the same numbers. No ownership fix step.
 
 `tar` prints `socket ignored` warnings for X11, samba and buildkit sockets. Expected.
 
-### 5.4 Point the config at the homes dataset, capture the vars, write the Dockerfiles
+### 5.4 Point the config at the homes dataset, and write the Dockerfiles
 
-Three edits to the moved `config.json`, all with the server still stopped. The old API drops
-unknown keys, so none of this can be a `PUT`.
+Two edits to the moved `config.json`, with the server still stopped. The old API drops unknown
+keys, so neither can be a `PUT`.
+
+The preset `vars` need nothing here (§1.2) — gen-2 reads the gen-1 field as it stands.
 
 Put the script in a file and `pct push` it — a `<<PY` heredoc through `ssh` and `pct exec`
 mangles the quoting.
@@ -453,27 +463,16 @@ HOMES_PARENT = "rpool/rmng-homes-105"          # the dataset created in §3.1
 c = json.load(open(PATH))
 c["docker"]["homesParent"] = HOMES_PARENT
 
-# The gen-2 server drops `vars` the first time it rewrites config.json, so capture it now.
-# §5.8 reads this file back.
-json.dump({p["name"]: p.get("vars", []) for p in c.get("presets", [])},
-          open("/root/preset-vars.json", "w"), indent=2)
-
-def dockerfile_for(entries):
-    lines = ["FROM pegasis0/rmng-template:latest", "",
-             "# Carried across from the gen-1 preset `vars` field, which gen-2 retired."]
-    for e in entries:
-        key, value = e["key"], e["value"]
-        assert '"' not in value and "$" not in value, f"{key} needs quoting by hand"
-        lines.append(f'ENV {key}="{value}"')
-    return "\n".join(lines) + "\n"
-
+# Every preset needs Dockerfile text, because the migration builds each clone from it. Keep it
+# to the base unless §1.1 found something worth carrying: env does NOT belong here.
 for p in c.get("presets", []):
-    p["dockerfile"] = dockerfile_for(p.get("vars", []))
+    p.setdefault("dockerfile", "FROM pegasis0/rmng-template:latest")
 
 json.dump(c, open(PATH, "w"), indent=2)
 print("homesParent =", c["docker"]["homesParent"])
 for p in c.get("presets", []):
-    print(f"--- {p['name']} ---"); print(p["dockerfile"])
+    print(p["name"], "vars:", [v["key"] for v in p.get("vars", [])])
+    print(p["dockerfile"])
 ```
 
 ```sh
@@ -481,13 +480,9 @@ ssh root@10.0.0.100 'pct push 205 /root/ct205-config.py /root/ct205-config.py
                      pct exec 205 -- python3 /root/ct205-config.py'
 ```
 
-A gen-1 `vars` entry is `{"key": ..., "value": ...}`. Print the result and read it before
-moving on — the Dockerfile text decides the image every clone is about to be rebuilt on, and
-after §5.6 has run, changing it costs a rebase of the whole fleet.
-
-Every var becomes an `ENV`, `PATH` included: a Dockerfile `ENV` reaches `docker exec` shells,
-which is the carrier that needs `PATH`. The home file in §5.8 is the other carrier and
-excludes it (§1.2).
+Read the printed Dockerfile before moving on — it decides the image every clone is about to be
+rebuilt on, and after §5.6 has run, changing it costs a rebase of the whole fleet. The printed
+var names are the ones each clone will get in `/etc/environment`.
 
 The default `homesParent` is `tank/rmng/homes`, which fits nobody here; a first create with
 the wrong parent fails with `no such pool`.
@@ -570,61 +565,6 @@ ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
   ls -l /var/lib/docker/volumes/rmng-data/_data/data/hosts/   # one symlink per managed clone
 "'
 ```
-
-### 5.8 Restore the preset vars to the agent
-
-§5.4 already put every var into the image as an `ENV`, which covers `docker exec` shells. The
-agent runs under `systemd --user`, which ignores the container's `Config.Env`, so it needs the
-home file as well. `PATH` is excluded here and here only (§1.2).
-
-Push it as a file, the same as §5.4:
-
-```python
-import json, os, pathlib, urllib.request
-
-vars_by_preset = json.load(open("/root/preset-vars.json"))
-state = json.load(urllib.request.urlopen("http://127.0.0.1:9000/api/state"))
-for h in state["hosts"]:
-    entries = vars_by_preset.get(h.get("presetName")) or []
-    lines = [e["key"] + "=" + e["value"] for e in entries if e.get("key") != "PATH"]
-    if not lines:
-        continue
-    d = pathlib.Path("/srv/rmng-homes/.merged") / h["id"] / ".config/environment.d"
-    d.mkdir(parents=True, exist_ok=True)
-    f = d / "10-rmng-preset.conf"
-    f.write_text("\n".join(lines) + "\n")
-    os.chmod(f, 0o600)
-    for p in (f, d, d.parent):
-        os.chown(p, 1000, 1000)
-    print("wrote", f)
-```
-
-```sh
-ssh root@10.0.0.100 'pct push 205 /root/ct205-env.py /root/ct205-env.py
-                     pct exec 205 -- python3 /root/ct205-env.py'
-```
-
-Write through `.merged`, not `upper` — the merged view is the path the clone has bound.
-
-Archived clones get the file too; it applies when they are unarchived. Then pick the agent up
-on the running clones:
-
-```sh
-ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
-for c in \$(docker ps --format {{.Names}} | grep -v ^rmng); do
-  docker exec -u rmng \$c bash -lc \"export XDG_RUNTIME_DIR=/run/user/1000
-    systemctl --user daemon-reload && systemctl --user restart agent-wrapper.service\"
-done"'
-```
-
-Verify on one clone that the agent process really has them:
-
-```sh
-docker exec -u rmng <clone> bash -lc \
-  'tr "\0" "\n" < /proc/$(pgrep -u rmng -f agent-wrapper|head -1)/environ | grep TURBO_'
-```
-
----
 
 ## 6. Tailscale — move the node to the new CT
 

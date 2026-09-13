@@ -18,6 +18,7 @@ export function makePreset(
     linearKey: "lin_api_fixture",
     group: "",
     defaultForkClone: "",
+    vars: [],
     agentPlaybook: "",
     globalPrompt: "",
     startupScript: "",

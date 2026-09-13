@@ -33,6 +33,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
         linearKey: "lin_api_fixture",
         group: "pooled",
         defaultForkClone: "",
+        vars: [{ key: "TURBO_TEAM", value: "talktomedi" }],
         agentPlaybook: "",
         globalPrompt: "",
         startupScript: "",
@@ -71,6 +72,7 @@ type Patch = {
     linearKey: string;
     group: string;
     defaultForkClone: string;
+    vars: { key: string; value: string }[];
     agentPlaybook: string;
     globalPrompt: string;
     dockerfile: string;
@@ -188,6 +190,33 @@ test("a blank Dockerfile resets to the default base on save", () => {
   expect(patch(draft).presets[0].dockerfile).toBe(
     "FROM pegasis0/rmng-template:latest",
   );
+});
+
+test("preset env vars survive the round trip, half-typed rows included", () => {
+  // The rows go to the server as the operator left them: it is the server that trims keys
+  // and drops the blank-key ones, so the form does not have to police a row still being
+  // typed. A row whose VALUE is blank is a real setting (`KEY=` clears an inherited value)
+  // and must reach the patch intact.
+  const draft = settingsDraftFrom(config());
+  expect(draft.presets[0].vars).toEqual([
+    { key: "TURBO_TEAM", value: "talktomedi" },
+  ]);
+
+  draft.presets = [
+    {
+      ...draft.presets[0],
+      vars: [
+        { key: "TURBO_TEAM", value: "talktomedi" },
+        { key: "", value: "" },
+        { key: "BLANK", value: "" },
+      ],
+    },
+  ];
+  expect(patch(draft).presets[0].vars).toEqual([
+    { key: "TURBO_TEAM", value: "talktomedi" },
+    { key: "", value: "" },
+    { key: "BLANK", value: "" },
+  ]);
 });
 
 test("a blank Linear key is sent as-is, clearing the stored one", () => {

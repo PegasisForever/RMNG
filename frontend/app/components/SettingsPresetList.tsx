@@ -1,7 +1,8 @@
 // The Presets section's body: one card per preset, holding its name, the ticket-id
 // prefixes that auto-select it, its Linear API key (a regular visible field — what the
 // editor sends is what is stored, blank clears it), its default account pool (one pool
-// feeds both providers), its full Dockerfile (built lazily into the preset's image; the rebuild
+// feeds both providers), its environment variables (delivered by the server, not baked into
+// the image), its full Dockerfile (built lazily into the preset's image; the rebuild
 // button below always pulls fresh base and rebuilds), and its two prompt appendices.
 //
 // The whole list is one prop and one `onChange`, so every edit inside a card is a new
@@ -210,6 +211,67 @@ function PresetCard({
             label="Default fork clone (fork tabs)"
             className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
           />
+        </Field>
+      </div>
+      {/* Env vars belong here, not in the Dockerfile below. A Dockerfile `ENV` only reaches
+          `docker exec`: systemd is PID 1 in a clone and does not pass its own environment to
+          the services it starts, so an image `ENV` never reaches an SSH login or the desktop.
+          The server writes these into the clone's `/etc/environment`, which all three read,
+          and rewrites it on every resync — so an edit here lands on a running fleet without a
+          rebuild. */}
+      <div className="mt-2">
+        <Field label="Environment variables (written to every clone's /etc/environment; applied on save, no rebuild)">
+          <div className="flex flex-col gap-1">
+            {p.vars.map((v, k) => (
+              <div key={k} className="flex items-center gap-2">
+                <input
+                  value={v.key}
+                  onChange={(e) =>
+                    onChange({
+                      vars: p.vars.map((vv, m) =>
+                        m === k ? { ...vv, key: e.target.value } : vv,
+                      ),
+                    })
+                  }
+                  placeholder="KEY"
+                  spellCheck={false}
+                  className={`${settingsInput} font-mono w-40 shrink-0`}
+                />
+                <input
+                  value={v.value}
+                  onChange={(e) =>
+                    onChange({
+                      vars: p.vars.map((vv, m) =>
+                        m === k ? { ...vv, value: e.target.value } : vv,
+                      ),
+                    })
+                  }
+                  placeholder="value"
+                  spellCheck={false}
+                  className={`${settingsInput} font-mono flex-1`}
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChange({ vars: p.vars.filter((_, m) => m !== k) })
+                  }
+                  aria-label={`Remove ${v.key || "variable"}`}
+                  className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() =>
+                onChange({ vars: [...p.vars, { key: "", value: "" }] })
+              }
+              className="self-start rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              + Add variable
+            </button>
+          </div>
         </Field>
       </div>
       <div className="mt-2">
