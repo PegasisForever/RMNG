@@ -965,11 +965,66 @@ async fn wait_op_terminal(app: &App, op_id: &str) {
     }
 }
 
-/// Boot one-shot: migrate every gen-1 row (managed, no dataset) to gen-2, one clone at a
-/// time. No gen-1 rows ⇒ no-op. Runs under the whole-LXC backup: per-clone failures log
-/// and continue with one retry at the end; the fleet (non-archived) starts after the
-/// window, with stored account tokens re-pushed onto the running clones.
-pub async fn migrate_all_on_boot(app: App) {
+/// How many clones migrate at once in [`migrate_all_on_boot`].
+///
+/// Was one. The per-clone cost is a home copy — measured at ~7 minutes for a 12 GB home
+/// on CT 104 — so a serial pass over a real fleet runs for hours (CT 106: 104 clones,
+/// homes to 44.8 GB). Concurrency is only safe because the home archive streams rather
+/// than buffering (`DockerCtl::download_tar_stream`); buffering four homes at once would
+/// have cost their combined size in RSS.
+const MIGRATE_CONCURRENCY: usize = 4;
+
+/// Migrate `ids`, up to [`MIGRATE_CONCURRENCY`] at a time. Returns (passed, failed ids).
+///
+/// Success is read off the ROW, not the operation: a finished op is pruned 8 s later
+/// ([`PRUNE_DONE_MS`]), which a 5 s poll can easily miss — and the row's `dataset` is the
+/// authoritative record that the clone is gen-2 now.
+async fn migrate_pass(app: &App, ids: Vec<String>) -> (usize, Vec<String>) {
+    use futures::StreamExt;
+    let results = futures::stream::iter(ids.into_iter().map(|id| {
+        let app = app.clone();
+        async move {
+            match start_migrate(&app, &id) {
+                Ok(op) => {
+                    wait_op_terminal(&app, &op.id).await;
+                    let migrated = app
+                        .store
+                        .get()
+                        .hosts
+                        .iter()
+                        .any(|h| h.id == id && h.dataset.is_some());
+                    if migrated { Ok(()) } else { Err(id) }
+                }
+                Err(e) => {
+                    tracing::warn!("migrate {id}: could not file op: {e}");
+                    Err(id)
+                }
+            }
+        }
+    }))
+    .buffer_unordered(MIGRATE_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    let mut pass = 0;
+    let mut failed = Vec::new();
+    for r in results {
+        match r {
+            Ok(()) => pass += 1,
+            Err(id) => failed.push(id),
+        }
+    }
+    (pass, failed)
+}
+
+/// Boot one-shot: migrate every gen-1 row (managed, no dataset) to gen-2,
+/// [`MIGRATE_CONCURRENCY`] at a time. No gen-1 rows ⇒ no-op. Runs under the whole-LXC
+/// backup: per-clone failures log and continue with one retry at the end; the fleet
+/// (non-archived) starts after the window, with stored account tokens re-pushed onto the
+/// running clones.
+///
+/// Returns whether there was anything to migrate — a `false` means boot still owes the
+/// fleet a start ([`boot_start_fleet`]).
+pub async fn migrate_all_on_boot(app: App) -> bool {
     let gen1: Vec<String> = app
         .store
         .get()
@@ -979,13 +1034,16 @@ pub async fn migrate_all_on_boot(app: App) {
         .map(|h| h.id)
         .collect();
     if gen1.is_empty() {
-        return;
+        return false;
     }
     tracing::warn!(
-        "gen-2 migration: {} gen-1 clone(s) detected, migrating one at a time: {}",
+        "gen-2 migration: {} gen-1 clone(s) detected, {MIGRATE_CONCURRENCY} at a time: {}",
         gen1.len(),
         gen1.join(", ")
     );
+    // Same normalisation the plain boot path does: a clone the daemon can restart will
+    // fight the window's stops.
+    normalize_restart_policies(&app).await;
     // Stable source for the home copies: stop the whole fleet first (best-effort).
     for h in app
         .store
@@ -998,54 +1056,10 @@ pub async fn migrate_all_on_boot(app: App) {
             tracing::warn!("migrate: pre-stopping {} failed: {e} (continuing)", h.id);
         }
     }
-    let mut failed: Vec<String> = Vec::new();
-    let mut pass = 0;
-    for id in gen1.clone() {
-        match start_migrate(&app, &id) {
-            Ok(op) => {
-                wait_op_terminal(&app, &op.id).await;
-                let ok = app
-                    .store
-                    .get()
-                    .operations
-                    .iter()
-                    .any(|o| o.id == op.id && o.status == OperationStatus::Done);
-                if ok {
-                    pass += 1;
-                } else {
-                    failed.push(id);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("migrate {id}: could not file op: {e}");
-                failed.push(id);
-            }
-        }
-    }
+    let (mut pass, failed) = migrate_pass(&app, gen1.clone()).await;
     // One retry pass for the failures.
-    let mut retry_failed: Vec<String> = Vec::new();
-    for id in failed {
-        match start_migrate(&app, &id) {
-            Ok(op) => {
-                wait_op_terminal(&app, &op.id).await;
-                let ok = app
-                    .store
-                    .get()
-                    .operations
-                    .iter()
-                    .any(|o| o.id == op.id && o.status == OperationStatus::Done);
-                if ok {
-                    pass += 1;
-                } else {
-                    retry_failed.push(id);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("migrate {id}: retry could not file op: {e}");
-                retry_failed.push(id);
-            }
-        }
-    }
+    let (retry_pass, retry_failed) = migrate_pass(&app, failed).await;
+    pass += retry_pass;
     // Start the fleet: every migrated non-archived clone, then re-push its stored
     // account tokens (those need running clones). Best-effort per clone.
     let mut started = 0;
@@ -1077,6 +1091,110 @@ pub async fn migrate_all_on_boot(app: App) {
         retry_failed.len(),
         retry_failed.join(", "),
     );
+    true
+}
+
+/// Start the fleet at boot: every managed, non-archived clone that is not already running.
+///
+/// This exists because clone containers carry `restart: no` (see
+/// `docker.rs::create_clone_container`). The daemon used to do this, but it did it the
+/// instant it started — before the server, and therefore before the home overlays were
+/// mounted — which handed clones an empty home. Starting them HERE, after
+/// `home_overlay::remount_all`, makes that race impossible rather than recoverable.
+pub async fn boot_start_fleet(app: &App) {
+    normalize_restart_policies(app).await;
+    let want: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| h.managed && !h.archived)
+        .map(|h| h.id)
+        .collect();
+    let (mut started, mut already) = (0usize, 0usize);
+    for id in want {
+        match app.docker.is_running(&id).await {
+            Ok(true) => already += 1,
+            Ok(false) => match app.docker.start_container(&id).await {
+                Ok(()) => started += 1,
+                Err(e) => tracing::warn!("boot: starting {id} failed: {e:#}"),
+            },
+            Err(e) => tracing::warn!("boot: liveness of {id}: {e:#}"),
+        }
+    }
+    tracing::info!("boot: fleet start — {started} started, {already} already running");
+}
+
+/// Take every managed clone off the daemon's restart policy, archived ones included.
+///
+/// New clones are created with `restart: no`; this is for the ones that are not new. Until
+/// a clone is normalised the daemon still starts it at CT boot, ahead of the server, which
+/// is the race the policy change exists to remove. One boot fixes an existing fleet.
+pub(crate) async fn normalize_restart_policies(app: &App) {
+    let ids: Vec<String> = app
+        .store
+        .get()
+        .hosts
+        .into_iter()
+        .filter(|h| h.managed)
+        .map(|h| h.id)
+        .collect();
+    let mut changed = 0usize;
+    for id in ids {
+        match app.docker.ensure_no_restart_policy(&id).await {
+            Ok(true) => changed += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!("boot: restart policy of {id}: {e:#}"),
+        }
+    }
+    if changed > 0 {
+        tracing::info!("boot: took {changed} clone(s) off the daemon restart policy");
+    }
+}
+
+/// How often [`crash_recovery`] looks for a clone that fell over.
+const CRASH_SWEEP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Restart a managed clone that stopped on its own.
+///
+/// `restart: no` (see `docker.rs::create_clone_container`) took this away from the daemon,
+/// so the server takes it back — and does it better: the daemon would happily revive an
+/// ARCHIVED clone's container, while this knows the difference.
+///
+/// Two guards against fighting a deliberate stop. A clone with a Running operation is left
+/// alone (archive, rebase and migrate all file their op BEFORE they stop the container),
+/// and a clone must be seen stopped on two consecutive sweeps before it is touched, so a
+/// container caught mid-restart is not raced.
+pub async fn crash_recovery(app: App) {
+    let mut down_last_sweep: std::collections::HashSet<String> = Default::default();
+    loop {
+        tokio::time::sleep(CRASH_SWEEP).await;
+        let st = app.store.get();
+        let busy: std::collections::HashSet<&str> = st
+            .operations
+            .iter()
+            .filter(|o| o.status == OperationStatus::Running)
+            .map(|o| o.target.as_str())
+            .collect();
+        let mut down_now = std::collections::HashSet::new();
+        for h in st.hosts.iter().filter(|h| h.managed && !h.archived) {
+            if busy.contains(h.id.as_str()) {
+                continue;
+            }
+            if !matches!(app.docker.is_running(&h.id).await, Ok(false)) {
+                continue;
+            }
+            if down_last_sweep.contains(&h.id) {
+                match app.docker.start_container(&h.id).await {
+                    Ok(()) => tracing::warn!("crash recovery: restarted {}", h.id),
+                    Err(e) => tracing::warn!("crash recovery: restarting {}: {e:#}", h.id),
+                }
+            } else {
+                down_now.insert(h.id.clone());
+            }
+        }
+        down_last_sweep = down_now;
+    }
 }
 
 /// Warm a preset image without creating (`POST /api/images/prebuild`): always rebuild the

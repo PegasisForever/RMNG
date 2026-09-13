@@ -260,15 +260,33 @@ async fn main() -> Result<()> {
     boot::run_late_boot(
         mediaplane::init,
         move || {
-            // Gen-2 one-shot migration FIRST: any gen-1 row (managed, no dataset) is
-            // migrated one clone at a time, with one Migrate op per clone in the jobs
-            // UI. The fleet stops for the window and (non-archived) restarts after.
-            // No gen-1 rows ⇒ no-op. Runs under the whole-LXC backup.
-            tokio::spawn(jobs::migrate_all_on_boot(app_for_bg.clone()));
-            // Home overlays do not survive a CT reboot (mounts, unlike containers):
-            // re-establish every managed clone's merged view before anything serves it.
-            // Best-effort per clone; migration mounts its own as it goes.
-            tokio::spawn(home_overlay::remount_all(app_for_bg.clone()));
+            // Boot order is LOAD-BEARING, so this is one sequential task rather than
+            // three spawns: overlays, then migration, then the fleet.
+            //
+            // Clone containers carry `restart: no`, so nothing runs a clone until this
+            // task says so. That is the whole point — with the daemon's `unless-stopped`
+            // the clones came up before the server and bound their home mountpoint while
+            // it was still empty, and a private bind never sees the overlay that lands a
+            // moment later.
+            tokio::spawn({
+                let app = app_for_bg.clone();
+                async move {
+                    // 1. Home overlays do not survive a CT reboot (mounts, unlike
+                    //    containers). Nothing may start a clone before its home is back.
+                    home_overlay::remount_all(app.clone()).await;
+                    // 2. Gen-2 one-shot migration: any gen-1 row (managed, no dataset) is
+                    //    migrated `MIGRATE_CONCURRENCY` at a time, one Migrate op each in
+                    //    the jobs UI. It owns the fleet for its window and starts the
+                    //    non-archived clones itself. No gen-1 rows ⇒ no-op.
+                    if !jobs::migrate_all_on_boot(app.clone()).await {
+                        // 3. No migration, so the fleet is still ours to start.
+                        jobs::boot_start_fleet(&app).await;
+                    }
+                    // 4. Only now: the daemon no longer revives a crashed clone, so we do.
+                    //    Started last so it cannot race the migration window's own stops.
+                    jobs::crash_recovery(app).await;
+                }
+            });
             // Background loops: the per-clone agent-state monitor poller, the one-shot
             // clone-home sync (links data/hosts/<id> → the clone's dataset dir, archived
             // included, so every home is browsable in one place; runs once here, the

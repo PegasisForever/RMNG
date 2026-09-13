@@ -20,7 +20,7 @@
 //! each preset's Dockerfile into a hash tag on demand); the retired gen-1 registry-template
 //! pull is gone.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::time::{Duration, Instant};
 
 use wire::EnvVar;
@@ -1139,13 +1139,28 @@ async fn migrate_one_inner(
     crate::zfs::create(&homes_parent(app), host_id)?;
 
     on_progress("copy", "copying /home/rmng out of the old container");
-    let tar = app.docker.download_home_tar(host_id, "/home/rmng").await?;
-    let bytes = tar.len() as u64;
     // Into the overlay upper: the merged view then shows old home over the new base.
     let dataset = std::path::PathBuf::from(crate::zfs::dataset_dir(host_id));
     crate::home_overlay::ensure_layout(&dataset)?;
     let upper = crate::home_overlay::upper_dir(&dataset);
-    extract_home_tar(&tar, &upper.to_string_lossy())?;
+    // Streamed, not buffered: the archive goes daemon -> extractor without ever being a
+    // whole home in memory, so several clones can migrate at once (see
+    // `jobs::migrate_all_on_boot`). The byte count is tallied off the stream itself.
+    let counted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stream = app.docker.download_tar_stream(host_id, "/home/rmng")?;
+    let dest = upper.to_string_lossy().into_owned();
+    let handle = tokio::runtime::Handle::current();
+    let tally = counted.clone();
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let reader = tokio_util::io::SyncIoBridge::new_with_handle(
+            tokio_util::io::StreamReader::new(stream),
+            handle,
+        );
+        extract_home_tar(CountingReader { inner: reader, tally }, &dest)
+    })
+    .await
+    .context("the home extract task did not finish")??;
+    let bytes = counted.load(std::sync::atomic::Ordering::Relaxed);
 
     on_progress("recreate", "removing the old container");
     app.docker.remove_container(host_id).await?;
@@ -1188,33 +1203,96 @@ async fn migrate_one_inner(
     Ok(MigrateReport { bytes, tag })
 }
 
+/// Counts the bytes pulled through the home archive stream, so the per-clone report keeps
+/// its "N bytes" figure now that the archive is never a `Vec` whose `len()` could be read.
+struct CountingReader<R> {
+    inner: R,
+    tally: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.tally
+            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+/// Strip the archive's `rmng/` top-level component and refuse anything that would escape
+/// the destination. `None` = the path WAS the top-level dir (nothing to extract).
+///
+/// Applied to entry paths AND to hard-link targets — they are rooted the same way, and
+/// stripping only the former is what made every home with hard links fail to migrate.
+fn home_archive_rel(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
+    let mut comps = path.components();
+    comps.next(); // strip the `rmng/` top-level dir
+    let rel: std::path::PathBuf = comps.collect();
+    if rel.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    if rel.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    }) {
+        anyhow::bail!("refusing to extract {rel:?} outside the dataset");
+    }
+    Ok(Some(rel))
+}
+
 /// Extract a daemon `download_from_container` tar of `/home/rmng` into the dataset dir.
 /// The archive roots every entry under the basename (`rmng/...`), so the first component
 /// is stripped. Runs as CT root, preserving the archived owners/modes. Entries escaping
 /// the destination (`..`, absolute) are refused.
-fn extract_home_tar(tar_bytes: &[u8], dest: &str) -> Result<()> {
-    let mut archive = tar::Archive::new(tar_bytes);
+///
+/// Takes a READER, not a slice: migration streams the archive straight through rather
+/// than holding a whole home in memory (see `DockerCtl::download_tar_stream`).
+///
+/// Hard links are collected and applied AFTER the main pass. Two reasons: the link target
+/// needs the same `rmng/` strip the entry path gets, and an archive may name a target it
+/// has not written yet. Missing the first of those is why homes carrying a `uv` cache, a
+/// `pnpm` store or any other hard-linked tree failed with
+/// `No such file or directory (os error 2) when hard linking rmng/...` — on CT 104 that
+/// was 4 of 8 clones, up to 28 276 hard-linked files in one home.
+fn extract_home_tar<R: std::io::Read>(reader: R, dest: &str) -> Result<()> {
+    let mut archive = tar::Archive::new(reader);
     archive.set_preserve_permissions(true);
+    // LOAD-BEARING, same as the skeleton export. The tar crate defaults to giving every
+    // extracted file to the running process — root — so without this a migrated home
+    // arrives entirely root-owned and the clone user cannot write to it. Measured on
+    // CT 104's first run: 554 501 files landed as uid 0 against 35 as uid 1000.
+    archive.set_preserve_ownerships(true);
+    let dest = std::path::Path::new(dest);
+    let mut links: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
     for entry in archive.entries()? {
         let mut entry = entry?;
-        let path = entry.path()?.to_path_buf();
-        let mut comps = path.components();
-        comps.next(); // strip the `rmng/` top-level dir
-        let rel: std::path::PathBuf = comps.collect();
-        if rel.as_os_str().is_empty() {
+        let Some(rel) = home_archive_rel(&entry.path()?)? else {
+            continue;
+        };
+        if entry.header().entry_type() == tar::EntryType::Link {
+            let target = entry
+                .link_name()?
+                .ok_or_else(|| anyhow!("hard link {rel:?} carries no target"))?;
+            let src = home_archive_rel(&target)?
+                .ok_or_else(|| anyhow!("hard link {rel:?} targets the archive root"))?;
+            links.push((src, rel));
             continue;
         }
-        if rel.components().any(|c| {
-            matches!(
-                c,
-                std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        }) {
-            anyhow::bail!("refusing to extract {rel:?} outside the dataset");
+        entry.unpack(dest.join(rel))?;
+    }
+    for (src, dst) in links {
+        let (src, dst) = (dest.join(src), dest.join(dst));
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {} for a hard link", parent.display()))?;
         }
-        entry.unpack(std::path::Path::new(dest).join(rel))?;
+        let _ = std::fs::remove_file(&dst);
+        std::fs::hard_link(&src, &dst)
+            .with_context(|| format!("hard linking {} to {}", src.display(), dst.display()))?;
     }
     Ok(())
 }
@@ -1480,6 +1558,137 @@ mod tests {
             },
         ];
         assert_eq!(etc_environment_conf(&vars), "FOO=1\nBAR=a b\n");
+    }
+
+    /// A home carrying a hard link (a `uv` cache linked into a venv, a `pnpm` store linked
+    /// into `node_modules`) must extract with the link intact. The archive roots BOTH the
+    /// entry path and the link target at `rmng/`; stripping only the former made the
+    /// extract fail with `No such file or directory (os error 2) when hard linking
+    /// rmng/...` and took down 4 of CT 104's 8 clones.
+    #[test]
+    fn extract_home_tar_rebases_hard_link_targets_onto_the_destination() {
+        let body = b"payload";
+        // Stamp the archive with OUR uid/gid: the extractor restores ownership now, so a
+        // foreign owner would need root. The hard-link behaviour under test is unaffected.
+        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+        let mut builder = tar::Builder::new(Vec::new());
+        // The daemon's archive carries a dir entry before anything inside it; `unpack`
+        // does not invent parents.
+        for dir in [
+            "rmng/",
+            "rmng/.cache/",
+            "rmng/.cache/pkg/",
+            "rmng/.venv/",
+            "rmng/.venv/site/",
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(0);
+            h.set_mode(0o755);
+            h.set_uid(uid as u64);
+            h.set_gid(gid as u64);
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_cksum();
+            builder.append_data(&mut h, dir, std::io::empty()).unwrap();
+        }
+        let mut file = tar::Header::new_gnu();
+        file.set_size(body.len() as u64);
+        file.set_mode(0o644);
+        file.set_uid(uid as u64);
+        file.set_gid(gid as u64);
+        file.set_cksum();
+        builder
+            .append_data(&mut file, "rmng/.cache/pkg/thing", &body[..])
+            .unwrap();
+        let mut link = tar::Header::new_gnu();
+        link.set_size(0);
+        link.set_mode(0o644);
+        link.set_uid(uid as u64);
+        link.set_gid(gid as u64);
+        link.set_entry_type(tar::EntryType::Link);
+        builder
+            .append_link(&mut link, "rmng/.venv/site/thing", "rmng/.cache/pkg/thing")
+            .unwrap();
+        let archive = builder.into_inner().unwrap();
+
+        let dest = std::env::temp_dir().join(format!("rmng-hardlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&dest).unwrap();
+        extract_home_tar(&archive[..], &dest.to_string_lossy()).unwrap();
+
+        let original = dest.join(".cache/pkg/thing");
+        let linked = dest.join(".venv/site/thing");
+        assert_eq!(std::fs::read(&original).unwrap(), body);
+        assert_eq!(
+            std::fs::read(&linked).unwrap(),
+            body,
+            "the hard link must resolve inside the destination, not against the CWD"
+        );
+        // Really a hard link, not a second copy.
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(&original).unwrap().ino(),
+            std::fs::metadata(&linked).unwrap().ino(),
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// The extractor must keep the ARCHIVED owner, not give everything to the process
+    /// running it. Without `set_preserve_ownerships` a migrated home arrives entirely
+    /// root-owned and the clone user cannot write to it — 554 501 files on CT 104.
+    /// Root-only: chown needs privilege, so it self-skips elsewhere.
+    #[test]
+    fn extract_home_tar_preserves_the_archived_owner() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: needs root to restore ownership");
+            return;
+        }
+        let body = b"payload";
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut dir = tar::Header::new_gnu();
+        dir.set_size(0);
+        dir.set_mode(0o755);
+        dir.set_uid(1000);
+        dir.set_gid(1000);
+        dir.set_entry_type(tar::EntryType::Directory);
+        dir.set_cksum();
+        builder.append_data(&mut dir, "rmng/", std::io::empty()).unwrap();
+        let mut file = tar::Header::new_gnu();
+        file.set_size(body.len() as u64);
+        file.set_mode(0o644);
+        file.set_uid(1000);
+        file.set_gid(1000);
+        file.set_cksum();
+        builder.append_data(&mut file, "rmng/owned", &body[..]).unwrap();
+        let archive = builder.into_inner().unwrap();
+
+        let dest = std::env::temp_dir().join(format!("rmng-own-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&dest).unwrap();
+        extract_home_tar(&archive[..], &dest.to_string_lossy()).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::metadata(dest.join("owned")).unwrap();
+        assert_eq!((md.uid(), md.gid()), (1000, 1000), "archived owner must survive");
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// A link target that escapes the dataset is refused, like any other entry.
+    #[test]
+    fn extract_home_tar_refuses_an_escaping_hard_link_target() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut link = tar::Header::new_gnu();
+        link.set_size(0);
+        link.set_mode(0o644);
+        link.set_entry_type(tar::EntryType::Link);
+        builder
+            .append_link(&mut link, "rmng/evil", "rmng/../../etc/shadow")
+            .unwrap();
+        let archive = builder.into_inner().unwrap();
+        let dest = std::env::temp_dir().join(format!("rmng-hardlink-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&dest).unwrap();
+        let err = extract_home_tar(&archive[..], &dest.to_string_lossy()).unwrap_err();
+        assert!(format!("{err:#}").contains("outside the dataset"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&dest);
     }
 
     #[test]

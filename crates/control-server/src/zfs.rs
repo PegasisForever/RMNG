@@ -124,6 +124,24 @@ pub fn create(parent: &str, clone_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Ensure `dataset` is mounted at its recorded mountpoint. Idempotent.
+///
+/// A CT reboot leaves every per-clone dataset UNMOUNTED. There is deliberately no
+/// `zfsutils-linux` inside the CT (its `zfs-dkms` cannot build under a shared kernel), so
+/// nothing runs the usual `zfs mount -a` at boot — the server is the only thing that can.
+/// Skipping this let `home_overlay::remount_all` stack an overlay on an empty directory
+/// and hand every clone a pristine template home while its real one sat unmounted.
+pub fn ensure_mounted(dataset: &str) -> Result<()> {
+    if dataset.is_empty() || dataset.contains(['\0', ' ', '\n']) {
+        anyhow::bail!("zfs: refusing to mount {dataset:?}");
+    }
+    if run(&["get", "-H", "-o", "value", "mounted", dataset])?.trim() == "yes" {
+        return Ok(());
+    }
+    run(&["mount", dataset])?;
+    Ok(())
+}
+
 /// `zfs snapshot <parent>/<clone-id>@<snap>`.
 pub fn snapshot(parent: &str, clone_id: &str, snap: &str) -> Result<String> {
     let full = format!("{}@{snap}", dataset_name(parent, clone_id));

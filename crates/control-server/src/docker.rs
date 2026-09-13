@@ -1576,8 +1576,21 @@ impl DockerCtl {
             // clones get this; the self-upgrade helper + lxcfs probe run no desktop.
             shm_size: Some(mem / 2),
             mounts: Some(mounts),
+            // `no`, deliberately — the SERVER owns when a clone runs, not the daemon.
+            //
+            // With `unless-stopped` the daemon restarts every clone the moment it starts,
+            // which on a CT reboot is BEFORE the server exists. A clone that wins that race
+            // binds `<homes>/.merged/<id>` while it is still a bare directory, and because
+            // a bind is private the overlay mounted a few seconds later never appears
+            // inside it: the clone runs on an empty home and anything it writes is orphaned
+            // under the mountpoint. Measured on CT 204: the clone started 84 ms ahead.
+            //
+            // `on-failure` does not help — the daemon auto-starts those at start too
+            // (measured: only `no` does not). So the fix is to take the daemon out of the
+            // decision entirely. `boot_start_fleet` starts clones after the overlays are
+            // up, and `crash_recovery` puts back the one thing this policy gives up.
             restart_policy: Some(RestartPolicy {
-                name: Some(RestartPolicyNameEnum::UNLESS_STOPPED),
+                name: Some(RestartPolicyNameEnum::NO),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1930,6 +1943,48 @@ impl DockerCtl {
     /// Nothing pauses a clone any more, but a container frozen by the build that archived
     /// them that way outlives an upgrade, and it must stay invisible until the reconciler
     /// clears it.
+    /// Force `restart: no` onto a clone container that predates that policy.
+    ///
+    /// Clones are created with it now (see `create_clone_container`), but one made by an
+    /// older build still carries `unless-stopped` — and would still be started by the
+    /// daemon on a CT boot, ahead of the server and its home overlays. Normalising at boot
+    /// means an existing fleet stops racing after one restart, with no recreate.
+    ///
+    /// Returns whether it had to change anything.
+    pub async fn ensure_no_restart_policy(&self, id: &str) -> Result<bool> {
+        let daemon = self.daemon()?;
+        let current = daemon
+            .inspect_container(
+                id,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+            .with_context(|| format!("inspecting {id} for its restart policy"))?
+            .host_config
+            .and_then(|h| h.restart_policy)
+            .and_then(|r| r.name);
+        if matches!(
+            current,
+            Some(RestartPolicyNameEnum::NO) | Some(RestartPolicyNameEnum::EMPTY)
+        ) {
+            return Ok(false);
+        }
+        daemon
+            .update_container(
+                id,
+                bollard::models::ContainerUpdateBody {
+                    restart_policy: Some(RestartPolicy {
+                        name: Some(RestartPolicyNameEnum::NO),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .with_context(|| format!("setting restart=no on {id}"))?;
+        Ok(true)
+    }
+
     pub async fn is_running(&self, id: &str) -> Result<bool> {
         match self
             .daemon()?
@@ -2105,6 +2160,36 @@ impl DockerCtl {
             buf.extend_from_slice(&bytes);
         }
         Ok(buf)
+    }
+
+    /// The same archive as [`Self::download_home_tar`], as a STREAM rather than one
+    /// `Vec<u8>`.
+    ///
+    /// Migration reads whole clone homes, and buffering them cost their full size in
+    /// resident memory — measured at 11.0 GiB of RSS while copying a 12.0 GB home, with
+    /// the destination still empty. That is what capped the migration at one clone at a
+    /// time; streaming into the extractor removes the ceiling and overlaps the download
+    /// with the unpack.
+    ///
+    /// Errors are mapped to `io::Error` so the stream composes with
+    /// `tokio_util::io::StreamReader`.
+    pub fn download_tar_stream(
+        &self,
+        container: &str,
+        path: &str,
+    ) -> Result<impl futures::Stream<Item = std::io::Result<bytes::Bytes>> + Unpin + use<>> {
+        let stream = self.daemon()?.download_from_container(
+            container,
+            Some(
+                bollard::query_parameters::DownloadFromContainerOptionsBuilder::new()
+                    .path(path)
+                    .build(),
+            ),
+        );
+        let what = format!("downloading {path} from {container}");
+        Ok(Box::pin(stream.map(move |chunk| {
+            chunk.map_err(|e| std::io::Error::other(format!("{what}: {e}")))
+        })))
     }
 
     /// The next chunk from an exec's output stream, or an error once it is clear none is

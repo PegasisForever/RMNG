@@ -33,6 +33,20 @@ const WORK_DIR: &str = "work";
 const SKEL_MARKER: &str = ".rmng-skeleton";
 const IMAGE_HOME: &str = "/home/rmng";
 
+/// One in-flight skeleton export per image digest (see [`ensure_skeleton`]).
+static SKEL_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn skeleton_lock(digest: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    SKEL_LOCKS
+        .lock()
+        .unwrap()
+        .entry(digest.to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
 /// Filesystem-safe form of an image id (`sha256:…` → `sha256-…`).
 fn digest_path(digest: &str) -> String {
     digest
@@ -284,6 +298,12 @@ fn unpack_skeleton(tar_bytes: &[u8], dest: &Path) -> Result<()> {
 /// is no home to mount.
 pub async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     let digest = app.docker.image_id(image_tag).await?;
+    // One export per digest at a time. Every clone of one preset resolves to the SAME
+    // image, so concurrent migrations all land here together — and the body below wipes
+    // the directory before re-exporting, which a second caller would read mid-wipe.
+    // Mirrors `derived::BUILD_LOCKS`.
+    let lock = skeleton_lock(&digest);
+    let _guard = lock.lock().await;
     // NB: mount paths come from HOMES_DIR (the mountpoint), not the dataset name.
     let dest = skeleton_dir(crate::zfs::HOMES_DIR, &digest);
     // Marker carries a version: v1 skeletons were exported WITHOUT ownership (tar-crate
@@ -377,7 +397,10 @@ pub fn teardown_merged(homes: &str, id: &str) {
 
 /// Mount (or remount, when the lower changed, e.g. rebase) one clone's home overlay.
 /// Idempotent: an already-correct mount is left alone.
-pub async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) -> Result<()> {
+/// Returns `true` when this call ESTABLISHED the mount (as opposed to finding it already
+/// correct). A container bound before that moment captured the bare mountpoint and needs
+/// restarting — see [`remount_all`].
+pub async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) -> Result<bool> {
     ensure_layout(dataset)?;
     let homes = merged
         .parent()
@@ -388,11 +411,12 @@ pub async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) -> Resu
         anyhow::bail!("skeleton missing for {digest} (export it first)");
     }
     match mounted_lower(merged)? {
-        Some(cur) if cur.contains(&digest_path(digest)) => return Ok(()),
+        Some(cur) if cur.contains(&digest_path(digest)) => return Ok(false),
         Some(_) => unmount_merged(merged),
         None => {}
     }
-    mount_overlay(&lower, &upper_dir(dataset), &work_dir(dataset), merged)
+    mount_overlay(&lower, &upper_dir(dataset), &work_dir(dataset), merged)?;
+    Ok(true)
 }
 
 /// Re-establish every managed clone's overlay after a reboot (mounts do not survive
@@ -414,7 +438,19 @@ pub async fn remount_all(app: App) {
         .collect();
     // Mount paths come from HOMES_DIR (the mountpoint), never the dataset name.
     let homes = crate::zfs::HOMES_DIR;
+    // Clones whose overlay this pass established: their containers, if already running,
+    // are bound to the bare mountpoint and must be restarted.
+    let mut remounted: Vec<String> = Vec::new();
     for (id, dataset, tag) in &rows {
+        // A CT reboot leaves the per-clone datasets UNMOUNTED: nothing inside the CT runs
+        // `zfs mount -a` (there is deliberately no zfsutils here, see PROXMOX-LXC.md).
+        // Building the overlay first would stack it on an empty directory and hand the
+        // clone a pristine template home while its real one sits unmounted — which is
+        // exactly what CT 204 did after its first reboot.
+        if let Err(e) = crate::zfs::ensure_mounted(dataset) {
+            tracing::warn!(target: "overlay", "remount: mounting {dataset} for {id}: {e:#}");
+            continue;
+        }
         let Some(tag) = tag.as_deref().filter(|t| !t.trim().is_empty()) else {
             tracing::warn!(target: "overlay", "remount: {id} has no recorded image; skipping");
             continue;
@@ -426,8 +462,40 @@ pub async fn remount_all(app: App) {
                 continue;
             }
         };
-        if let Err(e) = ensure_mounted(Path::new(dataset), &digest, &merged_dir(homes, id)).await {
-            tracing::warn!(target: "overlay", "remount: {id}: {e:#}");
+        // `dataset` is the ZFS NAME (`pool/rmng-homes/<id>`); the overlay needs the
+        // DIRECTORY. Passing the name gave overlayfs a relative `upperdir` that resolved
+        // to nothing, so every clone silently came up on the bare skeleton.
+        let dataset_dir = std::path::PathBuf::from(crate::zfs::dataset_dir(id));
+        match ensure_mounted(&dataset_dir, &digest, &merged_dir(homes, id)).await {
+            // Mounted just now: a container that Docker already started bound the bare
+            // mountpoint, and its bind is PRIVATE, so this mount will never propagate into
+            // it. On a CT reboot the clones routinely win that race — measured at 84 ms —
+            // and come up showing the template home with the real one nowhere in sight.
+            // Restarting the container is what re-binds it to the live overlay.
+            Ok(true) => remounted.push(id.clone()),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(target: "overlay", "remount: {id}: {e:#}"),
+        }
+    }
+    for id in &remounted {
+        match app.docker.is_running(id).await {
+            Ok(true) => {
+                let restart = async {
+                    app.docker.stop_even_if_paused(id).await?;
+                    app.docker.start_container(id).await
+                };
+                match restart.await {
+                    Ok(()) => tracing::info!(
+                        target: "overlay",
+                        "remount: restarted {id} so it binds the live home overlay"
+                    ),
+                    Err(e) => {
+                        tracing::warn!(target: "overlay", "remount: restarting {id}: {e:#}")
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(target: "overlay", "remount: liveness of {id}: {e:#}"),
         }
     }
 }

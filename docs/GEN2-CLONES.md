@@ -47,16 +47,28 @@ push goes over SMB. Partial-dir copy has no replacement: fork takes the whole ho
   `docker exec` silently lands on CT files). Instead pass `lxc.cgroup2.devices.allow:
   c 10:249 rwm` and create the node inside the CT with `mknod /dev/zfs c 10 249`
   (find the major:minor via host `ls -l /dev/zfs`). The node lives on the CT `/dev`
-  tmpfs, so the control-server re-creates it at boot when missing. Install
-  `zfsutils-linux`, keep `nesting=1,keyctl=1,fuse=1`. No `apparmor unconfined`
-  line (default profile). Check `zfs list` works inside the CT.
+  tmpfs, so the control-server re-creates it at boot when missing. Keep
+  `nesting=1,keyctl=1,fuse=1`. On an Ubuntu CT the `lxc.apparmor.profile: unconfined`
+  block from `PROXMOX-LXC.md` §1 is still required, privileged or not — without it
+  nested `docker run` dies with "the docker-default profile could not be loaded".
+  Do NOT install `zfsutils-linux` in the CT: its `zfs-dkms` post-install builds kernel
+  modules and fails under a shared kernel. The server image carries its own `zfs`, so
+  the CT needs only the device node; run `zfs list` from the Proxmox host instead.
 - Host layout: one parent dataset, e.g. `tank/rmng/homes` (pool name differs per
   host: `docker.homes_parent` config knob, default `tank/rmng/homes`), mounted into
   the CT once at `/srv/rmng-homes`. One child dataset per gen-2 clone:
   `<parent>/<id>`, created with `-o mountpoint=/srv/rmng-homes/<id>` so it lands
   under the bind (children otherwise auto-mount at the pool path).
-- The rmng container bind-mounts the homes dir `rshared`
-  (`-v /srv/rmng-homes:/srv/rmng-homes:rshared`). LOAD-BEARING: datasets are
+- **The parent carries the storage properties; the server sets none of them.**
+  `zfs::create` and `zfs::clone_dataset` pass `-o mountpoint` and nothing else, so
+  `dedup`, `compression` and `recordsize` are inherited by every clone home, by
+  `.skeleton/`, `.shared/` and `.merged/` (plain dirs in the parent), and by every
+  fork. Create the parent with `dedup=blake3` and leave `compression`/`recordsize`
+  alone: dedup matches blocks as written, so a different compression algorithm matches
+  nothing, and dedup covers only blocks written after it is switched on. Full
+  reasoning and measurements: `RUNBOOK-GEN1-TO-GEN2.md` §3.2a.
+- The rmng container bind-mounts the homes dir shared
+  (`-v /srv/rmng-homes:/srv/rmng-homes:shared`). LOAD-BEARING: datasets are
   created from inside that container, and only a shared bind propagates their
   mounts into dockerd's namespace (plus server-side home reads/writes).
 - The CT root can now destroy any pool dataset. All ZFS calls go through one wrapper
@@ -64,12 +76,28 @@ push goes over SMB. Partial-dir copy has no replacement: fork takes the whole ho
 
 ### 3.2 Gen-2 container spec
 
-Same as gen-1 (`docker.rs` `create_clone_container`) plus one bind mount:
-`<dataset-dir> -> /home/rmng`. Everything else (privileged, cpu/mem, shm, `rmng-sock`,
-lxcfs binds, `rmng` bridge) is unchanged. Record the base image tag plus dataset
-name on the clone row (new optional fields on `RmngClone`, serde-defaulted so old
-`state.json` loads). No gen label: after migration every clone is gen-2, and the
-dataset mount itself marks one.
+The home is an OVERLAY, not a plain dataset bind (`home_overlay.rs`):
+
+- `<homes>/.skeleton/<image-digest>/` — the image's own `/home/rmng`, exported once per
+  image and shared by every clone on it. This is the read-only lower.
+- `<dataset>/upper` + `<dataset>/work` — the clone's delta. The upper cannot be the
+  dataset root: overlayfs needs its workdir on the same filesystem but outside the upper.
+- `<homes>/.merged/<id>` — the merged view. THIS is what binds at `/home/rmng`.
+
+A fresh dataset is empty, so a plain bind would shadow the template's whole home layer
+(user units, toolchains, default configs). The overlay keeps the template as the single
+source and makes rebase a swap of the lower under the same upper.
+
+The mounts die with a CT reboot (host mounts outlive containers, not reboots), so boot
+re-establishes every clone's merged view (`home_overlay::remount_all`).
+
+Three further binds beyond gen-1: `<homes>` at `/home/rmng/clones` (§3.6),
+`<homes>/.shared` at `/home/rmng/shared`, and the unchanged per-clone `rmng-dind-*` /
+`rmng-ctd-*` volumes. Everything else (privileged, cpu/mem, shm, `rmng-sock`, lxcfs
+binds, `rmng` bridge) is unchanged. Record the base image tag plus dataset name on the
+clone row (new optional fields on `RmngClone`, serde-defaulted so old `state.json`
+loads). No gen label: after migration every clone is gen-2, and the dataset mount itself
+marks one.
 
 ### 3.3 Preset images
 
@@ -89,10 +117,11 @@ dataset mount itself marks one.
 
 ### 3.4 Flows
 
-- Create (gen-2): resolve tag (build if miss) → `zfs create` dataset, or `zfs clone`
-  from the template seed snapshot when one exists → `docker create`
-  with the mount → write identity plus dynamic env → start → wait-ready. Failure trap
-  destroys the container and the dataset, like today's volume cleanup.
+- Create (gen-2): resolve tag (build if miss) → `zfs create` dataset → ensure the
+  image's skeleton export → mount the overlay → `docker create` with the merged view at
+  `/home/rmng` → write identity plus dynamic env → start → wait-ready. Failure trap
+  tears down the merged mount and destroys the container and the dataset, like today's
+  volume cleanup.
 - Fork: `zfs snapshot <src>@<ts>` → `zfs clone` to new dataset → create from the
   TARGET preset's Dockerfile (built lazily inside the create) → start. The source
   contributes only its home. Same preset reuses the source tag with zero rebuild,
@@ -119,8 +148,9 @@ appends. No preset vars: the field is gone, old files ignore it.
 
 ### 3.6 Homes browsing plus cross-clone view
 
-Point `data/hosts/<id>` at the dataset dir for every clone. Same SMB share, works
-while stopped. The `/proc/<pid>/root` reader is deleted with the rest of gen-1.
+Point `data/hosts/<id>` at the clone's MERGED view (`<homes>/.merged/<id>`) for every
+clone. Same SMB share, works while stopped. The `/proc/<pid>/root` reader is deleted
+with the rest of gen-1.
 
 Every clone also mounts the homes parent dir at `/home/rmng/clones`, so any clone
 reaches any other home at `~/clones/<id>`. One mount per clone, new ids appear
@@ -129,40 +159,43 @@ read or copy straight across, no server round-trip. Accepted: every clone can re
 every home including tokens, and each clone also sees itself at `~/clones/<self>`.
 Keep an empty `clones` dir in the dataset so the mountpoint always exists.
 
-## 4. Migration plan (one shot)
+## 4. Migration (one shot, per CT)
 
-Decisions locked: no overlay-drift handling, no per-clone backup, whole fleet in one
-window. Rollback is restore the whole outer LXC from its dump, nothing finer.
-The new server version carries migration code only: it reads gen-1 homes to copy
-them, but cannot run gen-1 clones.
+The plan is now a runbook against the three boxes that actually have to move:
+**[RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md)** (CT 104, CT 105, CT 106). It
+carries the measured state of each box, the per-clone loss list, the commands, the
+verification gates and the rollback. Read it instead of planning from here.
 
-1. Dump the entire outer LXC and verify the dump. This is backup and rollback.
-2. Recreate the CT as privileged from that dump, fix shifted ownership, reinstall
-   the daemon, re-apply mounts, verify `zfs list` plus nested `hello-world`.
-3. Run the built-in rmng self-update to the gen-2 version.
-4. On boot the new control-server auto-files one Migrate op per gen-1 clone in the
-existing jobs UI (`OperationKind::Migrate`, step plus rolling log over SSE, same
-plumbing as clone and delete). It stops the fleet, then migrates one clone at a time, same id. Archived
-   clones stay stopped throughout:
-   - `zfs create` the new dataset.
-   - Copy home out of the stopped container (`docker cp <id>:/home/rmng`) into it.
-   - Remove the old container. Fresh `rmng-dind-*` volumes: inner Docker state
-     drops and re-pulls through the mirror. Say so in the window notice.
-   - Create the gen-2 container from the base tag with the dataset at `/home/rmng`,
-     fresh identity plus dynamic env, re-push accounts. Do not start yet.
-   - Failures log and continue; one retry pass at the end.
-5. Start the fleet, watch ready per clone.
-6. After a clean pass, delete the gen-1 migration code with the rest of gen-1.
+The shape, in one paragraph: dump the CT, build a FRESH privileged CT (never restore the
+dump as privileged — it corrupts LXC namespace state), move `/var/lib/docker` **and**
+`/var/lib/containerd` into it through one `pct exec … | pct exec …` pipe, set
+`docker.homesParent` on the moved config with the server stopped, then boot the gen-2
+image with `-v /srv/rmng-homes:/srv/rmng-homes:shared` added to the old run flags. On
+boot the server files one `Migrate` op per gen-1 row (`OperationKind::Migrate`, same jobs
+plumbing as clone and delete), stops the fleet, and migrates clones
+`jobs::MIGRATE_CONCURRENCY` (4) at a time:
 
-Time math: slowest single copy times fleet size, plus boot per clone.
-One window, one per-clone report of bytes plus pass or fail.
+- `zfs create` the new dataset;
+- stream the home out of the stopped container into the dataset's overlay `upper/`
+  (streamed, not buffered: a whole home in RAM is what used to force one clone at a time);
+- remove the old container and its `rmng-dind-*` / `rmng-ctd-*` volumes (inner Docker
+  state drops and re-pulls through the mirror);
+- build the ROW PRESET's Dockerfile and create the gen-2 container from it — **not** from
+  the clone's old `source` image, which is ignored;
+- stop it. Archived clones stay stopped throughout.
+
+Failures log and continue, with one retry pass at the end. Then the non-archived clones
+start and their stored accounts are re-pushed. Restart the control-server once afterwards
+so the `data/hosts/<id>` links are written (the migration job does not write them).
+
+Stage 4 — deleting the gen-1 code — happens after a clean pass on all three CTs.
 
 ## 5. Prerequisites (in order)
 
-1. Rehearse on a SPARE CT first, never the live CT first: dump, restore as
-   privileged, fix ownership, verify `zfs list` plus nested `hello-world`.
-2. Create `tank/rmng/homes`, mount into the CT, smoke-test snapshot/clone/destroy
-   timing on a tens-of-GB scratch dataset from inside the CT.
+1. Rehearse on SPARE CTs, never the live CT first. The recipe and the three rounds it
+   was run through are in [RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md) §9.
+2. Create the homes dataset, mount it into the CT, smoke-test snapshot/clone/destroy
+   timing from inside the CT.
 3. Land the store dataset plus base-tag fields, then create/fork/rebase/delete for gen-2.
 4. Run the migration, then delete gen-1 code.
 
@@ -181,26 +214,6 @@ One window, one per-clone report of bytes plus pass or fail.
 - Same Dockerfile text never rebuilds: a base release under the same tag does not
   invalidate the preset image. Refresh is manual (edit or rebuild button).
 - Inner Docker state drops at migration and re-pulls.
-
-## 8. Rehearsal notes (Sep 2026, replicas of CT 105 + CT 106)
-
-Two replica CTs were built at the exact Sep-5 server + both real configs (secrets
-scrubbed), seeded with live/archived/headless/sub-clone rows plus the real edge rows
-(missing preset, empty preset), then migrated end to end: 4/4 and 4/4, data matching to
-the kilobyte on 2 GB homes, archived staying stopped, the rest restarting. Procedure
-lessons for the real window:
-
-- `pct push` reads **host** paths: `scp` files to the host first.
-- The old server creates only from a **locally present** image (no pull): pull the
-  template into the CT before seeding or verifying anything.
-- Filing archive the instant a create settles races: retry archive a few times.
-- The host row lands **seconds after** its op reports Done: poll rows, not just ops.
-- Restore-as-privileged maps ownership cleanly (files land 0:0, no fix step needed).
-- Set `docker.homesParent` BEFORE the new server's first boot (the old API drops the
-  unknown key, so it must be a stopped-server config edit, not a PUT).
-- Stop a CT before starting its privileged double: DHCP hands both the same IP.
-- The new server recreates `/dev/zfs` at boot when missing, but your shell still needs
-  a manual `mknod` after every CT restart for hand-run `zfs`.
 
 ## 7. UI (decided, not built)
 

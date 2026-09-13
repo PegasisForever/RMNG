@@ -3,8 +3,10 @@
 RMNG drives a **local Docker daemon**, not `pct`. A **privileged** Proxmox LXC CT is where
 that Docker daemon runs (nested Docker on a shared kernel). Privileged is a hard requirement
 since gen-2: every clone home is its own ZFS dataset, and only a privileged CT can hold
-`/dev/zfs` plus the homes mount (§1c). This is a one-way trip — an existing unprivileged CT
-is converted via dump → restore-as-privileged (see [GEN2-CLONES.md](GEN2-CLONES.md) §4).
+`/dev/zfs` plus the homes mount (§1c). This is a one-way trip. An existing unprivileged CT
+is NOT converted in place and NOT restored from its dump as privileged — that corrupts the
+LXC namespace state. You build a fresh privileged CT and move the Docker state into it:
+see [RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md).
 The CT-wide live resource summary intentionally supports the documented production layout
 only: CT 105 with cgroup v2, an enforced 16-CPU capacity, and a ZFS-backed rootfs. Once
 Docker is up and healthy in the CT, follow [DEPLOY.md](DEPLOY.md) as you would on any host.
@@ -87,8 +89,14 @@ ls -l /dev/zfs
 # ... then in /etc/pve/lxc/<id>.conf (10:249 here — use what you measured):
 # lxc.cgroup2.devices.allow: c 10:249 rwm
 
-# The parent dataset, mounted into the CT at the fixed /srv/rmng-homes path:
-zfs create -o mountpoint=/srv/rmng-homes-fresh rpool/rmng-homes-fresh
+# The parent dataset, mounted into the CT at the fixed /srv/rmng-homes path.
+# `dedup=blake3` at create time is load-bearing: the control-server sets only
+# `mountpoint` on the per-clone datasets, so every clone home inherits dedup,
+# compression and recordsize from this parent — and dedup covers only blocks
+# written after it is on. Leave compression/recordsize inherited (lz4 / 128K):
+# a different compression algorithm produces different blocks and dedups against
+# nothing. See GEN2-CLONES.md §3.1.
+zfs create -o mountpoint=/srv/rmng-homes-fresh -o dedup=blake3 rpool/rmng-homes-fresh
 # ... then in /etc/pve/lxc/<id>.conf:
 # mp0: /srv/rmng-homes-fresh,mp=/srv/rmng-homes
 ```
@@ -109,7 +117,7 @@ zfs list                  # must work
 ```
 
 Smoke-test snapshot/clone/destroy timing on a scratch dataset before going further
-([GEN2-CLONES.md](GEN2-CLONES.md) §5.2). Then tell the server which parent is yours BEFORE
+([GEN2-CLONES.md](GEN2-CLONES.md) §5). Then tell the server which parent is yours BEFORE
 the first create — Settings → Docker → homes parent, or
 `PUT /api/config {"docker":{"homesParent":"rpool/rmng-homes-fresh"}}`. The default
 (`tank/rmng/homes`) fits almost nobody; a first create with the wrong parent fails with
