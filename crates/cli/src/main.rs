@@ -90,6 +90,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             CloneCmd::Restore { clone, wait } => commands::restore(client, clone, wait, json).await,
             CloneCmd::Fork {
                 source,
+                parent,
                 headless,
                 preset,
                 claude_account,
@@ -100,6 +101,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             } => {
                 let req = wire::CloneRequest {
                     source: source.clone(),
+                    parent: parent.clone(),
                     preset: preset.clone(),
                     claude_account: claude_account.clone(),
                     codex_account: codex_account.clone(),

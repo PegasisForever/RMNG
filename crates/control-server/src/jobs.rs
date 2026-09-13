@@ -389,6 +389,7 @@ async fn run_clone(app: App, op_id: String, plan: ClonePlan) {
                 codex_account_email: codex.1,
                 codex_group: codex.2,
                 group: plan.group.clone(),
+                parent: plan.parent.clone(),
                 preset_name: plan.preset_name.clone(),
                 headless: plan.headless,
                 linear_workspace: linear.workspace,

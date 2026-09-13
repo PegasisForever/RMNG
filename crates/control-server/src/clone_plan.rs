@@ -28,6 +28,8 @@ pub(crate) struct ClonePlan {
     pub id: String,
     /// The clone a fork copies. `None` builds from the preset's image onto a fresh home.
     pub source: Option<RmngClone>,
+    /// The id recorded as the new clone's parent (`None` = top-level).
+    pub parent: Option<String>,
     /// Drives the image, the env, the playbook and the startup script.
     pub preset_name: Option<String>,
     /// The ticket context the row stores and the agent is started on.
@@ -73,6 +75,24 @@ pub(crate) fn plan(
         (false, Some(_)) => {
             return Err("a source is only for a fork (POST /api/fork)".into());
         }
+    };
+    // Cosmetic subclone link, one level deep. A template build is always top-level.
+    let parent = match (fork, named(&req.parent)) {
+        (false, Some(_)) => {
+            return Err("a parent is only for a fork (POST /api/fork)".into());
+        }
+        (true, Some(id)) => {
+            let p = st
+                .hosts
+                .iter()
+                .find(|h| h.id == id)
+                .ok_or_else(|| format!("unknown clone '{id}'"))?;
+            if p.parent.is_some() {
+                return Err(format!("'{id}' is already a subclone"));
+            }
+            Some(id)
+        }
+        (_, None) => None,
     };
     // A fork keeps its source's preset unless the request names another one.
     let preset_name = asked_name.or_else(|| source.as_ref().and_then(|s| s.preset_name.clone()));
@@ -154,6 +174,7 @@ pub(crate) fn plan(
     Ok(ClonePlan {
         id,
         source,
+        parent,
         preset_name,
         linear,
         group,
@@ -433,8 +454,50 @@ mod tests {
         assert_eq!(got.codex, Side::Assign(None));
     }
 
-    // --- which clone a fork copies --------------------------------------------------------
+    // --- the subclone parent -------------------------------------------------------------
 
+    /// `--parent` is recorded on the row; omitted means top-level.
+    #[test]
+    fn a_fork_parent_is_recorded_and_defaults_to_none() {
+        let mut req = titled("spike");
+        req.parent = Some("pega-we-1".into());
+        let got = plan_of(&state(vec![source("pega-we-1")]), true, req).unwrap();
+        assert_eq!(got.parent.as_deref(), Some("pega-we-1"));
+
+        let got = plan_of(&state(vec![source("pega-we-1")]), true, titled("spike")).unwrap();
+        assert_eq!(got.parent, None);
+    }
+
+    /// A parent that names nothing is refused rather than recorded dangling.
+    #[test]
+    fn an_unknown_fork_parent_is_refused() {
+        let mut req = titled("spike");
+        req.parent = Some("pega-nope".into());
+        let err = plan_of(&state(vec![source("pega-we-1")]), true, req).unwrap_err();
+        assert!(err.contains("unknown clone"), "{err}");
+    }
+
+    /// One level deep: a subclone is never itself a parent.
+    #[test]
+    fn a_subclone_is_never_itself_a_parent() {
+        let mut child = source("pega-we-1a");
+        child.parent = Some("pega-we-1".into());
+        let mut req = titled("spike");
+        req.parent = Some("pega-we-1a".into());
+        let err = plan_of(&state(vec![source("pega-we-1"), child]), true, req).unwrap_err();
+        assert!(err.contains("already a subclone"), "{err}");
+    }
+
+    /// A template build is always top-level.
+    #[test]
+    fn a_parent_on_the_template_route_is_refused() {
+        let mut req = titled("spike");
+        req.parent = Some("pega-we-1".into());
+        let err = plan_of(&state(vec![source("pega-we-1")]), false, req).unwrap_err();
+        assert!(err.contains("only for a fork"), "{err}");
+    }
+
+    // --- which clone a fork copies --------------------------------------------------------
     #[test]
     fn a_fork_without_a_source_takes_the_presets_default_then_the_oldest() {
         let mut preset_default = cfg();

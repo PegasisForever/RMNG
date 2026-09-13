@@ -140,6 +140,10 @@ pub enum CloneCmd {
     Fork {
         /// Source gen-2 clone id (omitted = preset default, else oldest forkable)
         source: Option<String>,
+        /// Record this clone id as the new clone's parent (one level deep, cosmetic:
+        /// the ls tree and mute coverage read it)
+        #[arg(long)]
+        parent: Option<String>,
         /// Headless (no desktop) fork
         #[arg(long)]
         headless: bool,
@@ -593,6 +597,38 @@ mod tests {
                 "old verb `{}` should no longer parse",
                 old[2]
             );
+        }
+    }
+
+    #[test]
+    fn clone_fork_takes_source_parent_and_headless() {
+        let cli = Cli::parse_from([
+            "rmng",
+            "clone",
+            "fork",
+            "pega-we-1",
+            "--parent",
+            "pega-we-0",
+            "--headless",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Fork {
+                source,
+                parent,
+                headless,
+                ..
+            }) => {
+                assert_eq!(source.as_deref(), Some("pega-we-1"));
+                assert_eq!(parent.as_deref(), Some("pega-we-0"));
+                assert!(headless);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        // Omitted parent means top-level.
+        let cli = Cli::parse_from(["rmng", "clone", "fork", "pega-we-1"]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Fork { parent, .. }) => assert_eq!(parent, None),
+            other => panic!("wrong cmd: {other:?}"),
         }
     }
 

@@ -18,6 +18,12 @@ export type CloneRequest = {
   */
  source?: string;
  /**
+  * Fork only: the id recorded as this clone's parent (one level deep — a subclone is
+  * never itself a parent). Cosmetic: the ls tree and mute coverage read it.
+  * Omitted means top-level.
+  */
+ parent?: string;
+ /**
   * Preset name: its Dockerfile builds the image and its vars are the clone's
   * environment. Required while any presets exist, except on a fork, which keeps its
   * source's preset when this is omitted.
