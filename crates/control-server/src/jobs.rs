@@ -363,10 +363,12 @@ async fn run_clone(app: App, op_id: String, plan: ClonePlan) {
     }
 
     let daemon_up = app.media.is_connected(id);
-    let dataset = match &plan.source {
-        None => plan.id.clone(),
-        Some(_) => crate::zfs::dataset_name(&app.config().docker.homes_parent, id),
-    };
+    // Both home sources land on `<parent>/<id>` — `zfs::create` for a fresh clone,
+    // `zfs::clone_dataset` for a fork — so the row records that, never the bare id. A
+    // bare id parses as a pool name: every later `zfs` call on the row fails, and the
+    // one that matters is the boot remount, which then leaves the clone showing the
+    // template home with its real one unmounted.
+    let dataset = crate::zfs::dataset_name(&app.config().docker.homes_parent, id);
     let linear = plan.linear.clone().unwrap_or_default();
     let ticket_url = linear.ticket_url.clone();
     app.store.mutate(|s| {

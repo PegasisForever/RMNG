@@ -495,6 +495,13 @@ pub async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) -> Resu
 /// Re-establish every managed clone's overlay after a reboot (mounts do not survive
 /// one; containers do not need to run). Best-effort per clone; a missing image warns.
 pub async fn remount_all(app: App) {
+    // A clone's dataset is always `<parent>/<id>`, whichever way its home was made, so
+    // the recorded name is fully derivable — and a create between 2026-09-11 and this
+    // commit recorded the bare id instead. Repair those rows here rather than trusting
+    // them: the reader below is the boot remount, and a name it cannot open leaves the
+    // clone on the template home.
+    let parent = app.config().docker.homes_parent.clone();
+    let mut repaired: Vec<(String, String)> = Vec::new();
     let rows: Vec<(String, String, Option<String>)> = app
         .store
         .get()
@@ -502,13 +509,31 @@ pub async fn remount_all(app: App) {
         .into_iter()
         .filter(|h| h.managed && h.dataset.is_some())
         .map(|h| {
-            let dataset = h
+            let recorded = h
                 .dataset
                 .clone()
                 .expect("managed clone passed the is_some filter without a dataset");
-            (h.id, dataset, h.base_tag)
+            let canonical = crate::zfs::dataset_name(&parent, &h.id);
+            if recorded != canonical {
+                tracing::warn!(
+                    target: "overlay",
+                    "remount: {} recorded dataset {recorded}, correcting to {canonical}",
+                    h.id
+                );
+                repaired.push((h.id.clone(), canonical.clone()));
+            }
+            (h.id, canonical, h.base_tag)
         })
         .collect();
+    if !repaired.is_empty() {
+        app.store.mutate(|s| {
+            for (id, dataset) in &repaired {
+                if let Some(h) = s.hosts.iter_mut().find(|h| &h.id == id) {
+                    h.dataset = Some(dataset.clone());
+                }
+            }
+        });
+    }
     // Mount paths come from HOMES_DIR (the mountpoint), never the dataset name.
     let homes = crate::zfs::HOMES_DIR;
     // Clones whose overlay this pass established: their containers, if already running,
