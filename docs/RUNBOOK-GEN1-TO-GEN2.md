@@ -8,25 +8,28 @@ clone keeps it on a ZFS dataset outside the container. The new control-server ca
 gen-1 clones, so each CT gets one window: build a new privileged CT, move the Docker state
 into it, start the new server, and let it rewrite every clone.
 
-**Status.** CT 104 is done — it is now CT 204 (`ivan-rmng`, LAN 10.0.0.235, tailnet
-100.116.208.33 / `ivan-rmng.tail8d43a5.ts.net`), migrated 2026-09-13 on `1c12458`, 8 of 8
-clones passed, and since moved forward to a build carrying the preset-vars change (§1.2).
-CT 105 and CT 106 are outstanding.
-One item is open on CT 204: `tailscale serve` is not set, because Serve is disabled for that
-tailnet and enabling it needs a browser (§6.3). The dashboard answers on both addresses
-meanwhile.
+**Status.** Two of three are done.
 
-CT 104 itself is stopped, `onboot 0`, docker and tailscale disabled, snapshot `pre-gen2-redo`,
-and is the rollback (§9).
+    CT 104 -> CT 204  `ivan-rmng`,   LAN 10.0.0.235, tailnet 100.116.208.33
+                      2026-09-13, 8 of 8 clones passed
+    CT 106 -> CT 206  `haoran-rmng`, LAN 10.0.0.210, tailnet 100.91.21.92
+                      2026-09-13, 101 of 101 clones passed
+    CT 105            outstanding — the last one
 
-**Order: CT 104, then CT 105, then CT 106.** Smallest first; CT 106 last because it is the
-largest, has the most rows, and is the only one with rows that cannot migrate (§3.4).
+Both old CTs are stopped, `onboot 0`, docker and tailscale disabled, snapshotted, and are the
+rollback (§9). One item is open on each: `tailscale serve` is not set, because Serve is
+disabled for those tailnets and enabling it needs a browser (§6.3). Each dashboard answers on
+both of its addresses meanwhile.
+
+**Order was CT 104, CT 106, CT 105.** CT 106 was taken second rather than last: the parallel
+copy in §5.3 removed the reason to fear its size, and it was the CT under the most pressure.
 
 ## The three boxes
 
-| | CT 104 → 204 | CT 105 → 205 | CT 106 → 206 |
+| | CT 104 → 204 ✅ | CT 105 → 205 | CT 106 → 206 ✅ |
 | --- | --- | --- | --- |
 | IP of the OLD CT | 10.0.0.206 | 10.0.0.15 | 10.0.0.180 |
+| IP of the NEW CT | 10.0.0.235 | — | 10.0.0.210 |
 | rootfs used | 101 GB | 612 GB | 917 GB |
 | Docker | 29.7.2 / containerd.io 2.3.3 | 29.6.1 / containerd.io 2.2.5 | 29.6.1 / containerd.io 2.2.5 |
 | clone rows | 8 | 30 | 104 |
@@ -41,7 +44,10 @@ largest, has the most rows, and is the only one with rows that cannot migrate (�
 CT 105 also publishes 9002 and 9003 with nothing behind them. Drop them from the new run
 command.
 
-Budget: copy ≈ 30 min (104), 3 h (105), 4 h 30 m (106), plus the per-clone migration in §5.7.
+Budget, **with §5.3 run in parallel**: the copy was 30 minutes for CT 106's 905 GiB, and the
+per-clone migration in §5.7 another 2 h 30 m for its 101 clones. Do not budget from size — see
+§5.3, the cost tracks file count, and a serial copy of the same data would have run 4 to 6
+hours.
 
 ---
 
@@ -78,6 +84,22 @@ done
 
 Both `sort` calls need `LC_ALL=C`, or `comm` prints nonsense.
 
+**An empty `lost:` line is the failure, not a clean result.** On CT 106 the two `bash -lc`
+wrappers printed `Failed to create stream fd` and produced nothing, so the script cheerfully
+reported that no packages were lost. Check both files hold ~1300 lines before believing it.
+Running `dpkg-query` as the entrypoint instead of through a login shell works:
+
+```sh
+pct exec "$CT" -- docker exec "$CLONE" dpkg-query -W -f='${Package}\n'
+pct exec "$CT" -- docker run --rm --entrypoint dpkg-query pegasis0/rmng-template:latest \
+    -W -f='${Package}\n'
+```
+
+CT 106's real answer, for reference: it loses `rsync` and `sqlite3` at the package level, plus
+`/usr/local/bin/sops` and `/usr/local/bin/aws`; it gains clang-21, firefox, google-cloud-cli,
+llvm-21, onlyoffice, papirus-icon-theme and mission-center. Its `talktomedi` preset Dockerfile
+is CT 204's `Medi` one plus one `apt-get install rsync sqlite3` line.
+
 Then choose, per CT:
 
 - **Accept the loss** and transcribe what matters into the preset Dockerfile as `RUN` lines
@@ -106,6 +128,12 @@ explicitly.
 
 `PATH` needs no special handling. It used to, with per-shell rc drop-ins, only so fish would
 find a node installed by nvm inside the home. Put node in the preset Dockerfile instead.
+
+**And a gen-1 preset may carry a `PATH` var that has to be DROPPED, not read.** CT 106's
+`talktomedi` preset had `PATH=/home/rmng/.nvm/versions/node/v26.4.0/bin:…`. Carried across it
+would point every shell at a directory §8.4 deletes. CT 204's preset had no such var, so CT 106
+was the first CT where §5.4 had to edit the vars rather than leave them alone. Replace it with
+`COREPACK_HOME=/opt/corepack` and check the printed var list in §5.4 for a `PATH` entry.
 
 One gap to know about: a bare `docker exec` does not run PAM, so it gets none of this — that
 is the one entry path `/etc/environment` does not reach on its own. The server's own exec
@@ -139,9 +167,9 @@ $PVE "pct exec $CT -- curl -s http://127.0.0.1:9000/api/server/version"
 # The Docker package versions to pin on the new CT.
 $PVE "pct exec $CT -- dpkg -l | grep -E 'docker-ce |docker-ce-cli|containerd.io|buildx|compose'"
 
-# How much data moves. Use `du -shx`: without -x, du descends into every running container's
-# overlay mount and double counts (CT 104 read 126G against a real 30G).
-$PVE "pct exec $CT -- du -shx /var/lib/docker /var/lib/containerd"
+# How much data moves. Read it off ZFS, NOT with du: walking a big CT takes the better part of
+# an hour and tells you nothing more. Docker is essentially all of the rootfs.
+$PVE "zfs list -o name,used,refquota rpool/data/subvol-$CT-disk-0"
 
 # The exact run command of the current server, so the new one matches it.
 $PVE "pct exec $CT -- docker inspect rmng \
@@ -177,18 +205,39 @@ Write the file, not just the live value — this host was found back at the 6553
 no `/etc/sysctl.d` entry, so a `sysctl -w` alone had been lost. Check
 `sysctl fs.inotify.max_user_watches` before every window; 14 running CTs is enough to hit it.
 
+**Check it even when the file is already there.** Before the CT 106 window the live value read
+65536 again, although `/etc/sysctl.d/99-rmng-inotify.conf` was in place from the CT 104 window
+AND `/etc/sysctl.conf` and `/usr/lib/sysctl.d/10-pve-ct-inotify-limits.conf` both set it high.
+Something lowers it at runtime. The persisted file is not enough; read the live value.
+
 Recovery, if a CT is already stuck this way: raise the limit, then
 `pct exec <id> -- systemctl reset-failed && systemctl restart systemd-networkd`. No reboot.
 
-### 2.4 Delete the container-less rows (CT 106 only) — not optional
+### 2.4 Delete the container-less rows — not optional
 
-`haoran-dev-621`, `haoran-dev-635` and `ng-52378be7` have rows but no containers. The
-migration reads the home out of the container, so they fail on every pass and stay gen-1 —
-and **a leftover gen-1 row makes every later control-server restart re-run the migration,
-stopping the whole fleet each time.**
+Check for rows with no container, and delete them. CT 106 had three (`haoran-dev-621`,
+`haoran-dev-635`, `ng-52378be7`); CT 104 had none. The migration reads the home out of the
+container, so such a row fails on every pass and stays gen-1 — and **a leftover gen-1 row makes
+every later control-server restart re-run the migration, stopping the whole fleet each time.**
 
-Delete them in the UI before the window, or on the new server afterwards (the gen-2 delete
-tolerates a missing container):
+Put this in a file on the old CT and run it there — the quoting does not survive being typed
+through `ssh` and `pct exec`:
+
+```python
+import json, subprocess, urllib.request
+
+conts = set(subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}"],
+                           capture_output=True, text=True).stdout.split())
+rows = {h["id"] for h in
+        json.load(urllib.request.urlopen("http://127.0.0.1:9000/api/state"))["hosts"]}
+print("rows:", len(rows), " containers:", len(conts))
+print("ROWS WITH NO CONTAINER:", sorted(rows - conts))
+```
+
+The gen-1 API delete handles them too, despite the missing container — it simply sits at
+`step: "removing the container"` for about a minute before the row goes. Delete them in the UI
+or over the API before the window, or on the new server afterwards (the gen-2 delete tolerates
+a missing container as well):
 
 ```sh
 curl -s -XPOST http://<new-ct-ip>:9000/api/delete \
@@ -353,6 +402,13 @@ ls /var/lib/lxcfs/proc/          # cpuinfo diskstats loadavg meminfo slabinfo st
 "'
 ```
 
+**`systemctl is-active` is not the check — the directory listing is.** On CT 206 the unit
+reported `active` and the daemon logged its whole api_extensions list, while
+`/var/lib/lxcfs/proc/` did not exist and `mount | grep lxcfs` was empty. A plain
+`systemctl restart lxcfs` fixed it: 11 mounts, `proc` and `sys` present. CT 204 did not show
+this, so it is start-order dependent rather than a one-off. Restart once if the listing is
+empty, and only believe the `ls`.
+
 If you hit the failure after the fact: install lxcfs, then `docker restart rmng` to re-file
 the migration. The failing step is the home read, which happens before the old container is
 removed, so a failed pass destroys nothing.
@@ -438,29 +494,99 @@ from §3.2 — there is no way to dedup what is already written.
 
 The homes parent got its own `dedup=blake3` in §3.1. These are two separate datasets.
 
-### 5.3 Move the Docker state
+### 5.3 Move the Docker state — in parallel
 
-One host-side pipe, no intermediate tarball.
+Host-side pipes, no intermediate tarball. Reading through the old CT's namespace and writing
+through the new one is what makes the uid shift correct: the archive records the inside uids
+(0, 1000) and the privileged CT extracts them as the same numbers. No ownership fix step.
+
+**Do not run it as one pipe.** One `tar` is the entire limit. Measured mid-copy on CT 106:
+
+| | |
+| --- | --- |
+| extracting `tar` in the new CT | 100% of one core, 88% of it user time |
+| reading `tar` in the old CT | 5% of one core |
+| host | 32 cores, 31 idle |
+| pool | one NVMe, 5 MB/s of reads, **zero** iowait |
+
+The bulk of a gen-1 CT is hundreds of thousands of tiny files in the clone home directories
+(`node_modules`, git objects), and one process creating them one at a time is CPU bound long
+before the disk notices. A serial pipe opens at ~185 MB/s on the big image layers and then
+falls to 20-40 MB/s for hours, so **an ETA taken in the first 15 minutes will be wrong by
+hours**. Budget by file count, not by size.
+
+Split it instead. The work divides cleanly, because the homes live in independent snapshot
+directories — 546 of them on CT 106. Eight streams did 679 GB in **30 minutes** where serial
+was tracking to 4-6 hours: 562 tasks, 0 failures, 257 minutes of CPU in 31 minutes of wall
+time, 8.4x. Eight is the right number: at that point 22 of the 32 cores were busy.
+
+Two rules the split has to obey:
+
+1. **Copy the parent directories FIRST, with `--no-recursion`.** A worker that reaches a
+   missing parent creates it with tar's default mode and never comes back to fix it. Extract
+   `docker`, `docker/volumes`, `containerd`,
+   `containerd/io.containerd.snapshotter.v1.overlayfs` and its `snapshots` as bare entries
+   before any worker starts; tar does not touch the metadata of a directory that already
+   exists and is not an archive member.
+2. **One task per snapshot directory** — not fixed buckets. Sizes vary by two orders of
+   magnitude, so a worker pool pulling the next directory when it frees up is what balances
+   the streams.
 
 ```sh
-ssh root@10.0.0.100 '
-  time (pct exec 105 -- tar cf - --numeric-owner -C /var/lib docker containerd \
-      | pct exec 205 -- tar xf - --numeric-owner -C /var/lib)
-'
+# one task: "<KIND> <path relative to /var/lib>"
+kind=${1%% *}; path=${1#* }
+# The `docker` task hands every volume off to a task of its own, so it excludes them all here
+# — including rmng-ctd-*/rmng-dind-*, which still get copied, just by their own workers.
+# `docker/volumes/metadata.db` is NOT a volume and must stay in this task.
+case "$kind" in EXCL) ex=(--exclude=docker/volumes/rmng-*) ;; PLAIN) ex=() ;; esac
+pct exec 105 -- tar cf - --numeric-owner -C /var/lib "${ex[@]}" "$path" \
+  | pct exec 205 -- tar xf - --numeric-owner -C /var/lib
 ```
 
-Reading through the old CT's namespace and writing through the new one is what makes the uid
-shift correct: the archive records the inside uids (0, 1000) and the privileged CT extracts
-them as the same numbers. No ownership fix step.
+The task list: one `EXCL docker` (mostly metadata once the volumes are split out), one per
+volume under `docker/volumes/`, one per `containerd/` subdirectory except the overlayfs
+snapshotter, one for that snapshotter's `metadata.db`, and one per
+`containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/<N>`. Then
+`xargs -a tasks -d '\n' -n 1 -P 8 ./copy-one.sh`.
 
-`tar` prints `socket ignored` warnings for X11, samba and buildkit sockets. Expected.
+`tar` prints `socket ignored` warnings for X11, samba, MySQL and buildkit sockets. Expected —
+CT 106 logged 1319 of them and nothing else.
+
+**Do NOT drop the `rmng-ctd-*` and `rmng-dind-*` volumes from the task list.** There are two
+per clone — 202 on CT 106, about 200 GB — and the migration empties them on arrival (§8.3),
+which makes skipping them look free. It is not. The migration reads each home with `docker cp`, and Docker
+resolves **every mount a container declares** before it will read anything out of it. With the
+volumes gone all 101 clones failed at once:
+
+```
+operation failed: downloading /home/rmng from <clone>:
+  Docker responded with status code 500: get rmng-ctd-<clone>: no such volume
+```
+
+Their *content* is discarded; their *existence* is not optional. (That `remove_volume`
+tolerates a 404 says nothing about this — that is the delete path, not the read path.) Nothing
+is damaged if you hit it: the read is the first step, so the pass ends 0 of N migrated with
+every clone intact. To skip them anyway, recreate them empty before booting the server —
+
+```sh
+for c in $(docker ps -a --format '{{.Names}}' | grep -v '^rmng'); do
+  docker volume create "rmng-ctd-$c"; docker volume create "rmng-dind-$c"
+done
+docker cp <a-clone>:/home/rmng/.bashrc /tmp/probe   # must succeed BEFORE §5.7
+```
+
+— which is exactly what the migration creates for a new clone. Verify with that `docker cp`
+before starting the server, not after.
 
 ### 5.4 Point the config at the homes dataset, and write the Dockerfiles
 
 Two edits to the moved `config.json`, with the server still stopped. The old API drops unknown
 keys, so neither can be a `PUT`.
 
-The preset `vars` need nothing here (§1.2) — gen-2 reads the gen-1 field as it stands.
+The preset `vars` usually need nothing here (§1.2) — gen-2 reads the gen-1 field as it stands.
+The exception is a `PATH` var: CT 106's preset carried one pointing into `~/.nvm`, which §8.4
+deletes. Drop it and add `COREPACK_HOME=/opt/corepack`. Read the printed var list below and
+check for `PATH` before moving on.
 
 Put the script in a file and `pct push` it — a `<<PY` heredoc through `ssh` and `pct exec`
 mangles the quoting.
@@ -583,7 +709,12 @@ docker logs -f rmng
 
 On boot the server folds the retired config fields, recreates `/dev/zfs` if missing, creates
 the shared pool, stops every non-archived clone, and files one `Migrate` op per gen-1 row,
-four at a time. After the last one it starts every non-archived clone and re-pushes each
+`MIGRATE_CONCURRENCY` at a time (`crates/control-server/src/jobs.rs`).
+
+**That constant should be 8, not 4.** Measured on CT 206 while 4 ran: the host was 48% idle at
+load 17 of 32 cores, so each migrating clone costs about 4 cores and 8 is what fills the
+machine. Raising it needs a rebuild, so decide before the window rather than during it. Do not
+go past 8 without measuring — the plain file copy in §5.3 stopped gaining there too. After the last one it starts every non-archived clone and re-pushes each
 one's stored Claude and Codex tokens. Archived clones stay stopped. Failures log and
 continue, and one retry pass runs at the end.
 
@@ -651,6 +782,12 @@ pct exec 205 -- bash -lc "systemctl enable --now tailscaled
                           tailscale status | head -3"
 '
 ```
+
+**It comes up stopped, and needs one `tailscale up`.** §4 ran `tailscale down`, and that is
+recorded in the very state file this step moves — so the new daemon starts holding the right
+identity with `WantRunning=false` and prints `Tailscale is stopped.` Run
+`tailscale up --hostname=<name>`; with a valid node key it connects with no login prompt and
+no browser. A `tailscale serve` issued before this silently does nothing.
 
 The old daemon must already be down (§4) — two daemons on one node key fight over the
 netmap. Expect the old tailnet IP back with no login prompt. The CT needs `/dev/net/tun`,
@@ -735,6 +872,11 @@ ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
 Then check a home landed owned by the clone user, not root. A blind `chown -R` is **not** a
 correct repair — a healthy home has a small legitimate minority of non-1000 files.
 
+**Check a RUNNING clone.** The home's own root directory is owned by root until the clone is
+first started, so every archived clone reads `0 0 755` on `upper` and on the merged view while
+everything inside it is `1000`. CT 206 showed 40 of 101 at uid 1000 — exactly its 40 running
+clones — and CT 204 shows the same split. Not a fault, and not something to repair.
+
 ```sh
 ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
   find /srv/rmng-homes/<id>/upper -xdev -uid 1000 | wc -l    # want ~all of them
@@ -788,8 +930,21 @@ ssh root@10.0.0.100 'pct reboot 205'
 ```
 
 Then, with nothing touched afterwards: every dataset mounted, every overlay rebuilt, every
-running clone on its full home, and the server log carrying one `binds the live home overlay`
-line per clone it had to restart. `mknod /dev/zfs` is redone by the server on boot.
+running clone on its full home. CT 206 came back with 101 zfs mounts, 101 overlays and all 40
+clones running.
+
+The signal to read is the **token push**, not the `binds the live home overlay` line — the
+latter only appears for a clone the server had to restart, so a clean boot logs none of them:
+
+```
+claude token push done in 59ms: 40 pushed, 0 failed, 0 without live home
+```
+
+`0 without live home` is the assertion that every running clone has its overlay.
+
+`mknod /dev/zfs` is redone by the server **inside its own container**, so `/dev/zfs` is missing
+from the CT's own `/dev` after a reboot and that is correct — check it with
+`docker exec rmng ls -l /dev/zfs`, not from the CT.
 
 ### 7.6 End to end
 
@@ -857,42 +1012,54 @@ ssh root@10.0.0.100 'pct exec 205 -- bash -lc "
 ```
 
 Do not `docker image prune -a`: it would take `pegasis0/rmng-template:latest` and the derived
-tag out from under the running clones.
+tag out from under the running clones. Name every tag instead.
 
-### 8.3 Inner Docker re-pulls, and the `medi` compose stack
+CT 206's eight were `haoran-{base, base2, template, template2, template-authed, dev-231,
+20260811, latest-fable-51}`, plus the `hello-world` left behind by the §3.4 smoke test. They
+took the image store from 98.08 GB to 59.08 GB. What must stay: the derived `rmng-p-*` tag,
+`pegasis0/rmng-template:latest` under it, `pegasis0/rmng:latest`, the untagged image the
+renamed gen-1 server container still holds, `moby/buildkit` and `registry`.
+
+### 8.3 Inner Docker re-pulls — leave them to the clone owners
 
 Each clone's inner Docker starts empty — the `rmng-dind-*` and `rmng-ctd-*` volumes are
-deleted during migration. The first inner build or `docker run` in each clone re-pulls
+recreated empty during migration. The first inner build or `docker run` in each clone re-pulls
 through the `rmng-registry` mirror. Expect one slow first build per clone.
 
-**The `medi` clones run a compose stack, and it is not lost.** Both halves live in the home,
-which the migration carries across untouched:
+**Do not restart what was running inside the clones.** Their owners do that. Say that the
+inner Docker starts empty and stop there.
+
+What matters is that **nothing is lost**, and that is worth telling people. The `medi` clones
+run a compose stack whose two halves both live in the home, which the migration carries across
+untouched:
 
     ~/Dev/docker-compose.yaml     the stack (mysql, redis, minio, redisinsight, and the
-                                  research/voice services)
+                                  research/voice/kestra services)
     ~/Dev/dev_data/               its bind-mounted data — mysql, redis and s3 state
 
-Only the *images* go, with the dind volume. So there is nothing to rebuild and nothing to
-re-copy: bring the existing file back up, per clone that used it.
+Only the *images* go. Verified on CT 206: MySQL's data directory came back with its InnoDB
+files and binlogs intact.
+
+If you ever do bring one up, **name the services**. A bare `docker compose up` pulls for the
+whole file and aborts the batch on the first failure, and the CT 106 stack has two images that
+cannot be pulled here — `mediumai.azurecr.io/mediumai-research-core` needs an ACR login the
+mirror cannot supply, and `talktomedi/kestra:local` was built locally and lived in the inner
+Docker store the migration discards. Those two took the other seven services down with them on
+all 18 clones. This works:
 
 ```sh
-ssh root@10.0.0.100 'pct exec 205 -- docker exec -u rmng <clone> bash -lc "
-  cd ~/Dev && docker compose up -d && docker compose ps"'
+docker exec -u rmng <clone> bash -lc \
+  'set -a; . /etc/environment; set +a; cd ~/Dev && docker compose up -d mysql redis minio redisinsight'
 ```
 
 Ports are published inside the clone, so several clones running it at once do not collide.
-`research-core` pulls from `mediumai.azurecr.io`, which needs a registry login the mirror
-cannot supply — expect that one service to fail on a clone that has not logged in, and the
-rest of the stack to come up regardless.
-
-Do not run this for every clone by reflex. Check `~/Dev/dev_data` exists first; a clone that
-never used the stack should not have one created.
 
 ### 8.4 Remove nvm — after the rebase, not before
 
 The clone homes carry a whole nvm stack that predates the image having node: `~/.nvm`
-(≈150 MB on CT 104, ≈580 MB on CT 105), a `fisher` plugin set (`fabioantunes/fish-nvm`, plus
-`edc/bass`, which is only there because fish-nvm needs it), and three lines in `~/.bashrc`.
+(≈150 MB on CT 104, 148 MB on all 101 of CT 106's, ≈580 MB on CT 105), a `fisher` plugin set
+(`fabioantunes/fish-nvm`, plus `edc/bass`, which is only there because fish-nvm needs it), and
+three lines in `~/.bashrc`. Every home on both migrated CTs had it.
 
 The fish plugin is the part that matters. It installs `node`, `npm`, `npx` and `yarn`
 **functions**, and a fish function shadows the real binary — so a clone keeps resolving node
@@ -924,6 +1091,17 @@ sed -i '/_fisher_/d' "$d/.config/fish/fish_variables"
 per plugin). Leaving it behind makes a future `fisher` think the plugins are still installed.
 
 A shell that is already open keeps the functions it loaded; they go on the next one.
+
+Afterwards fish must resolve `/usr/bin/node`. **Do not judge `yarn --version` from a bare
+`docker exec`** — that path runs no PAM, so `COREPACK_HOME` is unset and corepack falls back to
+yarn 1.22.22. It is the §1.2 gap, not a fault. Both of these are the real answers:
+
+```sh
+docker exec -u rmng <clone> bash -lc 'set -a; . /etc/environment; set +a; yarn --version'
+docker exec <clone> bash -lc 'tr "\0" "\n" < /proc/$(pgrep -u rmng -f gnome-session | head -1)/environ'
+```
+
+The first prints 4.18.0; the second shows the preset's vars reaching the desktop session.
 
 ## 9. Rollback
 
