@@ -32,11 +32,12 @@ This is an internal tool doc. Rough edges are fine where noted.
 
 ## 2. Gen-1 end of life
 
-Gen-1 runs unchanged until the migration window. No new features, no fork, no rebase,
-no backports. After migration passes, the gen-1 provision path, seed file-copy path,
-`/proc`-link home reader, `rmng clone cp`, `rmng clone sync`, the `--seed` flag, the
-streaming local-dir upload route, and the Commit path are all deleted. Laptop-to-clone
+Gen-1 is gone. Every clone is gen-2, and the gen-1 code has been deleted: the gen-1
+provision path, the seed file-copy path, the `/proc`-link home reader, `rmng clone cp`,
+`rmng clone sync`, the `--seed` flag, the streaming local-dir upload route, the Commit
+path, and the one-shot gen-1 to gen-2 migration that converted the fleet. Laptop-to-clone
 push goes over SMB. Partial-dir copy has no replacement: fork takes the whole home.
+Clone-to-clone copy needs none: every clone sees every other home at `~/clones/<id>`.
 
 ## 3. Architecture
 
@@ -265,8 +266,8 @@ home) or fork (snapshot plus clone of a live source). No other create path.
   preset's FROM line. Starts empty; the agent pulls the repo itself.
   CLI/API template create stays regardless.
 - Seed snapshot: DELETED as redundant. Every modal create forks a live source,
-  so the source snapshot covers starting content. Pending code removal:
-  `seed_snapshot` config field plus the `CloneFromSnapshot` home-source path.
+  so the source snapshot covers starting content. The `seed_snapshot` config field
+  and the `CloneFromSnapshot` home-source path have been removed.
 - Clone menu: Rebase lives here. The dialog picks a preset (never an image list —
   the list stays internal for garbage collection) plus a rebuild checkbox, and tracks
   the op to settle. No separate fork item; the new clone modal covers forking.

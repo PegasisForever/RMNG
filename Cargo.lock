@@ -550,7 +550,6 @@ dependencies = [
  "axum",
  "base64",
  "bollard",
- "bytes",
  "futures",
  "libc",
  "media",
@@ -564,7 +563,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
- "tokio-util",
  "tower",
  "tower-http",
  "tracing",
@@ -2910,7 +2908,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tokio-util",
  "wire",
 ]
 

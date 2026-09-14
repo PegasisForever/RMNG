@@ -621,7 +621,7 @@ fn toml_table_header(line: &str) -> Option<String> {
 const RMNG_CLI_SKILL_MD: &str = concat!(
     r#"---
 name: rmng-cli
-description: "Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage clone-source images and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool."
+description: "Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage presets and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool."
 ---
 
 "#,
@@ -701,7 +701,7 @@ if __name__ == "__main__":
 
 /// The path Claude Code runs, as the CLONE sees it.
 ///
-/// Everything else here works in host coordinates (`/proc/<pid>/root/home/rmng/…`), and
+/// Everything else here works in host coordinates (`<homes>/.merged/<id>/…`), and
 /// writing one of those into `settings.json` produces a command that cannot exist inside the
 /// container. It fails in the worst way available: silently to us, and as a red hook error on
 /// every single tool call to whoever is working in that clone.

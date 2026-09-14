@@ -38,6 +38,9 @@ export const VERB: Record<Operation["kind"], string> = {
   pull: "Pulling",
   prebuild: "Building",
   update: "Updating",
+  // A kind this build does not know: only ever arrives from an operation row persisted by
+  // an older or newer server (`OperationKind::Unknown`). No flow files one.
+  unknown: "Working",
 };
 
 export function OperationProgress({ op }: { op: Operation }) {
