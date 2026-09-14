@@ -457,11 +457,20 @@ async fn clone_container_after_create(
     // storm's trigger (gnome-shell-calendar-server) then has nothing to wait on.
     // goa-daemon is D-Bus-only with no unit and was only ever pulled in by the source
     // registry, so masking the registry keeps it down too.
+    // Same for the five gvfs volume monitors: they each spawn and scan for hardware
+    // volumes a container never has (~230ms, sometimes inside our session-build wait).
+    // gvfs-daemon itself and gvfs-metadata stay: Files keeps trash + metadata, and
+    // nothing in the capture path changes.
     if !headless {
         for unit in [
             ".config/systemd/user/evolution-source-registry.service",
             ".config/systemd/user/evolution-calendar-factory.service",
             ".config/systemd/user/evolution-addressbook-factory.service",
+            ".config/systemd/user/gvfs-afc-volume-monitor.service",
+            ".config/systemd/user/gvfs-goa-volume-monitor.service",
+            ".config/systemd/user/gvfs-gphoto2-volume-monitor.service",
+            ".config/systemd/user/gvfs-mtp-volume-monitor.service",
+            ".config/systemd/user/gvfs-udisks2-volume-monitor.service",
         ] {
             crate::home_overlay::symlink_clone_home(hostname, unit, "/dev/null")
                 .with_context(|| format!("clone {hostname}: masking {unit} failed"))?;
