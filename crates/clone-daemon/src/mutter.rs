@@ -174,10 +174,14 @@ fn build_modes(w: u32, h: u32) -> Vec<HashMap<String, Value<'static>>> {
 /// the cursor out-of-band via `SPA_META_Cursor` on the PipeWire buffers (the raw-PW
 /// client-cursor path); `CURSOR_MODE_EMBEDDED` composites it into the frame instead.
 pub async fn setup_with_cursor_mode(sizes: &[(u32, u32)], cursor_mode: u32) -> Result<Session> {
+    let t0 = std::time::Instant::now();
     let conn = zbus::Connection::session().await.context("session bus")?;
 
     let rd = RemoteDesktopProxy::new(&conn).await?;
     let rd_path = rd.create_session().await.context("RemoteDesktop.CreateSession")?;
+    // Splits the holder's build time: bus-name wait (above) vs shell-main-loop
+    // queueing (below, RecordVirtual waits its turn behind startup work).
+    tracing::info!("mutter setup: CreateSession took {:?}", t0.elapsed());
     let rd_session = RemoteDesktopSessionProxy::builder(&conn)
         .path(rd_path.clone())?
         .build()

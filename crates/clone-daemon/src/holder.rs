@@ -106,11 +106,40 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
         None => boot,
     };
     let mut generation: u64 = 1;
-    let mut session = build_session(&cfg, cursor_mode).await?;
+    let t_build = std::time::Instant::now();
+    let mut session = {
+        // gnome-shell may still be initializing when we start (After= orders process start,
+        // not D-Bus readiness): any call inside can fail until it is up. Retry in-process —
+        // exiting here costs a 2s systemd RestartSec and the daemon waits out the same cliff.
+        let mut attempt = 0u32;
+        loop {
+            match build_session(&cfg, cursor_mode).await {
+                Ok(s) => break s,
+                Err(e) if attempt < 200 => {
+                    attempt += 1;
+                    tracing::warn!(
+                        "holder boot: build_session attempt {attempt} failed: {e:#}; retrying"
+                    );
+                    // The shell usually owns the bus ~300ms after our start; retry fast so
+                    // the common case costs extra attempts, not a restart.
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(e) => return Err(e).context("building the Mutter session"),
+            }
+        }
+    };
+    tracing::info!("holder boot: build_session took {:?}", t_build.elapsed());
     // A fast restart can race a PREVIOUS holder's teardown, whose monitors die
     // asynchronously after its connection dropped.
+    let t_settle = std::time::Instant::now();
     wait_monitors_settle(cfg.len()).await;
+    tracing::info!(
+        "holder boot: wait_monitors_settle took {:?}",
+        t_settle.elapsed()
+    );
+    let t_layout = std::time::Instant::now();
     apply_layout(&cfg).await;
+    tracing::info!("holder boot: apply_layout took {:?}", t_layout.elapsed());
     remember_layout(&cfg);
 
     let active: ActiveSession = Arc::new(tokio::sync::Mutex::new(SessionRuntime {
@@ -242,12 +271,28 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
                     continue; // a session we stopped ourselves during a swap
                 }
                 tracing::warn!("Mutter closed the session (gnome-shell restart?); rebuilding");
-                if let Err(e) = swap(
-                    &mut session, &active, &mut generation, &cfg.clone(), cursor_mode,
-                    &out, &mut ready_rx, &closed_tx,
-                ).await {
-                    tracing::error!("rebuilding the session failed: {e:#}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                // A rebuild can fail while the new shell is still coming up (its bus name
+                // is not back yet). Retry bounded: one try left the holder session-less
+                // forever, stranding capture until the next layout change or restart.
+                for attempt in 1..=15u32 {
+                    match swap(
+                        &mut session, &active, &mut generation, &cfg.clone(), cursor_mode,
+                        &out, &mut ready_rx, &closed_tx,
+                    ).await {
+                        Ok(()) => break,
+                        Err(e) => {
+                            tracing::error!(
+                                "rebuilding the session failed (attempt {attempt}): {e:#}"
+                            );
+                            if attempt == 15 {
+                                tracing::error!(
+                                    "session rebuild given up: holder stays session-less until \
+                                     the next layout change, restart, or shell return"
+                                );
+                            }
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
                 }
             }
         }

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use wire::holder::{FromHolder, HolderMonitor, ToHolder};
 use wire::socket::{
     CursorMeta, CursorShape, DaemonMsg, FrameMsg, MonitorPlacement, PlaneLayout, ServerMsg,
@@ -129,7 +129,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    gstreamer::init()?;
     let monitors = parse_monitors(std::env::var("RMNG_MONITORS").ok());
     let sizes: Vec<(u32, u32)> = monitors.iter().map(|m| (m.w, m.h)).collect();
     let socket = std::env::var("RMNG_SOCKET").ok();
@@ -154,6 +153,8 @@ async fn main() -> Result<()> {
     } else {
         mutter::CURSOR_MODE_METADATA
     };
+    // The holder never touches GStreamer (Mutter session + zbus/gdbus only): skip the
+    // ~200ms-warm/~1s-cold init so boot reaches the session build sooner.
     if holder_mode {
         tracing::info!(?sizes, "clone-daemon: session-holder mode");
         return holder::run(monitors, cursor_mode).await;
@@ -164,11 +165,16 @@ async fn main() -> Result<()> {
             // reach the holder — so a down/restarting control-server costs nothing but this
             // cheap retry loop. On a later disconnect we exit and systemd restarts us back
             // into it.
+            let t0 = std::time::Instant::now();
             let transport = connect_retry(&path).await;
+            tracing::info!("daemon boot: media socket took {:?}", t0.elapsed());
             let holder = Holder::connect().await?;
+            tracing::info!("daemon boot: holder connect took {:?} total", t0.elapsed());
             run_shipping(holder, transport, &path, embedded).await
         }
         None => {
+            // Self-test captures through the embedded GStreamer path: init stays.
+            gstreamer::init().context("gstreamer init")?;
             tracing::info!(?sizes, embedded, "clone-daemon: setting up Mutter session");
             let session = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
             tracing::info!(
@@ -230,6 +236,13 @@ async fn run_shipping(
         &[],
     )?;
     tracing::info!("connected to media socket {socket_path} as clone '{clone_id}'");
+    // After the Hello send, not before it: only the embedded-cursor path uses GStreamer
+    // (MCP screenshots encode via `media`), and no capture can start before the server
+    // sees this Hello and asks for it — sequential message processing guarantees that.
+    // Default raw-PW clones skip the ~190ms init entirely.
+    if embedded {
+        gstreamer::init().context("gstreamer init")?;
+    }
 
     // Latest captured dmabuf per monitor, refreshed by the capture callbacks below; the
     // MCP `screenshot` tool dups the fd and GPU-encodes it to PNG.

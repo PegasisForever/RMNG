@@ -1511,9 +1511,15 @@ impl DockerCtl {
     pub async fn create_clone_container(&self, spec: &CreateSpec) -> Result<String> {
         let dind_volume = Self::dind_volume_name(&spec.name);
         let ctd_volume = Self::ctd_volume_name(&spec.name);
-        // Ensure the per-clone inner-Docker volumes exist (idempotent).
-        self.ensure_volume(&dind_volume).await?;
-        self.ensure_volume(&ctd_volume).await?;
+        // Ensure the per-clone inner-Docker volumes exist (idempotent). Different
+        // names, no shared state: one wait instead of two. Either error fails the
+        // create exactly as the serial version did (dind first).
+        let (dind, ctd) = tokio::join!(
+            self.ensure_volume(&dind_volume),
+            self.ensure_volume(&ctd_volume)
+        );
+        dind?;
+        ctd?;
 
         let mut mounts = vec![
             Mount {
@@ -2979,7 +2985,8 @@ pub(crate) fn epoch_to_rfc3339(secs: i64) -> String {
 /// Build an in-memory tar from [`TarEntry`]s using the `tar` crate. mode/uid/gid are
 /// written verbatim into each header (the daemon extracts with those owners — gotcha #2).
 fn build_tar(entries: &[TarEntry]) -> Result<Vec<u8>> {
-    let mut builder = tar::Builder::new(Vec::new());
+    let total: usize = entries.iter().map(|e| e.data.len() + 1024).sum();
+    let mut builder = tar::Builder::new(Vec::with_capacity(total));
     for e in entries {
         let mut header = tar::Header::new_gnu();
         // Path relative, no leading slash (extracts relative to the request's `path`).

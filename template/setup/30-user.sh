@@ -138,6 +138,8 @@ Before=graphical-session.target
 Type=simple
 Environment=XDG_SESSION_TYPE=wayland
 Environment=MUTTER_DEBUG_DUMMY_MODE_SPECS=$MODE_SPECS
+# No screen reader headless: skips the at-spi bus + registry (~35ms) per shell start.
+Environment=NO_AT_BRIDGE=1
 ExecStart=/usr/bin/gnome-shell --headless --wayland
 Restart=on-failure
 [Install]
@@ -147,7 +149,9 @@ cat >"$UDIR/rmng-clone-daemon.service" <<UNIT
 [Unit]
 Description=rmng clone-daemon (capture + input)
 # Wants, never BindsTo: daemon restarts must NOT take the session down.
-After=gnome-headless.service rmng-session-holder.service
+# No After: the daemon starts WITH the shell, not after it — it retries the media
+# socket and the holder socket in userspace, so an early start only waits there
+# instead of holding the whole boot behind shell + holder setup.
 Wants=gnome-headless.service rmng-session-holder.service
 [Service]
 Type=simple

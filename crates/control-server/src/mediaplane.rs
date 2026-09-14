@@ -142,6 +142,10 @@ fn clip_forget_source(clip: &Mutex<ClipState>, src: &str) {
 #[derive(Default)]
 pub struct MediaHandle {
     conns: Mutex<HashMap<String, Arc<Conn>>>,
+    /// Wakeup for [`MediaHandle::is_connected`] waiters, notified on every Hello insert.
+    /// Waiters always re-check `is_connected`, so a cross-clone wakeup is just a recheck
+    /// and a Hello that lands before the wait starts is seen by the check, never missed.
+    hello_notify: tokio::sync::Notify,
     /// clone id → (monitor_id → its latest dmabuf frame). Per-monitor so every monitor
     /// of a multi-monitor clone can be primed on viewer connect (not just the last one).
     latest: Mutex<HashMap<String, HashMap<u32, LatestFrame>>>,
@@ -281,6 +285,16 @@ impl MediaHandle {
     /// daemon appears here.
     pub fn is_connected(&self, id: &str) -> bool {
         self.conns.lock().unwrap().contains_key(id)
+    }
+
+    /// Sleep until the next Hello from any clone or `fallback` elapses, whichever comes
+    /// first (see `hello_notify`). The clone wait-ready loop uses this instead of a
+    /// blind sleep so Hello usually lands within ms.
+    pub(crate) async fn wait_hello_tick(&self, fallback: std::time::Duration) {
+        tokio::select! {
+            _ = self.hello_notify.notified() => {}
+            _ = tokio::time::sleep(fallback) => {}
+        }
     }
 }
 
@@ -1194,6 +1208,7 @@ fn serve_clone(
                     .lock()
                     .unwrap()
                     .insert(h.clone_id.clone(), conn.clone());
+                handle.hello_notify.notify_waiters();
                 // A daemon starts out capturing, so tell it at once if nobody is watching.
                 send_capture_gate_on_hello(&handle, &app, &viewers, &h.clone_id);
                 // Correct a stale layout on the clone that is on screen right now, and on one

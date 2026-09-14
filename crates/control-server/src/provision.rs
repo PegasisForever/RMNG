@@ -27,7 +27,9 @@ use wire::EnvVar;
 
 use crate::app::App;
 use crate::clone_home::CloneHome;
+use crate::clone_plan::Side;
 use crate::docker::{CLONE_USER, CreateSpec, TarEntry};
+use crate::operation::OpHandle;
 
 /// The clone user's uid/gid inside every image (created uid 1000 by `template/setup/30-user.sh`
 /// at template build).
@@ -41,8 +43,9 @@ const CLONE_GID: u64 = 1000;
 /// treating it as "started but not yet ready" (a warning, not a failure — the clone is
 /// still booting its headless GNOME + user units under linger).
 const WAIT_READY_TIMEOUT: Duration = Duration::from_secs(90);
-/// Poll interval while waiting for readiness.
-const WAIT_READY_POLL: Duration = Duration::from_secs(2);
+/// Poll interval while waiting for readiness. Short on purpose: the check is one
+/// map lookup, and a 2 s interval added up to 2 s of pure wait to every fork.
+const WAIT_READY_POLL: Duration = Duration::from_millis(200);
 
 /// Headless clone: guarantee neither the desktop (`gnome-headless.service`), the capture daemon
 /// (`rmng-clone-daemon.service`), nor the session holder (`rmng-session-holder.service`) ever
@@ -302,6 +305,85 @@ pub(crate) fn clone_pct(step: &str) -> Option<f64> {
 /// yet. Returns the image reference on success (`RmngClone.source`). The container *name* is the
 /// The inject → start → wait-ready tail, factored out so the caller
 /// can run it under a cleanup trap.
+/// Account + settle work a fork runs while the clone boots. Spawned after the pre-boot
+/// upload lands (the tar owns `.claude.json` until then) and joined before every return
+/// of [`clone_container_after_create`], so boot failure still runs the existing destroy
+/// with nothing left writing. The joined account binds come back out through the return
+/// values; settle is best-effort fire-and-join.
+pub(crate) struct ForkPostUpload {
+    pub app: App,
+    pub op: OpHandle,
+    pub id: String,
+    pub group: Option<String>,
+    pub claude: Side,
+    pub codex: Side,
+}
+
+/// One provider's (selection, email, pool), as [`crate::jobs::bind_side`] answers it.
+pub(crate) type AccountBind = (Option<String>, Option<String>, Option<String>);
+
+struct PostUploadTasks {
+    accounts: tokio::task::JoinHandle<(AccountBind, AccountBind)>,
+    settle: tokio::task::JoinHandle<()>,
+}
+
+fn spawn_post_upload(w: ForkPostUpload) -> PostUploadTasks {
+    let app2 = w.app.clone();
+    let id2 = w.id.clone();
+    let accounts = tokio::spawn(async move {
+        tokio::join!(
+            crate::jobs::bind_side::<crate::pool::ClaudePool>(
+                &w.app,
+                &w.op,
+                &w.id,
+                w.group.clone(),
+                &w.claude
+            ),
+            crate::jobs::bind_side::<crate::pool::CodexPool>(
+                &w.app,
+                &w.op,
+                &w.id,
+                w.group.clone(),
+                &w.codex
+            ),
+        )
+    });
+    let settle = tokio::spawn(async move {
+        // Results dropped, exactly like the inline code: both are best-effort.
+        tokio::join!(
+            crate::homes::ensure_now(&app2, &id2),
+            crate::ssh::allow_clone_now(&app2, &id2)
+        );
+    });
+    PostUploadTasks { accounts, settle }
+}
+
+/// Join spawned post-upload work. Settle errors stay dropped (as today); an accounts
+/// task panic fails the op, like the inline code panicking would.
+async fn join_post_upload(
+    t: Option<PostUploadTasks>,
+) -> Result<Option<(AccountBind, AccountBind)>> {
+    match t {
+        None => Ok(None),
+        Some(t) => {
+            let _ = t.settle.await;
+            let acc = t.accounts.await.context("accounts task ended")?;
+            Ok(Some(acc))
+        }
+    }
+}
+
+/// Abort spawned post-upload work and wait out the aborts, so a failing boot's destroy
+/// runs with nothing left writing.
+async fn abort_post_upload(t: Option<PostUploadTasks>) {
+    if let Some(t) = t {
+        t.accounts.abort();
+        t.settle.abort();
+        let _ = t.accounts.await;
+        let _ = t.settle.await;
+    }
+}
+
 async fn clone_container_after_create(
     app: &App,
     container: &str,
@@ -310,8 +392,9 @@ async fn clone_container_after_create(
     agent_playbook: &str,
     global_prompt: &str,
     headless: bool,
+    post_upload: Option<ForkPostUpload>,
     on_progress: &mut impl FnMut(&str, &str),
-) -> Result<()> {
+) -> Result<Option<(AccountBind, AccountBind)>> {
     let docker = &app.docker;
     let cfg = app.config();
 
@@ -361,6 +444,33 @@ async fn clone_container_after_create(
         for unit in [
             ".config/systemd/user/gnome-headless.service",
             ".config/systemd/user/rmng-clone-daemon.service",
+        ] {
+            crate::home_overlay::symlink_clone_home(hostname, unit, "/dev/null")
+                .with_context(|| format!("clone {hostname}: masking {unit} failed"))?;
+        }
+    }
+
+    // Headed clones: mask the Evolution data-server units pre-boot. The shell activates
+    // them on every start (~250ms storm serialised with our session build) and needs
+    // none of them for capture: calendar/addressbook stay empty, everything else is
+    // identical. Masked activation fails fast with no error loop (validated live); the
+    // storm's trigger (gnome-shell-calendar-server) then has nothing to wait on.
+    // goa-daemon is D-Bus-only with no unit and was only ever pulled in by the source
+    // registry, so masking the registry keeps it down too.
+    // Same for the five gvfs volume monitors: they each spawn and scan for hardware
+    // volumes a container never has (~230ms, sometimes inside our session-build wait).
+    // gvfs-daemon itself and gvfs-metadata stay: Files keeps trash + metadata, and
+    // nothing in the capture path changes.
+    if !headless {
+        for unit in [
+            ".config/systemd/user/evolution-source-registry.service",
+            ".config/systemd/user/evolution-calendar-factory.service",
+            ".config/systemd/user/evolution-addressbook-factory.service",
+            ".config/systemd/user/gvfs-afc-volume-monitor.service",
+            ".config/systemd/user/gvfs-goa-volume-monitor.service",
+            ".config/systemd/user/gvfs-gphoto2-volume-monitor.service",
+            ".config/systemd/user/gvfs-mtp-volume-monitor.service",
+            ".config/systemd/user/gvfs-udisks2-volume-monitor.service",
         ] {
             crate::home_overlay::symlink_clone_home(hostname, unit, "/dev/null")
                 .with_context(|| format!("clone {hostname}: masking {unit} failed"))?;
@@ -466,9 +576,16 @@ async fn clone_container_after_create(
     bins.extend(entries);
     docker.upload_tar(container, bins).await?;
 
+    // Forks: accounts + settle run from here (the tar owns `.claude.json` until now),
+    // overlapping boot; joined before every return below.
+    let post_tasks = post_upload.map(spawn_post_upload);
+
     // systemd PID 1 comes up, and the user manager with it, now reading the env written above.
     on_progress("inject", "starting container");
-    docker.start_container(container).await?;
+    if let Err(e) = docker.start_container(container).await {
+        abort_post_upload(post_tasks).await;
+        return Err(e);
+    }
 
     // Headless clone: there is no clone-daemon, so a media `Hello` never arrives — don't wait
     // for one. Start the default `main` tmux session (idempotent; the viewer shows it as the
@@ -496,16 +613,17 @@ async fn clone_container_after_create(
             );
         }
         on_progress("ready", &format!("headless clone {hostname} up"));
-        return Ok(());
+        return Ok(join_post_upload(post_tasks).await?);
     }
 
     // wait-ready: poll the mediaplane for the daemon's Hello (keyed by clone_id == hostname).
+    // The sleep is only a fallback: every Hello notifies, so we usually wake within ms.
     on_progress("wait-ready", "waiting for the clone-daemon to register");
     let deadline = Instant::now() + WAIT_READY_TIMEOUT;
     loop {
         if app.media.is_connected(hostname) {
             on_progress("ready", &format!("clone {hostname} up + registered"));
-            return Ok(());
+            return Ok(join_post_upload(post_tasks).await?);
         }
         if Instant::now() >= deadline {
             // Timeout: distinguish "still booting" (container alive) from "died".
@@ -520,7 +638,7 @@ async fn clone_container_after_create(
                         WAIT_READY_TIMEOUT.as_secs()
                     ),
                 );
-                return Ok(());
+                return Ok(join_post_upload(post_tasks).await?);
             }
             // Dead: fold the container's log tail into the op log, then fail.
             let logs = docker.container_logs_tail(container, 30).await;
@@ -529,9 +647,10 @@ async fn clone_container_after_create(
             } else {
                 format!("\n{logs}")
             };
+            abort_post_upload(post_tasks).await;
             bail!("clone {hostname} exited before its daemon registered; last logs:{tail}");
         }
-        tokio::time::sleep(WAIT_READY_POLL).await;
+        app.media.wait_hello_tick(WAIT_READY_POLL).await;
     }
 }
 
@@ -717,8 +836,9 @@ pub async fn clone_container_gen2_from_tag(
     agent_playbook: &str,
     global_prompt: &str,
     headless: bool,
+    post_upload: Option<ForkPostUpload>,
     mut on_progress: impl FnMut(&str, &str),
-) -> Result<String> {
+) -> Result<(String, Option<(AccountBind, AccountBind)>)> {
     if !is_dns_label(hostname) {
         bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
     }
@@ -727,24 +847,34 @@ pub async fn clone_container_gen2_from_tag(
     let cfg = app.config();
 
     on_progress("queued", &format!("queued gen-2 clone {hostname}"));
-    if !docker.image_exists(&tag).await? {
-        bail!("base image '{tag}' does not exist");
-    }
-    docker.ensure_network().await?;
-
+    // No image check here: every caller ensures the tag first (`ensure_image` on the
+    // create/fork/migrate paths, an explicit `image_exists` loop on rebase), so a
+    // re-check is one more daemon roundtrip on every clone for a race it cannot close
+    // anyway (check-then-create is not atomic — a prune in between fails at create
+    // either way, and the error arm below still cleans up).
     on_progress("create", &format!("creating home dataset for {hostname}"));
     let clone_home = CloneHome::of(app, hostname);
-    let created_dataset = match home {
-        HomeSource::Create => {
-            clone_home.create_dataset()?;
-            true
+    // The daemon network and the home dataset do not touch each other: one wait
+    // instead of two. Either error fails the op exactly as before (network first,
+    // matching the old serial order).
+    let (net, created_dataset) = tokio::join!(
+        docker.ensure_network(),
+        async {
+            Ok::<bool, anyhow::Error>(match home {
+                HomeSource::Create => {
+                    clone_home.create_dataset()?;
+                    true
+                }
+                HomeSource::CloneFromSnapshot(ref snap) => {
+                    clone_home.clone_dataset_from(snap)?;
+                    true
+                }
+                HomeSource::Reuse => false,
+            })
         }
-        HomeSource::CloneFromSnapshot(ref snap) => {
-            clone_home.clone_dataset_from(snap)?;
-            true
-        }
-        HomeSource::Reuse => false,
-    };
+    );
+    net?;
+    let created_dataset = created_dataset?;
 
     on_progress("create", &format!("mounting home overlay for {hostname}"));
     // The dataset holds upper/ + work/; the skeleton (template home for this image)
@@ -791,13 +921,14 @@ pub async fn clone_container_gen2_from_tag(
         agent_playbook,
         global_prompt,
         headless,
+        post_upload,
         &mut on_progress,
     )
     .await
     {
-        Ok(()) => {
+        Ok(joined) => {
             crate::buildinfra::apply_to_clone(app, &container).await;
-            Ok(tag)
+            Ok((tag, joined))
         }
         Err(e) => {
             tracing::warn!("gen-2 clone {hostname} failed after create; cleaning up: {e}");
@@ -809,7 +940,8 @@ pub async fn clone_container_gen2_from_tag(
 
 /// Fork a gen-2 clone: snapshot the source home, clone it for the new id, create from the
 /// target preset's Dockerfile. The source keeps running. Overlay drift is silently dropped
-/// (fork copies the dataset only). Returns the new clone's tag.
+/// (fork copies the dataset only). Returns the new clone's tag, plus any early-joined
+/// accounts work (`Some` when `post_upload` was given).
 #[allow(clippy::too_many_arguments)]
 pub async fn fork_clone(
     app: &App,
@@ -826,8 +958,9 @@ pub async fn fork_clone(
     // `rebuild` forces a fresh build with a fresh base pull.
     preset_name: Option<&str>,
     rebuild: bool,
+    post_upload: Option<ForkPostUpload>,
     mut on_progress: impl FnMut(&str, &str),
-) -> Result<String> {
+) -> Result<(String, Option<(AccountBind, AccountBind)>)> {
     if !is_dns_label(new_id) {
         bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
     }
@@ -862,13 +995,14 @@ pub async fn fork_clone(
             agent_playbook,
             global_prompt,
             headless,
+            post_upload,
             &mut on_progress,
         )
         .await
     }
     .await;
     match built {
-        Ok(tag) => Ok(tag),
+        Ok(joined) => Ok(joined),
         Err(e) => {
             destroy_half_built_clone(app, new_id, true).await;
             let _ = src_home.drop_snapshot(&snap);
@@ -929,11 +1063,12 @@ pub async fn rebase_clone(
         agent_playbook,
         global_prompt,
         headless,
+        None,
         &mut on_progress,
     )
     .await
     {
-        Ok(tag) => {
+        Ok((tag, _)) => {
             purge_image_if_unused(app, host_id, &old_tag).await;
             Ok(tag)
         }
@@ -951,6 +1086,7 @@ pub async fn rebase_clone(
                 agent_playbook,
                 global_prompt,
                 headless,
+                None,
                 noop_progress,
             )
             .await
@@ -1092,9 +1228,11 @@ async fn migrate_one_inner(
         agent_playbook,
         global_prompt,
         headless,
+        None,
         &mut *on_progress,
     )
-    .await?;
+    .await
+    .map(|t| t.0)?;
 
     on_progress("stop", "stopping the migrated clone");
     app.docker.stop_even_if_paused(host_id).await?;
