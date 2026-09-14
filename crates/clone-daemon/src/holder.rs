@@ -115,14 +115,14 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
         loop {
             match build_session(&cfg, cursor_mode).await {
                 Ok(s) => break s,
-                Err(e) if attempt < 10 => {
+                Err(e) if attempt < 200 => {
                     attempt += 1;
                     tracing::warn!(
                         "holder boot: build_session attempt {attempt} failed: {e:#}; retrying"
                     );
-                    // The shell usually needs 0.2-1s from our start to own the bus name;
-                    // retry fast so the common case costs one extra attempt, not a restart.
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    // The shell usually owns the bus ~300ms after our start; retry fast so
+                    // the common case costs extra attempts, not a restart.
+                    tokio::time::sleep(Duration::from_millis(25)).await;
                 }
                 Err(e) => return Err(e).context("building the Mutter session"),
             }
