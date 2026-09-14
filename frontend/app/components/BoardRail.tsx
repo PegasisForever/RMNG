@@ -7,6 +7,7 @@ import { Settings } from "lucide-react";
 import { useId } from "react";
 
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { OperationProgress } from "~/components/OperationProgress";
 import type { AcctOrder } from "~/lib/accountOrder";
 import type { ClaudeUsage, Operation } from "~/lib/types";
@@ -33,6 +34,11 @@ export function formatLxcUsage(
             : `${(Number(stats.diskUsed) / GiB).toFixed(1)}GB`;
     return { cpu, mem, disk };
 }
+
+/** The layout picker's trigger. The rail is narrow and everything in it is small, so this
+ *  is the rest of the app's field styling at the rail's own text size rather than a form's. */
+const LAYOUT_FIELD =
+    "rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800";
 
 export interface BoardRailProps {
     /** Per-account usage rows (both providers), from `ControlState.claudeAccounts`. */
@@ -115,29 +121,17 @@ export function BoardRail({
                         <h3 className="shrink-0 text-[11px] font-medium text-slate-500 dark:text-slate-400">
                             Layout
                         </h3>
-                        <div
-                            aria-label="Layout"
-                            role="group"
-                            className="flex flex-wrap gap-1"
-                        >
-                            {presetNames.map((name) => {
-                                const active = name === activeLayout;
-                                return (
-                                    <button
-                                        key={name}
-                                        type="button"
-                                        onClick={() => onActivateLayout(name)}
-                                        aria-pressed={active}
-                                        className={`rounded-md border px-2 py-0.5 text-xs font-medium ${
-                                            active
-                                                ? "border-emerald-600 bg-emerald-600 text-white"
-                                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
-                                        }`}
-                                    >
-                                        {name}
-                                    </button>
-                                );
-                            })}
+                        <div className="min-w-0 flex-1">
+                            <DropdownSelect
+                                rows={presetNames.map((name) => ({
+                                    value: name,
+                                    label: name,
+                                }))}
+                                value={activeLayout}
+                                onChange={onActivateLayout}
+                                label="Layout"
+                                className={LAYOUT_FIELD}
+                            />
                         </div>
                     </div>
                 ) : null}

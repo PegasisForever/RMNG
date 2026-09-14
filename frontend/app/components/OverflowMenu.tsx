@@ -8,7 +8,15 @@
 // Every trigger and item stops pointer propagation, so opening one neither selects the card
 // underneath nor starts dragging it.
 import { Check, EllipsisVertical, type LucideIcon } from "lucide-react";
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 
 import {
@@ -115,6 +123,56 @@ export function MenuNote({ children }: { children: ReactNode }) {
   return <p className={`${ROW} text-slate-400 dark:text-slate-500`}>{children}</p>;
 }
 
+/** How far the panel sits off its trigger, and the least it keeps from a viewport edge. */
+const GAP = 4;
+const EDGE = 8;
+
+/** A rectangle in viewport coordinates — a trigger's box, or the viewport itself. */
+export interface Box {
+  top: number;
+  bottom: number;
+  left: number;
+  right: number;
+}
+
+/** Where a panel of this size goes: hanging off `trigger`, wholly inside `viewport`.
+ *
+ *  A fixed panel is clipped by nothing, so nothing stops it drawing off the bottom of the
+ *  window — which is what a ⋮ on a card near the foot of the board used to do, leaving half
+ *  its items unreachable. This flips the panel above its trigger when the room below will not
+ *  hold it, and caps its height to whichever side it lands on so a menu taller than the whole
+ *  window scrolls instead of overflowing. The horizontal clamp does the same for a trigger
+ *  close enough to an edge that the panel would hang off it.
+ *
+ *  Pure, so a test can pin the flip and the clamps without mounting anything. Returns
+ *  `maxHeight` rather than a height: the panel keeps its natural size when it fits.
+ */
+export function placeMenu(
+  trigger: Box,
+  panel: { width: number; height: number },
+  viewport: { width: number; height: number },
+  align: "left" | "right",
+): { top: number; left: number; maxHeight: number } {
+  const below = viewport.height - EDGE - (trigger.bottom + GAP);
+  const above = trigger.top - GAP - EDGE;
+
+  let top: number;
+  let maxHeight: number;
+  // Below unless it does not fit and above is roomier: a menu that fits stays where the
+  // operator expects it, and one that fits neither way opens on the taller side.
+  if (panel.height <= below || below >= above) {
+    top = trigger.bottom + GAP;
+    maxHeight = Math.max(below, 0);
+  } else {
+    maxHeight = Math.max(above, 0);
+    top = trigger.top - GAP - Math.min(panel.height, maxHeight);
+  }
+
+  const wanted = align === "left" ? trigger.left : trigger.right - panel.width;
+  const rightmost = Math.max(EDGE, viewport.width - EDGE - panel.width);
+  return { top, left: Math.min(Math.max(wanted, EDGE), rightmost), maxHeight };
+}
+
 /** The trigger's own styling, which only a custom trigger sets. The ⋮ button brings its own. */
 const PLAIN_TRIGGER = "flex cursor-pointer items-center rounded disabled:opacity-50";
 
@@ -137,11 +195,45 @@ export function OverflowMenu({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  // Where the panel goes, in viewport coordinates. Null until the trigger has been measured,
-  // which is also what keeps the first frame from flashing it at the origin.
-  const [at, setAt] = useState<{ top: number; left?: number; right?: number } | null>(null);
+  // The trigger's box in viewport coordinates, measured on the click that opens the menu.
+  // Null until then, which is also what keeps the first frame from flashing it at the origin.
+  const [at, setAt] = useState<Box | null>(null);
+  // Where the panel actually goes, which takes measuring the panel itself — see the layout
+  // effect below. It renders hidden for the one pass that measurement needs.
+  const [place, setPlace] = useState<{
+    top: number;
+    left: number;
+    maxHeight: number;
+  } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Placing the panel needs its size, and its size is only known once it is in the document.
+  // A layout effect runs before the browser paints, so the unplaced pass is never seen.
+  //
+  // `scrollHeight` rather than the rendered height: once a previous pass has capped the
+  // panel, its rendered height is that cap, and measuring it again would leave a menu stuck
+  // short after the window grew. The observer re-places a menu whose rows arrive late — the
+  // ones that open on a note and fill in from Linear.
+  useLayoutEffect(() => {
+    if (!open || !at) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const measure = () => {
+      setPlace(
+        placeMenu(
+          at,
+          { width: el.offsetWidth, height: el.scrollHeight },
+          { width: window.innerWidth, height: window.innerHeight },
+          align,
+        ),
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [open, at, align]);
 
   useEffect(() => {
     if (!open) return;
@@ -190,12 +282,8 @@ export function OverflowMenu({
         onClick={(e) => {
           e.stopPropagation();
           const box = e.currentTarget.getBoundingClientRect();
-          setAt({
-            top: box.bottom + 4,
-            ...(align === "left"
-              ? { left: box.left }
-              : { right: window.innerWidth - box.right }),
-          });
+          setAt({ top: box.top, bottom: box.bottom, left: box.left, right: box.right });
+          setPlace(null);
           setOpen((o) => !o);
         }}
         className={
@@ -214,8 +302,13 @@ export function OverflowMenu({
               <div
                 ref={menuRef}
                 role="menu"
-                style={{ top: at.top, left: at.left, right: at.right }}
-                className={`fixed z-50 w-56 overflow-hidden rounded-md py-1 ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`}
+                style={{
+                  top: place ? place.top : at.bottom + GAP,
+                  left: place ? place.left : at.left,
+                  maxHeight: place?.maxHeight,
+                  visibility: place ? undefined : "hidden",
+                }}
+                className={`fixed z-50 w-56 overflow-y-auto rounded-md py-1 ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`}
                 onClick={(e) => e.stopPropagation()}
               >
                 {children}
