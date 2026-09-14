@@ -92,6 +92,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 source,
                 parent,
                 headless,
+                title,
                 preset,
                 claude_account,
                 codex_account,
@@ -105,6 +106,12 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                     preset: preset.clone(),
                     claude_account: claude_account.clone(),
                     codex_account: codex_account.clone(),
+                    // A title both names the fork and makes it standalone: `linear` present
+                    // is what stops the plan copying the source's ticket onto it.
+                    linear: title.as_ref().map(|t| wire::LinearMeta {
+                        display_name: Some(t.clone()),
+                        ..Default::default()
+                    }),
                     first_message: first_message(message.as_ref(), message_file.as_ref())?,
                     headless: *headless,
                     run_startup_script: !common.no_startup_script,

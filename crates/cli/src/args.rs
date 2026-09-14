@@ -136,7 +136,8 @@ pub enum CloneCmd {
     /// Fork a gen-2 clone: snapshot + clone the source home, create from its recorded
     /// base tag (`rmng clone fork [source]`). Omitted source = the preset's default fork
     /// clone where it still exists and is forkable, else the oldest forkable clone.
-    /// The new hostname derives server-side.
+    /// The new hostname derives server-side, from the source id (`pega-dev-123` →
+    /// `pega-dev-123a`) unless `--title` names it.
     Fork {
         /// Source gen-2 clone id (omitted = preset default, else oldest forkable)
         source: Option<String>,
@@ -147,6 +148,11 @@ pub enum CloneCmd {
         /// Headless (no desktop) fork
         #[arg(long)]
         headless: bool,
+        /// Name the fork after this title instead of after its source. A titled fork is
+        /// standalone: it does not inherit the source's Linear ticket, so no agent
+        /// starts on it
+        #[arg(long)]
+        title: Option<String>,
         /// Env preset name override (omitted inherits the source preset)
         #[arg(long)]
         preset: Option<String>,
@@ -624,10 +630,34 @@ mod tests {
             }
             other => panic!("wrong cmd: {other:?}"),
         }
-        // Omitted parent means top-level.
+        // Omitted parent means top-level, and an omitted title means the server names the
+        // fork after its source.
         let cli = Cli::parse_from(["rmng", "clone", "fork", "pega-we-1"]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::Fork { parent, .. }) => assert_eq!(parent, None),
+            Cmd::Clone(CloneCmd::Fork { parent, title, .. }) => {
+                assert_eq!(parent, None);
+                assert_eq!(title, None);
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    /// `--title` is what lets a caller making many forks of one clone name each of them,
+    /// instead of drawing from that source's 27 letters.
+    #[test]
+    fn clone_fork_takes_a_title() {
+        let cli = Cli::parse_from([
+            "rmng",
+            "clone",
+            "fork",
+            "pega-we-1",
+            "--title",
+            "ng 0c3e2998",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Fork { title, .. }) => {
+                assert_eq!(title.as_deref(), Some("ng 0c3e2998"));
+            }
             other => panic!("wrong cmd: {other:?}"),
         }
     }

@@ -107,11 +107,19 @@ Each prints the started op id (follow with `rmng op wait <op-id>`), or blocks wi
 
 - `rmng clone create-plain --title <T> [--preset <P>]` — `--preset` is required when any
   presets are configured.
-- `rmng clone fork [SOURCE] [--preset <P>] [--claude-account <SEL>] [--codex-account <SEL>]
-  [--headless]` — an omitted source is the preset's default fork clone where it is still
-  forkable, else the oldest forkable clone. An omitted preset keeps the source's; naming one
-  moves the fork to that preset's account pool. A selection is an email (pin), `auto`, `none`
-  (no token), or `group:<pool>`.
+- `rmng clone fork [SOURCE] [--title <T>] [--preset <P>] [--claude-account <SEL>]
+  [--codex-account <SEL>] [--headless]` — an omitted source is the preset's default fork
+  clone where it is still forkable, else the oldest forkable clone. An omitted preset keeps
+  the source's; naming one moves the fork to that preset's account pool. A selection is an
+  email (pin), `auto`, `none` (no token), or `group:<pool>`.
+
+**How a fork is named.** Without `--title` it is named after its source and takes the next
+free letter, so forking `pega-dev-123` gives `pega-dev-123a`, then `…b`. It also inherits the
+source's Linear ticket, which is what starts an agent on it. `--title` names it from that
+title instead (`--title 'ng 0c3e2998'` → `pega-ng-0c3e2998`) and makes it **standalone**: it
+inherits no ticket, so nothing kicks an agent off on it. Use `--title` when you make many
+forks of one clone — a source has only its 27 letters, and a retired name is never handed out
+again.
 
 **Shared flags:** `--message <M>` | `--message-file <PATH>` (first message auto-sent to the
 agent; omitted ⇒ nothing is sent), `--column <NAME>`, `--no-startup-script`, `--wait`

@@ -126,15 +126,27 @@ pub(crate) fn plan(
 
     // The name: the ticket identifier, else a slug of the title. A clone built from an image
     // has no ticket to fall back on, so there a title is required.
+    //
+    // A fork that carries neither takes its SOURCE's id as the base, so forking
+    // `pega-dev-123` reads as `pega-dev-123a`. It used to fall through to the empty title,
+    // whose base is a literal `<prefix>host`: every titleless fork in the fleet pooled onto
+    // that one name whatever it was forked from, and because a retired name is never handed
+    // out again, the pool ran dry for good after `<prefix>hostz`.
     let ticket = req.linear.as_ref().and_then(|l| named(&l.ticket));
     let title = req.linear.as_ref().and_then(|l| named(&l.display_name));
     if source.is_none() && ticket.is_none() && title.is_none() {
         return Err("a title is required (linear.displayName)".into());
     }
     let prefix = &cfg.docker.hostname_prefix;
-    let base = match &ticket {
-        Some(t) => naming::ticket_hostname_base(prefix, t),
-        None => naming::plain_hostname_base(prefix, title.as_deref().unwrap_or_default()),
+    let base = match (&ticket, &title) {
+        (Some(t), _) => naming::ticket_hostname_base(prefix, t),
+        (None, Some(t)) => naming::plain_hostname_base(prefix, t),
+        // Without a source the guard above already refused this, so the fallback only keeps
+        // the match total.
+        (None, None) => source
+            .as_ref()
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| naming::plain_hostname_base(prefix, "")),
     };
     let taken: HashSet<&str> = st
         .hosts
@@ -625,6 +637,62 @@ mod tests {
         let retired = HashSet::from(["pega-we-142b".to_string()]);
         let got = plan(&cfg(), &st, &retired, false, req()).unwrap();
         assert_eq!(got.id, "pega-we-142c");
+    }
+
+    /// A fork that names nothing is named after what it copies, so the letter says which
+    /// copy of that clone it is. It used to be named `pega-host`, which said neither.
+    #[test]
+    fn a_fork_that_names_nothing_is_named_after_its_source() {
+        let st = state(vec![RmngClone {
+            linear_ticket: Some("DEV-123".into()),
+            ..source("pega-dev-123")
+        }]);
+        let got = plan_of(&st, true, CloneRequest::default()).unwrap();
+        assert_eq!(got.id, "pega-dev-123a");
+        // Its ticket still comes from the source, field for field.
+        assert_eq!(got.linear.unwrap().ticket.as_deref(), Some("DEV-123"));
+    }
+
+    /// Every titleless fork used to share one `pega-host` name whatever it copied, so 27 of
+    /// them anywhere in the fleet exhausted the letters for good. Naming each after its own
+    /// source keeps the families apart.
+    #[test]
+    fn titleless_forks_of_different_sources_do_not_share_a_name() {
+        let st = state(vec![source("pega-dev-123"), source("pega-dev-456")]);
+        let a = plan_of(
+            &st,
+            true,
+            CloneRequest {
+                source: Some("pega-dev-123".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let b = plan_of(
+            &st,
+            true,
+            CloneRequest {
+                source: Some("pega-dev-456".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (a.id.as_str(), b.id.as_str()),
+            ("pega-dev-123a", "pega-dev-456a")
+        );
+    }
+
+    /// A titled fork is named from the title, and bringing a `linear` of its own is what
+    /// keeps the source's ticket off it — so nothing kicks an agent off on that ticket.
+    #[test]
+    fn a_titled_fork_is_named_from_the_title_and_inherits_no_ticket() {
+        let st = state(vec![source("pega-dev-123")]);
+        let got = plan_of(&st, true, titled("ng 0c3e2998")).unwrap();
+        assert_eq!(got.id, "pega-ng-0c3e2998");
+        let linear = got.linear.unwrap();
+        assert_eq!(linear.ticket, None);
+        assert_eq!(linear.display_name.as_deref(), Some("ng 0c3e2998"));
     }
 
     // --- what a request must say ----------------------------------------------------------
