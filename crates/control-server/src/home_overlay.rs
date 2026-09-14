@@ -232,6 +232,51 @@ pub fn remove_home_file(homes: &Path, id: &str, rel: &str) -> Result<()> {
     }
 }
 
+/// Every user-data dir a Chromium-family browser might keep a profile lock in. Only
+/// `google-chrome` exists on the fleet today; the rest cost one array entry each and
+/// save a second diagnosis when someone installs Edge.
+const BROWSER_PROFILE_DIRS: [&str; 5] = [
+    "google-chrome",
+    "google-chrome-beta",
+    "google-chrome-unstable",
+    "chromium",
+    "microsoft-edge",
+];
+
+/// The three entries Chromium's `ProcessSingleton` keeps at the root of a user-data dir.
+/// `SingletonLock` is the one that matters; the other two are removed with it because
+/// that is what Chrome itself does when it breaks a lock, and a cookie left pointing at
+/// a socket that no longer exists is only a second thing to explain.
+const BROWSER_LOCK_FILES: [&str; 3] = ["SingletonLock", "SingletonCookie", "SingletonSocket"];
+
+/// Drop every stale Chromium profile lock from a clone's home.
+///
+/// Chrome records its lock as a SYMLINK whose target is the string `<hostname>-<pid>`,
+/// at the root of the user-data dir — on-disk state, inside the home. That is fine until
+/// the home moves: a gen-2 fork ZFS-clones the source's home verbatim and boots it under
+/// a NEW hostname, so the fork comes up owning a lock that names the source. Chrome will
+/// break a stale lock naming its OWN host (it checks whether the pid is alive), but it
+/// cannot check a pid on another machine, so a foreign hostname makes it refuse to start
+/// at all — `DisplayProfileInUseError`, a zenity "Unlock Profile and Relaunch" dialog and
+/// no browser. Hostname mismatch is the whole trigger; pid staleness never enters into it.
+///
+/// The same lock also rides in from a template home that had Chrome run in it, which is
+/// how every clone on one production CT ended up unable to open Chrome with no fork
+/// anywhere in their history. So this is not fork cleanup: it belongs on every path that
+/// brings a home up under a hostname, which is why it runs pre-boot for all of them.
+///
+/// Removal is unconditional because the caller holds a STOPPED container: nothing in it
+/// can be holding a lock legitimately. Errors are swallowed per entry — a home without a
+/// browser profile is the common case, and a lock we could not remove is a browser that
+/// will not start, never a clone that must not boot.
+pub fn clear_browser_profile_locks(homes: &Path, id: &str) {
+    for dir in BROWSER_PROFILE_DIRS {
+        for file in BROWSER_LOCK_FILES {
+            let _ = remove_home_file(homes, id, &format!(".config/{dir}/{file}"));
+        }
+    }
+}
+
 /// Ensure a home-relative dir exists with an exact mode, owned by the clone user.
 /// sshd's `StrictModes` refuses `authorized_keys` under a group/world-writable `.ssh`,
 /// so that dir goes through here (0700) rather than the default-mode parents
@@ -304,6 +349,11 @@ pub fn ensure_clone_home_dir(id: &str, rel: &str, mode: u32) -> Result<()> {
 /// [`remove_home_file`] against this server's homes.
 pub fn remove_clone_home(id: &str, rel: &str) -> Result<()> {
     remove_home_file(live_homes(), id, rel)
+}
+
+/// [`clear_browser_profile_locks`] against this server's homes.
+pub fn clear_clone_browser_profile_locks(id: &str) {
+    clear_browser_profile_locks(live_homes(), id)
 }
 
 /// [`write_home_symlink`] against this server's homes.
@@ -635,6 +685,63 @@ mod tests {
         );
         // No temp droppings beside the installed file.
         assert!(std::fs::read_dir(path.parent().unwrap()).unwrap().count() == 1);
+        let _ = std::fs::remove_dir_all(&homes);
+    }
+
+    #[test]
+    fn clearing_browser_locks_takes_the_singletons_and_spares_the_profile() {
+        let homes = scratch_homes("browserlocks");
+        // The shape a fork inherits: a lock naming the SOURCE clone, a cookie, a socket
+        // pointing into a /tmp dir that does not exist in this clone — beside real
+        // profile data that must survive.
+        write_home_symlink(
+            &homes,
+            "c1",
+            ".config/google-chrome/SingletonLock",
+            "src-host-2032",
+        )
+        .unwrap();
+        write_home_symlink(
+            &homes,
+            "c1",
+            ".config/google-chrome/SingletonCookie",
+            "7384025234",
+        )
+        .unwrap();
+        write_home_symlink(
+            &homes,
+            "c1",
+            ".config/google-chrome/SingletonSocket",
+            "/tmp/com.google.Chrome.wq9GuJ/SingletonSocket",
+        )
+        .unwrap();
+        write_home_file(
+            &homes,
+            "c1",
+            ".config/google-chrome/Preferences",
+            b"{}",
+            0o600,
+        )
+        .unwrap();
+
+        clear_browser_profile_locks(&homes, "c1");
+
+        let profile = homes
+            .join(MERGED_DIR)
+            .join("c1")
+            .join(".config/google-chrome");
+        for gone in ["SingletonLock", "SingletonCookie", "SingletonSocket"] {
+            // symlink_metadata, not exists(): a dangling symlink is exactly what we are
+            // removing, and `exists()` follows the link and reports it absent either way.
+            assert!(
+                std::fs::symlink_metadata(profile.join(gone)).is_err(),
+                "{gone} survived"
+            );
+        }
+        assert_eq!(std::fs::read(profile.join("Preferences")).unwrap(), b"{}");
+
+        // A home with no browser profile at all is the common case, not an error.
+        clear_browser_profile_locks(&homes, "c1");
         let _ = std::fs::remove_dir_all(&homes);
     }
 

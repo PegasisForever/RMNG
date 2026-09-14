@@ -367,6 +367,15 @@ async fn clone_container_after_create(
         }
     }
 
+    // Chrome's profile lock is a symlink naming `<hostname>-<pid>`, and it lives in the
+    // HOME — so a fork inherits the source's lock while booting under a new hostname, and
+    // Chrome refuses to start rather than break a lock it reads as another machine's. The
+    // same lock rides in from a template home too. Clearing it here rather than in
+    // `fork_clone` is deliberate: this is the one point create, fork, rebase and restore
+    // all pass through, and the container is still stopped, so nothing can be holding a
+    // lock we would be wrong to drop.
+    crate::home_overlay::clear_clone_browser_profile_locks(hostname);
+
     // The clone's identity and env, written while the container is STILL STOPPED.
     //
     // This cannot wait until after the start. The template enables lingering for the clone user,

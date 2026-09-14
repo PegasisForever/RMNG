@@ -242,6 +242,9 @@ Stage 4 — deleting the gen-1 code — happens after a clean pass on all three 
   until the new container passes ready, then purges it.
 - Fork, rebase, and migration silently drop overlay drift. No merge, no warning.
 - Fork takes the whole home, caches and all. Blocks are shared so disk is fine.
+- Per-machine state in the home outlives the hostname it named. Chromium profile
+  locks are cleared pre-boot (a foreign-host lock stops Chrome dead); app identity
+  is NOT — a fork keeps the source's browser profile, so both sync as one device.
 - Any clone reads any home via `~/clones`, tokens included. Chosen over access control.
 - Secrets baked into preset images are readable from layer history by anyone with
   daemon access. Accepted over a secrets pipeline.
