@@ -107,7 +107,25 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
     };
     let mut generation: u64 = 1;
     let t_build = std::time::Instant::now();
-    let mut session = build_session(&cfg, cursor_mode).await?;
+    let mut session = {
+        // gnome-shell may still be initializing when we start (After= orders process start,
+        // not D-Bus readiness): any call inside can fail until it is up. Retry in-process —
+        // exiting here costs a 2s systemd RestartSec and the daemon waits out the same cliff.
+        let mut attempt = 0u32;
+        loop {
+            match build_session(&cfg, cursor_mode).await {
+                Ok(s) => break s,
+                Err(e) if attempt < 10 => {
+                    attempt += 1;
+                    tracing::warn!(
+                        "holder boot: build_session attempt {attempt} failed: {e:#}; retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e).context("building the Mutter session"),
+            }
+        }
+    };
     tracing::info!("holder boot: build_session took {:?}", t_build.elapsed());
     // A fast restart can race a PREVIOUS holder's teardown, whose monitors die
     // asynchronously after its connection dropped.
