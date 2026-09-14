@@ -318,14 +318,18 @@ pub enum OperationKind {
     /// stored `"kind":"bootstrap"` op without this alias would wipe every clone.
     #[serde(alias = "bootstrap")]
     Pull,
-    Commit,
-    /// Gen-2 one-shot migration of a gen-1 clone (home copy into a fresh dataset +
-    /// container recreate). Auto-filed on boot of the gen-2 server version.
-    Migrate,
     /// Warm a gen-2 derived image tag without creating (`POST /api/images/prebuild`).
     Prebuild,
     /// Self-update the control-server: pull a new image + swap the running container.
     Update,
+    /// Any tag this build does not recognise, including the retired `commit` and
+    /// `migrate` flows. This is the general form of the `bootstrap` alias above: an
+    /// unknown tag would otherwise fail the whole `state.json` parse, and
+    /// `state.rs::read_from_disk` falls back to an EMPTY state on a parse error — the
+    /// server would come up seeing zero clones. A retired op row is inert: it is only
+    /// ever rendered, never driven.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -868,6 +872,21 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<OperationKind>("\"bootstrap\"").unwrap(),
             OperationKind::Pull
+        );
+        // Retired kinds: a `state.json` written before `commit`/`migrate` were deleted may
+        // still hold such a row. It must parse, not take the whole file down with it.
+        assert_eq!(
+            serde_json::from_str::<OperationKind>("\"commit\"").unwrap(),
+            OperationKind::Unknown
+        );
+        assert_eq!(
+            serde_json::from_str::<OperationKind>("\"migrate\"").unwrap(),
+            OperationKind::Unknown
+        );
+        // Any other unrecognised tag (a kind from a NEWER server) lands the same way.
+        assert_eq!(
+            serde_json::from_str::<OperationKind>("\"no-such-kind\"").unwrap(),
+            OperationKind::Unknown
         );
         // A whole Operation carrying the legacy kind deserializes with everything intact.
         let legacy = r#"{

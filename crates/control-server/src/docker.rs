@@ -2180,8 +2180,8 @@ impl DockerCtl {
 
     /// Download a tar archive of `path` inside a container (works on a STOPPED
     /// container too — the daemon reads the filesystem, not the process). Used by the
-    /// gen-2 migration to copy `/home/rmng` out of a stopped gen-1 container into its
-    /// fresh dataset; the caller extracts the bytes itself.
+    /// home-overlay skeleton export to copy a template home out of a container; the
+    /// caller extracts the bytes itself.
     pub async fn download_home_tar(&self, container: &str, path: &str) -> Result<Vec<u8>> {
         let mut stream = self.daemon()?.download_from_container(
             container,
@@ -2197,36 +2197,6 @@ impl DockerCtl {
             buf.extend_from_slice(&bytes);
         }
         Ok(buf)
-    }
-
-    /// The same archive as [`Self::download_home_tar`], as a STREAM rather than one
-    /// `Vec<u8>`.
-    ///
-    /// Migration reads whole clone homes, and buffering them cost their full size in
-    /// resident memory — measured at 11.0 GiB of RSS while copying a 12.0 GB home, with
-    /// the destination still empty. That is what capped the migration at one clone at a
-    /// time; streaming into the extractor removes the ceiling and overlaps the download
-    /// with the unpack.
-    ///
-    /// Errors are mapped to `io::Error` so the stream composes with
-    /// `tokio_util::io::StreamReader`.
-    pub fn download_tar_stream(
-        &self,
-        container: &str,
-        path: &str,
-    ) -> Result<impl futures::Stream<Item = std::io::Result<bytes::Bytes>> + Unpin + use<>> {
-        let stream = self.daemon()?.download_from_container(
-            container,
-            Some(
-                bollard::query_parameters::DownloadFromContainerOptionsBuilder::new()
-                    .path(path)
-                    .build(),
-            ),
-        );
-        let what = format!("downloading {path} from {container}");
-        Ok(Box::pin(stream.map(move |chunk| {
-            chunk.map_err(|e| std::io::Error::other(format!("{what}: {e}")))
-        })))
     }
 
     /// The next chunk from an exec's output stream, or an error once it is clear none is

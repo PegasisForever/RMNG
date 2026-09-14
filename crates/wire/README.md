@@ -66,7 +66,6 @@ AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb,
 CodexConfig { pollSecs, pinnedEmail?, usagePolling: bool }
              # usagePolling=false suppresses GET /wham/usage; refresh + push still run
 AppConfigRedacted   # GET /api/config shape: same fields, preset linear keys included
-ImageInfo   # GET /api/images row: {id, reference, size_bytes, created_at, base, created_from?, in_use_by}
 SetupEnv / EnvCheckRow   # GET /api/setup/env: the wizard's environment preflight rows
 # The only credential is the preset linear key (the Docker backend has none — local unix
 # socket). GET /api/config returns it verbatim: the browser lists Linear issues itself,

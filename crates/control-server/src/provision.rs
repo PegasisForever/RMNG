@@ -20,7 +20,7 @@
 //! each preset's Dockerfile into a hash tag on demand); the retired gen-1 registry-template
 //! pull is gone.
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use std::time::{Duration, Instant};
 
 use wire::EnvVar;
@@ -47,19 +47,6 @@ const WAIT_READY_TIMEOUT: Duration = Duration::from_secs(90);
 /// map lookup, and a 2 s interval added up to 2 s of pure wait to every fork.
 const WAIT_READY_POLL: Duration = Duration::from_millis(200);
 
-/// Headless clone: guarantee neither the desktop (`gnome-headless.service`), the capture daemon
-/// (`rmng-clone-daemon.service`), nor the session holder (`rmng-session-holder.service`) ever
-/// runs. Just removing the `default.target.wants` symlinks is not enough: `rmng-clone-daemon`
-/// carries `Wants=gnome-headless.service` and `Wants=rmng-session-holder.service`, so it pulls
-/// both up as runtime dependencies independent of `[Install]`, and the lingering user manager
-/// starts them at first boot before this script can win the race — which is exactly why headless
-/// clones were observed still running gnome-shell + the daemon on :9004.
-///
-/// A headless clone has no desktop, so the clean fix is to simply **delete the unit files** (real
-/// files the template ships in `~/.config/systemd/user`). With no fragment on disk systemd has
-/// nothing to start by any path — the `[Install]` want, the `Wants=` pull, or a manual start — and
-/// there is no leftover mask symlink to reason about. `daemon-reload` then makes the (possibly
-/// already-running) user manager forget the units so nothing restarts them, and `pkill` reaps
 /// Headless clone: pin tmux's multi-client sizing policy, then ensure a default `main` tmux
 /// session exists (idempotent). Runs as the clone user via a login shell so PATH/SHELL match an
 /// interactive session. `termplane` re-creates a missing session on select, so the default session
@@ -295,16 +282,6 @@ pub(crate) fn clone_pct(step: &str) -> Option<f64> {
     })
 }
 
-/// Create + start a clone container from an `rmng.image=1` source image, injecting its
-/// identity/preset/PATH files, and wait for its daemon to register.
-///
-/// Steps (→ pct): `queued` 0, `create` 20, `inject` 35, `start` 55, `wait-ready` 75,
-/// `ready` 80 — `ready` is this fn's TERMINAL step (daemon registered, or timed-out
-/// still-booting). The remaining `monitors` 85 / `accounts` 95 / `done` 100 steps are driven
-/// by the caller (`run_clone`), so this fn returning does NOT mean the clone is connectable
-/// yet. Returns the image reference on success (`RmngClone.source`). The container *name* is the
-/// The inject → start → wait-ready tail, factored out so the caller
-/// can run it under a cleanup trap.
 /// Account + settle work a fork runs while the clone boots. Spawned after the pre-boot
 /// upload lands (the tar owns `.claude.json` until then) and joined before every return
 /// of [`clone_container_after_create`], so boot failure still runs the existing destroy
@@ -770,11 +747,9 @@ pub(crate) fn preset_dockerfile(app: &App, preset_name: Option<&str>) -> String 
 
 /// How a gen-2 create sources the home dataset.
 pub enum HomeSource {
-    /// Fresh `zfs create` for a new clone / migration.
+    /// Fresh `zfs create` for a new clone.
     Create,
-    /// `zfs clone` from a template seed snapshot (template carries default home content).
-    CloneFromSnapshot(String),
-    /// The dataset already exists (fork cloned it, rebase/migration created it) — use it.
+    /// The dataset already exists (fork cloned it, rebase kept it) — use it.
     Reuse,
 }
 
@@ -863,10 +838,6 @@ pub async fn clone_container_gen2_from_tag(
             Ok::<bool, anyhow::Error>(match home {
                 HomeSource::Create => {
                     clone_home.create_dataset()?;
-                    true
-                }
-                HomeSource::CloneFromSnapshot(ref snap) => {
-                    clone_home.clone_dataset_from(snap)?;
                     true
                 }
                 HomeSource::Reuse => false,
@@ -1100,240 +1071,6 @@ pub async fn rebase_clone(
     }
 }
 
-/// One clone's migration step (stage-3 boot loop calls this per gen-1 row, one at a time):
-/// `zfs create` → copy `/home/rmng` out of the STOPPED old container into the dataset →
-/// remove the old container (fresh dind/ctd volumes on recreate) → create the gen-2
-/// container from the base tag with fresh identity/dynamic env → stop it (migrated clones
-/// start with the fleet, not during the window). Returns the copied bytes for the report.
-///
-/// Account token re-push is NOT done here: stage 3 reads the stored selections and calls
-/// [`crate::pool::push_both_sides`] after the fleet starts (it needs running clones).
-#[allow(clippy::too_many_arguments)]
-pub async fn migrate_one(
-    app: &App,
-    host_id: &str,
-    base_tag: &str,
-    env: &[EnvVar],
-    agent_playbook: &str,
-    global_prompt: &str,
-    headless: bool,
-    mut on_progress: impl FnMut(&str, &str),
-) -> Result<MigrateReport> {
-    if !is_dns_label(host_id) {
-        bail!("clone hostname must be a DNS label (lowercase letters, digits, hyphens)");
-    }
-    on_progress("queued", &format!("queued migration of {host_id}"));
-    match migrate_one_inner(
-        app,
-        host_id,
-        base_tag,
-        env,
-        agent_playbook,
-        global_prompt,
-        headless,
-        &mut on_progress,
-    )
-    .await
-    {
-        Ok(report) => Ok(report),
-        Err(e) => {
-            // One-shot window under a whole-LXC backup: leave no half-built dataset.
-            let home = CloneHome::of(app, host_id);
-            home.teardown();
-            let _ = home.destroy(false);
-            Err(e)
-        }
-    }
-}
-
-/// Copied home bytes + resolved derived tag, for the per-clone migration report.
-pub struct MigrateReport {
-    pub bytes: u64,
-    pub tag: String,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn migrate_one_inner(
-    app: &App,
-    host_id: &str,
-    base_tag: &str,
-    env: &[EnvVar],
-    agent_playbook: &str,
-    global_prompt: &str,
-    headless: bool,
-    on_progress: &mut impl FnMut(&str, &str),
-) -> Result<MigrateReport> {
-    on_progress("create", "creating the home dataset");
-    let home = CloneHome::of(app, host_id);
-    home.create_dataset()?;
-
-    on_progress("copy", "copying /home/rmng out of the old container");
-    // Into the overlay upper: the merged view then shows old home over the new base.
-    // No overlay yet — the recreate below mounts it, on top of what lands here.
-    home.ensure_layout()?;
-    let upper = home.upper();
-    // Streamed, not buffered: the archive goes daemon -> extractor without ever being a
-    // whole home in memory, so several clones can migrate at once (see
-    // `jobs::migrate_all_on_boot`). The byte count is tallied off the stream itself.
-    let counted = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let stream = app.docker.download_tar_stream(host_id, "/home/rmng")?;
-    let dest = upper.to_string_lossy().into_owned();
-    let handle = tokio::runtime::Handle::current();
-    let tally = counted.clone();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let reader = tokio_util::io::SyncIoBridge::new_with_handle(
-            tokio_util::io::StreamReader::new(stream),
-            handle,
-        );
-        extract_home_tar(
-            CountingReader {
-                inner: reader,
-                tally,
-            },
-            &dest,
-        )
-    })
-    .await
-    .context("the home extract task did not finish")??;
-    let bytes = counted.load(std::sync::atomic::Ordering::Relaxed);
-
-    on_progress("recreate", "removing the old container");
-    app.docker.remove_container(host_id).await?;
-    for volume in [
-        crate::docker::DockerCtl::dind_volume_name(host_id),
-        crate::docker::DockerCtl::ctd_volume_name(host_id),
-    ] {
-        if let Err(e) = app.docker.remove_volume(&volume).await {
-            tracing::warn!("migrate {host_id}: removing volume {volume}: {e} (non-fatal)");
-        }
-    }
-
-    on_progress("recreate", "creating the gen-2 container (stopped)");
-    // Migration builds from the row preset's Dockerfile (or the default base when the
-    // row names none): the old `base_tag` arg is retired, kept only for signature compat.
-    let _ = base_tag;
-    let dockerfile = preset_dockerfile(
-        app,
-        gen2_row(app, host_id)
-            .as_ref()
-            .and_then(|r| r.preset_name.as_deref()),
-    );
-    let image = crate::derived::ensure_image(app, &dockerfile, false, &mut *on_progress).await?;
-    let tag = clone_container_gen2_from_tag(
-        app,
-        &image,
-        host_id,
-        HomeSource::Reuse,
-        env,
-        agent_playbook,
-        global_prompt,
-        headless,
-        None,
-        &mut *on_progress,
-    )
-    .await
-    .map(|t| t.0)?;
-
-    on_progress("stop", "stopping the migrated clone");
-    app.docker.stop_even_if_paused(host_id).await?;
-    on_progress("done", &format!("clone {host_id} migrated ({bytes} bytes)"));
-    Ok(MigrateReport { bytes, tag })
-}
-
-/// Counts the bytes pulled through the home archive stream, so the per-clone report keeps
-/// its "N bytes" figure now that the archive is never a `Vec` whose `len()` could be read.
-struct CountingReader<R> {
-    inner: R,
-    tally: std::sync::Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl<R: std::io::Read> std::io::Read for CountingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.tally
-            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
-        Ok(n)
-    }
-}
-
-/// Strip the archive's `rmng/` top-level component and refuse anything that would escape
-/// the destination. `None` = the path WAS the top-level dir (nothing to extract).
-///
-/// Applied to entry paths AND to hard-link targets — they are rooted the same way, and
-/// stripping only the former is what made every home with hard links fail to migrate.
-fn home_archive_rel(path: &std::path::Path) -> Result<Option<std::path::PathBuf>> {
-    let mut comps = path.components();
-    comps.next(); // strip the `rmng/` top-level dir
-    let rel: std::path::PathBuf = comps.collect();
-    if rel.as_os_str().is_empty() {
-        return Ok(None);
-    }
-    if rel.components().any(|c| {
-        matches!(
-            c,
-            std::path::Component::ParentDir
-                | std::path::Component::RootDir
-                | std::path::Component::Prefix(_)
-        )
-    }) {
-        anyhow::bail!("refusing to extract {rel:?} outside the dataset");
-    }
-    Ok(Some(rel))
-}
-
-/// Extract a daemon `download_from_container` tar of `/home/rmng` into the dataset dir.
-/// The archive roots every entry under the basename (`rmng/...`), so the first component
-/// is stripped. Runs as CT root, preserving the archived owners/modes. Entries escaping
-/// the destination (`..`, absolute) are refused.
-///
-/// Takes a READER, not a slice: migration streams the archive straight through rather
-/// than holding a whole home in memory (see `DockerCtl::download_tar_stream`).
-///
-/// Hard links are collected and applied AFTER the main pass. Two reasons: the link target
-/// needs the same `rmng/` strip the entry path gets, and an archive may name a target it
-/// has not written yet. Missing the first of those is why homes carrying a `uv` cache, a
-/// `pnpm` store or any other hard-linked tree failed with
-/// `No such file or directory (os error 2) when hard linking rmng/...` — on CT 104 that
-/// was 4 of 8 clones, up to 28 276 hard-linked files in one home.
-fn extract_home_tar<R: std::io::Read>(reader: R, dest: &str) -> Result<()> {
-    let mut archive = tar::Archive::new(reader);
-    archive.set_preserve_permissions(true);
-    // LOAD-BEARING, same as the skeleton export. The tar crate defaults to giving every
-    // extracted file to the running process — root — so without this a migrated home
-    // arrives entirely root-owned and the clone user cannot write to it. Measured on
-    // CT 104's first run: 554 501 files landed as uid 0 against 35 as uid 1000.
-    archive.set_preserve_ownerships(true);
-    let dest = std::path::Path::new(dest);
-    let mut links: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let Some(rel) = home_archive_rel(&entry.path()?)? else {
-            continue;
-        };
-        if entry.header().entry_type() == tar::EntryType::Link {
-            let target = entry
-                .link_name()?
-                .ok_or_else(|| anyhow!("hard link {rel:?} carries no target"))?;
-            let src = home_archive_rel(&target)?
-                .ok_or_else(|| anyhow!("hard link {rel:?} targets the archive root"))?;
-            links.push((src, rel));
-            continue;
-        }
-        entry.unpack(dest.join(rel))?;
-    }
-    for (src, dst) in links {
-        let (src, dst) = (dest.join(src), dest.join(dst));
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir {} for a hard link", parent.display()))?;
-        }
-        let _ = std::fs::remove_file(&dst);
-        std::fs::hard_link(&src, &dst)
-            .with_context(|| format!("hard linking {} to {}", src.display(), dst.display()))?;
-    }
-    Ok(())
-}
-
 // --- clone binaries -------------------------------------------------------------------
 
 /// One binary the control-server installs into every clone before boot: the
@@ -1390,27 +1127,6 @@ pub(crate) fn unarchive_pct(step: &str) -> Option<f64> {
         "queued" => 0.0,
         "start" => 60.0,
         "render" => 80.0,
-        "done" => 100.0,
-        _ => return None,
-    })
-}
-
-/// Progress step → percentage for a gen-2 one-shot migration. Matches the `migrate_one`
-/// step keys, plus the one step the JOB emits before `migrate_one` is called.
-///
-/// `pre-stop` is that step, and it exists because of a drift: `jobs::run_migrate` stops the
-/// source container first (the home copy needs a stable source) and used to emit that as
-/// `stop` — the same key `migrate_one` uses for its LAST step. The bar therefore jumped to
-/// 90% before the migration had copied a byte, then fell back to 0 at `migrate_one`'s
-/// `queued`. Two different moments cannot share one step key.
-pub(crate) fn migrate_pct(step: &str) -> Option<f64> {
-    Some(match step {
-        "queued" => 0.0,
-        "pre-stop" => 5.0,
-        "create" => 10.0,
-        "copy" => 30.0,
-        "recreate" => 60.0,
-        "stop" => 90.0,
         "done" => 100.0,
         _ => return None,
     })
@@ -1579,148 +1295,6 @@ mod tests {
             },
         ];
         assert_eq!(etc_environment_conf(&vars), "FOO=1\nBAR=a b\n");
-    }
-
-    /// A home carrying a hard link (a `uv` cache linked into a venv, a `pnpm` store linked
-    /// into `node_modules`) must extract with the link intact. The archive roots BOTH the
-    /// entry path and the link target at `rmng/`; stripping only the former made the
-    /// extract fail with `No such file or directory (os error 2) when hard linking
-    /// rmng/...` and took down 4 of CT 104's 8 clones.
-    #[test]
-    fn extract_home_tar_rebases_hard_link_targets_onto_the_destination() {
-        let body = b"payload";
-        // Stamp the archive with OUR uid/gid: the extractor restores ownership now, so a
-        // foreign owner would need root. The hard-link behaviour under test is unaffected.
-        let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
-        let mut builder = tar::Builder::new(Vec::new());
-        // The daemon's archive carries a dir entry before anything inside it; `unpack`
-        // does not invent parents.
-        for dir in [
-            "rmng/",
-            "rmng/.cache/",
-            "rmng/.cache/pkg/",
-            "rmng/.venv/",
-            "rmng/.venv/site/",
-        ] {
-            let mut h = tar::Header::new_gnu();
-            h.set_size(0);
-            h.set_mode(0o755);
-            h.set_uid(uid as u64);
-            h.set_gid(gid as u64);
-            h.set_entry_type(tar::EntryType::Directory);
-            h.set_cksum();
-            builder.append_data(&mut h, dir, std::io::empty()).unwrap();
-        }
-        let mut file = tar::Header::new_gnu();
-        file.set_size(body.len() as u64);
-        file.set_mode(0o644);
-        file.set_uid(uid as u64);
-        file.set_gid(gid as u64);
-        file.set_cksum();
-        builder
-            .append_data(&mut file, "rmng/.cache/pkg/thing", &body[..])
-            .unwrap();
-        let mut link = tar::Header::new_gnu();
-        link.set_size(0);
-        link.set_mode(0o644);
-        link.set_uid(uid as u64);
-        link.set_gid(gid as u64);
-        link.set_entry_type(tar::EntryType::Link);
-        builder
-            .append_link(&mut link, "rmng/.venv/site/thing", "rmng/.cache/pkg/thing")
-            .unwrap();
-        let archive = builder.into_inner().unwrap();
-
-        let dest = std::env::temp_dir().join(format!("rmng-hardlink-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dest);
-        std::fs::create_dir_all(&dest).unwrap();
-        extract_home_tar(&archive[..], &dest.to_string_lossy()).unwrap();
-
-        let original = dest.join(".cache/pkg/thing");
-        let linked = dest.join(".venv/site/thing");
-        assert_eq!(std::fs::read(&original).unwrap(), body);
-        assert_eq!(
-            std::fs::read(&linked).unwrap(),
-            body,
-            "the hard link must resolve inside the destination, not against the CWD"
-        );
-        // Really a hard link, not a second copy.
-        use std::os::unix::fs::MetadataExt;
-        assert_eq!(
-            std::fs::metadata(&original).unwrap().ino(),
-            std::fs::metadata(&linked).unwrap().ino(),
-        );
-        let _ = std::fs::remove_dir_all(&dest);
-    }
-
-    /// The extractor must keep the ARCHIVED owner, not give everything to the process
-    /// running it. Without `set_preserve_ownerships` a migrated home arrives entirely
-    /// root-owned and the clone user cannot write to it — 554 501 files on CT 104.
-    /// Root-only: chown needs privilege, so it self-skips elsewhere.
-    #[test]
-    fn extract_home_tar_preserves_the_archived_owner() {
-        if unsafe { libc::geteuid() } != 0 {
-            eprintln!("skipping: needs root to restore ownership");
-            return;
-        }
-        let body = b"payload";
-        let mut builder = tar::Builder::new(Vec::new());
-        let mut dir = tar::Header::new_gnu();
-        dir.set_size(0);
-        dir.set_mode(0o755);
-        dir.set_uid(1000);
-        dir.set_gid(1000);
-        dir.set_entry_type(tar::EntryType::Directory);
-        dir.set_cksum();
-        builder
-            .append_data(&mut dir, "rmng/", std::io::empty())
-            .unwrap();
-        let mut file = tar::Header::new_gnu();
-        file.set_size(body.len() as u64);
-        file.set_mode(0o644);
-        file.set_uid(1000);
-        file.set_gid(1000);
-        file.set_cksum();
-        builder
-            .append_data(&mut file, "rmng/owned", &body[..])
-            .unwrap();
-        let archive = builder.into_inner().unwrap();
-
-        let dest = std::env::temp_dir().join(format!("rmng-own-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dest);
-        std::fs::create_dir_all(&dest).unwrap();
-        extract_home_tar(&archive[..], &dest.to_string_lossy()).unwrap();
-        use std::os::unix::fs::MetadataExt;
-        let md = std::fs::metadata(dest.join("owned")).unwrap();
-        assert_eq!(
-            (md.uid(), md.gid()),
-            (1000, 1000),
-            "archived owner must survive"
-        );
-        let _ = std::fs::remove_dir_all(&dest);
-    }
-
-    /// A link target that escapes the dataset is refused, like any other entry.
-    #[test]
-    fn extract_home_tar_refuses_an_escaping_hard_link_target() {
-        let mut builder = tar::Builder::new(Vec::new());
-        let mut link = tar::Header::new_gnu();
-        link.set_size(0);
-        link.set_mode(0o644);
-        link.set_entry_type(tar::EntryType::Link);
-        builder
-            .append_link(&mut link, "rmng/evil", "rmng/../../etc/shadow")
-            .unwrap();
-        let archive = builder.into_inner().unwrap();
-        let dest = std::env::temp_dir().join(format!("rmng-hardlink-esc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dest);
-        std::fs::create_dir_all(&dest).unwrap();
-        let err = extract_home_tar(&archive[..], &dest.to_string_lossy()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("outside the dataset"),
-            "{err:#}"
-        );
-        let _ = std::fs::remove_dir_all(&dest);
     }
 
     #[test]
@@ -1923,14 +1497,5 @@ mod tests {
         // The failure arm still has a reading, and clone_pct never did.
         assert!(rebase_pct("rollback").is_some());
         assert_eq!(clone_pct("stop"), None);
-    }
-
-    /// The job-side pre-stop and `migrate_one`'s final stop are two different moments and
-    /// must not share a step key: they did, and the bar hit 90% before a byte was copied.
-    #[test]
-    fn migrate_pre_stop_scores_below_the_copy() {
-        assert_eq!(migrate_pct("pre-stop"), Some(5.0));
-        assert_eq!(migrate_pct("stop"), Some(90.0));
-        assert!(migrate_pct("pre-stop") < migrate_pct("copy"));
     }
 }

@@ -265,7 +265,7 @@ async fn main() -> Result<()> {
         mediaplane::init,
         move || {
             // Boot order is LOAD-BEARING, so this is one sequential task rather than
-            // three spawns: overlays, then migration, then the fleet.
+            // separate spawns: overlays, then the fleet.
             //
             // Clone containers carry `restart: no`, so nothing runs a clone until this
             // task says so. That is the whole point — with the daemon's `unless-stopped`
@@ -278,16 +278,9 @@ async fn main() -> Result<()> {
                     // 1. Home overlays do not survive a CT reboot (mounts, unlike
                     //    containers). Nothing may start a clone before its home is back.
                     home_overlay::remount_all(app.clone()).await;
-                    // 2. Gen-2 one-shot migration: any gen-1 row (managed, no dataset) is
-                    //    migrated `MIGRATE_CONCURRENCY` at a time, one Migrate op each in
-                    //    the jobs UI. It owns the fleet for its window and starts the
-                    //    non-archived clones itself. No gen-1 rows ⇒ no-op.
-                    if !jobs::migrate_all_on_boot(app.clone()).await {
-                        // 3. No migration, so the fleet is still ours to start.
-                        jobs::boot_start_fleet(&app).await;
-                    }
-                    // 4. Only now: the daemon no longer revives a crashed clone, so we do.
-                    //    Started last so it cannot race the migration window's own stops.
+                    // 2. The fleet: every managed, non-archived clone.
+                    jobs::boot_start_fleet(&app).await;
+                    // 3. Only now: the daemon no longer revives a crashed clone, so we do.
                     jobs::crash_recovery(app).await;
                 }
             });
