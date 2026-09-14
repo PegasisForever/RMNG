@@ -1274,6 +1274,13 @@ impl AgentFlavor for PiFlavor {
                             Some("user") => {
                                 has_user = true;
                                 last_kind = "user".to_string();
+                                // A new turn retires the previous turn's calls, exactly like
+                                // `in_flight_tools` retires them on this same boundary: the
+                                // agent cannot be inside a call and have taken a new prompt,
+                                // and an interrupt fires no PostToolUse. Without this a call
+                                // whose process died mid-turn stays open forever and the
+                                // session reads busy until the heat death of the universe.
+                                open.clear();
                                 events.push(HookEvent {
                                     hook_event_name: "UserPromptSubmit".into(),
                                     session_id: Some(id.clone()),
@@ -3874,6 +3881,27 @@ mod tests {
     /// The full clone read against a fake home: an idle Pi session with a running wake task
     /// must Ask (never file-Working), so the model verifies the wake claim against the
     /// command. A dev server left on default flags claims a wake it never delivers.
+    #[test]
+    fn a_killed_mid_call_pi_session_with_a_later_turn_reads_idle() {
+        // Killed mid-tool-call in turn one (no PostToolUse ever comes), then a later
+        // turn completes. The stale call id must retire on the new prompt or the
+        // session reads busy forever and the clone with it (CT205, Sep 2026).
+        let base = pi_root("clone-deadcall");
+        let root = base.join("proc/999/root");
+        let body = format!(
+            "{{\"type\":\"session\",\"id\":\"{PI_ID}\",\"cwd\":\"/home/rmng/w\"}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\"}}],\"timestamp\":1000000}}}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"toolCall\",\"id\":\"c1\",\"name\":\"sh\",\"arguments\":{{}}}}],\"timestamp\":1001000}}}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\"}}],\"timestamp\":2000000}}}}\n\
+             {{\"type\":\"message\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"done\"}}],\"timestamp\":2001000}}}}\n"
+        );
+        write_pi_session(&root, "--home-rmng-w--", &format!("t_{PI_ID}.jsonl"), &body);
+        let reading = PiFlavor::read(&root);
+        assert_eq!(reading.sessions.len(), 1);
+        assert_eq!(reading.sessions[0].status.as_deref(), Some("idle"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn read_clone_asks_for_a_pi_wake_without_deciding() {
         let base = pi_root("clone-shortcut");
