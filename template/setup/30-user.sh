@@ -138,6 +138,8 @@ Before=graphical-session.target
 Type=simple
 Environment=XDG_SESSION_TYPE=wayland
 Environment=MUTTER_DEBUG_DUMMY_MODE_SPECS=$MODE_SPECS
+# No screen reader headless: skips the at-spi bus + registry (~35ms) per shell start.
+Environment=NO_AT_BRIDGE=1
 ExecStart=/usr/bin/gnome-shell --headless --wayland
 Restart=on-failure
 [Install]
