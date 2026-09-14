@@ -43,9 +43,8 @@ fn entries_to_remove(existing: &[String], desired: &HashSet<String>) -> Vec<Stri
 }
 
 /// Create or repoint `link` → `target`, best-effort. A link already pointing at `target`
-/// is left untouched; a stale symlink or a leftover non-symlink entry (e.g. an empty
-/// sshfs-era mountpoint dir) is replaced. Failures are logged, not fatal — next tick
-/// retries.
+/// is left untouched; a stale symlink is replaced. Failures are logged, not fatal — next
+/// tick retries.
 fn ensure_symlink(link: &Path, target: &Path, id: &str) {
     match std::fs::symlink_metadata(link) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -57,9 +56,7 @@ fn ensure_symlink(link: &Path, target: &Path, id: &str) {
             }
             let _ = std::fs::remove_file(link); // stale symlink → replace
         }
-        Ok(_) => {
-            let _ = std::fs::remove_dir(link); // leftover (empty) real dir
-        }
+        Ok(_) => {} // not ours (not a symlink) → leave it; the create below fails and logs
         Err(_) => {} // nothing there → just create
     }
     match std::os::unix::fs::symlink(target, link) {
@@ -68,8 +65,8 @@ fn ensure_symlink(link: &Path, target: &Path, id: &str) {
     }
 }
 
-/// Remove `hosts/` entries not in `desired`. Only sweeps our own symlinks and empty
-/// safe-named dirs (the is_safe_id guard keeps us from touching anything unexpected).
+/// Remove `hosts/` entries not in `desired`. Only sweeps our own symlinks — anything
+/// else under `hosts/` is not ours to delete.
 fn prune_stale(root: &Path, desired: &HashSet<String>) {
     let Ok(rd) = std::fs::read_dir(root) else {
         return;
@@ -86,18 +83,15 @@ fn prune_stale(root: &Path, desired: &HashSet<String>) {
                     tracing::info!(target: "homes", "removed stale clone-home link {name}");
                 }
             }
-            // sshfs-era leftover mountpoint dir — sweep it if empty + safe-named.
-            Ok(m) if m.is_dir() && is_safe_id(&name) => {
-                let _ = std::fs::remove_dir(&p);
-            }
             _ => {}
         }
     }
 }
 
 /// Point `hosts/<id>` at one clone's home. True when linked: the home is mounted and the
-/// symlink is in place. False (deleted/pre-migration clone, nothing mounted): the caller
-/// prunes any stale entry.
+/// symlink is in place. False when the merged view is not there — a clone whose dataset is
+/// gone, or one whose overlay has not been mounted yet — and the caller prunes any stale
+/// entry.
 async fn ensure_for(app: &App, root: &Path, id: &str) -> bool {
     // The clone's home on the CT is its overlay merged view: a plain directory once
     // mounted, present whether the clone runs or not — which is what makes stopped-clone
@@ -162,7 +156,8 @@ pub async fn sync_all(app: App) {
     let mut desired: HashSet<String> = HashSet::new();
 
     for h in &hosts {
-        // Linked → keep; missing dataset (deleted, pre-migration) → prune the stale entry.
+        // Linked → keep; no merged view (dataset gone, or overlay not mounted) → prune the
+        // stale entry.
         if ensure_for(&app, &root, &h.id).await {
             desired.insert(h.id.clone());
         }

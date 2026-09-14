@@ -247,9 +247,6 @@ fn fork_source(
     if !src.managed {
         return Err(format!("'{}' is not a managed clone", src.id));
     }
-    if src.base_tag.is_none() {
-        return Err(format!("'{}' is not a gen-2 clone (no base tag)", src.id));
-    }
     if st
         .operations
         .iter()
@@ -593,21 +590,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(unknown.contains("unknown clone 'ghost'"), "{unknown}");
-
-        let gen1 = RmngClone {
-            base_tag: None,
-            ..source("pega-we-1")
-        };
-        let err = plan_of(
-            &state(vec![gen1]),
-            true,
-            CloneRequest {
-                source: Some("pega-we-1".into()),
-                ..titled("spike")
-            },
-        )
-        .unwrap_err();
-        assert!(err.contains("not a gen-2 clone"), "{err}");
     }
 
     #[test]
