@@ -2161,6 +2161,11 @@ impl DockerCtl {
     /// [`upload_tar`](Self::upload_tar); works on a stopped container too.
     pub async fn upload_tar(&self, container: &str, entries: Vec<TarEntry>) -> Result<()> {
         let archive = build_tar(&entries).context("building upload tar")?;
+        // gzip the pre-boot tar (~111MB -> ~45MB, mostly agent-wrapper): the daemon's
+        // archive extractor sniffs compression, so the same bytes land.
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut enc, &archive).context("gzipping upload tar")?;
+        let archive = enc.finish().context("finishing gzip")?;
         self.daemon()?
             .upload_to_container(
                 container,
@@ -2985,6 +2990,8 @@ pub(crate) fn epoch_to_rfc3339(secs: i64) -> String {
 /// Build an in-memory tar from [`TarEntry`]s using the `tar` crate. mode/uid/gid are
 /// written verbatim into each header (the daemon extracts with those owners — gotcha #2).
 fn build_tar(entries: &[TarEntry]) -> Result<Vec<u8>> {
+    let total: usize = entries.iter().map(|e| e.data.len() + 1024).sum();
+    let mut builder = tar::Builder::new(Vec::with_capacity(total));
     let mut builder = tar::Builder::new(Vec::new());
     for e in entries {
         let mut header = tar::Header::new_gnu();

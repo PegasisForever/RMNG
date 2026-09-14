@@ -43,6 +43,7 @@ reqwest.workspace = true
 # `upload_tar` PUTs into containers.
 bollard = "0.19"
 tar = "0.4"
+flate2 = "1"
 # sha256 of clone binaries for the automatic hot-swap engine (src/binswap.rs): hash the
 # staged payloads once at startup + the on-disk `/opt/rmng/bin` binaries each check.
 sha2 = "0.10"

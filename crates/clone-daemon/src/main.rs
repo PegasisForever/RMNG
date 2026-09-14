@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use wire::holder::{FromHolder, HolderMonitor, ToHolder};
 use wire::socket::{
     CursorMeta, CursorShape, DaemonMsg, FrameMsg, MonitorPlacement, PlaneLayout, ServerMsg,
@@ -129,7 +129,6 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    gstreamer::init()?;
     let monitors = parse_monitors(std::env::var("RMNG_MONITORS").ok());
     let sizes: Vec<(u32, u32)> = monitors.iter().map(|m| (m.w, m.h)).collect();
     let socket = std::env::var("RMNG_SOCKET").ok();
@@ -154,6 +153,8 @@ async fn main() -> Result<()> {
     } else {
         mutter::CURSOR_MODE_METADATA
     };
+    // The holder never touches GStreamer (Mutter session + zbus/gdbus only): skip the
+    // ~200ms-warm/~1s-cold init so boot reaches the session build sooner.
     if holder_mode {
         tracing::info!(?sizes, "clone-daemon: session-holder mode");
         return holder::run(monitors, cursor_mode).await;
@@ -169,9 +170,14 @@ async fn main() -> Result<()> {
             tracing::info!("daemon boot: media socket took {:?}", t0.elapsed());
             let holder = Holder::connect().await?;
             tracing::info!("daemon boot: holder connect took {:?} total", t0.elapsed());
+            // After the holder wait, not before it: nothing above needs GStreamer, and
+            // the media dial + holder connect start sooner on every boot.
+            gstreamer::init().context("gstreamer init")?;
             run_shipping(holder, transport, &path, embedded).await
         }
         None => {
+            // Self-test captures through the embedded GStreamer path: init stays.
+            gstreamer::init().context("gstreamer init")?;
             tracing::info!(?sizes, embedded, "clone-daemon: setting up Mutter session");
             let session = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
             tracing::info!(

@@ -17,8 +17,9 @@ use crate::app::App;
 use crate::clone_plan::{ClonePlan, Side};
 use crate::operation::{self, Finish, Guards, OpHandle, OpSpec};
 use crate::provision::{
-    self, HomeSource, clone_container_gen2_from_tag, clone_key_env_vars, compose_clone_env,
-    control_env_vars, delete_clone, fork_clone, migrate_one, preset_env_vars, rebase_clone,
+    self, AccountBind, ForkPostUpload, HomeSource, clone_container_gen2_from_tag,
+    clone_key_env_vars, compose_clone_env, control_env_vars, delete_clone, fork_clone,
+    migrate_one, preset_env_vars, rebase_clone,
 };
 
 /// The operation-record plumbing, re-exported at its historical path: `pool` logs account
@@ -200,6 +201,9 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     let mut progress = op.progress();
     let env = gen2_create_env(&app, preset.as_deref(), &id).await?;
     let (playbook, prompt) = gen2_playbook_prompt(&app, preset.as_deref());
+    // Forks spawn accounts+settle during boot (joined inside `fork_clone`); `Some` here
+    // means the inline post-ready work below is already done.
+    let mut early_accounts: Option<(AccountBind, AccountBind)> = None;
     let image_ref = match &plan.source {
         // Image: a hash tag built on demand from the preset's Dockerfile. Home: a fresh
         // dataset, or a clone of the template seed snapshot where the template carries one.
@@ -226,12 +230,24 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
                 &playbook,
                 &prompt,
                 plan.headless,
+                None,
                 progress,
             )
-            .await?
+            .await
+            .map(|t| t.0)?
         }
         Some(src) => {
-            fork_clone(
+            // Accounts + settle spawn after the pre-boot upload lands and join before
+            // ready, overlapping boot (see `ForkPostUpload`).
+            let post = Some(ForkPostUpload {
+                app: app.clone(),
+                op: op.clone(),
+                id: id.clone(),
+                group: plan.group.clone(),
+                claude: plan.claude.clone(),
+                codex: plan.codex.clone(),
+            });
+            let (tag, acc) = fork_clone(
                 &app,
                 &src.id,
                 &id,
@@ -241,9 +257,12 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
                 plan.headless,
                 preset.as_deref(),
                 plan.rebuild,
+                post,
                 progress,
             )
-            .await?
+            .await?;
+            early_accounts = acc;
+            tag
         }
     };
     // A clone built from an image boots on one monitor nobody chose (the daemon's
@@ -257,10 +276,18 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     // The two sides touch different pools and different credential files, so they run
     // together: same assignments, one wait instead of two. (Log line order between the
     // two may vary; the row below uses both results either way.)
-    let (claude, codex) = tokio::join!(
-        bind_side::<crate::pool::ClaudePool>(&app, &op, &plan, &plan.claude),
-        bind_side::<crate::pool::CodexPool>(&app, &op, &plan, &plan.codex)
-    );
+    // Forks joined this inside `fork_clone` already (it ran during boot); anything else
+    // runs it here as before.
+    let spawned = early_accounts.is_some();
+    let (claude, codex) = match early_accounts {
+        Some(v) => v,
+        None => {
+            tokio::join!(
+                bind_side::<crate::pool::ClaudePool>(&app, &op, &id, plan.group.clone(), &plan.claude),
+                bind_side::<crate::pool::CodexPool>(&app, &op, &id, plan.group.clone(), &plan.codex)
+            )
+        }
+    };
 
     // Everything the clone needs that lives outside its container. Each has a reconcile loop
     // that would do this 10 to 15 s after the clone lands in `s.hosts` — which is exactly
@@ -270,10 +297,13 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
         "attaching the shared folder, home link and SSH access",
     );
     // A homes symlink and the bastion allowlist: different files, one wait.
-    tokio::join!(
-        crate::homes::ensure_now(&app, &id),
-        crate::ssh::allow_clone_now(&app, &id)
-    );
+    // Already joined inside on forks (`spawned`); other paths settle here as before.
+    if !spawned {
+        tokio::join!(
+            crate::homes::ensure_now(&app, &id),
+            crate::ssh::allow_clone_now(&app, &id)
+        );
+    }
 
     if plan.run_startup_script {
         op.step("settle", "running the preset startup script");
@@ -371,10 +401,11 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
 
 /// Settle one provider's account and answer the row's (selection, email, pool).
 /// Best-effort: a failure is logged into the op, never fatal.
-async fn bind_side<P: crate::pool::PoolProvider>(
+pub(crate) async fn bind_side<P: crate::pool::PoolProvider>(
     app: &App,
     op: &OpHandle,
-    plan: &ClonePlan,
+    clone_id: &str,
+    group: Option<String>,
     side: &Side,
 ) -> (Option<String>, Option<String>, Option<String>) {
     let requested = match side {
@@ -386,10 +417,10 @@ async fn bind_side<P: crate::pool::PoolProvider>(
     match crate::pool::assign_clone_side::<P>(
         app,
         Some(op.id()),
-        &plan.id,
+        clone_id,
         requested.as_deref(),
         current,
-        plan.group.as_deref(),
+        group.as_deref(),
         crate::pool::AssignStrictness::BestEffort,
     )
     .await
@@ -400,7 +431,7 @@ async fn bind_side<P: crate::pool::PoolProvider>(
         Ok(None) => (
             Some(crate::pool::normalize_selection(requested.as_deref())),
             None,
-            plan.group.clone(),
+            group.clone(),
         ),
         Err(e) => {
             tracing::warn!("unexpected assignment failure: {e:#}");
@@ -408,7 +439,7 @@ async fn bind_side<P: crate::pool::PoolProvider>(
             (
                 Some(crate::pool::normalize_selection(requested.as_deref())),
                 None,
-                plan.group.clone(),
+                group.clone(),
             )
         }
     }
