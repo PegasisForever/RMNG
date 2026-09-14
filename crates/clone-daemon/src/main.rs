@@ -164,8 +164,11 @@ async fn main() -> Result<()> {
             // reach the holder — so a down/restarting control-server costs nothing but this
             // cheap retry loop. On a later disconnect we exit and systemd restarts us back
             // into it.
+            let t0 = std::time::Instant::now();
             let transport = connect_retry(&path).await;
+            tracing::info!("daemon boot: media socket took {:?}", t0.elapsed());
             let holder = Holder::connect().await?;
+            tracing::info!("daemon boot: holder connect took {:?} total", t0.elapsed());
             run_shipping(holder, transport, &path, embedded).await
         }
         None => {

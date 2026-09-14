@@ -73,6 +73,16 @@ const STARTUP_SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// Op-log lines keep this tail of the script's combined output; the full text goes to tracing.
 const STARTUP_SCRIPT_LOG_TAIL: usize = 4000;
 
+/// Home-relative path of the startup-script skip stamp: the sha256 of the script text
+/// that last ran cleanly (exit 0) on this home lineage.
+const STARTUP_SCRIPT_STAMP_REL: &str = ".config/rmng/startup-script.sha256";
+
+/// Stable content hash of one preset startup script for the skip stamp.
+fn startup_script_stamp(script: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(script.as_bytes()))
+}
+
 /// Run the effective preset's startup script as the clone user, as the last settle step
 /// of create/fork. The script arrives over stdin (`bash -s`), so no quoting layer sits
 /// between the Settings text and the interpreter. Best-effort: any failure or timeout is
@@ -86,6 +96,21 @@ async fn run_startup_script(app: &App, op: &OpHandle, clone_id: &str, preset_nam
         .filter(|s| !s.is_empty());
     let Some(script) = script else {
         op.log("startup script: none configured");
+        return;
+    };
+    // A fork carries its source's home, script effects included: when this exact text
+    // already ran cleanly on this home lineage, re-running is pure wait (and a hazard
+    // for a non-idempotent script). A missing or mismatched stamp always runs, so
+    // pre-stamp clones, edited scripts and fresh homes behave exactly as before.
+    let stamp = startup_script_stamp(&script);
+    if crate::home_overlay::read_home_file(
+        std::path::Path::new(crate::zfs::HOMES_DIR),
+        clone_id,
+        STARTUP_SCRIPT_STAMP_REL,
+    )
+    .is_ok_and(|cur| cur.as_deref() == Some(stamp.as_bytes()))
+    {
+        op.log("startup script: already applied on this home, skipped");
         return;
     };
     let cmd = ["bash".to_string(), "-s".to_string()];
@@ -130,6 +155,21 @@ async fn run_startup_script(app: &App, op: &OpHandle, clone_id: &str, preset_nam
             // A failing script is still a successful provision: logged, never fatal.
             op.log(format!("startup script: exit {}", out.exit_code));
             op.log(tail);
+            // Record a clean run so a fork carrying this home skips the re-run above.
+            // A failed run stamps nothing: the next fork tries again. A stamp that
+            // fails to write is a warning, never a failed clone.
+            if out.exit_code == 0 {
+                if let Err(e) = crate::home_overlay::write_home_file(
+                    std::path::Path::new(crate::zfs::HOMES_DIR),
+                    clone_id,
+                    STARTUP_SCRIPT_STAMP_REL,
+                    stamp.as_bytes(),
+                    0o644,
+                ) {
+                    tracing::warn!("startup script stamp on {clone_id} not written: {e:#}");
+                    op.log("startup script: applied, but the skip-stamp was not written");
+                }
+            }
         }
     }
 }
@@ -214,8 +254,13 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     }
 
     op.step("accounts", "assigning agent accounts");
-    let claude = bind_side::<crate::pool::ClaudePool>(&app, &op, &plan, &plan.claude).await;
-    let codex = bind_side::<crate::pool::CodexPool>(&app, &op, &plan, &plan.codex).await;
+    // The two sides touch different pools and different credential files, so they run
+    // together: same assignments, one wait instead of two. (Log line order between the
+    // two may vary; the row below uses both results either way.)
+    let (claude, codex) = tokio::join!(
+        bind_side::<crate::pool::ClaudePool>(&app, &op, &plan, &plan.claude),
+        bind_side::<crate::pool::CodexPool>(&app, &op, &plan, &plan.codex)
+    );
 
     // Everything the clone needs that lives outside its container. Each has a reconcile loop
     // that would do this 10 to 15 s after the clone lands in `s.hosts` — which is exactly
@@ -224,8 +269,11 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
         "settle",
         "attaching the shared folder, home link and SSH access",
     );
-    crate::homes::ensure_now(&app, &id).await;
-    crate::ssh::allow_clone_now(&app, &id).await;
+    // A homes symlink and the bastion allowlist: different files, one wait.
+    tokio::join!(
+        crate::homes::ensure_now(&app, &id),
+        crate::ssh::allow_clone_now(&app, &id)
+    );
 
     if plan.run_startup_script {
         op.step("settle", "running the preset startup script");
@@ -279,18 +327,17 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
              check it in the UI)"
         ),
     };
-    let forked = plan.source.is_some();
     let first_message = plan.first_message.clone();
     let agent_instructions = plan.agent_instructions.clone();
     let claude_instructions = plan.claude_instructions.clone();
     Ok(Finish::new(message)
         .state(move |s| s.hosts.insert(0, row))
-        .after(move |app, _st| async move {
-            // A forked home carries the source's files with a fresh /etc (no stamps):
-            // converge it.
-            if forked {
-                crate::clone_reconcile::spawn_converge_after_start(&app, &id, "fork");
-            }
+        .after(move |_app, _st| async move {
+            // No post-op converge on this path: the pre-boot tar already uploaded every
+            // stamp the converge would check (payload, codex parity, ssh, the five
+            // managed-home merges), so a fork's converge is a provable no-op wrapped in
+            // a 30-minute poll task. Rebase/migrate/unarchive keep theirs (their
+            // pre-boot coverage differs).
             // TEMPORARILY DISABLED — the only automatic first message in the server, and
             // the only way a turn starts without an operator asking for one. Nothing may
             // prompt a clone but the web UI's composer until the kickoff is reworked.
@@ -1052,6 +1099,12 @@ async fn run_prebuild(app: App, op: OpHandle, dockerfile: String) -> anyhow::Res
     // The runner's progress sink, which carries the shared op-log cap. This flow used to
     // re-implement that cap inline — a third copy of the same `drain(0..)` to keep in step.
     let tag = crate::derived::ensure_image(&app, &dockerfile, true, op.progress()).await?;
+    // Warm the overlay lower too: the first fork on a new tag otherwise pays a full
+    // `/home/rmng` export + unpack on its own critical path. Failing here fails the
+    // op — the fork would hit the same error later with less context.
+    let mut progress = op.progress();
+    progress("warm", &format!("exporting home skeleton for {tag}"));
+    crate::home_overlay::ensure_skeleton(&app, &tag).await?;
     Ok(Finish::new(format!("derived image {tag} ready")))
 }
 
@@ -1158,6 +1211,22 @@ async fn run_unarchive(app: App, op: OpHandle, host_id: String) -> anyhow::Resul
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn startup_script_stamp_is_stable_and_text_sensitive() {
+        assert_eq!(
+            startup_script_stamp("echo hi"),
+            startup_script_stamp("echo hi")
+        );
+        assert_ne!(
+            startup_script_stamp("echo hi"),
+            startup_script_stamp("echo bye")
+        );
+        assert_ne!(
+            startup_script_stamp("echo hi"),
+            startup_script_stamp("echo hi\n")
+        );
+    }
 
     /// A minimal App backed by a throwaway temp data dir (ClaudeStore/state don't touch the
     /// repo). Docker is constructed I/O-free — `fail_stale_ops` and the guard pass never

@@ -41,8 +41,9 @@ const CLONE_GID: u64 = 1000;
 /// treating it as "started but not yet ready" (a warning, not a failure — the clone is
 /// still booting its headless GNOME + user units under linger).
 const WAIT_READY_TIMEOUT: Duration = Duration::from_secs(90);
-/// Poll interval while waiting for readiness.
-const WAIT_READY_POLL: Duration = Duration::from_secs(2);
+/// Poll interval while waiting for readiness. Short on purpose: the check is one
+/// map lookup, and a 2 s interval added up to 2 s of pure wait to every fork.
+const WAIT_READY_POLL: Duration = Duration::from_millis(200);
 
 /// Headless clone: guarantee neither the desktop (`gnome-headless.service`), the capture daemon
 /// (`rmng-clone-daemon.service`), nor the session holder (`rmng-session-holder.service`) ever
@@ -727,24 +728,34 @@ pub async fn clone_container_gen2_from_tag(
     let cfg = app.config();
 
     on_progress("queued", &format!("queued gen-2 clone {hostname}"));
-    if !docker.image_exists(&tag).await? {
-        bail!("base image '{tag}' does not exist");
-    }
-    docker.ensure_network().await?;
-
+    // No image check here: every caller ensures the tag first (`ensure_image` on the
+    // create/fork/migrate paths, an explicit `image_exists` loop on rebase), so a
+    // re-check is one more daemon roundtrip on every clone for a race it cannot close
+    // anyway (check-then-create is not atomic — a prune in between fails at create
+    // either way, and the error arm below still cleans up).
     on_progress("create", &format!("creating home dataset for {hostname}"));
     let clone_home = CloneHome::of(app, hostname);
-    let created_dataset = match home {
-        HomeSource::Create => {
-            clone_home.create_dataset()?;
-            true
+    // The daemon network and the home dataset do not touch each other: one wait
+    // instead of two. Either error fails the op exactly as before (network first,
+    // matching the old serial order).
+    let (net, created_dataset) = tokio::join!(
+        docker.ensure_network(),
+        async {
+            Ok::<bool, anyhow::Error>(match home {
+                HomeSource::Create => {
+                    clone_home.create_dataset()?;
+                    true
+                }
+                HomeSource::CloneFromSnapshot(ref snap) => {
+                    clone_home.clone_dataset_from(snap)?;
+                    true
+                }
+                HomeSource::Reuse => false,
+            })
         }
-        HomeSource::CloneFromSnapshot(ref snap) => {
-            clone_home.clone_dataset_from(snap)?;
-            true
-        }
-        HomeSource::Reuse => false,
-    };
+    );
+    net?;
+    let created_dataset = created_dataset?;
 
     on_progress("create", &format!("mounting home overlay for {hostname}"));
     // The dataset holds upper/ + work/; the skeleton (template home for this image)

@@ -106,11 +106,20 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
         None => boot,
     };
     let mut generation: u64 = 1;
+    let t_build = std::time::Instant::now();
     let mut session = build_session(&cfg, cursor_mode).await?;
+    tracing::info!("holder boot: build_session took {:?}", t_build.elapsed());
     // A fast restart can race a PREVIOUS holder's teardown, whose monitors die
     // asynchronously after its connection dropped.
+    let t_settle = std::time::Instant::now();
     wait_monitors_settle(cfg.len()).await;
+    tracing::info!(
+        "holder boot: wait_monitors_settle took {:?}",
+        t_settle.elapsed()
+    );
+    let t_layout = std::time::Instant::now();
     apply_layout(&cfg).await;
+    tracing::info!("holder boot: apply_layout took {:?}", t_layout.elapsed());
     remember_layout(&cfg);
 
     let active: ActiveSession = Arc::new(tokio::sync::Mutex::new(SessionRuntime {

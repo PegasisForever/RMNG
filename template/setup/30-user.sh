@@ -147,7 +147,9 @@ cat >"$UDIR/rmng-clone-daemon.service" <<UNIT
 [Unit]
 Description=rmng clone-daemon (capture + input)
 # Wants, never BindsTo: daemon restarts must NOT take the session down.
-After=gnome-headless.service rmng-session-holder.service
+# No After: the daemon starts WITH the shell, not after it — it retries the media
+# socket and the holder socket in userspace, so an early start only waits there
+# instead of holding the whole boot behind shell + holder setup.
 Wants=gnome-headless.service rmng-session-holder.service
 [Service]
 Type=simple
