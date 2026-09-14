@@ -25,9 +25,11 @@ services:
     privileged: true
     # PID 1 reaper — the server spawns short-lived exec/tar helpers.
     init: true
-    # Share the Docker host's PID namespace so clone PIDs are visible: the clone-home
-    # reconciler symlinks data/hosts/<id> → /proc/<clone-pid>/root/home/rmng, letting you
-    # browse every clone's home in one place (adds no privilege beyond the docker socket).
+    # Share the Docker host's PID namespace so clone container roots are visible as
+    # /proc/<host-pid>/root: activity detection (`stuck`) reads each running clone's
+    # session registry, hook log and /tmp through Docker's host pid (gen-2 homes link
+    # data/hosts/<id> at the merged home view, which carries no pid). Removing this
+    # blinds working-vs-idle for the whole fleet. Adds no privilege beyond docker.sock.
     pid: "host"
     restart: unless-stopped
     volumes:

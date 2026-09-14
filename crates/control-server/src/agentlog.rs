@@ -10,10 +10,10 @@
 //! itself drove, so a hand-run agent left its clone reading `idle` while it was visibly working.
 //!
 //! **Why it needs no clone-side cooperation.** [`crate::homes`] already maintains
-//! `<data_dir>/hosts/<clone-id>` as a symlink to `/proc/<pid>/root/home/rmng` for every running
-//! managed clone (the control-server runs with `pid: "host"`). So these are plain file reads
-//! from this process — no `docker exec`, no new connection, no agent-wrapper rebuild, and it
-//! works on clones that are already running.
+//! `<data_dir>/hosts/<clone-id>` as a symlink to the clone's merged home view
+//! (`/srv/rmng-homes/.merged/<clone-id>`) for every managed clone, running or stopped.
+//! So these are plain file reads from this process — no `docker exec`, no new connection,
+//! no agent-wrapper rebuild, and it works on clones that are already running.
 //!
 //! **What was measured rather than assumed** (CT 120, both CLIs run by hand in a real clone):
 //!
@@ -104,8 +104,8 @@ const MAX_SCAN_FILES_PER_PROVIDER: usize = 8192;
 /// How long one clone's filesystem walk may take before the pass abandons it.
 ///
 /// Clone containers run privileged with `fusermount` available, so a clone can mount a FUSE
-/// filesystem under `~/.claude/projects/` that simply never answers. Reads through
-/// `/proc/<pid>/root` into it then block in uninterruptible sleep forever. Without this the
+/// filesystem under `~/.claude/projects/` that simply never answers. Reads through the
+/// clone's home into it then block in uninterruptible sleep forever. Without this the
 /// serial per-clone loop never reaches the next clone and the whole fleet's scanning stops —
 /// silently, since nothing else logs.
 const CLONE_SCAN_TIMEOUT: Duration = Duration::from_secs(20);

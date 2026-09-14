@@ -241,7 +241,7 @@ pub fn apply_verdict(will_progress: Option<bool>) -> wire::MonitorState {
 /// Four flavours are read and no two of them publish anything alike: Claude Code keeps a live
 /// session registry, Cursor keeps nothing at all and has to be rebuilt out of the hook stream,
 /// Codex and Pi each write their own transcript and no registry. This is the one shape all
-/// four answer in, so [`read_clone`] merges four readings instead of unpacking four return
+/// four answer in, so [`read_clone_at`] merges four readings instead of unpacking four return
 /// types and remembering which gate belongs in front of which.
 #[derive(Debug, Default)]
 pub(crate) struct Reading {
@@ -262,7 +262,7 @@ pub(crate) struct Reading {
     pub cwds: HashMap<String, String>,
     /// Whether `events` is the clone's whole hook log rather than this flavour's own records.
     ///
-    /// [`read_clone`] opens the hook log itself when no flavour already has, and it decides
+    /// [`read_clone_at`] opens the hook log itself when no flavour already has, and it decides
     /// that on this flag, never on `events` being empty: Codex fills `events` from its
     /// rollouts without the hook log having been opened, and a clone running both agents
     /// would then lose every Claude Code event.
@@ -290,7 +290,7 @@ pub(crate) trait AgentFlavor {
     fn read(root: &Path) -> Reading;
 }
 
-/// One flavour's gate and read as plain values, so [`read_clone`] can loop over the four
+/// One flavour's gate and read as plain values, so [`read_clone_at`] can loop over the four
 /// rather than name each one.
 ///
 /// [`AgentFlavor`] cannot be a `dyn` object: it carries an associated const and none of its
@@ -359,26 +359,28 @@ pub struct Session {
 
 /// The clone's filesystem root as this process sees it, e.g. `/proc/1234/root`.
 ///
-/// Derived from the symlink `homes` already maintains, so it reuses the uid-1000 pid that
-/// [`crate::homes::pick_home_pid`] chose. Reading the container's `/proc` matters: a session
-/// record stores the pid as the CONTAINER numbers it, so checking `/proc/<pid>/stat` out here
-/// would test an unrelated process that happens to hold that number.
-pub fn clone_root(data_dir: &str, id: &str) -> Option<PathBuf> {
-    let link = crate::homes::hosts_root(data_dir).join(id);
-    let target = std::fs::read_link(link).ok()?;
-    let s = target.to_str()?;
-    // `/proc/<pid>/root/home/rmng` -> `/proc/<pid>/root`
-    let cut = s.find("/root/")? + "/root".len();
-    let root = PathBuf::from(&s[..cut]);
-    // `read_link` answers from the link, never from what it points at, so it keeps succeeding
-    // long after that pid has exited. [`crate::homes`] links the lowest uid-1000 pid in the
-    // clone, which is an ordinary process that can end at any time, and repoints only every 15
-    // seconds. In between, every read under this root fails.
-    //
-    // Without this check that window reads as a clone with no agent session at all, which is a
-    // confident `Stuck` for the whole clone rather than "I cannot see it". Over 15.5 hours on
-    // CT 105 and CT 106 it closed 523 sessions that were still running, and the two clones worst
-    // affected spent 91% and 81% of their decision log on the churn.
+/// Resolved from the host pid Docker reports for the clone (`State.Pid`). The
+/// control-server runs with `pid: "host"` (compose.yaml), so that path IS the clone's root
+/// filesystem — its `/proc` is the container's own (what the aliveness checks need), its
+/// `/tmp` holds the background-task outputs, and its `/home/rmng` is the same merged view
+/// `hosts/<id>` points at. `None` when the pid is gone or its home is not (yet) visible:
+/// "cannot see it", handled by [`LastSeen::blind`].
+///
+/// Reading the container's `/proc` matters: a session record stores the pid as the
+/// CONTAINER numbers it, so checking `/proc/<pid>/stat` out here would test an unrelated
+/// process that happens to hold that number.
+///
+/// The `metadata` check is load-bearing, not paranoia. A pid read from Docker can outlive
+/// the process (a clone restarting between inspect and read), and `read_link`-style paths
+/// keep resolving after their target is gone. Without this check that window reads as a
+/// clone with no agent session at all, which is a confident `Stuck` for the whole clone
+/// rather than "I cannot see it". The old gen-1 link reader learned this over 15.5 hours
+/// on CT 105 and CT 106, where it closed 523 sessions that were still running.
+pub fn container_root(pid: i64) -> Option<PathBuf> {
+    if pid <= 0 {
+        return None;
+    }
+    let root = PathBuf::from(format!("/proc/{pid}/root"));
     std::fs::metadata(root.join("home/rmng")).ok()?;
     Some(root)
 }
@@ -3150,11 +3152,27 @@ pub async fn resolve_fleet(
     let data_dir = app.data_dir();
 
     let reads = ids.into_iter().map(|id| {
-        let data_dir = data_dir.clone();
+        let docker = app.docker.clone();
         async move {
-            let id2 = id.clone();
-            let read = tokio::task::spawn_blocking(move || read_clone(&data_dir, &id2)).await;
-            (id, read.ok().flatten())
+            // Gen-2 homes link `hosts/<id>` at the merged home view, which carries no
+            // pid, so the container root comes from Docker's host pid instead.
+            // `inspect_runtime` 404s (stopped/gone) to `pid: None`, which correctly
+            // stays unreadable — the monitor marks stopped clones `offline` without
+            // asking here.
+            let root = docker
+                .inspect_runtime(&id)
+                .await
+                .ok()
+                .and_then(|rt| rt.pid)
+                .and_then(container_root);
+            let Some(root) = root else {
+                return (id, None);
+            };
+            let read = tokio::task::spawn_blocking(move || read_clone_at(&root))
+                .await
+                .ok()
+                .flatten();
+            (id, read)
         }
     });
     let read = futures::future::join_all(reads).await;
@@ -3478,16 +3496,9 @@ impl SessionCase {
     }
 }
 
-/// Every live session in one clone, read on the blocking pool.
-///
-/// `None` when the home is not reachable. An empty vec when nothing is running in there,
-/// which is a decided clone rather than an unreadable one.
-///
-/// All four agents are read through one interface, so what is left here is the merge and the
-/// decision. Each flavour's gate, and the differently shaped evidence behind it, lives on its
-/// own adapter; see [`AgentFlavor`].
-fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
-    let root = clone_root(data_dir, id)?;
+/// Every live session in one clone, read on the blocking pool from an already-resolved
+/// container root (see [`container_root`]).
+fn read_clone_at(root: &Path) -> Option<Vec<SessionCase>> {
     let mut sessions: Vec<Session> = Vec::new();
     let mut events: Vec<HookEvent> = Vec::new();
     let mut cwds: HashMap<String, String> = HashMap::new();
@@ -3495,10 +3506,10 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     let mut hooks_read = false;
     for f in flavors() {
         // The gate is the whole of what a clone not running this agent pays.
-        if !(f.present)(&root) {
+        if !(f.present)(root) {
             continue;
         }
-        let got = (f.read)(&root);
+        let got = (f.read)(root);
         hooks_read |= got.hook_log_read;
         for s in &got.sessions {
             flavor_of.insert(s.session_id.clone(), f.name);
@@ -3536,7 +3547,7 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     // terminal or wake-off is unaffected and settles here for free.
     let pi_tasks_early: Vec<PiTask> =
         match live.iter().any(|s| pi_ids.contains(s.session_id.as_str())) {
-            true => read_pi_tasks(&root),
+            true => read_pi_tasks(root),
             false => Vec::new(),
         };
     let pi_wake_pending = live.iter().any(|s| {
@@ -3550,11 +3561,11 @@ fn read_clone(data_dir: &str, id: &str) -> Option<Vec<SessionCase>> {
     // The hook log, unless a flavour already opened it. On the flag, never on `events` being
     // empty: see [`Reading::hook_log_read`].
     if !hooks_read {
-        events.extend(read_hook_events(&root));
+        events.extend(read_hook_events(root));
     }
     let now = clone_now(&events);
     // Read and folded once for the whole clone, however many sessions read from it.
-    let facts = CloneFacts::read(&root, &events, cwds, now);
+    let facts = CloneFacts::read(root, &events, cwds, now);
     let ages = prompt_ages(&events, now);
     Some(
         live.iter()
@@ -3866,8 +3877,9 @@ mod tests {
     #[test]
     fn read_clone_asks_for_a_pi_wake_without_deciding() {
         let base = pi_root("clone-shortcut");
-        // Fake container root: clone_root cuts the homes link at `/root/`.
-        let fake = base.join("proc/999/root/home/rmng");
+        // Fake container root, as `container_root` would resolve it.
+        let root = base.join("proc/999/root");
+        let fake = root.join("home/rmng");
         std::fs::create_dir_all(fake.join(".pi/agent/sessions/--home-rmng-api--")).unwrap();
         std::fs::create_dir_all(fake.join("apitest/.pi/tasks/session-x-1")).unwrap();
         let session_body = format!(
@@ -3886,11 +3898,7 @@ mod tests {
             r#"{"id":"b1","name":"long build","command":"cargo build --release","cwd":"/home/rmng/apitest","status":"running","notifyOnCompletion":true,"triggerOnCompletion":true}"#,
         )
         .unwrap();
-        let data_dir = base.join("data");
-        std::fs::create_dir_all(data_dir.join("hosts")).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&fake, data_dir.join("hosts").join("c1")).unwrap();
-        let cases = read_clone(data_dir.to_str().unwrap(), "c1").expect("home readable");
+        let cases = read_clone_at(&root).expect("clone readable");
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].verdict, Verdict::Ask, "why: {}", cases[0].why);
         let tasks = cases[0]
@@ -3910,7 +3918,8 @@ mod tests {
     #[test]
     fn read_clone_settles_a_nowake_pi_task_without_asking() {
         let base = pi_root("clone-nowake");
-        let fake = base.join("proc/999/root/home/rmng");
+        let root = base.join("proc/999/root");
+        let fake = root.join("home/rmng");
         std::fs::create_dir_all(fake.join(".pi/agent/sessions/--home-rmng-api--")).unwrap();
         std::fs::create_dir_all(fake.join("apitest/.pi/tasks/session-x-1")).unwrap();
         let session_body = format!(
@@ -3929,11 +3938,7 @@ mod tests {
             r#"{"id":"s1","name":"dev server","command":"npm run dev","cwd":"/home/rmng/apitest","status":"running","notifyOnCompletion":true,"triggerOnCompletion":false}"#,
         )
         .unwrap();
-        let data_dir = base.join("data");
-        std::fs::create_dir_all(data_dir.join("hosts")).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&fake, data_dir.join("hosts").join("c1")).unwrap();
-        let cases = read_clone(data_dir.to_str().unwrap(), "c1").expect("home readable");
+        let cases = read_clone_at(&root).expect("clone readable");
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].verdict, Verdict::Stuck);
         assert!(cases[0].view.is_null(), "no model view needed");
@@ -4690,24 +4695,21 @@ mod tests {
     }
 
     #[test]
-    fn a_link_whose_pid_has_gone_reads_as_unreachable_not_as_empty() {
-        // `read_link` answers from the link, so it survives the pid it names. Believing it cost
-        // 523 sessions being closed while they were still running, over 15.5 hours.
-        let data = std::env::temp_dir().join(format!("rmng-stuck-dangle-{}", std::process::id()));
-        let hosts = data.join("hosts");
-        let _ = std::fs::remove_dir_all(&data);
-        std::fs::create_dir_all(&hosts).unwrap();
+    fn container_root_rejects_a_dead_pid() {
+        assert_eq!(container_root(0), None);
+        assert_eq!(container_root(-1), None);
+        // A pid that cannot exist: the home check must fail rather than panic.
+        assert_eq!(container_root(1_000_000_007), None);
+    }
 
-        let live = data.join("proc/4242/root");
-        std::fs::create_dir_all(live.join("home/rmng")).unwrap();
-        std::os::unix::fs::symlink(live.join("home/rmng"), hosts.join("here")).unwrap();
-        assert_eq!(clone_root(data.to_str().unwrap(), "here"), Some(live));
-
-        // Same shape, but the pid has exited and taken its whole `/proc` entry with it.
-        std::os::unix::fs::symlink(data.join("proc/9999/root/home/rmng"), hosts.join("gone"))
-            .unwrap();
-        assert_eq!(clone_root(data.to_str().unwrap(), "gone"), None);
-        let _ = std::fs::remove_dir_all(&data);
+    #[test]
+    fn read_clone_at_reads_a_container_root_directly() {
+        // The gen-2 live path: no `hosts` symlink involved, the root comes from the
+        // Docker pid. An empty registry is a decided idle clone, never unreadable.
+        let root = fake_clone("direct");
+        let cases = read_clone_at(&root).expect("a reachable root always reads");
+        assert!(cases.is_empty(), "no sessions means idle, not blind");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
