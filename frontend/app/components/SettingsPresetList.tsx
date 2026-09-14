@@ -235,7 +235,12 @@ function PresetCard({
                   }
                   placeholder="KEY"
                   spellCheck={false}
-                  className={`${settingsInput} font-mono w-40 shrink-0`}
+                  // `settingsInput` leads with `w-full`, so a `w-40` here is a coin
+                  // toss decided by the order Tailwind emits the two rules — and it
+                  // lost: the key took the whole row, leaving the value a sliver and
+                  // pushing Remove out of the panel. `basis-40` sizes it instead,
+                  // which the flex algorithm honours over `width` outright.
+                  className={`${settingsInput} font-mono basis-40 grow-0 shrink-0`}
                 />
                 <input
                   value={v.value}
@@ -248,7 +253,10 @@ function PresetCard({
                   }
                   placeholder="value"
                   spellCheck={false}
-                  className={`${settingsInput} font-mono flex-1`}
+                  // `min-w-0`: a flex item defaults to `min-width:auto` and refuses
+                  // to shrink under its content, so a long value would push the row
+                  // wide again.
+                  className={`${settingsInput} font-mono min-w-0 flex-1`}
                 />
                 <button
                   type="button"
