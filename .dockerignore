@@ -38,9 +38,6 @@ docs/
 # directory only, never a `scripts/` dir at any deeper level.
 /scripts/
 
-# Install the terminal pi extension from the checkout.
-/pi-subagents-rmng/
-
 # Editor/OS cruft
 *.tmp.*
 *.swp
