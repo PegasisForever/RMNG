@@ -1,3 +1,7 @@
+> **Archived.** Migration done 2026-09-13/14: CT 104 → 204 (8/8 clones), CT 106 → 206 (101/101), CT 105 → 205 (24/24). Kept as historical record only — the gen-1 code paths it refers to are deleted from the repo.
+>
+> **Rollback (§9) still reads ARMED at archive time.** The status below leaves the old CTs stopped (`onboot 0`), snapshotted (`pre-gen2`) as the rollback, and no repo commit records their destruction — verify on the Proxmox host before destroying anything. Open item: `tailscale serve` not set on CT 204/206 (Serve disabled for those tailnets); CT 205 has it.
+
 # Runbook — migrating CT 104, CT 105 and CT 106 from gen-1 to gen-2
 
 **Scope.** These three containers only, all on the Proxmox host `10.0.0.100`. Not a general

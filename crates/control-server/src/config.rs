@@ -15,19 +15,9 @@ pub fn load() -> Result<AppConfig> {
     let path = config_path();
     let cfg = match std::fs::read_to_string(&path) {
         Ok(s) => {
-            let mut cfg: AppConfig =
-                serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
-            // Legacy fields (serde ignores them at parse): fold what's still useful
-            // into the current shape and rewrite the file once, so dead secrets
-            // (long-lived clone tokens, per-workspace Linear keys) don't linger on disk.
-            // Also scrubs the retired `proxmox` block, carrying its `hostnamePrefix`
-            // into `docker.hostnamePrefix` when no `docker` key is present.
-            let raw = serde_json::from_str::<serde_json::Value>(&s).unwrap_or_default();
-            if migrate_legacy(&raw, &mut cfg) {
-                tracing::info!("migrating legacy config fields in {}", path.display());
-                save(&cfg)?;
-            }
-            cfg
+            // Retired keys are dropped at parse, never an error; missing keys
+            // take their defaults, so old files always load.
+            serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             tracing::info!("no {} — using defaults", path.display());
@@ -36,182 +26,6 @@ pub fn load() -> Result<AppConfig> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     Ok(cfg)
-}
-
-/// Fold legacy config fields into the current shape; true = the file must be
-/// rewritten. Legacy `envPresets` (env-only presets, pre Linear unification) seed
-/// `presets` (no labels/key — the operator adds those in Settings). Legacy `linear`
-/// workspace keys (now per-preset) and `cloneAccounts` long-lived tokens (dead since
-/// the single-token model) are dropped; the rewrite scrubs them from disk. The retired
-/// Proxmox backend is gone: any `proxmox` block is scrubbed (rewrite), and its
-/// `hostnamePrefix` is carried into `docker.hostnamePrefix` when the new config has no
-/// `docker` key. Legacy top-level `monitors` array is migrated to a `"Default"` layout
-/// preset (one-shot only, when `layout_presets` is still empty). There is no
-/// `setupComplete` grandfather — an old `config.json` re-runs the wizard (new machine,
-/// no `rmng` network / base image), so `setupComplete` stays whatever the file said
-/// (default `false` when absent).
-fn migrate_legacy(raw: &serde_json::Value, cfg: &mut AppConfig) -> bool {
-    let non_empty = |k: &str| match raw.get(k) {
-        Some(serde_json::Value::Array(a)) => !a.is_empty(),
-        Some(serde_json::Value::Object(o)) => !o.is_empty(),
-        _ => false,
-    };
-    if cfg.presets.is_empty() {
-        if let Some(rows) = raw.get("envPresets").and_then(|v| v.as_array()) {
-            for r in rows {
-                let Some(name) = r.get("name").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                cfg.presets.push(wire::Preset {
-                    name: name.to_string(),
-                    labels: Vec::new(),
-                    linear_key: String::new(),
-                    // Blank = no opinion; a legacy env-only preset never had an account default.
-                    group: String::new(),
-                    // An `envPresets` row was nothing BUT its vars, so dropping them left an
-                    // empty preset. They are a live field again, so carry them.
-                    vars: serde_json::from_value(
-                        r.get("vars").cloned().unwrap_or(serde_json::Value::Null),
-                    )
-                    .unwrap_or_default(),
-                    agent_playbook: String::new(),
-                    global_prompt: String::new(),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-    if non_empty("linear") {
-        tracing::info!(
-            "dropping legacy per-workspace Linear keys (now per-preset — re-enter in Settings)"
-        );
-    }
-    // Retired: the whole Proxmox backend is gone. Scrub any `proxmox` block from disk;
-    // carry its `hostnamePrefix` into `docker.hostnamePrefix` when the file predates the
-    // Docker backend (no `docker` key), so the operator's clone-name prefix survives.
-    // A blank legacy prefix is NOT folded — it would clobber the docker default.
-    let has_proxmox = raw.get("proxmox").is_some();
-    if has_proxmox {
-        tracing::info!("scrubbing retired proxmox settings from config");
-        if raw.get("docker").is_none() {
-            if let Some(prefix) = raw
-                .get("proxmox")
-                .and_then(|p| p.get("hostnamePrefix"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-            {
-                tracing::info!("carrying proxmox.hostnamePrefix into docker.hostnamePrefix");
-                cfg.docker.hostname_prefix = prefix.to_string();
-            }
-        }
-    }
-    let retired_clone_mcp = raw
-        .get("listen")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|listen| listen.contains_key("cloneMcp"));
-    let retired_detector_url = raw.get("detectorInferenceUrl").is_some();
-    let mut changed = non_empty("envPresets")
-        || non_empty("linear")
-        || non_empty("cloneAccounts")
-        || has_proxmox
-        || retired_clone_mcp
-        || retired_detector_url;
-    // Retired split pool lists → one `groups` list (one-shot, when `groups` is still
-    // empty). Same-named pools merge members (deduped); either side alone survives.
-    if cfg.groups.is_empty() && (!cfg.clone_groups.is_empty() || !cfg.codex_groups.is_empty()) {
-        let mut merged: Vec<wire::CloneGroup> = Vec::new();
-        for g in cfg.clone_groups.drain(..).chain(cfg.codex_groups.drain(..)) {
-            match merged.iter_mut().find(|m| m.name == g.name) {
-                Some(m) => {
-                    for email in g.accounts {
-                        if !m.accounts.contains(&email) {
-                            m.accounts.push(email);
-                        }
-                    }
-                }
-                None => merged.push(g),
-            }
-        }
-        tracing::info!(
-            "folding retired clone_groups/codex_groups into one groups list ({} pool(s))",
-            merged.len()
-        );
-        cfg.groups = merged;
-        changed = true;
-    }
-
-    // Retired per-provider preset defaults → one `group` (one-shot). A `group:<pool>`
-    // value folds to the pool name (Claude side wins when the two name different pools —
-    // only reachable from a hand-written config; the old UI offered two pickers).
-    // Anything else (email/`auto`/`none` pins, bare `group:`) means no pool was named:
-    // fall back to the first pool when one exists, else `"none"` (any group) — a preset
-    // always names a default.
-    {
-        let fallback = cfg
-            .groups
-            .first()
-            .map(|g| g.name.clone())
-            .unwrap_or_else(|| "none".to_string());
-        let mut folded = 0usize;
-        for p in cfg.presets.iter_mut() {
-            if !p.group.is_empty() {
-                continue;
-            }
-            fn pool_of(sel: &str) -> Option<String> {
-                sel.strip_prefix("group:")
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            }
-            let g1 = pool_of(p.claude_account.trim());
-            let g2 = pool_of(p.codex_account.trim());
-            let next = match (g1, g2) {
-                (Some(a), Some(b)) => {
-                    if a != b {
-                        tracing::warn!(
-                            "preset {name:?} named two pools ({a:?} vs {b:?}) — keeping {a:?}",
-                            name = p.name,
-                        );
-                    }
-                    a
-                }
-                (Some(a), None) | (None, Some(a)) => a,
-                (None, None) => fallback.clone(),
-            };
-            p.group = next;
-            p.claude_account.clear();
-            p.codex_account.clear();
-            folded += 1;
-        }
-        if folded > 0 {
-            tracing::info!(
-                "folding retired preset claude/codex defaults into one group ({folded} preset(s))"
-            );
-            changed = true;
-        }
-    }
-
-    // Legacy single `monitors` array → a "Default" layout preset (one-shot). Only when
-    // the new `layout_presets` is still empty (don't clobber an already-migrated config).
-    if cfg.layout_presets.is_empty() {
-        if let Some(mons) = raw.get("monitors").and_then(|m| m.as_array()) {
-            if !mons.is_empty() {
-                if let Ok(parsed) = serde_json::from_value::<Vec<wire::MonitorSpec>>(
-                    serde_json::Value::Array(mons.clone()),
-                ) {
-                    cfg.layout_presets = vec![wire::LayoutPreset {
-                        name: "Default".into(),
-                        monitors: parsed,
-                    }];
-                    if cfg.active_layout.is_empty() {
-                        cfg.active_layout = "Default".into();
-                    }
-                    changed = true;
-                }
-            }
-        }
-    }
-    changed
 }
 
 #[cfg(test)]
@@ -298,10 +112,10 @@ mod tests {
         assert_eq!(untouched.presets, base.presets);
     }
 
-    /// A gen-1 `config.json` carries its preset env in `presets[].vars`. That field was retired
-    /// when preset env moved into the Dockerfile, so a gen-1 → gen-2 migration silently dropped
-    /// it and the vars had to be scraped out and written back by hand (the old runbook §5.4 and
-    /// §5.8). It is a live field again, so the migration just reads it.
+    /// A gen-1 `config.json` carried its preset env in `presets[].vars`. That field was retired
+    /// when preset env moved into the Dockerfile, so the retired gen-1 → gen-2 migration silently
+    /// dropped it and the vars had to be scraped out and written back by hand (the old runbook
+    /// §5.4 and §5.8). It is a live field again, so the current code just reads it.
     #[test]
     fn a_gen_1_config_keeps_its_preset_vars() {
         let gen1 = serde_json::json!({
@@ -327,128 +141,6 @@ mod tests {
                 ("TURBO_TEAM", "talktomedi"),
             ]
         );
-    }
-
-    #[test]
-    fn migrate_legacy_folds_old_fields() {
-        // envPresets seed presets (no labels/key); linear + cloneAccounts just flag a rewrite.
-        let raw = serde_json::json!({
-            "envPresets": [{ "name": "old", "vars": [{ "key": "A", "value": "1" }] }],
-            "linear": [{ "name": "we", "key": "K" }],
-        });
-        let mut cfg = AppConfig::default();
-        assert!(migrate_legacy(&raw, &mut cfg));
-        assert_eq!(cfg.presets.len(), 1);
-        assert_eq!(cfg.presets[0].name, "old");
-        assert!(cfg.presets[0].labels.is_empty() && cfg.presets[0].linear_key.is_empty());
-        assert_eq!(
-            cfg.presets[0].dockerfile,
-            "FROM pegasis0/rmng-template:latest"
-        );
-
-        // Legacy object-shaped `linear` also counts; existing presets are never clobbered.
-        let raw = serde_json::json!({ "linear": { "we": "K1" }, "envPresets": [{ "name": "x" }] });
-        let mut cfg = AppConfig::default();
-        cfg.presets = vec![wire::Preset {
-            name: "kept".into(),
-            ..Default::default()
-        }];
-        assert!(migrate_legacy(&raw, &mut cfg));
-        assert_eq!(cfg.presets.len(), 1);
-        assert_eq!(cfg.presets[0].name, "kept");
-
-        // Split pool lists fold into one `groups` (same-named merge members, deduped).
-        let mut cfg = AppConfig::default();
-        cfg.clone_groups = vec![
-            wire::CloneGroup {
-                name: "team".into(),
-                accounts: vec!["a@x.com".into()],
-            },
-            wire::CloneGroup {
-                name: "solo".into(),
-                accounts: vec!["b@x.com".into()],
-            },
-        ];
-        cfg.codex_groups = vec![wire::CloneGroup {
-            name: "team".into(),
-            accounts: vec!["z@o.com".into(), "a@x.com".into()],
-        }];
-        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
-        assert_eq!(cfg.groups.len(), 2);
-        let team = cfg.groups.iter().find(|g| g.name == "team").unwrap();
-        assert_eq!(team.accounts, vec!["a@x.com", "z@o.com"]);
-        assert!(cfg.clone_groups.is_empty() && cfg.codex_groups.is_empty());
-
-        // A preset with no pool default always gains one (`"none"` = any group when
-        // no pools exist yet).
-        let mut cfg = AppConfig::default();
-        cfg.presets = vec![wire::Preset {
-            name: "p".into(),
-            ..Default::default()
-        }];
-        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
-        assert_eq!(cfg.presets[0].group, "none");
-    }
-
-    #[test]
-    fn migrate_legacy_folds_preset_account_defaults_into_one_group() {
-        // Both sides naming the same pool → that pool.
-        let mut cfg = AppConfig::default();
-        cfg.presets = vec![wire::Preset {
-            name: "p".into(),
-            claude_account: "group:pooled".into(),
-            codex_account: "group:pooled".into(),
-            ..Default::default()
-        }];
-        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
-        assert_eq!(cfg.presets[0].group, "pooled");
-        assert!(cfg.presets[0].claude_account.is_empty());
-        assert!(cfg.presets[0].codex_account.is_empty());
-
-        // One side only → that side's pool.
-        let mut cfg = AppConfig::default();
-        cfg.presets = vec![wire::Preset {
-            name: "p".into(),
-            claude_account: "group:team".into(),
-            ..Default::default()
-        }];
-        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
-        assert_eq!(cfg.presets[0].group, "team");
-
-        // Different pools → the Claude side wins.
-        let mut cfg = AppConfig::default();
-        cfg.presets = vec![wire::Preset {
-            name: "p".into(),
-            claude_account: "group:a".into(),
-            codex_account: "group:b".into(),
-            ..Default::default()
-        }];
-        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
-        assert_eq!(cfg.presets[0].group, "a");
-
-        // No pool named and pools exist → the first pool.
-        let mut cfg = AppConfig::default();
-        cfg.groups = vec![wire::CloneGroup {
-            name: "pooled".into(),
-            accounts: vec![],
-        }];
-        cfg.presets = vec![wire::Preset {
-            name: "p".into(),
-            claude_account: "sam@example.com".into(),
-            codex_account: "group:".into(),
-            ..Default::default()
-        }];
-        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
-        assert_eq!(cfg.presets[0].group, "pooled");
-
-        // No pool named and no pools exist → any group.
-        let mut cfg = AppConfig::default();
-        cfg.presets = vec![wire::Preset {
-            name: "p".into(),
-            ..Default::default()
-        }];
-        assert!(migrate_legacy(&serde_json::json!({}), &mut cfg));
-        assert_eq!(cfg.presets[0].group, "none");
     }
 
     #[test]
@@ -574,97 +266,6 @@ mod tests {
         assert!(ok.setup_complete);
         let ok = merge_update(&base, serde_json::json!({})).unwrap();
         assert!(ok.setup_complete);
-    }
-
-    #[test]
-    fn migrates_legacy_monitors_into_default_preset() {
-        // Simulate an old config.json with a top-level `monitors` array and no presets.
-        let raw: serde_json::Value = serde_json::json!({
-            "monitors": [
-                { "width": 3440, "height": 1440, "x": 0, "y": 0, "primary": true }
-            ]
-        });
-        let mut cfg = AppConfig::default(); // layout_presets empty, active_layout ""
-        let changed = migrate_legacy(&raw, &mut cfg);
-        assert!(changed);
-        assert_eq!(cfg.layout_presets.len(), 1);
-        assert_eq!(cfg.layout_presets[0].name, "Default");
-        assert_eq!(cfg.layout_presets[0].monitors[0].width, 3440);
-        assert_eq!(cfg.active_layout, "Default");
-    }
-
-    #[test]
-    fn migration_noop_when_presets_present() {
-        // Use a non-empty, different monitors array to truly test the anti-clobber guard.
-        // If the outer `cfg.layout_presets.is_empty()` guard were removed, this test would fail.
-        let raw: serde_json::Value = serde_json::json!({
-            "monitors": [
-                { "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": true }
-            ]
-        });
-        let mut cfg = AppConfig::default();
-        cfg.layout_presets = vec![wire::LayoutPreset {
-            name: "X".into(),
-            monitors: vec![wire::MonitorSpec {
-                width: 800,
-                height: 600,
-                x: 0,
-                y: 0,
-                primary: true,
-            }],
-        }];
-        cfg.active_layout = "X".into();
-        // Migration must not clobber an already-migrated config.
-        let _ = migrate_legacy(&raw, &mut cfg);
-        assert_eq!(cfg.layout_presets.len(), 1);
-        assert_eq!(cfg.layout_presets[0].name, "X");
-        assert_eq!(
-            cfg.layout_presets[0].monitors[0].width, 800,
-            "existing preset width must not be clobbered"
-        );
-    }
-
-    #[test]
-    fn migrate_scrubs_proxmox() {
-        // A legacy config with a proxmox block: it's scrubbed (rewrite flagged), its
-        // hostnamePrefix is folded into docker.hostnamePrefix (no docker key present),
-        // and setupComplete is NOT grandfathered — it stays false when the key is absent.
-        let raw = serde_json::json!({
-            "proxmox": { "ssh": "root@node", "storage": "local-lvm", "hostnamePrefix": "clone-" },
-        });
-        let mut cfg: AppConfig = serde_json::from_value(raw.clone()).unwrap();
-        assert!(!cfg.setup_complete); // serde default before migration
-        assert!(migrate_legacy(&raw, &mut cfg)); // rewrite flagged
-        // The `proxmox` key is gone from the serialized output (AppConfig has no such field).
-        let out = serde_json::to_value(&cfg).unwrap();
-        assert!(out.get("proxmox").is_none(), "proxmox not scrubbed: {out}");
-        // hostnamePrefix folded into docker.
-        assert_eq!(cfg.docker.hostname_prefix, "clone-");
-        // NOT grandfathered — an ssh target no longer implies setup is done.
-        assert!(!cfg.setup_complete);
-
-        // When a `docker` key already exists, the proxmox prefix is NOT folded (the new
-        // config's docker settings win); proxmox is still scrubbed (rewrite flagged).
-        let raw = serde_json::json!({
-            "proxmox": { "hostnamePrefix": "old-" },
-            "docker": { "hostnamePrefix": "new-" },
-        });
-        let mut cfg: AppConfig = serde_json::from_value(raw.clone()).unwrap();
-        assert!(migrate_legacy(&raw, &mut cfg));
-        assert_eq!(cfg.docker.hostname_prefix, "new-");
-
-        // A blank legacy prefix is NOT folded — the docker default survives
-        // (still scrubbed / rewrite flagged, since the proxmox block is present).
-        let raw = serde_json::json!({ "proxmox": { "hostnamePrefix": "" } });
-        let mut cfg: AppConfig = serde_json::from_value(raw.clone()).unwrap();
-        assert!(migrate_legacy(&raw, &mut cfg));
-        assert_eq!(cfg.docker.hostname_prefix, "pega-"); // default kept
-
-        // No `proxmox` key and a fully-migrated file → no rewrite from proxmox scrubbing.
-        let raw = serde_json::json!({ "docker": { "hostnamePrefix": "keep-" } });
-        let mut cfg: AppConfig = serde_json::from_value(raw.clone()).unwrap();
-        assert!(!migrate_legacy(&raw, &mut cfg));
-        assert_eq!(cfg.docker.hostname_prefix, "keep-");
     }
 
     #[test]
@@ -1062,8 +663,6 @@ fn merge_presets(_base: &[wire::Preset], rows: &[serde_json::Value]) -> Vec<wire
                 .trim()
                 .to_string(),
             vars,
-            claude_account: String::new(),
-            codex_account: String::new(),
             agent_playbook,
             global_prompt,
             startup_script,

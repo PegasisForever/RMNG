@@ -83,8 +83,8 @@ impl CloneHome {
     /// for a fresh clone, `zfs clone` for a fork — so it is fully derivable and no caller
     /// has to remember it.
     ///
-    /// This is what the create and migrate paths store in `RmngClone::dataset`. They
-    /// store it for its presence alone (see [`is_gen2`]); no reader takes the value back
+    /// This is what the create path stores in `RmngClone::dataset`. It
+    /// stores it for its presence alone (see [`is_gen2`]); no reader takes the value back
     /// out.
     pub(crate) fn dataset(&self) -> String {
         crate::zfs::dataset_name(&self.parent, &self.id)
@@ -163,9 +163,9 @@ impl CloneHome {
 
     /// Make sure the dataset holds the overlay upper + work dirs.
     ///
-    /// Public, and not folded into [`Self::ensure_overlay`], because the migration writes
-    /// the old home straight into [`Self::upper`] long before there is an image to mount
-    /// over it.
+    /// Public, and not folded into [`Self::ensure_overlay`], because the retired one-shot
+    /// migration wrote the old home straight into [`Self::upper`] long before there was
+    /// an image to mount over it.
     pub(crate) fn ensure_layout(&self) -> Result<()> {
         for dir in [self.upper(), self.work()] {
             std::fs::create_dir_all(&dir).with_context(|| format!("mkdir {}", dir.display()))?;

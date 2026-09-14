@@ -13,7 +13,7 @@
 //! The bind is part of the container spec ([`crate::docker::CreateSpec::shared_dir`]), so it
 //! is present from first boot and survives restarts — no live mount, no re-apply loop. That
 //! works because every clone the server sees runs a freshly created container: fresh clones
-//! are created with the bind, and the gen-2 migration recreates the rest. (A live mount via
+//! are created with the bind, and the retired gen-2 migration recreated the rest. (A live mount via
 //! `open_tree`/`move_mount` used to cover clones that predated the feature; it died with the
 //! last of those.)
 

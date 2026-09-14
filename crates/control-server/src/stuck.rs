@@ -374,7 +374,7 @@ pub struct Session {
 /// the process (a clone restarting between inspect and read), and `read_link`-style paths
 /// keep resolving after their target is gone. Without this check that window reads as a
 /// clone with no agent session at all, which is a confident `Stuck` for the whole clone
-/// rather than "I cannot see it". The old gen-1 link reader learned this over 15.5 hours
+/// rather than "I cannot see it". The retired gen-1 link reader learned this over 15.5 hours
 /// on CT 105 and CT 106, where it closed 523 sessions that were still running.
 pub fn container_root(pid: i64) -> Option<PathBuf> {
     if pid <= 0 {

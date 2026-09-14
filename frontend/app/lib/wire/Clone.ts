@@ -48,7 +48,7 @@ claudeGroup: string | null,
  * to a fixed account — `claude_account_email` alone can't tell these apart. Group
  * binding moved to the shared [`RmngClone::group`]: with a group set, an `"auto"`
  * selection resolves inside it, otherwise fleet-wide. Legacy `"none"`/`"group:<name>"`
- * values migrate to `"auto"` (+ `group`) on load.
+ * values migrated to `"auto"` (+ `group`) on load.
  */
 claudeSelection: string | null, 
 /**

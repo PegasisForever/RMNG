@@ -74,7 +74,7 @@ the same absence, so tolerating it here would only delay the failure by one pass
   would otherwise run transient), `etc/environment` (base session + control URLs +
   preset vars; read by PAM and the lingering user manager at boot, which is why it
   cannot wait until after start — and why an unresolvable control host fails the op
-  at create/fork/rebase/migrate instead of booting a degraded URL the loop could
+  at create/fork/rebase instead of booting a degraded URL the loop could
   never repair), headless unit MASKS (`gnome-headless` + `clone-daemon` → `/dev/null`
   symlinks over the baked unit files, so the desktop never starts — no reload, no
   pkill, no boot race; fails the op on upload error), and, only when the preset
@@ -128,7 +128,7 @@ stamped and idempotent throughout):
   so upgrades (payload, probe, MCP sets) land without waiting on any timer.
 - Settings save: one full pass (`sync_all_running`, reason `settings-save`),
   detached — the PUT never waits on Docker. Env, parity, and MCP changes land now.
-- Fork / rebase / migrate / unarchive: `spawn_converge_after_start` per clone —
+- Fork / rebase / unarchive: `spawn_converge_after_start` per clone —
   waits bounded (10 s cadence, 30 min cap) for the container to be running, then
   runs the chain. Covers fresh `/etc` on carried-over homes; quiet no-op when the
   clone never comes up (still archived, deleted mid-wait).

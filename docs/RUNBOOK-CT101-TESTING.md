@@ -7,7 +7,7 @@ CT 101 is the disposable test deployment. Every command here was run against it 
 is fine and updating CT 101 is fine, but putting a build onto a production container needs
 the operator to ask for that deploy by name. Reading a production container stays fine.
 (The production containers are CT 204, CT 205 and CT 206 —
-[RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md) lists them.)
+[RUNBOOK-GEN1-TO-GEN2.md](archive/RUNBOOK-GEN1-TO-GEN2.md) lists them.)
 
 ## Access
 

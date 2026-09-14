@@ -47,8 +47,6 @@ pub const DOCKER_SUBNET: &str = "10.99.0.0/24";
 /// Registry reference the in-product self-update pulls the control-server image from
 /// (and digest-compares against for update-available detection).
 pub const SERVER_IMAGE: &str = "pegasis0/rmng:latest";
-/// The shared Docker build infra (pull-through Hub mirror + remote BuildKit) always runs.
-pub const BUILD_INFRA_ENABLED: bool = true;
 /// Images + cache size for that build infra.
 pub const REGISTRY_IMAGE: &str = "registry:2.8.3";
 pub const BUILDKIT_IMAGE: &str = "moby/buildkit:v0.17.2";
@@ -56,9 +54,6 @@ pub const BUILDKIT_CACHE_GB: u32 = 40;
 /// Usage poll intervals (seconds, floored at 15 by the pollers). Nobody changes these.
 pub const CLAUDE_POLL_SECS: u64 = 600;
 pub const CODEX_POLL_SECS: u64 = 600;
-/// The Codex poller always fetches usage (the `usagePolling=false` escape hatch for a
-/// drifting `/wham/usage` shape is gone; a drift is fixed in code now).
-pub const CODEX_USAGE_POLLING: bool = true;
 
 /// Chroma subsampling mode for the port-1 viewer video stream.
 ///
@@ -129,8 +124,6 @@ pub struct Preset {
     /// accounts from this one pool (each side's rotator only sees its own provider's
     /// members); an explicit per-clone email or `auto` in the clone dialog overrides it
     /// for that side only. Always set: saves fill a blank with the first pool.
-    /// (Older configs named per-provider `group:<pool>` selections in `claude_account` /
-    /// `codex_account`; those fold into this on load.)
     #[serde(default)]
     pub group: String,
     /// Default fork source for the clone modal's fork tabs: a clone id, or empty for the
@@ -159,14 +152,6 @@ pub struct Preset {
     /// image now.
     #[serde(default)]
     pub vars: Vec<EnvVar>,
-    /// Retired per-provider defaults (split-pool era). Parse-only: never written back.
-    /// A `group:<pool>` value migrates into [`Preset::group`] on load; an email/`auto`
-    /// pin is dropped (pins now live on the clone, not the preset).
-    #[serde(default, skip_serializing)]
-    pub claude_account: String,
-    /// Retired per-provider default, twin of [`Preset::claude_account`]. Parse-only.
-    #[serde(default, skip_serializing)]
-    pub codex_account: String,
     /// Optional per-preset text appended (after `"\n\n"`) to the global agent playbook for
     /// clones of this preset. Empty ⇒ no append. Non-secret. (Layer **d**: node-agent extra,
     /// this preset only.)
@@ -202,8 +187,6 @@ impl Default for Preset {
             group: String::new(),
             default_fork_clone: String::new(),
             vars: Vec::new(),
-            claude_account: String::new(),
-            codex_account: String::new(),
             agent_playbook: String::new(),
             global_prompt: String::new(),
             startup_script: String::new(),
@@ -439,14 +422,6 @@ pub struct AppConfig {
     /// one group (see `RmngClone::group`), which feeds both sides.
     #[serde(default)]
     pub groups: Vec<CloneGroup>,
-    /// Retired split lists (folded into `groups` by `migrate_legacy` on load).
-    /// Parse-only: never written back.
-    #[serde(default, skip_serializing)]
-    pub clone_groups: Vec<CloneGroup>,
-    /// Retired split lists (folded into `groups` by `migrate_legacy` on load).
-    /// Parse-only: never written back.
-    #[serde(default, skip_serializing)]
-    pub codex_groups: Vec<CloneGroup>,
     /// Clone presets (env vars + Linear key + auto-select ticket labels). Auto-selected
     /// by ticket label when cloning from a ticket; required pick otherwise.
     #[serde(default)]
@@ -488,8 +463,6 @@ impl Default for AppConfig {
             claude: ClaudeConfig::default(),
             codex: CodexConfig::default(),
             groups: Vec::new(),
-            clone_groups: Vec::new(),
-            codex_groups: Vec::new(),
             presets: Vec::new(),
             chroma: ChromaMode::default(),
             ssh: SshConfig::default(),
@@ -659,13 +632,11 @@ mod tests {
         assert_eq!(DOCKER_SOCKET, "/var/run/docker.sock");
         assert_eq!(DOCKER_SUBNET, "10.99.0.0/24");
         assert_eq!(SERVER_IMAGE, "pegasis0/rmng:latest");
-        assert!(BUILD_INFRA_ENABLED);
         assert_eq!(REGISTRY_IMAGE, "registry:2.8.3");
         assert_eq!(BUILDKIT_IMAGE, "moby/buildkit:v0.17.2");
         assert_eq!(BUILDKIT_CACHE_GB, 40);
         assert_eq!(CLAUDE_POLL_SECS, 600);
         assert_eq!(CODEX_POLL_SECS, 600);
-        assert!(CODEX_USAGE_POLLING);
         let mons = AppConfig::default().effective_monitors();
         assert_eq!(mons.len(), 2);
         assert_eq!(
@@ -795,8 +766,6 @@ mod tests {
                     group: "pooled".into(),
                     default_fork_clone: String::new(),
                     vars: Vec::new(),
-                    claude_account: String::new(),
-                    codex_account: String::new(),
                     agent_playbook: String::new(),
                     global_prompt: String::new(),
                     startup_script: String::new(),

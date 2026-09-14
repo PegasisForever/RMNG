@@ -202,7 +202,7 @@ pub struct RmngClone {
     /// to a fixed account — `claude_account_email` alone can't tell these apart. Group
     /// binding moved to the shared [`RmngClone::group`]: with a group set, an `"auto"`
     /// selection resolves inside it, otherwise fleet-wide. Legacy `"none"`/`"group:<name>"`
-    /// values migrate to `"auto"` (+ `group`) on load.
+    /// values migrated to `"auto"` (+ `group`) on load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_selection: Option<String>,
     /// Email of the imported Codex (ChatGPT) account whose token is written into this
@@ -312,24 +312,12 @@ pub enum OperationKind {
     Delete,
     Archive,
     Unarchive,
-    /// Pull the clone template from a registry (replaced the retired in-product
-    /// `Bootstrap` build). The `bootstrap` alias keeps a persisted legacy op loadable:
-    /// `state.rs::read_from_disk` falls back to an EMPTY state on any parse error, so a
-    /// stored `"kind":"bootstrap"` op without this alias would wipe every clone.
-    #[serde(alias = "bootstrap")]
+    /// Pull the clone template from a registry.
     Pull,
     /// Warm a gen-2 derived image tag without creating (`POST /api/images/prebuild`).
     Prebuild,
     /// Self-update the control-server: pull a new image + swap the running container.
     Update,
-    /// Any tag this build does not recognise, including the retired `commit` and
-    /// `migrate` flows. This is the general form of the `bootstrap` alias above: an
-    /// unknown tag would otherwise fail the whole `state.json` parse, and
-    /// `state.rs::read_from_disk` falls back to an EMPTY state on a parse error — the
-    /// server would come up seeing zero clones. A retired op row is inert: it is only
-    /// ever rendered, never driven.
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -841,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn operation_kind_serde_and_bootstrap_alias() {
+    fn operation_kind_serde() {
         // Canonical serialization is the lowercase variant name.
         assert_eq!(
             serde_json::to_string(&OperationKind::Pull).unwrap(),
@@ -867,36 +855,17 @@ mod tests {
             serde_json::from_str::<OperationKind>("\"unarchive\"").unwrap(),
             OperationKind::Unarchive
         );
-        // Legacy persisted ops used `"bootstrap"`; the alias keeps them loadable so a
-        // stored op never trips `read_from_disk`'s parse-error → empty-state fallback.
-        assert_eq!(
-            serde_json::from_str::<OperationKind>("\"bootstrap\"").unwrap(),
-            OperationKind::Pull
-        );
-        // Retired kinds: a `state.json` written before `commit`/`migrate` were deleted may
-        // still hold such a row. It must parse, not take the whole file down with it.
-        assert_eq!(
-            serde_json::from_str::<OperationKind>("\"commit\"").unwrap(),
-            OperationKind::Unknown
-        );
-        assert_eq!(
-            serde_json::from_str::<OperationKind>("\"migrate\"").unwrap(),
-            OperationKind::Unknown
-        );
-        // Any other unrecognised tag (a kind from a NEWER server) lands the same way.
-        assert_eq!(
-            serde_json::from_str::<OperationKind>("\"no-such-kind\"").unwrap(),
-            OperationKind::Unknown
-        );
-        // A whole Operation carrying the legacy kind deserializes with everything intact.
-        let legacy = r#"{
-            "id": "op_1", "kind": "bootstrap", "target": "my-base",
-            "status": "running", "step": "queued", "pct": 0.0, "message": "queued",
-            "startedAt": 1
-        }"#;
-        let op: Operation = serde_json::from_str(legacy).unwrap();
-        assert_eq!(op.kind, OperationKind::Pull);
-        assert_eq!(op.target, "my-base");
+        // Retired or unknown tags fail loudly: operations prune within a minute and
+        // stale `Running` rows are failed at boot, so no live `state.json` can still
+        // carry `bootstrap`/`commit`/`migrate` — and a corrupt row must surface as a
+        // parse error (degraded mode, never persisted over) rather than render as a
+        // mystery row.
+        for tag in ["\"bootstrap\"", "\"commit\"", "\"migrate\"", "\"no-such-kind\""] {
+            assert!(
+                serde_json::from_str::<OperationKind>(tag).is_err(),
+                "{tag} must fail to parse"
+            );
+        }
     }
 
     #[test]

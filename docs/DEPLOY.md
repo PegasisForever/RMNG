@@ -176,10 +176,6 @@ no clone restart). Existing clones created before the upgrade are migrated the s
   clone's CPU/memory limit and competes fleet-wide (fine for a small trusted fleet).
 - If `rmng-buildkit` is down, in-clone `docker build` fails until it is back; the clone's local
   `default` builder remains as a manual fallback: `docker buildx use default`.
-- Turn the whole feature off with `docker.buildInfraEnabled = false` in config.json.
-  This is a pure "stop managing": the reconciler stops touching clones and no infra
-  is ensured; already-created infra containers and already-migrated clone config are left in
-  place (remove them manually if you want them gone).
 
 ## Images & clones
 
@@ -360,7 +356,7 @@ clone writes to it as itself and the `shared` SMB share acts as the same user.
 It reaches clones that already exist. Docker cannot add a mount to a live container, and
 recreating one would destroy the clone's writable layer, so the pool is a create-time bind
 (see `CreateSpec::shared_dir`): every freshly created container carries it from first boot,
-and the gen-2 migration recreates the rest. Clones that predate the pool keep no mount —
+and the retired gen-2 migration recreated the rest. Clones that predate the pool keep no mount —
 there is no live re-apply loop.
 
 Four consequences worth knowing:

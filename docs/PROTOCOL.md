@@ -319,9 +319,8 @@ the config. `PUT /api/config` returns
   `app_EMoamEEZ73f0CkXaXp7hrann`). No `expires_in` — expiry is decoded from the access-token
   JWT `exp`. Refresh tokens are single-use / rotating.
 - **Usage:** `GET https://chatgpt.com/backend-api/wham/usage` (Bearer + `ChatGPT-Account-Id`);
-  windows map to 5h/weekly by `limit_window_seconds`. Disable with `codex.usagePolling=false`
-  (refresh + push still run).
-- **`CodexConfig`**: `poll_secs`, `pinned_email?`, `usage_polling` (bool, default `true`).
+  windows map to 5h/weekly by `limit_window_seconds`.
+- **`CodexConfig`**: `auto_reset` (bool, default `false`).
 - **`groups`** (`CloneGroup[]`): the single pool list above. A clone binds one pool via its
   clone-level `group` (each side resolving to its own provider's least-used member); a legacy
   per-side `group:<name>` selection still binds it. Selected at clone/swap time as the shared

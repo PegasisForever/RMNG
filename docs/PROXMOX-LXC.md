@@ -6,7 +6,7 @@ since gen-2: every clone home is its own ZFS dataset, and only a privileged CT c
 `/dev/zfs` plus the homes mount (§1c). This is a one-way trip. An existing unprivileged CT
 is NOT converted in place and NOT restored from its dump as privileged — that corrupts the
 LXC namespace state. You build a fresh privileged CT and move the Docker state into it:
-see [RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md).
+see [RUNBOOK-GEN1-TO-GEN2.md](archive/RUNBOOK-GEN1-TO-GEN2.md).
 The CT-wide live resource summary intentionally supports the documented production layout
 only: one CT with cgroup v2, an enforced CPU capacity, and a ZFS-backed rootfs. Once
 Docker is up and healthy in the CT, follow [DEPLOY.md](DEPLOY.md) as you would on any host.
@@ -30,7 +30,7 @@ dev0: /dev/dri/renderD128,mode=0666
 # screenshots with renderD128 alone, verified Sep 2026). Pass it only when the box has an AMD
 # compute GPU and a clone is meant to use it. Of the production containers, CT 204 and CT 205
 # pass it and CT 206 does not; when replacing a CT, copy whatever that CT already passed
-# (RUNBOOK-GEN1-TO-GEN2.md §3.2).
+# (archive/RUNBOOK-GEN1-TO-GEN2.md §3.2).
 dev1: /dev/kfd,mode=0666
 
 # Let the guest's Docker/systemd operate without the host AppArmor profile fighting it.
@@ -119,7 +119,7 @@ its conf.
 **Do NOT `apt-get install zfsutils-linux` in the CT.** Its `zfs-dkms` post-install tries to
 build kernel modules and fails under a shared kernel. The control-server image carries its own
 `zfs` binaries, so the CT needs the **device node only**
-([GEN2-CLONES.md](GEN2-CLONES.md) §3.1, [RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md) §3.4):
+([GEN2-CLONES.md](GEN2-CLONES.md) §3.1, [RUNBOOK-GEN1-TO-GEN2.md](archive/RUNBOOK-GEN1-TO-GEN2.md) §3.4):
 
 ```sh
 mknod /dev/zfs c 10 249   # same major:minor as the host node; lives on the CT /dev

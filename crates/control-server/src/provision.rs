@@ -16,7 +16,7 @@
 //!
 //! Guest scripts are embedded (`include_str!`) and streamed over `docker exec bash -s`:
 //! [`crate::docker::DockerCtl::exec_script`]. Binaries (clone-daemon, agent-wrapper) are
-//! pushed via `upload_tar`. Clone images are gen-2 preset builds (`crate::derived` builds
+//! pushed via `upload_tar`. Clone images are preset builds (`crate::derived` builds
 //! each preset's Dockerfile into a hash tag on demand); the retired gen-1 registry-template
 //! pull is gone.
 
@@ -720,7 +720,7 @@ pub async fn delete_clone(
 // --- gen-2 clones ---------------------------------------------------------------------
 
 /// Full Dockerfile text of the named preset (config). Unknown, unnamed, or empty ⇒
-/// the default base Dockerfile. Every create/fork/migrate resolves its image from
+/// the default base Dockerfile. Every create/fork resolves its image from
 /// this — never from a caller-supplied base.
 pub(crate) fn preset_dockerfile(app: &App, preset_name: Option<&str>) -> String {
     let name = preset_name.unwrap_or("").trim();
@@ -820,7 +820,7 @@ pub async fn clone_container_gen2_from_tag(
 
     on_progress("queued", &format!("queued gen-2 clone {hostname}"));
     // No image check here: every caller ensures the tag first (`ensure_image` on the
-    // create/fork/migrate paths, an explicit `image_exists` loop on rebase), so a
+    // create/fork paths, an explicit `image_exists` loop on rebase), so a
     // re-check is one more daemon roundtrip on every clone for a race it cannot close
     // anyway (check-then-create is not atomic — a prune in between fails at create
     // either way, and the error arm below still cleans up).

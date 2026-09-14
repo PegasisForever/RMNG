@@ -27,7 +27,7 @@ Auth is file-based. The control-server signs in, refreshes, and pushes `~/.codex
 
 pi ships no MCP support, so [`pi-mcp-adapter`](https://www.npmjs.com/package/pi-mcp-adapter) bridges the servers into pi tools. The wrapper reads the control-server's neutral descriptor at `~/.config/rmng/mcp.json` (the single source of truth, already headless-filtered) and maps it to the adapter's config.
 
-The desktop server is promoted to direct tools (`desktop_screenshot`, `desktop_left_click`, …), which replaces the old `alwaysLoad` flag. Linear stays behind the proxy tool.
+The desktop server is marked `directTools` with an `eager` lifecycle in the descriptor, so its tools (`desktop_screenshot`, `desktop_left_click`, …) load as first-class pi tools. Linear stays behind the proxy tool.
 
 The loader runs with `noExtensions`, so the wrapper loads only these two inline extensions and ignores anything under `~/.pi/agent/extensions`. A discovered extension would load ahead of them and could block a tool call or rewrite the provider payload before either one runs, so a `pi install` inside the clone must not reach the assistant.
 

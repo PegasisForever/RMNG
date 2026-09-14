@@ -288,7 +288,6 @@ fn kind_noun(kind: OperationKind) -> &'static str {
         OperationKind::Unarchive => "unarchive",
         OperationKind::Update => "control-server update",
         OperationKind::Prebuild => "prebuild",
-        OperationKind::Unknown => "operation",
     }
 }
 
@@ -541,9 +540,6 @@ fn default_queued(kind: OperationKind, target: &str, source: Option<&str>) -> St
         OperationKind::Unarchive => format!("queued unarchive of {target}"),
         OperationKind::Update => "queued control-server update".to_string(),
         OperationKind::Prebuild => format!("queued derived-image build → {target}"),
-        // No flow files an `Unknown`; it only ever arrives from a persisted row written by
-        // another server version, which already carries its own label.
-        OperationKind::Unknown => format!("queued operation on {target}"),
     }
 }
 

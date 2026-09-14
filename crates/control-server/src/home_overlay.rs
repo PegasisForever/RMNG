@@ -420,7 +420,7 @@ fn unpack_skeleton(tar_bytes: &[u8], dest: &Path) -> Result<()> {
 pub(crate) async fn ensure_skeleton(app: &App, image_tag: &str) -> Result<String> {
     let digest = app.docker.image_id(image_tag).await?;
     // One export per digest at a time. Every clone of one preset resolves to the SAME
-    // image, so concurrent migrations all land here together — and the body below wipes
+    // image, so concurrent creates all land here together — and the body below wipes
     // the directory before re-exporting, which a second caller would read mid-wipe.
     // Mirrors `derived::BUILD_LOCKS`.
     let lock = skeleton_lock(&digest);
@@ -509,9 +509,9 @@ pub(crate) fn teardown_merged(merged: &Path) {
 
 /// Mount (or remount, when the lower changed, e.g. rebase) one clone's home overlay.
 /// Idempotent: an already-correct mount is left alone. The upper and work dirs must
-/// already exist ([`CloneHome::ensure_layout`]) — the migration fills the upper long
-/// before there is an image to mount over it, so ensuring them here too would be a
-/// second owner for one rule.
+/// already exist ([`CloneHome::ensure_layout`]) — the retired one-shot migration filled
+/// the upper long before there was an image to mount over it, so ensuring them here
+/// too would be a second owner for one rule.
 /// Returns `true` when this call ESTABLISHED the mount (as opposed to finding it already
 /// correct). A container bound before that moment captured the bare mountpoint and needs
 /// restarting — see [`remount_all`].

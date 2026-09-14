@@ -40,9 +40,9 @@ struct ManagedMcp {
     /// `Some(env)` ⇒ authenticate with `Authorization: Bearer <$env>`, resolved from the clone
     /// env at runtime (each emitter renders the env reference in its own syntax).
     bearer_env: Option<&'static str>,
-    /// node-agent (Claude Agent SDK) hint: keep this server's tools in context every turn.
-    /// Ignored by the file-based agents (Claude CLI / Codex).
-    always_load: bool,
+    /// node-agent hint: promote this server's tools to first-class pi tools with an eager
+    /// connection (e.g. `desktop`). Ignored by the file-based agents (Claude CLI / Codex).
+    direct_tools: bool,
 }
 
 /// THE managed MCP set. Order is stable (used verbatim by the emitters).
@@ -53,14 +53,14 @@ fn managed_mcp() -> [ManagedMcp; 2] {
             url: "http://127.0.0.1:9004",
             headless_only: true,
             bearer_env: None,
-            always_load: true,
+            direct_tools: true,
         },
         ManagedMcp {
             name: "linear",
             url: "https://mcp.linear.app/mcp",
             headless_only: false,
             bearer_env: Some("LINEAR_API_KEY"),
-            always_load: false,
+            direct_tools: false,
         },
     ]
 }
@@ -140,7 +140,7 @@ pub(crate) fn merge_claude_mcp(
     )
 }
 
-/// `{name,url,bearerEnv?,alwaysLoad?}`. The agent-wrapper maps this to the Claude Agent SDK's
+/// `{name,url,bearerEnv?,directTools?,lifecycle?}`. The agent-wrapper maps this to the pi-mcp-adapter's
 /// `mcpServers` (resolving `bearerEnv` from `process.env`, skipping a server whose bearer env is
 /// empty). Headless-filtered here so the wrapper needs no headless logic of its own.
 fn mcp_descriptor_json(headless: bool) -> String {
@@ -151,8 +151,9 @@ fn mcp_descriptor_json(headless: bool) -> String {
             if let Some(env) = m.bearer_env {
                 o["bearerEnv"] = serde_json::json!(env);
             }
-            if m.always_load {
-                o["alwaysLoad"] = serde_json::json!(true);
+            if m.direct_tools {
+                o["directTools"] = serde_json::json!(true);
+                o["lifecycle"] = serde_json::json!("eager");
             }
             o
         })
@@ -1669,7 +1670,7 @@ async fn sync_clone_ssh(app: &App, id: &str, warned: &mut HashSet<String>) -> bo
 /// a converged clone is a handful of `cat`s plus one env compare.
 ///
 /// Callers (nothing here runs on a timer): the boot pass, Settings-save fan-out, and
-/// post-op convergence after fork/rebase/migrate. The 30 s loop runs SSH only.
+/// post-op convergence after fork/rebase/unarchive. The 30 s loop runs SSH only.
 async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSet<String>) {
     let id = h.id.as_str();
     if !app.docker.is_running(id).await.unwrap_or(false) {
@@ -1831,8 +1832,8 @@ async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSe
 }
 
 /// Post-op convergence: run the full chain for one clone in the background after
-/// fork/rebase/migrate/unarchive complete. The clone may not be running yet (rebase ends
-/// stopped; migration restarts the fleet after the window), so this waits — bounded —
+/// fork/rebase/unarchive complete. The clone may not be running yet (rebase ends
+/// stopped), so this waits — bounded —
 /// for it to come up instead of assuming the op left it running. Fire-and-forget with
 /// logging: a failure surfaces in the warn log, and the next boot pass or Settings save
 /// retries. Replaces what the 30 s loop used to guarantee for these transitions.
@@ -1885,7 +1886,7 @@ pub async fn sync_all_running(app: &App, reason: &str) {
 /// running managed clone, so upgrades (payload, probe, MCP sets) land without waiting
 /// on any timer. There is no polling loop anymore — after boot, convergence rides
 /// explicit triggers only: the pre-boot tar (create), Settings-save fan-out, and
-/// post-op sync after fork/rebase/migrate/unarchive.
+/// post-op sync after fork/rebase/unarchive.
 pub async fn run(app: App) {
     sync_all_running(&app, "boot").await;
 }
@@ -2491,15 +2492,17 @@ mod tests {
             "Bearer ${LINEAR_API_KEY}"
         );
 
-        // The node-agent descriptor: desktop carries alwaysLoad, linear carries bearerEnv.
+        // The node-agent descriptor: desktop carries directTools + eager lifecycle, linear carries bearerEnv.
         let desc: serde_json::Value = serde_json::from_str(&mcp_descriptor_json(false)).unwrap();
         let arr = desc.as_array().unwrap();
         let desktop = arr.iter().find(|s| s["name"] == "desktop").unwrap();
         let linear = arr.iter().find(|s| s["name"] == "linear").unwrap();
-        assert_eq!(desktop["alwaysLoad"], true);
+        assert_eq!(desktop["directTools"], true);
+        assert_eq!(desktop["lifecycle"], "eager");
         assert_eq!(desktop["url"], "http://127.0.0.1:9004");
         assert_eq!(linear["bearerEnv"], "LINEAR_API_KEY");
-        assert!(linear.get("alwaysLoad").is_none());
+        assert!(linear.get("directTools").is_none());
+        assert!(linear.get("lifecycle").is_none());
 
         // Headless: desktop is filtered out of every emitter; linear stays.
         assert!(!codex_mcp_toml(true).contains("desktop"));

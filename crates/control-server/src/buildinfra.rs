@@ -103,7 +103,7 @@ pub fn render_buildkitd_toml(gc_gb: u32) -> String {
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Sweep running managed clones forever, applying the mirror + remote builder to any not yet
-/// confirmed. Idempotent + best-effort; disabled clones/off-toggle are simply skipped. Never
+/// confirmed. Idempotent + best-effort; unmanaged or stopped clones are simply skipped. Never
 /// returns. Mirrors `homes::run`'s loop shape.
 pub async fn run(app: App) {
     let mut done: HashSet<String> = HashSet::new();

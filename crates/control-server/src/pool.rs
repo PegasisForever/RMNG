@@ -1311,9 +1311,9 @@ pub(crate) async fn push_stale_tokens_for<P: PoolProvider>(app: &App, only: Opti
 /// ([`push_stale_tokens_for`]) and re-bound without a push by the rotator, so the
 /// credentials on its disk are whatever it was archived with — possibly an account that has
 /// since been deleted or gone dark. Without this it runs them until the next poll, up to ten
-/// minutes of 401s on a clone the operator was just told is ready. The gen-2 migration needs
-/// the same repair for the same reason: it stops the fleet, rewrites every home, and starts
-/// it again.
+/// minutes of 401s on a clone the operator was just told is ready. The retired gen-2
+/// migration needed the same repair for the same reason: it stopped the fleet, rewrote
+/// every home, and started it again.
 ///
 /// Best-effort on both sides. A failure here is logged and left to the next reconcile pass.
 pub(crate) async fn push_both_sides(app: &App, host_id: &str, why: &str) {

@@ -83,7 +83,12 @@ function emit(obj: Record<string, unknown>): void {
 function emitActivity(text: string): void {
   const oneLine = text.replace(/\s+/g, " ").trim();
   if (!oneLine) return;
-  emit({ activity: oneLine.length > ACTIVITY_MAX ? oneLine.slice(0, ACTIVITY_MAX - 1) + "…" : oneLine });
+  emit({
+    activity:
+      oneLine.length > ACTIVITY_MAX
+        ? oneLine.slice(0, ACTIVITY_MAX - 1) + "…"
+        : oneLine,
+  });
 }
 
 // ---- MCP -------------------------------------------------------------------
@@ -106,21 +111,35 @@ function mcpConfigBuiltin(): McpAdapterConfig {
   // The desktop-control MCP is served by the clone-daemon over HTTP (localhost), sharing its live
   // Mutter session. Skipped on headless clones — there is no daemon / :9004 there.
   if (!CONFIG.headless) {
-    entries.push({ name: "desktop", url: CONFIG.daemonMcpUrl, alwaysLoad: true });
+    entries.push({
+      name: "desktop",
+      url: CONFIG.daemonMcpUrl,
+      directTools: true,
+      lifecycle: "eager" as const,
+    });
   }
   // The clone's preset Linear identity (LINEAR_API_KEY, injected at clone creation).
-  entries.push({ name: "linear", url: "https://mcp.linear.app/mcp", bearerEnv: "LINEAR_API_KEY" });
+  entries.push({
+    name: "linear",
+    url: "https://mcp.linear.app/mcp",
+    bearerEnv: "LINEAR_API_KEY",
+  });
   return mcpConfigFromDescriptor(entries);
 }
 
 // ---- the persistent session ------------------------------------------------
 /** Resolve the configured model, accepting either `provider/id` or a bare id. */
 async function pickModel(runtime: ModelRuntime): Promise<Model<any>> {
-  const [provider, id] = CONFIG.model.includes("/") ? CONFIG.model.split("/", 2) : [undefined, CONFIG.model];
+  const [provider, id] = CONFIG.model.includes("/")
+    ? CONFIG.model.split("/", 2)
+    : [undefined, CONFIG.model];
   const available = await runtime.getAvailable();
-  const match = available.find((m) => m.id === id && (!provider || m.provider === provider));
+  const match = available.find(
+    (m) => m.id === id && (!provider || m.provider === provider),
+  );
   if (!match) {
-    const seen = available.map((m) => `${m.provider}/${m.id}`).join(", ") || "none";
+    const seen =
+      available.map((m) => `${m.provider}/${m.id}`).join(", ") || "none";
     throw new Error(`model ${CONFIG.model} is not available (have: ${seen})`);
   }
   return match;
@@ -199,7 +218,10 @@ function assistantText(message: unknown): string {
   const m = message as { role?: string; content?: unknown };
   if (m?.role !== "assistant" || !Array.isArray(m.content)) return "";
   return m.content
-    .filter((b): b is { type: "text"; text: string } => (b as { type?: string })?.type === "text")
+    .filter(
+      (b): b is { type: "text"; text: string } =>
+        (b as { type?: string })?.type === "text",
+    )
     .map((b) => b.text)
     .join("")
     .trim();
@@ -221,7 +243,9 @@ function onSessionEvent(event: AgentSessionEvent): void {
     case "agent_end": {
       // pi surfaces a stream failure as an errorMessage on the final assistant message
       // rather than throwing out of prompt().
-      const last = event.messages[event.messages.length - 1] as { errorMessage?: string } | undefined;
+      const last = event.messages[event.messages.length - 1] as
+        | { errorMessage?: string }
+        | undefined;
       if (last?.errorMessage) lastError = last.errorMessage;
       break;
     }
@@ -326,8 +350,15 @@ const server = Bun.serve({
       } catch {
         return Response.json({ error: "invalid json" }, { status: 400 });
       }
-      const text = typeof (body as { text?: unknown })?.text === "string" ? (body as { text: string }).text.trim() : "";
-      if (!text) return Response.json({ error: "body must be { text }" }, { status: 400 });
+      const text =
+        typeof (body as { text?: unknown })?.text === "string"
+          ? (body as { text: string }).text.trim()
+          : "";
+      if (!text)
+        return Response.json(
+          { error: "body must be { text }" },
+          { status: 400 },
+        );
 
       let active: AgentSession;
       try {

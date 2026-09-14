@@ -7,7 +7,7 @@
 //! `/home/rmng` and visible on the CT as the merged view, so the browse entry is a plain
 //! symlink `<data_dir>/hosts/<id>` → [`CloneHome::merged`]. It exists running or stopped — no
 //! PID chasing, no `pid: "host"` requirement. The retired `/proc/<pid>/root` reader is
-//! gone (see stage 4 deletions for the rest of gen-1).
+//! gone (stage 4 of the migration deleted the rest of gen-1).
 //!
 //! Links are static, not reconciled: the create job links its clone eagerly, the delete
 //! job unlinks it, and a one-shot boot sync repairs crash windows. A missing dataset

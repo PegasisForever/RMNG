@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
     }
 
     // Shared build infra (pull-through Hub mirror + remote BuildKit): ensure the two infra
-    // containers exist + run. Gated on setup-complete + the master toggle; runs after
+    // containers exist + run. Gated on setup-complete; runs after
     // `self_setup` (which ensured the `rmng` network). Non-fatal + bounded — a down/slow
     // daemon (or a first-run image pull) logs and retries next boot, same posture as
     // `ensure_network`. 120 s covers a cold pull of registry + buildkit.

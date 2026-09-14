@@ -8,28 +8,30 @@
 
 /** One entry in the descriptor JSON array written by the control-server. */
 export interface McpDescriptor {
-  name: string;
-  url: string;
-  /** When set, authenticate with `Authorization: Bearer <process.env[bearerEnv]>`. */
-  bearerEnv?: string;
-  /** node-agent hint: keep this server's tools in context every turn (e.g. `desktop`). */
-  alwaysLoad?: boolean;
+        name: string;
+        url: string;
+        /** When set, authenticate with `Authorization: Bearer <process.env[bearerEnv]>`. */
+        bearerEnv?: string;
+        /** node-agent hint: promote this server's tools to first-class pi tools (e.g. `desktop`). */
+        directTools?: boolean;
+        /** `eager` connects at startup instead of on first use (set with `directTools`). */
+        lifecycle?: "eager" | "lazy";
 }
 
 /** One server in the adapter's config. */
 export interface McpAdapterServer {
-  url: string;
-  /** `eager` connects at startup instead of on first use. */
-  lifecycle?: "eager" | "lazy";
-  /** Promote this server's tools to first-class pi tools instead of hiding them behind the proxy. */
-  directTools?: boolean;
-  headers?: Record<string, string>;
+        url: string;
+        /** `eager` connects at startup instead of on first use. */
+        lifecycle?: "eager" | "lazy";
+        /** Promote this server's tools to first-class pi tools instead of hiding them behind the proxy. */
+        directTools?: boolean;
+        headers?: Record<string, string>;
 }
 
 export interface McpAdapterConfig {
-  mcpServers: Record<string, McpAdapterServer>;
-  /** The adapter's config accepts more keys than the wrapper sets (settings, oauth, …). */
-  [key: string]: unknown;
+        mcpServers: Record<string, McpAdapterServer>;
+        /** The adapter's config accepts more keys than the wrapper sets (settings, oauth, …). */
+        [key: string]: unknown;
 }
 
 /**
@@ -37,30 +39,40 @@ export interface McpAdapterConfig {
  * but empty in the environment is skipped (e.g. `linear` on a clone with no `LINEAR_API_KEY`),
  * matching the behavior of the file-based agents (which only auth when the key is present).
  *
- * `alwaysLoad` becomes `directTools` plus an eager connection. The old flag kept a server's
- * tools in context every turn; promoting them to real pi tools is the closest equivalent, and
- * it is what the desktop server needs so screenshot and click are always callable.
+ * `directTools` + `lifecycle` pass through to the adapter verbatim: the control-server marks
+ * the desktop server for promotion so screenshot and click are always callable.
  */
 export function mcpConfigFromDescriptor(
-  entries: McpDescriptor[],
-  env: Record<string, string | undefined> = process.env,
+        entries: McpDescriptor[],
+        env: Record<string, string | undefined> = process.env,
 ): McpAdapterConfig {
-  const mcpServers: Record<string, McpAdapterServer> = {};
-  for (const e of entries) {
-    if (!e || typeof e.name !== "string" || typeof e.url !== "string" || !e.name || !e.url) {
-      continue;
-    }
-    let headers: Record<string, string> | undefined;
-    if (e.bearerEnv) {
-      const key = env[e.bearerEnv] ?? "";
-      if (!key) continue; // no key ⇒ omit the server rather than register an unauthenticated one
-      headers = { Authorization: `Bearer ${key}` };
-    }
-    mcpServers[e.name] = {
-      url: e.url,
-      ...(e.alwaysLoad ? { lifecycle: "eager" as const, directTools: true } : {}),
-      ...(headers ? { headers } : {}),
-    };
-  }
-  return { mcpServers };
+        const mcpServers: Record<string, McpAdapterServer> = {};
+        for (const e of entries) {
+                if (
+                        !e ||
+                        typeof e.name !== "string" ||
+                        typeof e.url !== "string" ||
+                        !e.name ||
+                        !e.url
+                ) {
+                        continue;
+                }
+                let headers: Record<string, string> | undefined;
+                if (e.bearerEnv) {
+                        const key = env[e.bearerEnv] ?? "";
+                        if (!key) continue; // no key ⇒ omit the server rather than register an unauthenticated one
+                        headers = { Authorization: `Bearer ${key}` };
+                }
+                mcpServers[e.name] = {
+                        url: e.url,
+                        ...(e.directTools
+                                ? { directTools: true as const }
+                                : {}),
+                        ...(e.lifecycle === "eager" || e.lifecycle === "lazy"
+                                ? { lifecycle: e.lifecycle }
+                                : {}),
+                        ...(headers ? { headers } : {}),
+                };
+        }
+        return { mcpServers };
 }

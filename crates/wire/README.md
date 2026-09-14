@@ -38,18 +38,19 @@ RmngClone { id, host, port, username, password, domain?, gdm_username?, gdm_pass
        container?, source?, claude_account_email?, linear_*?, display_name?,
        monitor_state?, unread?,
        codex_account_email?, codex_group?, codex_selection? }
-Operation { id, kind: Clone|Delete|Bootstrap|Commit, target, source?, status, step, pct,
+Operation { id, kind: Clone|Delete|Archive|Unarchive|Pull|Prebuild|Update,
+            target, source?, status, step, pct,
             message, log: Vec<String>, container?, started_at, finished_at? }
 ClaudeUsage { id, email, provider, active, assignable?, error?, stale?,
               last_updated, five_hour?, seven_day?, spend? }
 MonitorSpec { width, height }
 
 # configuration (edited via the Settings UI, not hand-edited files)
-AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb, template_reference},
+AppConfig { docker{hostname_prefix, clone_cpus, clone_memory_mb, homes_parent},
             presets: [{name, labels: [label], linear_key, vars: [{key, value}]}],
             claude{poll, pinnedEmail, swap...},
             clone_groups: [{name, accounts: [email]}],
-            codex{pollSecs, pinnedEmail, usagePolling},
+            codex{autoReset},
             codex_groups: [{name, accounts: [email]}],
             clone_socket, data_dir, static_dir, chroma, setup_complete,
             monitors: [MonitorSpec], listen{video, web, daemon_mcp, forward, bastion}, agent{port} }
@@ -63,8 +64,7 @@ AppConfig { docker{socket, subnet, hostname_prefix, clone_cpus, clone_memory_mb,
 # Codex account tokens are NOT config: each account's OAuth triple lives in the server's
 # 0600 `codex-accounts.json`; the server refreshes it and pushes a short-lived
 # auth.json into assigned clones' ~/.codex/auth.json (refresh_token emptied; see control-server).
-CodexConfig { pollSecs, pinnedEmail?, usagePolling: bool }
-             # usagePolling=false suppresses GET /wham/usage; refresh + push still run
+CodexConfig { autoReset: bool }
 AppConfigRedacted   # GET /api/config shape: same fields, preset linear keys included
 SetupEnv / EnvCheckRow   # GET /api/setup/env: the wizard's environment preflight rows
 # The only credential is the preset linear key (the Docker backend has none — local unix

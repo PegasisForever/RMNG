@@ -32,7 +32,7 @@ routes + SSE + SPA + the desktop/exec proxy endpoints for `rmng desktop`/`rmng e
 ingest → `media` encode → viewer; input routing;
 clipboard broker) · `forward` (port-forward data plane: viewer TCP spliced to the clone) ·
 `docker` (bollard primitives against the local daemon) · `provision` (clone/pull/commit/delete
-flows over those primitives) · `clone_reconcile` (the 30 s live-migration pass over running
+flows over those primitives) · `clone_reconcile` (content convergence over running
 clones: payloads, sshd, `/etc/environment`, the generated agent configs) · `jobs` (the
 clone/delete/pull/commit Operation machine) · `naming` (clone hostname derivation + the
 preset lookup by ticket-id prefix)
@@ -146,7 +146,7 @@ endpoints, the two Linear image byte routes, agent-wrapper, the daemon-MCP proxy
 `cargo test -p control-server` (run where GStreamer links — the crate pulls in `media`): the
 subnet/IP allocator + image-reference canonicalization + step→percentage tables (`provision`/`docker`),
 account scoring / assignment / rotation for both providers, the injected credential-file shapes
-(access token in, refresh token emptied), provider usage-window parsing, the reverse token
-migration (parse, dedupe, 0600 stores), per-clone identity keys, the `/etc/environment` sync's
+(access token in, refresh token emptied), provider usage-window parsing, the completed reverse
+token migration (parse, dedupe, 0600 stores), per-clone identity keys, the `/etc/environment` sync's
 retired-key stripping, config defaults/merge/redaction + one-time/restart-required categories,
 Docker lifecycle transitions, and `in_use_by` accounting.

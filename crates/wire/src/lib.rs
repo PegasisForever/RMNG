@@ -31,8 +31,8 @@ pub mod socket;
 pub mod viewer;
 
 pub use config::{
-    AGENT_PORT, AppConfig, AppConfigRedacted, BUILD_INFRA_ENABLED, BUILDKIT_CACHE_GB,
-    BUILDKIT_IMAGE, CLAUDE_POLL_SECS, CLONE_SOCKET, CODEX_POLL_SECS, CODEX_USAGE_POLLING,
+    AGENT_PORT, AppConfig, AppConfigRedacted, BUILDKIT_CACHE_GB,
+    BUILDKIT_IMAGE, CLAUDE_POLL_SECS, CLONE_SOCKET, CODEX_POLL_SECS,
     ChromaMode, ClaudeConfig, CloneGroup, CodexConfig, ConfigPutResponse, DATA_DIR, DOCKER_SOCKET,
     DOCKER_SUBNET, DockerConfig, EnvCheckRow, EnvVar, JudgeConfig, JudgeProvider,
     PORT_BASTION, PORT_DAEMON_MCP, PORT_FORWARD, PORT_VIDEO, PORT_WEB, Preset, PresetRedacted,

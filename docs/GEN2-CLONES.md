@@ -1,8 +1,8 @@
 # Gen-2 clones
 
-Gen-1 is today's clone: home lives in the container overlay layer, fork means file copy,
-template means `docker commit`. Gen-1 is end of life: it runs until migration, then its
-code is deleted. No dual paths, no compat layer.
+Gen-1 was the old clone: home lived in the container overlay layer, fork meant file copy,
+template meant `docker commit`. Gen-1 reached end of life: it ran until the migration, then its
+code was deleted. No dual paths, no compat layer.
 
 Gen-2 is the new clone: home lives on its own ZFS dataset, fork is snapshot plus clone,
 template is text plus tags. All new work goes here.
@@ -67,7 +67,7 @@ Clone-to-clone copy needs none: every clone sees every other home at `~/clones/<
   fork. Create the parent with `dedup=blake3` and leave `compression`/`recordsize`
   alone: dedup matches blocks as written, so a different compression algorithm matches
   nothing, and dedup covers only blocks written after it is switched on.
-  `RUNBOOK-GEN1-TO-GEN2.md` §3.1 has the create command.
+  `archive/RUNBOOK-GEN1-TO-GEN2.md` §3.1 has the create command.
 - The rmng container bind-mounts the homes dir shared
   (`-v /srv/rmng-homes:/srv/rmng-homes:shared`). LOAD-BEARING: datasets are
   created from inside that container, and only a shared bind propagates their
@@ -194,36 +194,14 @@ for the life of the container. As a slave of the CT's `<homes>` peer group the v
 tracks the CT — homes appear as clones are created, vanish as they are deleted — while
 mounts made inside a clone still never escape to the CT.
 
-## 4. Migration (one shot, per CT)
+## 4. Migration (done, kept as record)
 
-The plan is now a runbook against the three boxes that actually have to move:
-**[RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md)** (CT 104, CT 105, CT 106). It
-carries the measured state of each box, the per-clone loss list, the commands, the
-verification gates and the rollback. Read it instead of planning from here.
-
-The shape, in one paragraph: dump the CT, build a FRESH privileged CT (never restore the
-dump as privileged — it corrupts LXC namespace state), move `/var/lib/docker` **and**
-`/var/lib/containerd` into it through one `pct exec … | pct exec …` pipe, set
-`docker.homesParent` on the moved config with the server stopped, then boot the gen-2
-image with `-v /srv/rmng-homes:/srv/rmng-homes:shared` added to the old run flags. On
-boot the server files one `Migrate` op per gen-1 row (`OperationKind::Migrate`, same jobs
-plumbing as clone and delete), stops the fleet, and migrates clones
-`jobs::MIGRATE_CONCURRENCY` (4) at a time:
-
-- `zfs create` the new dataset;
-- stream the home out of the stopped container into the dataset's overlay `upper/`
-  (streamed, not buffered: a whole home in RAM is what used to force one clone at a time);
-- remove the old container and its `rmng-dind-*` / `rmng-ctd-*` volumes (inner Docker
-  state drops and re-pulls through the mirror);
-- build the ROW PRESET's Dockerfile and create the gen-2 container from it — **not** from
-  the clone's old `source` image, which is ignored;
-- stop it. Archived clones stay stopped throughout.
-
-Failures log and continue, with one retry pass at the end. Then the non-archived clones
-start and their stored accounts are re-pushed. Restart the control-server once afterwards
-so the `data/hosts/<id>` links are written (the migration job does not write them).
-
-Stage 4 — deleting the gen-1 code — happens after a clean pass on all three CTs.
+The one-shot gen-1 to gen-2 migration completed on all three CTs (104, 105, 106), and
+the gen-1 code is deleted. The full record — per-box state, per-clone loss list,
+commands, verification gates, and rollback — lives in
+**[RUNBOOK-GEN1-TO-GEN2.md](archive/RUNBOOK-GEN1-TO-GEN2.md)**. In short: each box got a fresh
+privileged CT, Docker state moved over, and every gen-1 home was streamed into a new
+ZFS dataset and recreated as a gen-2 container from its row preset's Dockerfile.
 
 ## 5. Prerequisites (in order)
 
@@ -232,7 +210,8 @@ Stage 4 — deleting the gen-1 code — happens after a clean pass on all three 
 2. Create the homes dataset, mount it into the CT, smoke-test snapshot/clone/destroy
    timing from inside the CT.
 3. Land the store dataset plus base-tag fields, then create/fork/rebase/delete for gen-2.
-4. Run the migration, then delete gen-1 code.
+4. Run the migration, then delete gen-1 code — DONE (migration completed on all three
+   CTs; gen-1 code deleted).
 
 ## 6. Accepted rough edges
 
