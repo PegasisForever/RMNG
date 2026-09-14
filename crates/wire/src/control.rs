@@ -395,7 +395,10 @@ pub struct LxcStats {
     pub mem_used: u64,
     /// RAM plus swap limit in bytes; 0 when either cgroup limit is unbounded or unavailable.
     pub mem_limit: u64,
-    /// Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
+    /// Physical, compression-aware disk use of the whole CT, in bytes: its ZFS root
+    /// filesystem plus every clone-home dataset mounted under the homes root. The root
+    /// filesystem alone omits the homes tree, which is where a fleet's disk use actually
+    /// accumulates.
     pub disk_used: Option<u64>,
 }
 

@@ -10,7 +10,7 @@ that deploy by name. Reading CT 105 stays fine.
 ## Access
 
 CT 101 is a Proxmox container on the host at `10.0.0.100`. It runs Docker, and the
-control-server is a container named `rmng` published on `10.0.0.182`.
+control-server is a container named `rmng` published on `10.0.0.178`.
 
 The local `gcr-ssh-agent` cannot sign with the RSA key and there is no askpass, so plain
 `ssh root@10.0.0.100` fails with `Permission denied`. Bypass the agent:
@@ -38,7 +38,7 @@ user units. The clone user has passwordless sudo, so `-u rmng` is rarely limitin
 The control-server container has no `python3`. Pipe its JSON to your own box instead:
 
 ```sh
-curl -s http://10.0.0.182:9000/api/state | python3 -m json.tool
+curl -s http://10.0.0.178:9000/api/state | python3 -m json.tool
 ```
 
 ## Fast path: swap one binary
@@ -135,7 +135,7 @@ their units, with no clone recreate needed.
 ## Create a clone
 
 ```sh
-curl -s -XPOST http://10.0.0.182:9000/api/clone -H 'content-type: application/json' \
+curl -s -XPOST http://10.0.0.178:9000/api/clone -H 'content-type: application/json' \
   -d '{"linear":{"displayName":"pi probe"},"preset":"work",
        "codexAccount":"hello@talktomedi.com","headless":false}'
 ```
@@ -157,7 +157,7 @@ Prefer the dashboard API over talking to the wrapper directly. It exercises the 
 including the Rust chat proxy and the persisted transcript.
 
 ```sh
-curl -s -XPOST http://10.0.0.182:9000/api/chat/pi-probe \
+curl -s -XPOST http://10.0.0.178:9000/api/chat/pi-probe \
   -H 'content-type: application/json' \
   -d '{"text":"Take a screenshot and say in one sentence what is on screen."}'
 ```

@@ -14,10 +14,12 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use nix::errno::Errno;
 use nix::sys::statvfs::statvfs;
 
 const LXC_CGROUP_ROOT: &str = "/proc/1/root/sys/fs/cgroup";
 const LXC_ROOT: &str = "/proc/1/root";
+const LXC_MOUNTINFO: &str = "/proc/1/mountinfo";
 
 /// RAM plus swap usage and limit for one clone, in bytes. A zero limit means one or both
 /// cgroup limits are unbounded or unavailable.
@@ -61,11 +63,75 @@ async fn cpu_usage_from_root(root: &Path) -> Result<u64> {
     parse_cpu_usage(&stat)
 }
 
-/// Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
+/// Physical, compression-aware disk use of the whole CT, in bytes: its ZFS root filesystem
+/// plus every dataset of the homes tree under [`crate::zfs::HOMES_DIR`].
+///
+/// The root filesystem alone is not the CT's disk use. Since gen-2 every clone home is its
+/// own pool dataset with its own mount, so a `statvfs` of the CT root misses all of them —
+/// and stating the homes parent does not recover them either, because a dataset's `statvfs`
+/// reports only its own referenced bytes, never its children's. Both readings show a fleet
+/// whose disk use barely moves as clones fill up, which is what this walk fixes.
+///
+/// Only `zfs` mounts are counted. The `.merged` overlay views sit under the same root, and a
+/// `statvfs` of an overlay reports its upper filesystem's figures — counting them would add
+/// each clone's dataset a second time.
 pub fn lxc_disk_used() -> Result<u64> {
-    let stat =
+    let root =
         statvfs(LXC_ROOT).with_context(|| format!("reading filesystem stats for {LXC_ROOT}"))?;
-    disk_used(stat.blocks(), stat.blocks_free(), stat.fragment_size())
+    let mut total = disk_used(root.blocks(), root.blocks_free(), root.fragment_size())?;
+
+    let mountinfo = std::fs::read_to_string(LXC_MOUNTINFO)
+        .with_context(|| format!("reading {LXC_MOUNTINFO}"))?;
+    for point in homes_mounts(&mountinfo, crate::zfs::HOMES_DIR) {
+        let path = Path::new(LXC_ROOT).join(point.trim_start_matches('/'));
+        let stat = match statvfs(&path) {
+            Ok(stat) => stat,
+            // A clone destroyed between listing the mounts and stating them. The fleet is
+            // live, so this races every sweep; a vanished mount is not a broken reading.
+            Err(Errno::ENOENT | Errno::ENOTDIR) => continue,
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("reading filesystem stats for {}", path.display())
+                });
+            }
+        };
+        let used = disk_used(stat.blocks(), stat.blocks_free(), stat.fragment_size())?;
+        total = total
+            .checked_add(used)
+            .ok_or_else(|| anyhow!("CT disk usage overflowed adding {}", path.display()))?;
+    }
+    Ok(total)
+}
+
+/// Mount points of the ZFS datasets making up the homes tree — the parent itself and one per
+/// clone — in mountinfo order, deduplicated by device id so a dataset mounted at more than one
+/// path is counted once.
+///
+/// Pure, so a test can pin the shape against a real mountinfo body without mounting anything.
+/// Mount points are taken verbatim: mountinfo octal-escapes whitespace, and clone ids never
+/// contain any (see [`crate::zfs`]), so there is nothing to unescape.
+fn homes_mounts(mountinfo: &str, homes: &str) -> Vec<String> {
+    let nested = format!("{homes}/");
+    let mut seen = std::collections::HashSet::new();
+    let mut points = Vec::new();
+    for line in mountinfo.lines() {
+        let Some((fields, after)) = line.split_once(" - ") else {
+            continue;
+        };
+        let mut fields = fields.split_whitespace().skip(2);
+        let Some(device) = fields.next() else { continue };
+        let Some(point) = fields.nth(1) else { continue };
+        if after.split_whitespace().next() != Some("zfs") {
+            continue;
+        }
+        if point != homes && !point.starts_with(&nested) {
+            continue;
+        }
+        if seen.insert(device.to_string()) {
+            points.push(point.to_string());
+        }
+    }
+    points
 }
 
 /// Kept separate from the `/proc` path so synthetic CT 105 cgroup-v2 fixtures can exercise the
@@ -219,6 +285,38 @@ mod tests {
         assert_eq!(disk_used(10, 3, 4096).unwrap(), 28_672);
         assert!(disk_used(3, 10, 4096).is_err());
         assert!(disk_used(u64::MAX, 0, 2).is_err());
+    }
+
+    #[test]
+    fn homes_mounts_takes_every_dataset_once_and_no_overlay_view() {
+        // Trimmed from a live CT's /proc/1/mountinfo: the root, the homes parent, two clone
+        // datasets, a `.merged` overlay view of one of them, one dataset mounted a second
+        // time, a sibling path that merely shares the prefix, and a tmpfs.
+        let info = "\
+8780 7110 0:880 / / rw,relatime shared:4151 master:4110 - zfs rpool/data/subvol-204-disk-0 rw,xattr,posixacl
+8784 8780 0:775 / /srv/rmng-homes rw,relatime shared:4623 master:4096 - zfs rpool/rmng-homes-104 rw,xattr,noacl
+8790 8784 0:917 / /srv/rmng-homes/ivan-dev-725 rw,relatime shared:4625 - zfs rpool/rmng-homes-104/ivan-dev-725 rw,xattr
+8791 8784 0:983 / /srv/rmng-homes/ivan-dev-707 rw,relatime shared:4627 - zfs rpool/rmng-homes-104/ivan-dev-707 rw,xattr
+8800 8784 0:78 / /srv/rmng-homes/.merged/ivan-dev-707 rw,relatime shared:90 - overlay overlay rw,lowerdir=/srv/rmng-homes/.skeleton/sha256-ab
+8801 8784 0:917 / /srv/rmng-homes/ivan-dev-725-again rw,relatime shared:4625 - zfs rpool/rmng-homes-104/ivan-dev-725 rw,xattr
+8802 8780 0:991 / /srv/rmng-homes-104 rw,relatime shared:4629 - zfs rpool/rmng-homes-104 rw,xattr
+8803 8784 0:23 / /srv/rmng-homes/scratch rw,relatime - tmpfs tmpfs rw,size=64k
+";
+
+        assert_eq!(
+            homes_mounts(info, "/srv/rmng-homes"),
+            vec![
+                "/srv/rmng-homes".to_string(),
+                "/srv/rmng-homes/ivan-dev-725".to_string(),
+                "/srv/rmng-homes/ivan-dev-707".to_string(),
+            ]
+        );
+
+        // The CT root is summed separately, never as part of the homes tree.
+        assert!(!homes_mounts(info, "/srv/rmng-homes").iter().any(|p| p == "/"));
+        // Nothing mounted under the homes root means nothing to add.
+        assert!(homes_mounts(info, "/srv/other-homes").is_empty());
+        assert!(homes_mounts("", "/srv/rmng-homes").is_empty());
     }
 
     #[tokio::test]

@@ -55,8 +55,13 @@ those settings, swap-aware clone memory samples are unavailable.
 The sidebar’s `LXC` header is measured from CT 105 itself rather than by adding clone values. It
 reads the CT-root cgroup through `/proc/1/root`: CPU comes from `cpu.stat` against its enforced
 16-CPU capacity, and memory includes every CT process with the same swap-aware/cache-excluding policy used for
-clone rows. Disk is `statvfs` usage of the CT root filesystem, so this ZFS rootfs figure is
-physical and compression-aware. There is deliberately no logical/pre-compression disk metric:
+clone rows. Disk is `statvfs` usage of the CT root filesystem **plus every ZFS dataset of the
+homes tree**, so this figure is physical and compression-aware. Summing the datasets is not
+optional bookkeeping: since gen-2 each clone home is its own dataset with its own mount, and a
+dataset's `statvfs` reports only its own referenced bytes — so the root alone, or the homes
+parent alone, shows a fleet whose disk use barely moves as clones fill up. The `.merged` overlay
+views are deliberately skipped; an overlay's `statvfs` reports its upper filesystem, which would
+count every clone dataset twice. There is deliberately no logical/pre-compression disk metric:
 RMNG does not query the Proxmox host for ZFS `logicalused`.
 
 ## 1b. Raise the kernel keyring quotas on the Proxmox host

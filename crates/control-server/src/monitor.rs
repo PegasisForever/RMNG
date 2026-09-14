@@ -270,7 +270,7 @@ async fn sample_lxc() -> Option<LxcUsage> {
     let disk_used = match disk {
         Ok(disk_used) => Some(disk_used),
         Err(e) => {
-            tracing::debug!(error = %e, "CT 105 rootfs disk sample unavailable");
+            tracing::debug!(error = %e, "CT disk sample unavailable");
             None
         }
     };

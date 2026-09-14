@@ -166,10 +166,12 @@ RMNG, independent of the clone-only `stats` map. Its `LxcStats` payload has `cpu
 `memLimit`, and `diskUsed`. CPU is measured from the CT-root cgroup’s `cpu.stat` over the monitor
 interval: `100` means CT 105's enforced 16-CPU capacity was busy. `memUsed` uses the
 same RAM-plus-swap policy as clone stats but includes the control-server, Docker daemon, registry,
-caches, and every other CT process. `diskUsed` is physical rootfs usage from CT-root `statvfs`; on
-this CT’s ZFS rootfs it is compression-aware. There is intentionally no logical/pre-compression
+caches, and every other CT process. `diskUsed` is physical usage from CT-root `statvfs` of the
+root filesystem plus every ZFS dataset of the homes tree (one per clone), which on ZFS is
+compression-aware; the `.merged` overlay views are excluded so no clone is counted twice.
+There is intentionally no logical/pre-compression
 disk value because it is not observable from the unprivileged LXC. `cpuPct` is `null` until a
-second CPU sample establishes a rate; `diskUsed` is `null` when the rootfs stat is unavailable.
+second CPU sample establishes a rate; `diskUsed` is `null` when the stat is unavailable.
 Like `stats`, this event is SSE-only and never writes `state.json`.
 
 ### `forwards` event
