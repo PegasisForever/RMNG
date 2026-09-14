@@ -450,6 +450,24 @@ async fn clone_container_after_create(
         }
     }
 
+    // Headed clones: mask the Evolution data-server units pre-boot. The shell activates
+    // them on every start (~250ms storm serialised with our session build) and needs
+    // none of them for capture: calendar/addressbook stay empty, everything else is
+    // identical. Masked activation fails fast with no error loop (validated live); the
+    // storm's trigger (gnome-shell-calendar-server) then has nothing to wait on.
+    // goa-daemon is D-Bus-only with no unit and was only ever pulled in by the source
+    // registry, so masking the registry keeps it down too.
+    if !headless {
+        for unit in [
+            ".config/systemd/user/evolution-source-registry.service",
+            ".config/systemd/user/evolution-calendar-factory.service",
+            ".config/systemd/user/evolution-addressbook-factory.service",
+        ] {
+            crate::home_overlay::symlink_clone_home(hostname, unit, "/dev/null")
+                .with_context(|| format!("clone {hostname}: masking {unit} failed"))?;
+        }
+    }
+
     // Chrome's profile lock is a symlink naming `<hostname>-<pid>`, and it lives in the
     // HOME — so a fork inherits the source's lock while booting under a new hostname, and
     // Chrome refuses to start rather than break a lock it reads as another machine's. The

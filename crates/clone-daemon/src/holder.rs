@@ -271,12 +271,22 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
                     continue; // a session we stopped ourselves during a swap
                 }
                 tracing::warn!("Mutter closed the session (gnome-shell restart?); rebuilding");
-                if let Err(e) = swap(
-                    &mut session, &active, &mut generation, &cfg.clone(), cursor_mode,
-                    &out, &mut ready_rx, &closed_tx,
-                ).await {
-                    tracing::error!("rebuilding the session failed: {e:#}");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                // A rebuild can fail while the new shell is still coming up (its bus name
+                // is not back yet). Retry bounded: one try left the holder session-less
+                // forever, stranding capture until the next layout change or restart.
+                for attempt in 1..=15u32 {
+                    match swap(
+                        &mut session, &active, &mut generation, &cfg.clone(), cursor_mode,
+                        &out, &mut ready_rx, &closed_tx,
+                    ).await {
+                        Ok(()) => break,
+                        Err(e) => {
+                            tracing::error!(
+                                "rebuilding the session failed (attempt {attempt}): {e:#}"
+                            );
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
                 }
             }
         }
