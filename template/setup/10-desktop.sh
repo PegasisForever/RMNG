@@ -20,6 +20,19 @@ ln -sf /usr/share/zoneinfo/America/Toronto /etc/localtime
 echo America/Toronto >/etc/timezone
 mkdir -p /etc/sysctl.d && echo 'net.ipv4.ping_group_range = 0 65534' >/etc/sysctl.d/99-ping.conf
 
+# A clone runs privileged with NO user namespace, so its systemd-sysctl writes the HOST's
+# sysctls -- inotify limits live in the init userns ucounts, and the container shares it.
+# GNOME's localsearch ships /usr/lib/sysctl.d/30-localsearch.conf pinning
+#   fs.inotify.max_user_watches = 65536
+# which was written to RAISE the old 8192 default and now silently LOWERS a host that has
+# deliberately raised it. Every clone start stomped the Proxmox host back to 65536, and a
+# host short of inotify watches fails to boot CTs: systemd-networkd exits
+# `code: 28 (No space left on device)` and the container comes up with no IP. Chased three
+# times in docs/RUNBOOK-GEN1-TO-GEN2.md §2.3 before the cause was found.
+# Mask it the systemd way -- /etc/ wins over /usr/lib/ by name, and a /dev/null symlink
+# drops the file entirely. Survives a localsearch package upgrade; `rm` would not.
+ln -sf /dev/null /etc/sysctl.d/30-localsearch.conf
+
 log "headless GNOME + Mutter + VA-API + PipeWire (NO gdm/g-r-d)"
 # vapostproc (screenshot encode) is plugins-bad, pngenc -good, base in -base. sudo +
 # openssh-server: the docker image ships neither.

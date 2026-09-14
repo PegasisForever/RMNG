@@ -263,12 +263,25 @@ Write the file, not just the live value — this host was found back at the 6553
 no `/etc/sysctl.d` entry, so a `sysctl -w` alone had been lost. Check
 `sysctl fs.inotify.max_user_watches` before every window; 14 running CTs is enough to hit it.
 
-**Check it even when the file is already there.** Before the CT 106 window the live value read
-65536 again, although `/etc/sysctl.d/99-rmng-inotify.conf` was in place from the CT 104 window
-AND `/etc/sysctl.conf` and `/usr/lib/sysctl.d/10-pve-ct-inotify-limits.conf` both set it high.
-Something lowers it at runtime. The persisted file is not enough; read the live value.
-The CT 105 window found it back at 65536 a third time. Treat `sysctl -w` as a required step of
-every window, not a conditional one — it has never once still been raised.
+**Cause found after the CT 105 window — it was the clones.** A clone runs privileged with no
+user namespace, so `systemd-sysctl` inside it writes the *host's* sysctls: inotify limits live
+in the init-userns ucounts and the container shares them. The clone image carries GNOME
+localsearch's `/usr/lib/sysctl.d/30-localsearch.conf`, which pins
+`fs.inotify.max_user_watches = 65536` — written to raise the old 8192 default, and now
+lowering a host that deliberately raised it. **Every clone start stomped the host.** That is
+why only `max_user_watches` ever reverted while `max_user_instances` held, and why it looked
+random: it tracked whenever a clone last booted.
+
+Proof, if you need to re-confirm it: `sysctl -w fs.inotify.max_user_watches=1234567`,
+`docker restart <any clone>`, wait ten seconds, read it back — 65536.
+
+Fixed in `template/setup/10-desktop.sh` with `ln -sf /dev/null
+/etc/sysctl.d/30-localsearch.conf` (the systemd mask; `/etc` wins over `/usr/lib` by name, and
+it survives a package upgrade where `rm` would not). **Clones built before that template
+change still stomp it** — mask it in a running one with
+`docker exec <clone> ln -sf /dev/null /etc/sysctl.d/30-localsearch.conf`, which holds until
+that clone is next rebased. Keep doing the `sysctl -w` check until every clone is on a
+template newer than the fix.
 
 Recovery, if a CT is already stuck this way: raise the limit, then
 `pct exec <id> -- systemctl reset-failed && systemctl restart systemd-networkd`. No reboot.
