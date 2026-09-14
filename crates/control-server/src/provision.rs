@@ -617,6 +617,7 @@ async fn clone_container_after_create(
     }
 
     // wait-ready: poll the mediaplane for the daemon's Hello (keyed by clone_id == hostname).
+    // The sleep is only a fallback: every Hello notifies, so we usually wake within ms.
     on_progress("wait-ready", "waiting for the clone-daemon to register");
     let deadline = Instant::now() + WAIT_READY_TIMEOUT;
     loop {
@@ -649,7 +650,7 @@ async fn clone_container_after_create(
             abort_post_upload(post_tasks).await;
             bail!("clone {hostname} exited before its daemon registered; last logs:{tail}");
         }
-        tokio::time::sleep(WAIT_READY_POLL).await;
+        app.media.wait_hello_tick(WAIT_READY_POLL).await;
     }
 }
 
