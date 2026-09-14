@@ -35,37 +35,14 @@ use serde::{Deserialize, Serialize};
 /// deliberate. Unknown fields from the group-proxy era are dropped by serde on load.
 const KEY_FILE: &str = "cliproxy-instances.json";
 
-/// Accepts **both** spellings of the key map, and that is load-bearing rather than defensive.
-///
-/// The group-proxy era's struct carried no `rename_all`, so it wrote snake_case `router_keys`;
-/// nothing guarantees a given deployment's file uses one spelling or the other, and every clone's
-/// `/etc/environment` already holds the value under whichever was written. Reading only the wrong
-/// one silently mints fresh keys for the whole fleet — which does not fail loudly, it just breaks
-/// sub-clone creation and clone↔clone SSH on every clone at once, because those compare the
-/// presented bearer against this map.
-///
-/// So both are deserialized and merged on load ([`KeyFile::keys`]); writes use `routerKeys`.
+/// The on-disk shape. Only the key map is kept; every other field from the retired group-proxy
+/// file (instance ports, CLIProxyAPI secrets) is dropped by serde on load and rewritten away on
+/// the first mint.
 #[derive(Default, Serialize, Deserialize)]
 struct KeyFile {
-    /// `clone_id` → its stable identity bearer (`RMNG_PROXY_KEY`). The canonical spelling — what
-    /// we write.
+    /// `clone_id` → its stable identity bearer (`RMNG_PROXY_KEY`).
     #[serde(default, rename = "routerKeys")]
     router_keys: HashMap<String, String>,
-    /// The group-proxy era's spelling. Read-only: merged into `router_keys` at load and never
-    /// written back, so a file round-trips to the canonical form on the first mint.
-    #[serde(default, rename = "router_keys", skip_serializing)]
-    legacy_router_keys: HashMap<String, String>,
-}
-
-impl KeyFile {
-    /// Both spellings merged, canonical winning a collision (a file carrying both is already
-    /// malformed; preferring the one we write keeps the outcome deterministic).
-    fn keys(mut self) -> HashMap<String, String> {
-        for (clone, key) in self.router_keys.drain() {
-            self.legacy_router_keys.insert(clone, key);
-        }
-        self.legacy_router_keys
-    }
 }
 
 struct Inner {
@@ -100,16 +77,10 @@ fn random_token() -> String {
 impl CloneKeys {
     pub fn load(data_dir: &str) -> Self {
         let path = std::path::Path::new(data_dir).join(KEY_FILE);
-        let raw: KeyFile = std::fs::read_to_string(&path)
+        let file: KeyFile = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        // Collapse both on-disk spellings into the canonical field, so everything downstream —
-        // including the rewrite on the next mint — sees one map.
-        let file = KeyFile {
-            router_keys: raw.keys(),
-            legacy_router_keys: HashMap::new(),
-        };
         let index = file
             .router_keys
             .iter()
@@ -226,16 +197,12 @@ mod tests {
     /// across the revert; minting fresh keys would silently break both.
     #[test]
     fn adopts_existing_router_keys_and_ignores_group_proxy_fields() {
-        // The SHIPPED group-proxy file, byte-for-byte in shape: its struct carried no
-        // `rename_all`, so the key map is snake_case `router_keys`. This is the format actually
-        // found on an upgraded deployment — a fixture written in the other spelling passes while
-        // the real thing silently re-mints every clone's key.
         let dir = tmp_dir("adopt");
         std::fs::write(
             std::path::Path::new(&dir).join(KEY_FILE),
             r#"{
                 "instances": {"team": {"port": 9100, "inbound_key": "secret"}},
-                "router_keys": {"clone-a": "PREEXISTING"},
+                "routerKeys": {"clone-a": "PREEXISTING"},
                 "admin_secret": "another-secret"
             }"#,
         )
@@ -268,27 +235,6 @@ mod tests {
         );
         // And the rewritten file still round-trips.
         assert_eq!(CloneKeys::load(&dir).mint("clone-a"), "PREEXISTING");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The camelCase spelling must work too. Which one a deployment has is not knowable from
-    /// here, and picking wrong re-mints the whole fleet's identity rather than failing loudly.
-    #[test]
-    fn adopts_camel_case_router_keys_too() {
-        let dir = tmp_dir("adopt-camel");
-        std::fs::write(
-            std::path::Path::new(&dir).join(KEY_FILE),
-            r#"{"routerKeys": {"clone-a": "CAMEL"}}"#,
-        )
-        .unwrap();
-        assert_eq!(CloneKeys::load(&dir).mint("clone-a"), "CAMEL");
-        // Both at once (a malformed file): the canonical spelling wins, deterministically.
-        std::fs::write(
-            std::path::Path::new(&dir).join(KEY_FILE),
-            r#"{"routerKeys": {"clone-a": "CAMEL"}, "router_keys": {"clone-a": "SNAKE"}}"#,
-        )
-        .unwrap();
-        assert_eq!(CloneKeys::load(&dir).mint("clone-a"), "CAMEL");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

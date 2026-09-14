@@ -650,10 +650,9 @@ pub(crate) fn delete_pct(step: &str) -> Option<f64> {
 /// volume is logged, not fatal (the container removal is what matters). `host_id` is both
 /// the container name to stop/remove and the volume-name stem (`rmng-dind-<host_id>`).
 ///
-/// Gen-2 tail (no-op on gen-1 rows, which carry no `dataset`): destroy the home dataset
-/// (kept, with a warning, when fork clones still reference it), destroy the origin
-/// snapshot it was cloned from when nothing references it anymore, and remove the base
-/// image tag when no remaining clone row references it.
+/// Gen-2 tail: destroy the home dataset (kept, with a warning, when fork clones still
+/// reference it), destroy the origin snapshot it was cloned from when nothing references
+/// it anymore, and remove the base image tag when no remaining clone row references it.
 pub async fn delete_clone(
     app: &App,
     host_id: &str,
@@ -693,25 +692,23 @@ pub async fn delete_clone(
     let home = CloneHome::of(app, host_id);
     home.teardown();
     if let Some(row) = gen2_row(app, host_id) {
-        if crate::clone_home::is_gen2(&row) {
-            on_progress("remove", "destroying the home dataset");
-            // Read the origin BEFORE the destroy: afterwards there is nothing left to ask.
-            let origin = home.origin();
-            match home.destroy(false) {
-                Ok(()) => {
-                    if let Some(snap) = origin {
-                        if let Err(e) = home.drop_snapshot(&snap) {
-                            tracing::warn!(
-                                "delete {host_id}: keeping origin snapshot {snap}: {e} (non-fatal)"
-                            );
-                        }
+        on_progress("remove", "destroying the home dataset");
+        // Read the origin BEFORE the destroy: afterwards there is nothing left to ask.
+        let origin = home.origin();
+        match home.destroy(false) {
+            Ok(()) => {
+                if let Some(snap) = origin {
+                    if let Err(e) = home.drop_snapshot(&snap) {
+                        tracing::warn!(
+                            "delete {host_id}: keeping origin snapshot {snap}: {e} (non-fatal)"
+                        );
                     }
                 }
-                Err(e) => tracing::warn!(
-                    "delete {host_id}: keeping home dataset ({e}); fork clones may still \
-                     reference it (non-fatal)"
-                ),
             }
+            Err(e) => tracing::warn!(
+                "delete {host_id}: keeping home dataset ({e}); fork clones may still \
+                 reference it (non-fatal)"
+            ),
         }
         if let Some(tag) = row.base_tag {
             purge_image_if_unused(app, host_id, &tag).await;
@@ -865,7 +862,7 @@ pub async fn clone_container_gen2_from_tag(
         cpus: cfg.docker.clone_cpus,
         memory_mb: cfg.docker.clone_memory_mb,
         sock_source: sock_source_dir(app).await,
-        home_dir: Some(merged.to_string_lossy().into_owned()),
+        home_dir: merged.to_string_lossy().into_owned(),
         browse_root: crate::clone_home::browse_root().display().to_string(),
         // Absolute host path (the pool lives under the homes parent, which the daemon
         // sees through the shared homes bind); ensured at server startup.

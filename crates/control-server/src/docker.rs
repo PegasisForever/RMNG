@@ -293,9 +293,8 @@ pub struct CreateSpec {
     /// The daemon path is `<this>/clones.sock`; empty skips the mount (dev/test).
     pub sock_source: String,
     /// Merged home-overlay view on the CT (e.g. `/srv/rmng-homes/.merged/<id>`),
-    /// bound at `/home/rmng`. Always `Some` from the create path; `None` mounts no home
-    /// (only meaningful for flows that bring their own).
-    pub home_dir: Option<String>,
+    /// bound at `/home/rmng`.
+    pub home_dir: String,
     /// The merged-view root on the CT (e.g. `/srv/rmng-homes/.merged`), bound at
     /// `/clones` so every clone sees every home. Always mounted alongside `home_dir`,
     /// and reached as `~/clones` through the symlink `home_overlay::ensure_home_links`
@@ -1503,39 +1502,37 @@ impl DockerCtl {
         // Clone home: the merged overlay view at /home/rmng. Always mounted: the single
         // create caller always passes a merged path, and a clone without its home is
         // never a valid output — fail at Docker, loudly, rather than boot half a clone.
-        if let Some(dir) = spec.home_dir.as_deref() {
-            mounts.push(Mount {
-                target: Some("/home/rmng".to_string()),
-                source: Some(dir.to_string()),
-                typ: Some(MountTypeEnum::BIND),
+        mounts.push(Mount {
+            target: Some("/home/rmng".to_string()),
+            source: Some(spec.home_dir.clone()),
+            typ: Some(MountTypeEnum::BIND),
+            ..Default::default()
+        });
+        mounts.push(Mount {
+            target: Some("/clones".to_string()),
+            source: Some(spec.browse_root.clone()),
+            typ: Some(MountTypeEnum::BIND),
+            // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
+            // copies straight across any home. No `read_only` here.
+            //
+            // NOT under `/home/rmng`. GNOME's file manager lists every mount whose
+            // path is under the home directory, and each sibling home below this
+            // one is its own overlay mount, so a clone's sidebar grew a row per
+            // clone in the fleet. `~/clones` is a symlink to here.
+            //
+            // `rslave` is load-bearing. Every sibling's home is its own overlay
+            // mount UNDER this source, and a default (private) bind copies only
+            // the mounts that exist the moment the container starts: a clone
+            // created later shows up as an empty directory here, forever. As a
+            // slave of the CT's `<homes>` peer group this view tracks the CT —
+            // homes appear as clones are created and vanish as they are deleted —
+            // while mounts made inside the clone still never escape to the CT.
+            bind_options: Some(MountBindOptions {
+                propagation: Some(MountBindOptionsPropagationEnum::RSLAVE),
                 ..Default::default()
-            });
-            mounts.push(Mount {
-                target: Some("/clones".to_string()),
-                source: Some(spec.browse_root.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
-                // copies straight across any home. No `read_only` here.
-                //
-                // NOT under `/home/rmng`. GNOME's file manager lists every mount whose
-                // path is under the home directory, and each sibling home below this
-                // one is its own overlay mount, so a clone's sidebar grew a row per
-                // clone in the fleet. `~/clones` is a symlink to here.
-                //
-                // `rslave` is load-bearing. Every sibling's home is its own overlay
-                // mount UNDER this source, and a default (private) bind copies only
-                // the mounts that exist the moment the container starts: a clone
-                // created later shows up as an empty directory here, forever. As a
-                // slave of the CT's `<homes>` peer group this view tracks the CT —
-                // homes appear as clones are created and vanish as they are deleted —
-                // while mounts made inside the clone still never escape to the CT.
-                bind_options: Some(MountBindOptions {
-                    propagation: Some(MountBindOptionsPropagationEnum::RSLAVE),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        }
+            }),
+            ..Default::default()
+        });
         // Shared pool, same ordinary bind: present from first boot and surviving
         // restarts, unlike the retired live mount it replaces. Always mounted, same
         // reasoning: `shared_host_dir` never yields empty, and a pool-less clone would
