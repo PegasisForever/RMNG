@@ -170,8 +170,6 @@ async fn main() -> Result<()> {
             tracing::info!("daemon boot: media socket took {:?}", t0.elapsed());
             let holder = Holder::connect().await?;
             tracing::info!("daemon boot: holder connect took {:?} total", t0.elapsed());
-            // After the holder wait, not before it: nothing above needs GStreamer, and
-            // the media dial + holder connect start sooner on every boot.
             run_shipping(holder, transport, &path, embedded).await
         }
         None => {
@@ -238,13 +236,6 @@ async fn run_shipping(
         &[],
     )?;
     tracing::info!("connected to media socket {socket_path} as clone '{clone_id}'");
-    // After the Hello send, not before it: only the embedded-cursor path uses GStreamer
-    // (MCP screenshots encode via `media`), and no capture can start before the server
-    // sees this Hello and asks for it — sequential message processing guarantees that.
-    // Default raw-PW clones skip the ~190ms init entirely.
-    if embedded {
-        gstreamer::init().context("gstreamer init")?;
-    }
     // After the Hello send, not before it: only the embedded-cursor path uses GStreamer
     // (MCP screenshots encode via `media`), and no capture can start before the server
     // sees this Hello and asks for it — sequential message processing guarantees that.

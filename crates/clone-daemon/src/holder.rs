@@ -284,6 +284,12 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
                             tracing::error!(
                                 "rebuilding the session failed (attempt {attempt}): {e:#}"
                             );
+                            if attempt == 15 {
+                                tracing::error!(
+                                    "session rebuild given up: holder stays session-less until \
+                                     the next layout change, restart, or shell return"
+                                );
+                            }
                             tokio::time::sleep(Duration::from_secs(2)).await;
                         }
                     }
