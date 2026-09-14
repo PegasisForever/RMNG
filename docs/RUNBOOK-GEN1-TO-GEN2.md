@@ -8,46 +8,54 @@ clone keeps it on a ZFS dataset outside the container. The new control-server ca
 gen-1 clones, so each CT gets one window: build a new privileged CT, move the Docker state
 into it, start the new server, and let it rewrite every clone.
 
-**Status.** Two of three are done.
+**Status. All three are done.**
 
     CT 104 -> CT 204  `ivan-rmng`,   LAN 10.0.0.235, tailnet 100.116.208.33
                       2026-09-13, 8 of 8 clones passed
     CT 106 -> CT 206  `haoran-rmng`, LAN 10.0.0.210, tailnet 100.91.21.92
                       2026-09-13, 101 of 101 clones passed
-    CT 105            outstanding — the last one
+    CT 105 -> CT 205  `pega-rmng`,   LAN 10.0.0.129, tailnet 100.99.199.38
+                      2026-09-14, 24 of 24 clones passed
 
-Both old CTs are stopped, `onboot 0`, docker and tailscale disabled, snapshotted, and are the
-rollback (§9). One item is open on each: `tailscale serve` is not set, because Serve is
-disabled for those tailnets and enabling it needs a browser (§6.3). Each dashboard answers on
-both of its addresses meanwhile.
+All three old CTs are stopped, `onboot 0`, docker and tailscale disabled, snapshotted, and are
+the rollback (§9). One item is open on CT 204 and CT 206: `tailscale serve` is not set, because
+Serve is disabled for those tailnets and enabling it needs a browser (§6.3). Each dashboard
+answers on both of its addresses meanwhile. **CT 205 has its serve** — Serve was already enabled
+on `tail0e863`, which is why §6.3 is a per-tailnet caveat and not a general one.
 
 **Order was CT 104, CT 106, CT 105.** CT 106 was taken second rather than last: the parallel
 copy in §5.3 removed the reason to fear its size, and it was the CT under the most pressure.
 
 ## The three boxes
 
-| | CT 104 → 204 ✅ | CT 105 → 205 | CT 106 → 206 ✅ |
+| | CT 104 → 204 ✅ | CT 105 → 205 ✅ | CT 106 → 206 ✅ |
 | --- | --- | --- | --- |
 | IP of the OLD CT | 10.0.0.206 | 10.0.0.15 | 10.0.0.180 |
-| IP of the NEW CT | 10.0.0.235 | — | 10.0.0.210 |
-| rootfs used | 101 GB | 612 GB | 917 GB |
+| IP of the NEW CT | 10.0.0.235 | 10.0.0.129 | 10.0.0.210 |
+| rootfs used | 101 GB | 564 GB | 917 GB |
 | Docker | 29.7.2 / containerd.io 2.3.3 | 29.6.1 / containerd.io 2.2.5 | 29.6.1 / containerd.io 2.2.5 |
-| clone rows | 8 | 30 | 104 |
+| clone rows | 8 | 24 | 104 |
 | hostname prefix | `ivan-` | `pega-` | `haoran-` |
-| presets | 1 (`Medi`) | 3 (`medi`, `hyperhost`, `wealthstack`) | 1 (`talktomedi`) |
+| presets | 1 (`Medi`) | 4 (`medi`, `hyperhost`, `wealthstack`, `personal`) | 1 (`talktomedi`) |
 | published ports | 445 2222 9000 9001 9005 | 445 2222 9000 9001 9005 | 445 2222 9000 9001 9005 |
 | `/etc/docker/daemon.json` | none | `{"dns": […]}` | none |
 | GPU devices to pass | render node + `/dev/kfd` | render node + `/dev/kfd` | render node only |
 | tailnet | `tail8d43a5.ts.net` | `tail0e863.ts.net` | `tailc2613e.ts.net` |
-| `tailscale serve` | — (restore it, §6.3) | yes → `:9000` | none |
+| `tailscale serve` | — (restore it, §6.3) | yes → `:9000`, restored ✅ | none |
 
-CT 105 also publishes 9002 and 9003 with nothing behind them. Drop them from the new run
-command.
+CT 105 also published 9002 and 9003 with nothing behind them; they were dropped from the new
+run command.
 
-Budget, **with §5.3 run in parallel**: the copy was 30 minutes for CT 106's 905 GiB, and the
-per-clone migration in §5.7 another 2 h 30 m for its 101 clones. Do not budget from size — see
-§5.3, the cost tracks file count, and a serial copy of the same data would have run 4 to 6
-hours.
+Budget, **with §5.3 run in parallel**: the copy was 30 minutes for CT 106's 905 GiB and 40
+minutes for CT 105's 564 GB (500 tasks, 0 failures); the per-clone migration in §5.7 was
+another 2 h 30 m for CT 106's 101 clones and 1 h 01 m for CT 105's 24. Do not budget from size
+— see §5.3, the cost tracks file count, and a serial copy of the same data would have run 4 to
+6 hours.
+
+**Pool space was never the constraint.** CT 105 started with 853 GiB free and *ended with 864
+GiB* — dedup held the whole 564 GB copy to a few GiB, and §8.2's image reclaim gave back more
+than the copy took. Do the §2.2 check anyway, but do not plan around needing a second full
+copy's worth of headroom.
 
 ---
 
@@ -99,6 +107,56 @@ CT 106's real answer, for reference: it loses `rsync` and `sqlite3` at the packa
 `/usr/local/bin/sops` and `/usr/local/bin/aws`; it gains clang-21, firefox, google-cloud-cli,
 llvm-21, onlyoffice, papirus-icon-theme and mission-center. Its `talktomedi` preset Dockerfile
 is CT 204's `Medi` one plus one `apt-get install rsync sqlite3` line.
+
+CT 105's answer, for reference — **measure every preset separately there, they differ a lot.**
+Its clones ran nine different base images. The set common to all of them is `avahi-utils
+flameshot gnome-themes-extra grim htop rclone rsync tree wl-clipboard` plus flameshot's qt6
+stack; on top of that `hyperhost` carries the whole gtk4/gstreamer/wayland/drm **-dev**
+toolchain (that is the preset `pega-rmng-development` builds RMNG under), and `wealthstack`
+carries gtk3 + webkit2gtk **-dev** for `pega-git-visualizer`. `gained:` was empty for every
+clone — these bases are strict supersets of the template.
+
+Two CT 105 losses that no Dockerfile can carry, both worth naming out loud rather than
+discovering later:
+
+- `git-visualizer`, an apt package installed into one clone's base. One image serves a whole
+  preset, so a per-clone package has nowhere to live.
+- `/usr/local/bin/sendrec`, a hand-built 2.6 MB binary in 9 of 11 live clones and in no
+  package repo. It went into `~/.local/bin/sendrec` in all 24 homes instead: that is back on
+  `PATH` via Ubuntu's default `~/.profile`, and unlike `/usr/local/bin` the home survives
+  every future rebase. Copy it out with `docker cp <clone>:/usr/local/bin/<bin> …` **before**
+  §5.1, while the old CT still has it.
+
+**The template ships no node at all** — not in any version of it so far. Every preset
+Dockerfile has to install one; the CT 204 `Medi` file is the reference. Check with
+`docker run --rm --entrypoint bash pegasis0/rmng-template:latest -c 'command -v node npm'`
+before assuming otherwise.
+
+**NodeSource silently gives you the wrong node once a major goes EOL.** CT 105's `wealthstack`
+clones run node 20, so its Dockerfile started as the CT 204 block with `node_20.x` — and node
+20 is past EOL, so `deb.nodesource.com/node_20.x` no longer lists a `nodejs` package. apt fell
+straight through to **Ubuntu's own `nodejs` 22.22.1**, which passed the `/usr/bin/node
+--version` check at the end of that `RUN` and then broke the *next* step with `npm: not
+found`, because Ubuntu splits npm into a separate package. The failure names npm, not node,
+and points at the corepack line rather than the real culprit two steps up.
+
+For any EOL major, take the official tarball instead of NodeSource, and assert the version so
+a wrong one fails the build rather than shipping quietly:
+
+```dockerfile
+RUN curl -fsSL -o /tmp/node.tar.xz \
+      https://nodejs.org/dist/v20.20.2/node-v20.20.2-linux-x64.tar.xz \
+ && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+      --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md \
+ && rm -f /tmp/node.tar.xz \
+ && /usr/local/bin/node --version | grep -qx v20.20.2 \
+ && /usr/local/bin/npm --version
+```
+
+That lands node in `/usr/local/bin`, not `/usr/bin` — so the §8.4 check becomes
+`command -v node` printing *either* path. The node-20 tarball also bundles corepack already,
+so the corepack step needs `npm install -g corepack --force` or it fails on the existing
+`/usr/local/bin/corepack`.
 
 Then choose, per CT:
 
@@ -209,6 +267,8 @@ no `/etc/sysctl.d` entry, so a `sysctl -w` alone had been lost. Check
 65536 again, although `/etc/sysctl.d/99-rmng-inotify.conf` was in place from the CT 104 window
 AND `/etc/sysctl.conf` and `/usr/lib/sysctl.d/10-pve-ct-inotify-limits.conf` both set it high.
 Something lowers it at runtime. The persisted file is not enough; read the live value.
+The CT 105 window found it back at 65536 a third time. Treat `sysctl -w` as a required step of
+every window, not a conditional one — it has never once still been raised.
 
 Recovery, if a CT is already stuck this way: raise the limit, then
 `pct exec <id> -- systemctl reset-failed && systemctl restart systemd-networkd`. No reboot.
@@ -243,6 +303,26 @@ a missing container as well):
 curl -s -XPOST http://<new-ct-ip>:9000/api/delete \
   -H 'Content-Type: application/json' -d '{"id":"haoran-dev-621"}'
 ```
+
+### 2.4b Check every row's preset actually exists
+
+A row can name a preset that is not in `config.json`. CT 105 had two — `pega-command-center`
+and `pega-daily-catch-up` both carried `presetName: "personal"` with no `personal` preset
+anywhere. `preset_dockerfile()` falls back to the bare template for an unknown name, so those
+rows would have rebuilt onto an image with no node and picked up no vars at all, silently.
+
+```sh
+pct exec <ct> -- python3 -c '
+import json, urllib.request
+c = json.load(open("/var/lib/docker/volumes/rmng-data/_data/config.json"))
+have = {p["name"] for p in c.get("presets", [])}
+used = {h.get("presetName") for h in
+        json.load(urllib.request.urlopen("http://127.0.0.1:9000/api/state"))["hosts"]}
+print("preset names with no preset:", sorted(n for n in used - have if n))'
+```
+
+Fix it by adding the missing preset in §5.4 rather than by editing the rows — one new entry
+copied from the nearest existing preset, with its own Dockerfile and no project vars.
 
 ### 2.5 Write the preset Dockerfiles
 
@@ -408,6 +488,10 @@ reported `active` and the daemon logged its whole api_extensions list, while
 `systemctl restart lxcfs` fixed it: 11 mounts, `proc` and `sys` present. CT 204 did not show
 this, so it is start-order dependent rather than a one-off. Restart once if the listing is
 empty, and only believe the `ls`.
+
+CT 205 hit it too — `is-active: active`, `/var/lib/lxcfs/proc/` absent, one restart gave 11
+mounts. Two of three CTs now, so just make the restart unconditional and check the listing
+after it.
 
 If you hit the failure after the fact: install lxcfs, then `docker restart rmng` to re-file
 the migration. The failing step is the home read, which happens before the old container is
@@ -588,6 +672,14 @@ The exception is a `PATH` var: CT 106's preset carried one pointing into `~/.nvm
 deletes. Drop it and add `COREPACK_HOME=/opt/corepack`. Read the printed var list below and
 check for `PATH` before moving on.
 
+**All three of CT 105's presets had one**, so assume every preset has a `PATH` var until you
+have looked. Dropping it outright is safe even though these also listed `~/.cargo/bin` and
+`~/.local/bin` — which hold cargo, rustc, rustup, uv and the `claude`, `codex` and `pi`
+binaries. The server execs with `bash -lc`, and a login shell re-adds `~/.local/bin` from
+Ubuntu's default `~/.profile` and `~/.cargo/bin` from rustup's `.bashrc` line. Verified on
+CT 205 after the drop: `command -v claude` → `/home/rmng/.local/bin/claude` in all 11 running
+clones.
+
 Put the script in a file and `pct push` it — a `<<PY` heredoc through `ssh` and `pct exec`
 mangles the quoting.
 
@@ -714,7 +806,10 @@ the shared pool, stops every non-archived clone, and files one `Migrate` op per 
 **That constant should be 8, not 4.** Measured on CT 206 while 4 ran: the host was 48% idle at
 load 17 of 32 cores, so each migrating clone costs about 4 cores and 8 is what fills the
 machine. Raising it needs a rebuild, so decide before the window rather than during it. Do not
-go past 8 without measuring — the plain file copy in §5.3 stopped gaining there too. After the last one it starts every non-archived clone and re-pushes each
+go past 8 without measuring — the plain file copy in §5.3 stopped gaining there too.
+CT 105 was deliberately left at 4: 24 rows at 4 at a time came to 1 h 01 m, and the ~20 minutes
+8 would have saved did not justify building and pushing a one-off image on the last CT. It is
+worth raising only for a CT on CT 106's scale. After the last one it starts every non-archived clone and re-pushes each
 one's stored Claude and Codex tokens. Archived clones stay stopped. Failures log and
 continue, and one retry pass runs at the end.
 
@@ -1020,6 +1115,16 @@ took the image store from 98.08 GB to 59.08 GB. What must stay: the derived `rmn
 `pegasis0/rmng-template:latest` under it, `pegasis0/rmng:latest`, the untagged image the
 renamed gen-1 server container still holds, `moby/buildkit` and `registry`.
 
+CT 205's thirteen were `hyperhost-worker{3,4,5}` and `pega-template{3,5,6,7,8,9,10,11,12,13}`:
+168.2 GB of images down to 83.2 GB. It keeps three derived tags, not one, because it has three
+distinct preset Dockerfiles (`personal` shares `medi`'s text, so it resolves to the same tag).
+`alpine:latest` was left alone at 4 MB rather than chased down.
+
+**Look for stray junk in `rmng-data` while you are here.** CT 205 arrived carrying
+`/var/lib/docker/volumes/rmng-data/_data/core.1944916`, an **18 GB core dump** from a crash on
+the old CT that the copy faithfully reproduced. It is referenced by nothing. Check with
+`ls -lnS /var/lib/docker/volumes/rmng-data/_data/ | head` and delete what is obviously dead.
+
 ### 8.3 Inner Docker re-pulls — leave them to the clone owners
 
 Each clone's inner Docker starts empty — the `rmng-dind-*` and `rmng-ctd-*` volumes are
@@ -1071,8 +1176,20 @@ image first, confirm `/usr/bin/node` answers, and only then remove.
 
 ```sh
 ssh root@10.0.0.100 'pct exec 205 -- docker exec -u rmng <clone> bash -lc "command -v node"'
-# must print /usr/bin/node, not /home/rmng/.nvm/...
+# must print /usr/bin/node (or /usr/local/bin/node for a tarball install, §1.1),
+# not /home/rmng/.nvm/...
 ```
+
+**Check fish separately, and do not trust `command -v` there.** Before the strip, CT 205's
+clones printed `command -v node` → `/usr/bin/node` in fish while `node --version` returned the
+nvm version — the fish-nvm *function* shadows the binary, so the path looks right and the
+version is wrong. On `pega-we-588a` that meant fish ran node 26.4.0 where the image ships
+20.20.2. `docker exec -u rmng <clone> fish -lc 'echo (command -v node) (node --version)'`
+shows both halves; after the strip they agree.
+
+**`install -o 1000` fails in the privileged CT** with `install: invalid user: '1000'` — there
+is no passwd entry for that uid there. Use `mkdir -p` + `cp` + numeric `chown 1000:1000`
+when placing anything into a home from the CT side.
 
 Removal, per home — the merged view, so it works on stopped and archived clones too:
 
