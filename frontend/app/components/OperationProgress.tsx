@@ -27,13 +27,16 @@ const STATUS_LABEL: Record<Operation["status"], string> = {
   error: "Failed",
 };
 
-const VERB: Record<Operation["kind"], string> = {
+/** One present-participle label per operation kind. `Record<Operation["kind"], ...>` keeps
+ *  this exhaustive against the generated kind list: a new server kind fails the type check
+ *  here instead of rendering a blank verb. */
+export const VERB: Record<Operation["kind"], string> = {
   clone: "Cloning",
   delete: "Deleting",
   archive: "Archiving",
   unarchive: "Restoring",
   pull: "Pulling",
-  commit: "Committing",
+  prebuild: "Building",
   update: "Updating",
 };
 

@@ -346,8 +346,8 @@ function CopySshMenuItem({
   );
 }
 
-/** The per-clone overflow menu (⋮): commit / change-account / delete and the rest. Unmanaged
- *  rows (no container) only get Remove. The shell — trigger, portal, positioning, item row —
+/** The per-clone overflow menu (⋮): Linear, change-account, rebase, port forward, SSH,
+ *  archive, mute, delete. Unmanaged rows (no container) only get Remove. The shell — trigger, portal, positioning, item row —
  *  is shared with the ticket cards; only this list of actions is the clone's own. */
 function CloneMenu({
   cloneId,
@@ -476,8 +476,8 @@ export function SidebarClone({
   // once here rather than repeating the fallback down the card.
   const title = ticket?.title ?? clone.displayName ?? clone.id;
   const linearUrl = ticket?.url ?? clone.linearTicketUrl ?? undefined;
-  // Managed clones (backed by a container named after the clone id) get the commit /
-  // account actions; plain unmanaged rows only get remove.
+  // Managed clones (backed by a container named after the clone id) get the full menu;
+  // plain unmanaged rows only get remove.
   const managed = clone.managed === true;
   // Archived clones retain their container but deliberately hide runtime actions until they
   // are restored; unmanaged rows have no container-backed SSH endpoint either.

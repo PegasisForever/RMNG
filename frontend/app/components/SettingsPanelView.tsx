@@ -30,7 +30,6 @@ import type { BoardColumn } from "~/lib/board";
 import type { SettingsDraft } from "~/lib/settingsDraft";
 import { orderedAccounts } from "~/lib/accountOrder";
 import type { ClaudeUsage, Operation } from "~/lib/types";
-import type { ImageInfo } from "~/lib/wire/ImageInfo";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
 export interface SettingsPanelViewProps {
