@@ -519,6 +519,10 @@ pub async fn abort_chat(app: &App, host: &RmngClone) {
 
 // --- kickoff (post-clone first message) ------------------------------------
 
+/// TEMPORARILY UNUSED — its one caller (`jobs::finish_clone`) is commented out, so nothing
+/// auto-prompts a clone any more. Kept whole rather than deleted: the kickoff is coming back
+/// after a rework, and this is the shape it has to come back to.
+#[allow(dead_code)]
 #[derive(Default)]
 pub struct KickoffOpts {
     pub ticket_url: Option<String>,
@@ -529,6 +533,9 @@ pub struct KickoffOpts {
 
 /// After a clone, wait for the wrapper to accept its event stream, then send the kickoff
 /// message (ticket URL or plain first message + optional instruction overrides).
+///
+/// TEMPORARILY UNCALLED — see [`KickoffOpts`].
+#[allow(dead_code)]
 pub async fn kickoff_agent(app: App, host: RmngClone, opts: KickoffOpts) {
     let mut msg = opts
         .ticket_url

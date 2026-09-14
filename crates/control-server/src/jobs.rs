@@ -291,22 +291,34 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
             if forked {
                 crate::clone_reconcile::spawn_converge_after_start(&app, &id, "fork");
             }
+            // TEMPORARILY DISABLED — the only automatic first message in the server, and
+            // the only way a turn starts without an operator asking for one. Nothing may
+            // prompt a clone but the web UI's composer until the kickoff is reworked.
+            //
+            // Restore by uncommenting this block, dropping the `let _` below, and removing
+            // the `#[allow(dead_code)]` from `chat::kickoff_agent` and `chat::KickoffOpts`.
+            //
             // Start the agent on its ticket or first message; a clone with neither stays
             // quiet.
-            if ticket_url.is_some() || first_message.is_some() {
-                if let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == id) {
-                    tokio::spawn(crate::chat::kickoff_agent(
-                        app.clone(),
-                        host,
-                        crate::chat::KickoffOpts {
-                            ticket_url,
-                            message: first_message,
-                            agent_instructions,
-                            claude_instructions,
-                        },
-                    ));
-                }
-            }
+            // if ticket_url.is_some() || first_message.is_some() {
+            //     if let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == id) {
+            //         tokio::spawn(crate::chat::kickoff_agent(
+            //             app.clone(),
+            //             host,
+            //             crate::chat::KickoffOpts {
+            //                 ticket_url,
+            //                 message: first_message,
+            //                 agent_instructions,
+            //                 claude_instructions,
+            //             },
+            //         ));
+            //     }
+            // }
+            //
+            // The plan still carries all four: they are recorded on the row and read back by
+            // the clone dialog, so they are collected and stored exactly as before — only the
+            // send is gone.
+            let _ = (&ticket_url, &first_message, &agent_instructions, &claude_instructions);
         }))
 }
 
