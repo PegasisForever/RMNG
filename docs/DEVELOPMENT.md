@@ -36,8 +36,12 @@ running server's payloads; there's no manual redeploy step.
 | [CLI.md](CLI.md) | The `rmng` CLI (`/usr/local/bin/rmng` in every clone): every subcommand incl. `desktop`/`exec`, `--json`, exit codes, wait semantics |
 | [PROTOCOL.md](PROTOCOL.md) | The port-1 video/input/clipboard/cursor wire protocol, the clone socket, the config schema, every env var, the clone-daemon CLI, and the per-crate public API |
 | [SCRIPTS.md](SCRIPTS.md) | Every script: what it does, where it runs, its args, and what invokes it |
-| [DEPLOY.md](DEPLOY.md) | The Docker build → run → wizard → images/clones flow, the image build, upgrades, clone-home browsing, and the dev loop |
-| [PROXMOX-LXC.md](PROXMOX-LXC.md) | Running the Docker host on an unprivileged Proxmox LXC CT (one hosting option) |
+| [DEPLOY.md](DEPLOY.md) | The Docker build → run → wizard → clones flow, the image build, upgrades, clone-home browsing, and the dev loop |
+| [PROXMOX-LXC.md](PROXMOX-LXC.md) | Running the Docker host on a **privileged** Proxmox LXC CT (one hosting option; privileged is a hard requirement since gen-2, and it is a one-way trip) |
+| [GEN2-CLONES.md](GEN2-CLONES.md) | The gen-2 design reference: ZFS home datasets, the home overlay, preset images, and the create/fork/rebase/delete flows. Read this before changing anything about clone storage |
+| [CLONE-LAYERS.md](CLONE-LAYERS.md) | Where every byte of a clone comes from: baked into the image, injected before boot, injected after boot, and what converges later |
+| [RUNBOOK-GEN1-TO-GEN2.md](RUNBOOK-GEN1-TO-GEN2.md) | The record of the gen-1 → gen-2 migration of the three production containers, including the still-armed rollback (§9) |
+| [RUNBOOK-CT101-TESTING.md](RUNBOOK-CT101-TESTING.md) | Testing a change on CT 101, the disposable test deployment — and the rule that production is never a deploy target |
 
 ## Workspace map
 

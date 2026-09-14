@@ -36,8 +36,10 @@ clone binaries.
   dirs owned by the user (`~/.claude`, `~/.codex`, `~/.pi/agent`, `~/.config[/rmng]`,
   both `rmng-cli` skill dirs, `~/.cursor[/rules]`, `~/.rmng` — every parent the parity
   tar writes into, so the extract never invents a root-owned dir; a test pins this
-  against phase 30), user toolchains (claude / uv / rustup / nvm / fish-nvm, plus the
-  Codex CLI — the image is its sole source, no post-boot install exists), and the `systemd --user` unit DEFINITIONS (headless
+  against phase 30), user toolchains (uv / rustup, plus the standalone `claude` and
+  `codex` CLIs — the image is their sole source, no post-boot install exists; both
+  installers need no node, and nvm is NOT installed — a clone that needs node gets it
+  from its preset Dockerfile), and the `systemd --user` unit DEFINITIONS (headless
   gnome-shell + clone-daemon + agent-wrapper) with their wants-symlinks. The
   session-holder unit is NOT baked (the server ships it pre-boot on headed clones).
   Pre-creates `/opt/rmng/bin` EMPTY and `~/.ssh` (700, no host keys). Blanks

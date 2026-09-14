@@ -71,7 +71,6 @@ RUN apt-get clean \
  && rm -f /etc/ssh/ssh_host_* \
  && [ "$(id -u "$USERNAME")" = 1000 ]
 
-LABEL rmng.image=1 rmng.base=1
 ENV container=docker
 STOPSIGNAL SIGRTMIN+3
 ENTRYPOINT ["/sbin/init"]
