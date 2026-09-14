@@ -249,7 +249,7 @@ export function CloneModalView({
               ) : null}
 
               {/* Fork source: blank until a preset resolves, then the preset's default fork
-              clone (else the oldest forkable one) fills in directly. Only the fork
+              clone (live or archived) fills in directly. Only the fork
               tabs take a source. */}
               {draft.mode === "template" ? null : (
                 <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
@@ -268,7 +268,7 @@ export function CloneModalView({
                             ]
                           : clones.map((c) => ({
                               value: c.id,
-                              label: c.id,
+                              label: c.archived ? `${c.id} (archived)` : c.id,
                             }))
                       }
                       value={draft.source ?? ""}

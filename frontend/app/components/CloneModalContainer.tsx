@@ -52,7 +52,7 @@ export function CloneModalContainer({
   onClose,
   onStart,
 }: {
-  /** Live clones to fork from; the dialog offers only forkable rows (managed, not archived). */
+  /** Clones to fork from: live first, archived last; the dialog offers every managed row. */
   clones: Clone[];
   /** Live operations from the SSE state — the started op is followed through these. */
   operations: Operation[];
@@ -77,8 +77,14 @@ export function CloneModalContainer({
     [],
   );
 
+  // Live first, archived last: the auto-pick (`sources[0]` in the draft) stays on live
+  // work, while an archived home — quiescent, so the most stable template — is one
+  // click away and keeps a preset default pointing at it working.
   const sources = useMemo(
-    () => clones.filter((c) => c.managed && !c.archived),
+    () => [
+      ...clones.filter((c) => c.managed && !c.archived),
+      ...clones.filter((c) => c.managed && c.archived),
+    ],
     [clones],
   );
   // Joined, so a new array on every SSE frame does not re-announce the same list.

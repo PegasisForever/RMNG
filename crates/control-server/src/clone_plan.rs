@@ -210,9 +210,10 @@ fn preset_pool(p: &Preset) -> Option<String> {
     Some(p.group.trim().to_string()).filter(|g| !g.is_empty() && !g.eq_ignore_ascii_case("none"))
 }
 
-/// The clone a fork copies: the one asked for, else the preset's default fork clone where it
-/// is still forkable, else the oldest forkable clone (clones are prepended as they are made,
-/// so the last row is the oldest survivor).
+/// The clone a fork copies: the one asked for, else the preset's default fork clone where a
+/// managed clone still carries that id (live or archived — an archived home is quiescent,
+/// which makes it the most stable template), else the oldest live forkable clone (clones
+/// are prepended as they are made, so the last row is the oldest survivor).
 fn fork_source(
     st: &ControlState,
     asked: Option<String>,
@@ -229,14 +230,18 @@ fn fork_source(
             let default = preset
                 .map(|p| p.default_fork_clone.trim())
                 .filter(|d| !d.is_empty());
-            st.hosts
-                .iter()
-                .filter(forkable)
-                .find(|h| Some(h.id.as_str()) == default)
-                .or_else(|| st.hosts.iter().find(forkable))
-                .ok_or_else(|| {
-                    "no forkable clones: build one from a preset image first".to_string()
-                })?
+            match default
+                .and_then(|d| st.hosts.iter().find(|h| h.managed && h.id.as_str() == d))
+            {
+                Some(h) => h,
+                None => st
+                    .hosts
+                    .iter()
+                    .find(forkable)
+                    .ok_or_else(|| {
+                        "no forkable clones: build one from a preset image first".to_string()
+                    })?,
+            }
         }
     };
     if !src.managed {
@@ -523,6 +528,43 @@ mod tests {
         assert_eq!(got.source.unwrap().id, "pega-we-2");
         // A default naming no forkable clone falls back to the oldest.
         let got = plan_of(&st, true, req).unwrap();
+        assert_eq!(got.source.unwrap().id, "pega-we-1");
+    }
+
+    #[test]
+    fn a_fork_without_a_source_honors_an_archived_default() {
+        // An archived home is quiescent, so a default pointing at one is honored — only
+        // the automatic fallback stays live-only.
+        let mut preset_default = cfg();
+        preset_default.presets[0].default_fork_clone = "pega-we-2".into();
+        let archived = RmngClone {
+            archived: true,
+            ..source("pega-we-2")
+        };
+        let st = state(vec![source("pega-we-1"), archived]);
+        let req = CloneRequest {
+            preset: Some("work".into()),
+            ..titled("spike")
+        };
+        let got = plan(&preset_default, &st, &HashSet::new(), true, req).unwrap();
+        assert_eq!(got.source.unwrap().id, "pega-we-2");
+    }
+
+    #[test]
+    fn an_archived_source_named_by_hand_forks_fine() {
+        let archived = RmngClone {
+            archived: true,
+            ..source("pega-we-1")
+        };
+        let got = plan_of(
+            &state(vec![archived]),
+            true,
+            CloneRequest {
+                source: Some("pega-we-1".into()),
+                ..titled("spike")
+            },
+        )
+        .unwrap();
         assert_eq!(got.source.unwrap().id, "pega-we-1");
     }
 

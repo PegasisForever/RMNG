@@ -135,11 +135,12 @@ pub enum CloneCmd {
     },
     /// Fork a gen-2 clone: snapshot + clone the source home, create from its recorded
     /// base tag (`rmng clone fork [source]`). Omitted source = the preset's default fork
-    /// clone where it still exists and is forkable, else the oldest forkable clone.
+    /// clone where a managed clone still carries that id (live or archived), else the
+    /// oldest live forkable clone.
     /// The new hostname derives server-side, from the source id (`pega-dev-123` →
     /// `pega-dev-123a`) unless `--title` names it.
     Fork {
-        /// Source gen-2 clone id (omitted = preset default, else oldest forkable)
+        /// Source gen-2 clone id (omitted = preset default, else oldest live forkable)
         source: Option<String>,
         /// Record this clone id as the new clone's parent (one level deep, cosmetic:
         /// the ls tree and mute coverage read it)

@@ -102,14 +102,15 @@ the Codex twins); `accounts` is a convenience view over them, not extra data.
 ### Creating clones — two verbs
 
 Both build from a preset image: `create-plain` onto a fresh home, `fork` onto a copy of a
-live clone's home. The server names the clone and picks up whatever the flags leave open.
+clone's home (live or archived — an archived home is quiescent, so a stable template). The server names the clone and picks up whatever the flags leave open.
 Each prints the started op id (follow with `rmng op wait <op-id>`), or blocks with `--wait`.
 
 - `rmng clone create-plain --title <T> [--preset <P>]` — `--preset` is required when any
   presets are configured.
 - `rmng clone fork [SOURCE] [--title <T>] [--preset <P>] [--claude-account <SEL>]
   [--codex-account <SEL>] [--headless]` — an omitted source is the preset's default fork
-  clone where it is still forkable, else the oldest forkable clone. An omitted preset keeps
+  clone where a managed clone still carries that id (live or archived), else the oldest
+  live forkable clone. An omitted preset keeps
   the source's; naming one moves the fork to that preset's account pool. A selection is an
   email (pin), `auto`, `none` (no token), or `group:<pool>`.
 

@@ -97,7 +97,7 @@ test("a source picked by hand sticks until it stops being forkable", () => {
   );
   expect(picked.draft.source).toBe("b");
   expect(cloneDialogReducer(picked, sources("a", "b")).draft.source).toBe("b");
-  // "b" was deleted or archived: the pick goes back to following the preset.
+  // "b" was deleted: the pick goes back to following the preset.
   expect(cloneDialogReducer(picked, sources("a")).draft.source).toBe("a");
 });
 

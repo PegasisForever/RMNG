@@ -948,9 +948,7 @@ export function DashboardContainer({
           onImportAccount={(provider, group) =>
             openImport(null, { provider, group })
           }
-          forkSources={state.hosts
-            .filter((h) => h.managed && !h.archived)
-            .map((h) => h.id)}
+          forkSources={state.hosts.filter((h) => h.managed).map((h) => h.id)}
           boardColumns={columns}
           boardColumnCounts={columnCounts}
           onAddBoardColumn={(title) =>

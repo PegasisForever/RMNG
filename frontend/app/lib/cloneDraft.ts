@@ -206,7 +206,8 @@ export function cloneDialogReducer(
 
 /** Fill in what the operator has not: the tab's preset and team, the fork source, and
  *  the pool the resolved preset names. A pick made by hand stays put — unless
- *  it stopped qualifying, as a source clone does when it is deleted or archived. Both
+ *  it stopped qualifying, as a source clone does when it is deleted. Archiving no
+ *  longer disqualifies: an archived home forks fine. Both
  *  account sides stay blank (Follow group) until the operator pins one. */
 function follow(s: CloneDialog): CloneDialog {
  let d = s.draft;
