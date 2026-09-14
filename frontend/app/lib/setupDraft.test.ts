@@ -26,7 +26,6 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       hostnamePrefix: "pega-",
       cloneCpus: 16,
       cloneMemoryMb: 32768,
-      seedSnapshot: null,
       homesParent: "tank/rmng/homes",
     },
     claude: {},

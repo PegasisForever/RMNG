@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { OperationProgress } from "./OperationProgress";
+import { OperationProgress, VERB } from "./OperationProgress";
 import { makeOperation } from "./__fixtures__/operations";
 import { GLASS_OUTLINE } from "~/lib/glass";
 
@@ -60,3 +60,22 @@ test("the log starts collapsed and its button points to selectable output", () =
   expect(html).toContain("select-text");
   expect(html).toContain("(no output yet)");
 });
+
+// The kind list is generated from the Rust enum, so a kind the server files but the UI has
+// no verb for used to render an empty label and an empty screen-reader status. `VERB` is
+// typed exhaustive against that list, and these two tests keep the rendered output honest.
+test("every operation kind has a non-empty verb", () => {
+  const kinds = Object.keys(VERB) as (keyof typeof VERB)[];
+  expect(kinds).toContain("prebuild");
+  for (const kind of kinds) expect(VERB[kind]).not.toBe("");
+});
+
+test.each(Object.keys(VERB) as (keyof typeof VERB)[])(
+  "a %s job renders its verb next to the status text",
+  (kind) => {
+    const html = render({ kind });
+    const verb = VERB[kind];
+    expect(html).toContain(`${verb}<span class="sr-only">`);
+    expect(html).toContain(`aria-label="${verb} pega-per-9"`);
+  },
+);
