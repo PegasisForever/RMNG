@@ -72,16 +72,17 @@ FROM ubuntu:26.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 # samba: serves clone homes over SMB. openssh-server: sshd + ssh-keygen for the :2222
 # bastion and per-clone host keys (control plane itself uses unix sockets, no SSH).
-# rclone: fast project copies between clone homes (measured 2.1s vs 5.8s cp -a on 23k
-# files); cp -a stays the fallback. gstreamer1.0-gl: separate package shipping glupload —
-# without it the zero-copy AVC444 encode bridge dies at init and viewers hang on
-# "connected, waiting for video".
+# gstreamer1.0-gl: separate package shipping glupload — without it the zero-copy AVC444
+# encode bridge dies at init and viewers hang on "connected, waiting for video".
+# zfsutils-linux: LOAD-BEARING — the server creates, snapshots, clones and destroys every
+# clone's home dataset itself (`zfs.rs`), through the CT's /dev/zfs node. The CT does not
+# and must not have these binaries (see docs/PROXMOX-LXC.md §1c).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
       gstreamer1.0-gl \
       libva2 libva-drm2 va-driver-all libdrm2 \
-      ca-certificates samba openssh-server rclone zfsutils-linux \
+      ca-certificates samba openssh-server zfsutils-linux \
  && rm -rf /var/lib/apt/lists/*
 
 # SMB-only `rmng` at uid/gid 1000 (must equal the clone's uid so share-created files land

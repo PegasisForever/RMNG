@@ -1,13 +1,10 @@
-# Build context excludes. Root-anchored (leading `/`) where a path must survive at a
-# deeper level — notably `/scripts/` (repo-root scripts: the host-only publish wrappers,
-# never COPY'd into an image) vs `crates/control-server/scripts/` (guest scripts
-# `include_str!`'d at compile time, MUST be in context).
+# Build context excludes.
 #
 # NOT excluded, load-bearing:
-#   - gnome-patch/                     (template/Dockerfile's gnome-build stage compiles the
-#                                       patched shell; the root Dockerfile no longer does)
-#   - crates/control-server/scripts/   (include_str!'d guest scripts)
-#   - template/setup/                  (the template Dockerfile's provisioning phase scripts)
+#   - gnome-patch/      (template/Dockerfile's gnome-build stage compiles the patched shell;
+#                        the root Dockerfile no longer does)
+#   - template/setup/   (the template Dockerfile's provisioning phase scripts)
+#   - docs/CLI.md       (include_str!'d into the server binary; see below)
 
 # Rust build output (25G+; rebuilt in-stage with cache mounts)
 target/
@@ -35,9 +32,10 @@ docs/
 .superpowers/
 .claude/
 
-# Repo-root scripts (root-anchored so the CRATE-level crates/control-server/scripts/ dir —
-# include_str!'d — survives). Host-only convenience wrappers (e.g. publish-template.sh):
-# run on the host, never consumed by an image build, so they stay out of the context.
+# Repo-root scripts. Host-only convenience wrappers (publish-server.sh,
+# publish-template.sh, build-macos-app.sh): run on the host, never consumed by an image
+# build, so they stay out of the context. Root-anchored (leading `/`) so it excludes this
+# directory only, never a `scripts/` dir at any deeper level.
 /scripts/
 
 # Install the terminal pi extension from the checkout.
