@@ -84,7 +84,7 @@ export function makeCloneNoToken(overrides: Partial<Clone> = {}): Clone {
   });
 }
 
-/** A plain unmanaged row (no container): only deletable, no commit/account actions.
+/** A plain unmanaged row (no container): only deletable, no account or container actions.
  *  Carries no account fields at all, because an unmanaged clone never binds one. */
 export function makeCloneUnmanaged(overrides: Partial<Clone> = {}): Clone {
   return makeClone({

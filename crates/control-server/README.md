@@ -38,8 +38,7 @@ clone/delete/pull/commit Operation machine) · `naming` (clone hostname derivati
 preset lookup by ticket-id prefix)
 · `claude` / `codex` (the two account stores: usage poll + OAuth refresh + token push +
 assign/swap/rotate) · `clone_ops` (what those two share: the guest-script exec path, JWT decode,
-provider-scoped view replacement) · `token_unmigrate` (the one-shot startup migration off the
-retired routed model) · `chat` (agent-wrapper proxy +
+provider-scoped view replacement) · `chat` (agent-wrapper proxy +
 per-clone SSE + the activity stream behind working/idle) · `monitor` (Docker maintenance,
 CPU/RAM sampling, the activity bus and lifecycle writer) · `homes`
 (clone-home symlinks under `data/hosts/`) · `shared` (mounts `data/shared` into every running
@@ -111,10 +110,7 @@ flows, streaming progress through a `FnMut(&str, &str)` callback (the old `P ste
 Clone images are **gen-2 preset builds** — no golden-CT / CoW model: each preset's Dockerfile
 builds into a hash tag on demand (see
 [DEPLOY.md#publishing-the-template](../../docs/DEPLOY.md#publishing-the-template)).
-In-container guest scripts
-(`claude-import.sh`, `codex-import.sh` — one per provider, same `status`/`read`/`apply`/`clear`
-verbs) run over `docker exec bash -s`. See [DEPLOY.md](../../docs/DEPLOY.md) and
-[SCRIPTS.md](../../docs/SCRIPTS.md).
+See [DEPLOY.md](../../docs/DEPLOY.md) and [SCRIPTS.md](../../docs/SCRIPTS.md).
 
 ## Clone binaries — create-time injection
 

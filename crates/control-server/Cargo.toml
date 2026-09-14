@@ -27,12 +27,10 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 futures.workspace = true
-bytes.workspace = true
 tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["sync"] }
 # `StreamReader` + `SyncIoBridge`: stream a clone home from the daemon into the blocking
 # tar extractor without buffering it (src/provision.rs `migrate_one_inner`).
-tokio-util.workspace = true
 axum = { workspace = true, features = ["multipart"] }
 tower.workspace = true
 tower-http.workspace = true

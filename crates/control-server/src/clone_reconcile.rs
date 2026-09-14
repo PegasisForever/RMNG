@@ -621,7 +621,7 @@ fn toml_table_header(line: &str) -> Option<String> {
 const RMNG_CLI_SKILL_MD: &str = concat!(
     r#"---
 name: rmng-cli
-description: "Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage clone-source images and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool."
+description: "Use when you need to manage the RMNG clone fleet from inside a clone: list clones, create or destroy clones, open an SSH/exec session into another clone, drive a clone's desktop, manage presets and agent accounts, or search what other clones have already worked through in their own transcripts. Covers the `rmng` command-line tool."
 ---
 
 "#,
@@ -701,7 +701,7 @@ if __name__ == "__main__":
 
 /// The path Claude Code runs, as the CLONE sees it.
 ///
-/// Everything else here works in host coordinates (`/proc/<pid>/root/home/rmng/…`), and
+/// Everything else here works in host coordinates (`<homes>/.merged/<id>/…`), and
 /// writing one of those into `settings.json` produces a command that cannot exist inside the
 /// container. It fails in the worst way available: silently to us, and as a red hook error on
 /// every single tool call to whoever is working in that clone.
@@ -1348,24 +1348,16 @@ fn etc_environment_sync_script(desired_env: &str) -> String {
     format!(
         r#"set -e
 etc=/etc/environment
-legacy=/home/rmng/.config/environment.d/30-rmng-preset.conf
 desired="$(mktemp)"
 base="$(mktemp)"
 tmp="$(mktemp)"
 keys_file="$(mktemp)"
-legacy_keys="$(mktemp)"
-trap 'rm -f "$desired" "$base" "$tmp" "$keys_file" "$legacy_keys"' EXIT
+trap 'rm -f "$desired" "$base" "$tmp" "$keys_file"' EXIT
 base64 -d > "$desired" <<'RMNG_DESIRED_ENV'
 {desired_b64}
 RMNG_DESIRED_ENV
 if [ -f "$etc" ]; then
   cp "$etc" "$base"
-fi
-if [ -f "$legacy" ]; then
-  grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$legacy" | sed 's/=.*//' | sort -u > "$legacy_keys"
-  awk -F= 'NR==FNR {{ drop[$1]=1; next }} !($1 in drop)' "$legacy_keys" "$base" > "$tmp"
-  cat "$tmp" > "$base"
-  awk '/^[A-Za-z_][A-Za-z0-9_]*=/' "$legacy" >> "$base"
 fi
 grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$desired" | sed 's/=.*//' | sed '/^$/d' | sort -u > "$keys_file"
 awk -F= 'NR==FNR {{ drop[$1]=1; next }} !($1 in drop)' "$keys_file" "$base" > "$tmp"
@@ -1373,8 +1365,6 @@ if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | wc -l)" -eq 0 ]; then
   printf '\n' >> "$tmp"
 fi
 awk '/^[A-Za-z_][A-Za-z0-9_]*=/' "$desired" >> "$tmp"
-rm -f "$legacy"
-rmdir /home/rmng/.config/environment.d 2>/dev/null || true
 if [ -s "$tmp" ] && [ "$(tail -c 1 "$tmp" | wc -l)" -eq 0 ]; then
   printf '\n' >> "$tmp"
 fi
@@ -2539,40 +2529,17 @@ mod tests {
         assert_ne!(original.data, updated.data);
     }
 
-    #[test]
-    fn etc_environment_sync_uses_desired_env_and_removes_legacy_environment_d() {
-        let script = etc_environment_sync_script(
-            "RMNG_CONTROL_URL=http://rmng-control:9000\nLINEAR_API_KEY=secret\n",
-        );
-        assert!(script.contains("base64 -d"));
-        assert!(script.contains("/etc/environment"));
-        assert!(script.contains("drop[$1]=1"));
-        assert!(script.contains("awk '/^[A-Za-z_][A-Za-z0-9_]*=/' \"$desired\" >> \"$tmp\""));
-        assert!(script.contains("cmp -s \"$tmp\" \"$etc\""));
-        assert!(script.contains("install -m 0644"));
-        assert!(script.contains("rm -f \"$legacy\""));
-    }
-
     /// The agent-wrapper restart is gated on this script PRINTING the marker, and a wrapper
     /// that never restarts keeps a stale `ANTHROPIC_BASE_URL` forever (the bug this fixes)
     /// while one that restarts every pass interrupts chat twice a minute. Both failure modes
     /// live in shell, not Rust, so run the real script against a real file rather than
     /// asserting on its text.
     /// Run the real sync script against a temp `/etc/environment`, returning whether it
-    /// announced a change. Redirects `$etc` (and parks the legacy path somewhere absent) so no
-    /// root or container is needed.
-    fn run_env_sync(dir: &std::path::Path, etc: &std::path::Path, desired: &str) -> bool {
+    /// announced a change. Redirects `$etc` so no root or container is needed.
+    fn run_env_sync(etc: &std::path::Path, desired: &str) -> bool {
         let script = etc_environment_sync_script(desired)
             .replace("etc=/etc/environment", &format!("etc={}", etc.display()))
-            .replace(
-                "legacy=/home/rmng/.config/environment.d/30-rmng-preset.conf",
-                &format!("legacy={}/nonexistent-legacy", dir.display()),
-            )
-            .replace("install -m 0644 -o root -g root", "install -m 0644")
-            .replace(
-                "rmdir /home/rmng/.config/environment.d",
-                "rmdir /nonexistent",
-            );
+            .replace("install -m 0644 -o root -g root", "install -m 0644");
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(&script)
@@ -2607,7 +2574,6 @@ mod tests {
         .unwrap();
 
         let changed = run_env_sync(
-            &dir,
             &etc,
             "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n",
         );
@@ -2641,7 +2607,6 @@ mod tests {
 
         // Idempotent: a second pass with the same desired env is not a change.
         let changed = run_env_sync(
-            &dir,
             &etc,
             "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n",
         );
@@ -2660,7 +2625,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let etc = dir.join("environment");
         let run = |desired: &str| -> (String, bool) {
-            let printed = run_env_sync(&dir, &etc, desired);
+            let printed = run_env_sync(&etc, desired);
             (String::new(), printed)
         };
 

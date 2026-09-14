@@ -161,10 +161,10 @@ persists the file, so folding stats in would rewrite it on every poll.
 
 ### `lxcStats` event
 
-The same connection also sends a named `lxcStats` event for the complete CT 105 LXC that hosts
-RMNG, independent of the clone-only `stats` map. Its `LxcStats` payload has `cpuPct`, `memUsed`,
+The same connection also sends a named `lxcStats` event for the complete LXC container that
+hosts RMNG, independent of the clone-only `stats` map. Its `LxcStats` payload has `cpuPct`, `memUsed`,
 `memLimit`, and `diskUsed`. CPU is measured from the CT-root cgroup’s `cpu.stat` over the monitor
-interval: `100` means CT 105's enforced 16-CPU capacity was busy. `memUsed` uses the
+interval: `100` means the container's whole enforced CPU capacity was busy. `memUsed` uses the
 same RAM-plus-swap policy as clone stats but includes the control-server, Docker daemon, registry,
 caches, and every other CT process. `diskUsed` is physical usage from CT-root `statvfs` of the
 root filesystem plus every ZFS dataset of the homes tree (one per clone), which on ZFS is
@@ -222,9 +222,10 @@ budget, and a clone holding more logs than the budget has its most recently modi
 so the sessions actually being written are never the ones dropped.
 
 The server reads them with **no `docker exec`**: [homes.rs](../crates/control-server/src/homes.rs)
-already symlinks `<data_dir>/hosts/<clone-id>` → `/proc/<pid>/root/home/rmng` for every running
-managed clone, so a 15 s timer does plain file reads, consuming only the bytes appended since the
-last pass.
+already symlinks `<data_dir>/hosts/<clone-id>` → the clone's merged home view (`<homes>/.merged/<id>`)
+for every managed clone, so a 15 s timer does plain file reads, consuming only the bytes appended
+since the last pass. The home is a dataset outside the container, so the link resolves for a
+stopped or archived clone too — no PID chasing, nothing to repoint across a restart.
 
 Three properties worth knowing before reading the numbers:
 
@@ -755,10 +756,22 @@ unmanaged, non-gen-2, or concurrently-operated clones return `400`.
 
 ---
 
-## Images (clone-source templates) & setup
+## Setup
 
-Clone images are gen-2 preset builds (see above). `POST`
-bodies (references contain `/` and `:`, so nothing uses path params).
+There is no image-management API. A clone's system image is a **preset image**: the preset's
+own Dockerfile text, built and tagged by hash on first use
+([Clone lifecycle](#clone-lifecycle) → `POST /api/clones`, and `POST /api/clones/{id}/rebase`). Nothing lists,
+pulls, or deletes images over HTTP — unused tags are reclaimed by the server itself.
+
+One endpoint survives from the retired images API:
+
+### `POST /api/images/prebuild` → `{ ok, op }`
+
+Warm a preset image without creating a clone. Body: `{ "dockerfile": "<full text>" }`
+(required, non-empty) — the preset card's rebuild button posts the editor's **current** text,
+which may be unsaved. It always rebuilds with a fresh base pull, even when the tag already
+exists, which is the only way to pick up a new `FROM` release under an unchanged tag. Returns
+the driving `Operation` (kind `prebuild`); progress streams over `/events`.
 
 ### `GET /api/setup/env` → `SetupEnv`
 

@@ -1,4 +1,4 @@
-//! The clone flows — delete, rebase, migrate, prebuild, archive, unarchive and create — plus
+//! The clone flows — delete, rebase, prebuild, archive, unarchive and create — plus
 //! the boot-time fleet passes that drive them. Ported from `jobs.server.ts`; the backend is
 //! now `provision.rs` (bollard), not the retired SSH+`pct` path. Jobs run in the background:
 //! the API creates the operation and returns its id immediately; updates flow over `/events`.
@@ -19,7 +19,7 @@ use crate::operation::{self, Finish, Guards, OpHandle, OpSpec};
 use crate::provision::{
     self, AccountBind, ForkPostUpload, HomeSource, clone_container_gen2_from_tag,
     clone_key_env_vars, compose_clone_env, control_env_vars, delete_clone, fork_clone,
-    migrate_one, preset_env_vars, rebase_clone,
+    preset_env_vars, rebase_clone,
 };
 
 /// The operation-record plumbing, re-exported at its historical path: `pool` logs account
@@ -206,18 +206,8 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     let mut early_accounts: Option<(AccountBind, AccountBind)> = None;
     let image_ref = match &plan.source {
         // Image: a hash tag built on demand from the preset's Dockerfile. Home: a fresh
-        // dataset, or a clone of the template seed snapshot where the template carries one.
+        // dataset.
         None => {
-            let home = match app
-                .config()
-                .docker
-                .seed_snapshot
-                .clone()
-                .unwrap_or_default()
-            {
-                s if !s.trim().is_empty() => HomeSource::CloneFromSnapshot(s),
-                _ => HomeSource::Create,
-            };
             let dockerfile = crate::provision::preset_dockerfile(&app, preset.as_deref());
             let tag = crate::derived::ensure_image(&app, &dockerfile, plan.rebuild, &mut progress)
                 .await?;
@@ -225,7 +215,7 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
                 &app,
                 &tag,
                 &id,
-                home,
+                HomeSource::Create,
                 &env,
                 &playbook,
                 &prompt,
@@ -366,7 +356,7 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
             // No post-op converge on this path: the pre-boot tar already uploaded every
             // stamp the converge would check (payload, codex parity, ssh, the five
             // managed-home merges), so a fork's converge is a provable no-op wrapped in
-            // a 30-minute poll task. Rebase/migrate/unarchive keep theirs (their
+            // a 30-minute poll task. Rebase/unarchive keep theirs (their
             // pre-boot coverage differs).
             // TEMPORARILY DISABLED — the only automatic first message in the server, and
             // the only way a turn starts without an operator asking for one. Nothing may
@@ -656,7 +646,7 @@ async fn run_delete(app: App, op: OpHandle, host_id: String) -> anyhow::Result<F
 
 // --- shared gen-2 inputs --------------------------------------------------------------------
 
-/// Everything a gen-2 fork/rebase/migrate needs from the source row's preset: the clone's
+/// Everything a gen-2 fork/rebase needs from the source row's preset: the clone's
 /// full session env — control URL, per-clone identity key, and the preset's own vars. It is
 /// used whole: the create path writes all of it to `/etc/environment`, which is the one
 /// carrier an SSH login, the desktop session and the agent all read.
@@ -799,202 +789,6 @@ async fn run_rebase(
         }))
 }
 
-// --- migrate ---------------------------------------------------------------------------------
-
-/// Migrate one gen-1 clone (managed row without a dataset). Files a `Migrate` op and
-/// drives it; the clone stays STOPPED — the boot loop starts the fleet after the window.
-pub fn start_migrate(app: &App, host_id: &str) -> Result<Operation, JobError> {
-    let spec = OpSpec::new(OperationKind::Migrate, host_id)
-        .steps(provision::migrate_pct)
-        // The shared set plus gen-1: there is nothing to migrate once the row has a dataset.
-        .guards(Guards::on_clone().gen2(false));
-    let host_id = host_id.to_string();
-    operation::run_op(app, spec, move |app, op| run_migrate(app, op, host_id))
-}
-
-async fn run_migrate(app: App, op: OpHandle, host_id: String) -> anyhow::Result<Finish> {
-    let progress = op.progress();
-    let row = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .find(|h| h.id == host_id)
-        .ok_or_else(|| anyhow::anyhow!("unknown clone '{host_id}'"))?;
-    let base = row
-        .source
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("clone '{host_id}' has no source image"))?;
-    // The home copy needs a stable source: stop it first (best-effort — it may already
-    // be stopped; the boot loop stops the whole fleet beforehand anyway).
-    //
-    // The step key is `pre-stop`, not `stop`: `migrate_one` ends on `stop` (90%), and sharing
-    // the key put the bar at 90% before a single byte had been copied.
-    op.step("pre-stop", &format!("stopping {host_id} for migration"));
-    if let Err(e) = app.docker.stop_even_if_paused(&host_id).await {
-        tracing::warn!("migrate {host_id}: pre-stop failed: {e} (continuing)");
-    }
-    let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await?;
-    // Playbook/prompt injects are skipped: the copied home already carries the files the
-    // gen-1 create wrote; re-injecting would only rewrite identical content.
-    let report = migrate_one(&app, &host_id, &base, &env, "", "", row.headless, progress).await?;
-    // Presence is the gen-2 marker; the value comes off the clone's own home.
-    let dataset = crate::clone_home::CloneHome::of(&app, &host_id).dataset();
-    let tag = report.tag;
-    Ok(
-        Finish::new(format!("clone {host_id} migrated ({} bytes)", report.bytes))
-            .row(move |h| {
-                h.dataset = Some(dataset);
-                h.base_tag = Some(tag.clone());
-                h.source = Some(tag);
-            })
-            .after(move |app, _st| async move {
-                // The fleet restarts after the window: the waiter catches this clone's boot.
-                crate::clone_reconcile::spawn_converge_after_start(&app, &host_id, "migrate");
-            }),
-    )
-}
-
-/// Wait until op `op_id` leaves `Running` (poll 5 s). The boot loop runs migrations one
-/// at a time through the same `start_migrate` path the API uses, so the jobs UI shows
-/// each clone's progress while the window runs.
-async fn wait_op_terminal(app: &App, op_id: &str) {
-    loop {
-        let running = app
-            .store
-            .get()
-            .operations
-            .iter()
-            .any(|o| o.id == op_id && o.status == OperationStatus::Running);
-        if !running {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    }
-}
-
-/// How many clones migrate at once in [`migrate_all_on_boot`].
-///
-/// Was one. The per-clone cost is a home copy — measured at ~7 minutes for a 12 GB home
-/// on CT 104 — so a serial pass over a real fleet runs for hours (CT 106: 104 clones,
-/// homes to 44.8 GB). Concurrency is only safe because the home archive streams rather
-/// than buffering (`DockerCtl::download_tar_stream`); buffering four homes at once would
-/// have cost their combined size in RSS.
-const MIGRATE_CONCURRENCY: usize = 4;
-
-/// Migrate `ids`, up to [`MIGRATE_CONCURRENCY`] at a time. Returns (passed, failed ids).
-///
-/// Success is read off the ROW, not the operation: a finished op is pruned 8 s later
-/// ([`PRUNE_DONE_MS`]), which a 5 s poll can easily miss — and the row carrying a dataset
-/// at all ([`crate::clone_home::is_gen2`]) is the authoritative record that the clone is
-/// gen-2 now.
-async fn migrate_pass(app: &App, ids: Vec<String>) -> (usize, Vec<String>) {
-    use futures::StreamExt;
-    let results = futures::stream::iter(ids.into_iter().map(|id| {
-        let app = app.clone();
-        async move {
-            match start_migrate(&app, &id) {
-                Ok(op) => {
-                    wait_op_terminal(&app, &op.id).await;
-                    let migrated = app
-                        .store
-                        .get()
-                        .hosts
-                        .iter()
-                        .any(|h| h.id == id && crate::clone_home::is_gen2(h));
-                    if migrated { Ok(()) } else { Err(id) }
-                }
-                Err(e) => {
-                    tracing::warn!("migrate {id}: could not file op: {e}");
-                    Err(id)
-                }
-            }
-        }
-    }))
-    .buffer_unordered(MIGRATE_CONCURRENCY)
-    .collect::<Vec<_>>()
-    .await;
-    let mut pass = 0;
-    let mut failed = Vec::new();
-    for r in results {
-        match r {
-            Ok(()) => pass += 1,
-            Err(id) => failed.push(id),
-        }
-    }
-    (pass, failed)
-}
-
-/// Boot one-shot: migrate every gen-1 row (managed, no dataset — see
-/// [`crate::clone_home::is_gen2`]) to gen-2,
-/// [`MIGRATE_CONCURRENCY`] at a time. No gen-1 rows ⇒ no-op. Runs under the whole-LXC
-/// backup: per-clone failures log and continue with one retry at the end; the fleet
-/// (non-archived) starts after the window, with stored account tokens re-pushed onto the
-/// running clones.
-///
-/// Returns whether there was anything to migrate — a `false` means boot still owes the
-/// fleet a start ([`boot_start_fleet`]).
-pub async fn migrate_all_on_boot(app: App) -> bool {
-    let gen1: Vec<String> = app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .filter(|h| h.managed && !crate::clone_home::is_gen2(h))
-        .map(|h| h.id)
-        .collect();
-    if gen1.is_empty() {
-        return false;
-    }
-    tracing::warn!(
-        "gen-2 migration: {} gen-1 clone(s) detected, {MIGRATE_CONCURRENCY} at a time: {}",
-        gen1.len(),
-        gen1.join(", ")
-    );
-    // Same normalisation the plain boot path does: a clone the daemon can restart will
-    // fight the window's stops.
-    normalize_restart_policies(&app).await;
-    // Stable source for the home copies: stop the whole fleet first (best-effort).
-    for h in app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .filter(|h| h.managed && !h.archived)
-    {
-        if let Err(e) = app.docker.stop_even_if_paused(&h.id).await {
-            tracing::warn!("migrate: pre-stopping {} failed: {e} (continuing)", h.id);
-        }
-    }
-    let (mut pass, failed) = migrate_pass(&app, gen1.clone()).await;
-    // One retry pass for the failures.
-    let (retry_pass, retry_failed) = migrate_pass(&app, failed).await;
-    pass += retry_pass;
-    // Start the fleet: every migrated non-archived clone, then re-push its stored
-    // account tokens (those need running clones). Best-effort per clone.
-    let mut started = 0;
-    for h in app
-        .store
-        .get()
-        .hosts
-        .into_iter()
-        .filter(|h| h.managed && !h.archived && crate::clone_home::is_gen2(h))
-    {
-        if let Err(e) = app.docker.start_container(&h.id).await {
-            tracing::warn!("migrate: starting {} failed: {e} (continuing)", h.id);
-            continue;
-        }
-        started += 1;
-        crate::pool::push_both_sides(&app, &h.id, "migrate").await;
-    }
-    tracing::warn!(
-        "gen-2 migration: {pass} passed, {} failed ({}), {started} started",
-        retry_failed.len(),
-        retry_failed.join(", "),
-    );
-    true
-}
-
 // --- boot + crash recovery --------------------------------------------------------------------
 
 /// Start the fleet at boot: every managed, non-archived clone that is not already running.
@@ -1065,7 +859,7 @@ const CRASH_SWEEP: std::time::Duration = std::time::Duration::from_secs(30);
 /// ARCHIVED clone's container, while this knows the difference.
 ///
 /// Two guards against fighting a deliberate stop. A clone with a Running operation is left
-/// alone (archive, rebase and migrate all file their op BEFORE they stop the container),
+/// alone (archive and rebase both file their op BEFORE they stop the container),
 /// and a clone must be seen stopped on two consecutive sweeps before it is touched, so a
 /// container caught mid-restart is not raced.
 pub async fn crash_recovery(app: App) {

@@ -165,9 +165,10 @@ pub(crate) struct Guards {
     /// `Some(true)`: the row must be archived. `Some(false)`: it must not be. `None`: either
     /// is fine, and the call site says why.
     pub(crate) archived: Option<bool>,
-    /// `Some(true)`: the row must be gen-2 ([`crate::clone_home::is_gen2`] — its home is a
-    /// ZFS dataset this server owns). `Some(false)`: it must still be gen-1.
-    pub(crate) gen2: Option<bool>,
+    /// The row must be gen-2 ([`crate::clone_home::is_gen2`] — its home is a ZFS dataset
+    /// this server owns). Only gen-2 clones exist now, but rebase still asserts it rather
+    /// than assuming it.
+    pub(crate) gen2: bool,
     /// No other `Running` operation may target this id. Two flows on one clone race over
     /// its container and its row.
     pub(crate) idle_target: bool,
@@ -201,7 +202,7 @@ impl Guards {
     }
 
     pub(crate) fn gen2(mut self, want: bool) -> Self {
-        self.gen2 = Some(want);
+        self.gen2 = want;
         self
     }
 }
@@ -249,14 +250,8 @@ pub(crate) fn check_guards(app: &App, spec: &OpSpec) -> Result<(), JobError> {
         // definition of the same thing. The tag is still checked, deeper in
         // `provision::rebase_clone`, which bails with "no recorded base tag"; that is the
         // right place for it, because the tag is what that code actually needs.
-        match spec.guards.gen2 {
-            Some(true) if !crate::clone_home::is_gen2(row) => {
-                return Err(JobError(format!("'{target}' is not a gen-2 clone")));
-            }
-            Some(false) if crate::clone_home::is_gen2(row) => {
-                return Err(JobError(format!("'{target}' is already a gen-2 clone")));
-            }
-            _ => {}
+        if spec.guards.gen2 && !crate::clone_home::is_gen2(row) {
+            return Err(JobError(format!("'{target}' is not a gen-2 clone")));
         }
     }
 
@@ -288,13 +283,12 @@ fn kind_noun(kind: OperationKind) -> &'static str {
     match kind {
         OperationKind::Clone => "clone",
         OperationKind::Pull => "pull",
-        OperationKind::Commit => "commit",
         OperationKind::Delete => "delete",
         OperationKind::Archive => "archive",
         OperationKind::Unarchive => "unarchive",
         OperationKind::Update => "control-server update",
-        OperationKind::Migrate => "migration",
         OperationKind::Prebuild => "prebuild",
+        OperationKind::Unknown => "operation",
     }
 }
 
@@ -542,14 +536,14 @@ fn default_queued(kind: OperationKind, target: &str, source: Option<&str>) -> St
     match kind {
         OperationKind::Clone => format!("queued clone of {}", source.unwrap_or("?")),
         OperationKind::Pull => format!("queued template pull → {target}"),
-        OperationKind::Commit => format!("queued commit of {}", source.unwrap_or("?")),
         OperationKind::Delete => format!("queued delete of {target}"),
         OperationKind::Archive => format!("queued archive of {target}"),
         OperationKind::Unarchive => format!("queued unarchive of {target}"),
         OperationKind::Update => "queued control-server update".to_string(),
-        // Stage 2 owns the migrate flow; the label keeps filed ops readable meanwhile.
-        OperationKind::Migrate => format!("queued migration of {target}"),
         OperationKind::Prebuild => format!("queued derived-image build → {target}"),
+        // No flow files an `Unknown`; it only ever arrives from a persisted row written by
+        // another server version, which already carries its own label.
+        OperationKind::Unknown => format!("queued operation on {target}"),
     }
 }
 
@@ -714,8 +708,8 @@ mod tests {
         );
     }
 
-    /// Migrate demands gen-1, rebase demands gen-2, and both read the one definition of the
-    /// split ([`crate::clone_home::is_gen2`]).
+    /// Rebase demands gen-2, and reads the one definition of the split
+    /// ([`crate::clone_home::is_gen2`]).
     #[tokio::test]
     async fn generation_guard_reads_one_definition() {
         let app = test_app();
@@ -736,9 +730,6 @@ mod tests {
         });
         let needs_gen2 =
             |id: &str| OpSpec::new(OperationKind::Clone, id).guards(Guards::on_clone().gen2(true));
-        let needs_gen1 = |id: &str| {
-            OpSpec::new(OperationKind::Migrate, id).guards(Guards::on_clone().gen2(false))
-        };
         assert!(
             check_guards(&app, &needs_gen2("gen1"))
                 .unwrap_err()
@@ -746,13 +737,6 @@ mod tests {
                 .contains("not a gen-2")
         );
         check_guards(&app, &needs_gen2("gen2")).unwrap();
-        assert!(
-            check_guards(&app, &needs_gen1("gen2"))
-                .unwrap_err()
-                .0
-                .contains("already a gen-2")
-        );
-        check_guards(&app, &needs_gen1("gen1")).unwrap();
     }
 
     /// `idle_fleet` (the self-update guard) refuses on ANY running operation, whatever it

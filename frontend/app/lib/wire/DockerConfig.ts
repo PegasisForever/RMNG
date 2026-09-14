@@ -22,12 +22,8 @@ cloneCpus: number,
 cloneMemoryMb: number, 
 /**
  * REMOVED `profile_lines`: presets carry their own full Dockerfile now.
- * Template home seed snapshot (`<dataset>@<snap>`). A create clones the new home
- * from it by default, so template clones start with content; empty means a fresh
- * home. Seed refresh is manual.
- */
-seedSnapshot: string | null, 
-/**
+ * REMOVED `seed_snapshot`: every modal create forks a live source, so the source
+ * snapshot covers starting content.
  * Parent ZFS dataset for all gen-2 clone homes (`<this>/<clone-id>`), mounted
  * into the outer CT once at `/srv/rmng-homes`. Per-machine: the pool name differs
  * per host (e.g. `tank/rmng/homes` vs `rpool/rmng/homes`). Immediate-apply (read

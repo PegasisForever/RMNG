@@ -62,7 +62,7 @@ What each piece is for:
 | --- | --- |
 | `--privileged` | the control-server orchestrates **privileged** clone containers (nested Docker) on the same daemon |
 | `--init` | PID-1 reaper for the short-lived exec/tar helpers the server spawns |
-| `--pid host` | share the host PID namespace so clone PIDs are visible — that's what lets the reconciler find each clone's **uid-1000** process (matched by mount namespace via `/proc/<pid>/ns/mnt`) and link the browse target, served both as the `clones` SMB share and at the host path. Omitting it disables **only** that feature (the server warns once) |
+| `--pid host` | share the host PID namespace so clone PIDs are visible. Activity detection (working-vs-idle for the whole fleet) reads each running clone's session registry, hook log and `/tmp` through its host pid, and the cgroup reader resolves the outer container's `/proc/1/root`. Home browsing does **not** need it (see [Browsing clone homes](#browsing-clone-homes-datahostsid)) |
 | `-v /var/run/docker.sock:…` | the daemon the server drives via bollard |
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
@@ -105,7 +105,7 @@ Afterward, use **Settings** to create presets (Linear key + labels + env vars), 
 settings and account pools, monitor defaults, and the ports. Accounts themselves are imported from
 signing in to the provider, not entered here. Secrets are write-only and redacted on read. The one-time fields
 (`dataDir`, `cloneSocket`, `docker.subnet`) lock once the wizard latches. See
-[SCRIPTS.md](SCRIPTS.md) for the in-container guest scripts and [API.md](API.md) for every
+[SCRIPTS.md](SCRIPTS.md) for the build and developer scripts and [API.md](API.md) for every
 endpoint.
 
 ## Clone inference: credentials, not a route
@@ -152,43 +152,6 @@ account can join a pool as it is added. Named **pools** (the single `groups` lis
 `config.json`, Claude and Codex members mixed) are edited in Settings and balanced per-side by a
 10-minute sticky rotator. A clone binds at most one pool, which feeds both providers. Full
 endpoint reference: [API.md](API.md#accounts-claude--codex).
-
-### Upgrading a fleet that ran the retired `rmng-cliproxy` sidecar
-
-An older deployment routed all clone model traffic through an `rmng-cliproxy` container (one
-CLIProxyAPI instance per account pool) that owned the accounts. Upgrading past that needs **no
-operator action and no re-login** — on first boot the new server does three things in this order:
-
-1. **Removes the retired sidecar** — `docker rm -f rmng-cliproxy`, in effect; absent is a no-op,
-   so this is harmless on a deployment that never had one. Verify with
-   `docker ps -a --filter name=rmng-cliproxy`, which should come back empty. It goes first, and
-   that ordering is load-bearing: while the sidecar runs it keeps its per-account processes alive,
-   and those refresh OAuth tokens on their own schedule. Refresh tokens are single-use, so a
-   rotation landing *after* the migration copied a credential would invalidate the copy — leaving
-   a store of dead tokens and forcing exactly the fleet-wide re-login this avoids.
-2. **Carries the credentials back** into `data/claude-accounts.json` / `data/codex-accounts.json`
-   (`0600`), rebuilding the single `groups` pool list from the per-pool directories each
-   account was found in (same-named pools merge members). One-shot and stamp-gated by `data/.token-unmigration-done` — deliberately
-   a *different* stamp from the forward migration's `.token-migration-done`, which may still be
-   sitting there and means the opposite thing. The old credential files are only read, never
-   consumed, so a failure part-way just retries on the next boot.
-3. **Lets the clones converge on the next reconcile pass (~30 s)**, with no recreate and no reboot:
-   the reconciler strips the retired env keys (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
-   `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`) from `/etc/environment` and rewrites the Codex
-   config without its routed-provider block. Because `/etc/environment` is read by PAM
-   at *session start*, a process already running keeps the old values for as long as it lives — so
-   the reconciler restarts `agent-wrapper` whenever it actually changes the env, and only on a real
-   change, since restarting every pass would interrupt an in-flight chat turn twice a minute.
-
-Two things do not survive. **Gemini logins (Antigravity) are not carried across**: that provider
-only ever existed through the sidecar and has no credential-injection path, so its files are left
-untouched on disk and reported as a count in the log rather than silently discarded — re-add
-those accounts under Claude or Codex if you need them. And an account enrolled in several pools
-lands in exactly **one** store entry (first pool in sorted order wins), because a single-use
-refresh token held in two places would have the two copies invalidate each other.
-
-**No template rebuild is needed.** This ships as a control-server image only — pull it, recreate
-the container, and the fleet converges on its own inside a minute.
 
 ## Shared build cache & Docker Hub mirror
 
@@ -348,23 +311,18 @@ Publish a new control-server image with `scripts/publish-server.sh` (tags `:YYYY
 
 ## Browsing clone homes (`data/hosts/<id>`)
 
-With `--pid host`, the control-server shares the host PID namespace, so a 15 s reconciler
-maintains a symlink per running managed clone:
+The control-server maintains one symlink per managed clone:
 
 ```
-<data_dir>/hosts/<id> → /proc/<uid-1000-pid>/root/home/rmng
+<data_dir>/hosts/<id> → <homes>/.merged/<id>
 ```
 
-That surfaces every clone's home (`/home/rmng`) in one directory. It repoints links across
-clone restarts (the PID changes) and prunes stopped/deleted clones.
-
-The pid is the lowest-numbered uid-1000 process in the clone's mount namespace **whose
-`/proc/<pid>/root` actually leads to the clone's home**. That last test exists because a Chrome or
-Firefox renderer chroots itself into `/proc/<pid>/fdinfo` while still running as uid 1000 in the
-clone's namespace: picking one produces a link that never resolves, and it never gets repointed,
-because the pid is stable and the reconciler only replaces a link whose target changed. Token
-counting and log-based activity detection read the clone's files through this same link, so a bad
-pick silently takes them down with the browsing.
+That surfaces every clone's home (`/home/rmng`) in one directory. A gen-2 clone's home lives
+on its own ZFS dataset outside the container and is bound in through an overlay merged view,
+so the link points at a plain directory on the box. **It resolves whether the clone is running
+or stopped** — archived clones stay linked, and their files, ledgers and token accounting keep
+working while they are down. The links are written when a clone is created and removed when it
+is deleted; a one-shot sync at server boot repairs anything a crash left behind.
 
 Reach it three ways:
 
@@ -375,12 +333,15 @@ Reach it three ways:
   Fixed credential → user `rmng`, password `rmng`. **Prerequisite: host port 445 must be free**
   (the `-p 445:445` publish fails clearly if something already holds it). Files you create over
   SMB land owned by the clone's own `rmng` user (uid **1000**).
-- **From the Docker host** (the same symlink path resolves there, since `/proc/<pid>/root` is
-  the clone's rootfs): `/var/lib/docker/volumes/rmng-data/_data/data/hosts/<id>`.
+- **From the Docker host**: `/var/lib/docker/volumes/rmng-data/_data/hosts/<id>`.
 - **`docker exec`** into the control-server container and browse `data/hosts/`.
 
-Omit `--pid host` and this feature is simply off (the server logs a one-time hint per clone);
-nothing else is affected.
+Clones reach each other's homes the same way, without the server: every clone has the same
+merged-view root bound at `/clones`, reached as `~/clones/<id>`.
+
+Browsing no longer needs `--pid host`. **Keep `--pid host` anyway** — the server still uses the
+host PID namespace for activity detection (working-vs-idle for the whole fleet) and for reading
+the outer container's cgroup and mount state. Dropping it blinds those, not this.
 
 ## The shared folder
 
@@ -513,8 +474,8 @@ so those tools reflect the clone's own 16-cpu / 32-GiB limits.
 
 The control-server's sidebar reads cgroup-v2 counters directly for RAM-plus-swap usage. Its
 compose deployment therefore requires the existing `privileged: true` and `pid: "host"` settings;
-without them, RMNG cannot resolve clone cgroups through `/proc/<pid>/root` or the documented CT
-105-wide cgroup through `/proc/1/root`.
+without them, RMNG cannot resolve clone cgroups through `/proc/<pid>/root` or the enclosing
+container's own cgroup through `/proc/1/root`.
 
 - **Optional, auto-detected.** RMNG probes for lxcfs at boot / on Settings → Test / at wizard
   finish and shows the result as an advisory row in the setup checklist ("LXCFS"). Without

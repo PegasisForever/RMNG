@@ -46,8 +46,7 @@ $RMNG_CONTROL_URL` hint.
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
 | `clone create-plain`, `clone fork` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
-| `clone rm`, `clone archive`, `clone restore` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
-| `clone cp` | `{ bytes, dst }` |
+| `clone rm`, `clone rebase`, `clone archive`, `clone restore` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
 | `clone self` | the caller's `Clone` record, or exit 1 outside a clone |
 | `op wait` | the terminal `Operation` |
 | `op ls` | `Operation[]` |
@@ -148,6 +147,31 @@ Destroy a clone (container + volumes; cascades to its sub clones). Asks `[y/N]` 
 Stop a managed clone while retaining its container/volumes/notes/chat, then restart it later.
 Reversible, no confirmation. The server refuses unknown / unmanaged / already-in-state clones.
 
+### `rmng clone rebase <CLONE> --preset <NAME> [--rebuild] [--wait] [--timeout <N>]`
+
+Swap the system image under a clone while keeping the clone: same id, same home. The clone's
+home lives on its own ZFS dataset, not inside the container, so the container can be replaced
+without touching it. Use this to pick up a new base image or a preset Dockerfile edit on a
+clone you do not want to recreate.
+
+`--preset <NAME>` is **required** — it names the preset whose image the clone moves onto, and
+the clone's own preset bindings (accounts, playbook, env) are unchanged by the move. The
+preset image is built on first use; `--rebuild` forces a rebuild even when the tag already
+exists, which is what you want after editing the preset's Dockerfile, because identical
+Dockerfile text never rebuilds on its own.
+
+The server stops the clone, removes the old container, creates a new one from the target image
+on the same dataset, and starts it. If the new container fails to come up, it is recreated from
+the previous image automatically. Anything the clone held **outside** `/home/rmng` — packages
+installed by hand into the running container, files under `/opt` or `/usr/local` — is dropped
+without warning; transcribe it into the preset Dockerfile first.
+
+Prints the started op id (follow with `rmng op wait <op-id>`), or blocks with `--wait`
+(default timeout 600 s).
+
+    rmng clone rebase pega-dev-123 --preset work --wait
+    rmng clone rebase pega-dev-123 --preset work --rebuild --wait
+
 ### `rmng clone ssh <CLONE>`
 
 Print the ready-to-paste `ssh` command for a usable managed clone (working/idle/not-yet-sampled).
@@ -182,59 +206,13 @@ the move is filed immediately and the archive runs in the background.
 A sub clone is refused. The board draws it under its parent's card and never files it, so
 filing one would write an id no column ever draws. Move the parent instead.
 
-### `rmng clone cp <SRC> <CLONE>:<DST-DIR> [--exclude <name>]…`
+### Moving files between clones
 
-Copy a directory into a clone at an absolute path. `SRC` takes two forms, and which one you
-use decides where the bytes travel.
+There is no copy verb. Every clone already has every other clone's home mounted at
+`~/clones/<id>`, so read or copy straight across with ordinary `cp`/`rsync` — no server round
+trip, no command. `~/shared` is the fleet-wide drop box, visible to every clone and over SMB.
 
-**`<CLONE>:<DIR>`, clone to clone.** The server can already see every running clone's home
-(the same links the SMB share is built on), so it does the copy itself, with `rclone` in
-parallel across files. Nothing enters this process, a socket, or the Docker API. Use this
-for a large tree. Both paths must sit under `/home/rmng`, and both clones must be running.
-An image without rclone falls back to `cp -a`, which is slower on a source tree and the only
-one of the two that preserves hardlinks.
-
-**A local directory, streaming.** `tar` writes into the request body and the server passes
-the archive to the Docker daemon, so the project streams through without either end
-buffering it, and the route is exempt from the 64MB body cap the JSON routes carry. This is
-the only form available from a machine the server cannot see, such as an operator laptop,
-and it is the only one that reaches a path outside `/home/rmng`.
-
-Files and directories both arrive owned as they were at the source, which for a copy between
-clone agents is the same agent user on the far side. Directories take a second pass, because
-the rclone Ubuntu ships has no directory metadata and would otherwise leave every one of them
-owned by the server's root: a tree whose files are writable but whose directories are not
-lets an agent edit code and fail to create a single new file.
-
-Reading needs none of this: every clone already sees every other clone's home at
-`~/clones/<id>`, so copy straight across.
-
-The destination is created if missing. Nothing is deleted there and nothing is copied back:
-an existing directory receives these files on top of what it already holds.
-
-`--exclude <name>` is anchored at the top of SRC and matches a directory there and nowhere
-below it. That matters for a JavaScript project: unanchored, `--exclude dist` would also
-strike every `node_modules/*/dist`, and the copy would look complete while importing nothing.
-
-    rmng clone cp /home/rmng/proj agt-1a2b:/home/rmng/proj --exclude target --exclude .venv
-
-`--json` → `{ bytes, dst }`. `--exclude` is anchored at the top of SRC either way.
-
-### `rmng clone sync <CLONE>:<SRC-DIR> <CLONE>:<DST-DIR> [--exclude <name>]…`
-
-`cp` with deletion: the destination ends up matching the source, so a file it holds and the
-source does not is removed. Everything else is `cp`'s clone-to-clone form, including the
-anchored excludes and the ownership handling.
-
-An excluded name is left alone rather than deleted, which is what lets a destination keep its
-own `target/` through a sync that excludes it.
-
-Two restrictions, both because deletion is involved. The source must be a clone, since a
-streamed archive tells the server what it holds and never what it lacks; use `cp` to send a
-local directory. And the destination cannot be `/home/rmng` itself, where a sync would delete
-`Desktop`, `.ssh`, `.claude` and everything else the source happens not to have.
-
-    rmng clone sync pega-we-142:/home/rmng/proj agt-1a2b:/home/rmng/proj --exclude target
+    cp -a ~/clones/pega-we-142/proj ~/proj
 
 ### `rmng clone self`
 

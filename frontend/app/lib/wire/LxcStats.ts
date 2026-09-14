@@ -21,6 +21,9 @@ memUsed: bigint,
  */
 memLimit: bigint, 
 /**
- * Physical, compression-aware use of CT 105's ZFS root filesystem, in bytes.
+ * Physical, compression-aware disk use of the whole CT, in bytes: its ZFS root
+ * filesystem plus every clone-home dataset mounted under the homes root. The root
+ * filesystem alone omits the homes tree, which is where a fleet's disk use actually
+ * accumulates.
  */
 diskUsed: bigint | null, };

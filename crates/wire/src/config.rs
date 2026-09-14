@@ -297,11 +297,8 @@ pub struct DockerConfig {
     #[serde(default = "default_clone_memory_mb")]
     pub clone_memory_mb: u32,
     /// REMOVED `profile_lines`: presets carry their own full Dockerfile now.
-    /// Template home seed snapshot (`<dataset>@<snap>`). A create clones the new home
-    /// from it by default, so template clones start with content; empty means a fresh
-    /// home. Seed refresh is manual.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed_snapshot: Option<String>,
+    /// REMOVED `seed_snapshot`: every modal create forks a live source, so the source
+    /// snapshot covers starting content.
     /// Parent ZFS dataset for all gen-2 clone homes (`<this>/<clone-id>`), mounted
     /// into the outer CT once at `/srv/rmng-homes`. Per-machine: the pool name differs
     /// per host (e.g. `tank/rmng/homes` vs `rpool/rmng/homes`). Immediate-apply (read
@@ -333,7 +330,6 @@ impl Default for DockerConfig {
             hostname_prefix: default_hostname_prefix(),
             clone_cpus: default_clone_cpus(),
             clone_memory_mb: default_clone_memory_mb(),
-            seed_snapshot: None,
             homes_parent: default_homes_parent(),
         }
     }
@@ -634,29 +630,6 @@ pub struct EnvCheckRow {
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct SetupEnv {
     pub rows: Vec<EnvCheckRow>,
-}
-
-/// A clone-source image (labeled `rmng.image=1`) as shown to the browser
-/// (`GET /api/images`). Images replace the retired clone-id templates: any clone can be
-/// committed to one, and clone creation picks from these.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct ImageInfo {
-    /// Full image id (`sha256:…`).
-    pub id: String,
-    /// Repo tag reference, e.g. `pegasis0/rmng-template:latest`.
-    pub reference: String,
-    pub size_bytes: i64,
-    /// ISO timestamp the image was created.
-    pub created_at: String,
-    /// True for the wizard-built base image (`rmng.base=1`).
-    pub base: bool,
-    /// Lineage: the reference this image was committed from (`rmng.created-from`), if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_from: Option<String>,
-    /// Ids of live clones currently running on this image.
-    pub in_use_by: Vec<String>,
 }
 
 #[cfg(test)]

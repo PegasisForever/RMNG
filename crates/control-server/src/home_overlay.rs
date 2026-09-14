@@ -113,10 +113,6 @@ const HOME_LINKS: [(&str, &str); 2] = [("clones", "/clones"), ("shared", "/share
 /// Point `~/clones` and `~/shared` at the mounts outside the home. Idempotent, and safe
 /// on a home that has never seen them.
 ///
-/// The entry it replaces is the empty mountpoint directory Docker invented back when the
-/// binds landed inside the home. `remove_dir` is non-recursive, so a directory holding
-/// anything at all is left exactly as it is and only logged: whatever a clone put there
-/// is the clone's, and losing it to a cosmetic fix would be a bad trade.
 /// `home` is the merged view — [`CloneHome::merged`] — not a homes root plus an id:
 /// this module no longer derives that path for anyone.
 pub(crate) fn ensure_home_links(home: &Path, id: &str) {
@@ -132,17 +128,8 @@ pub(crate) fn ensure_home_links(home: &Path, id: &str) {
                     continue;
                 }
             }
-            Ok(md) if md.is_dir() => {
-                if let Err(e) = std::fs::remove_dir(&path) {
-                    tracing::warn!(
-                        target: "overlay",
-                        "{id}: ~/{name} is a non-empty directory, leaving it ({e})"
-                    );
-                    continue;
-                }
-            }
             Ok(_) => {
-                tracing::warn!(target: "overlay", "{id}: ~/{name} is a file, leaving it");
+                tracing::warn!(target: "overlay", "{id}: ~/{name} is not a symlink, leaving it");
                 continue;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -552,12 +539,6 @@ pub(crate) async fn ensure_mounted(dataset: &Path, digest: &str, merged: &Path) 
 /// Fleet-wide, so it lives here rather than on [`CloneHome`]: it builds one home per
 /// managed gen-2 row and asks each to come up. No path is derived in this function.
 pub(crate) async fn remount_all(app: App) {
-    // A clone's home is always `<parent>/<id>`, whichever way it was made, so the name
-    // recorded on the row is fully derivable — and a create between 2026-09-11 and the
-    // move to `CloneHome` recorded the bare id instead. Nothing reads that value any
-    // more (only its presence marks a gen-2 clone), but a deployed fleet still carries
-    // the bad rows, so correct them here rather than leaving `state.json` holding a lie.
-    let mut repaired: Vec<(String, String)> = Vec::new();
     let mut rows: Vec<(CloneHome, Option<String>)> = Vec::new();
     for h in app
         .store
@@ -566,27 +547,7 @@ pub(crate) async fn remount_all(app: App) {
         .into_iter()
         .filter(|h| h.managed && crate::clone_home::is_gen2(h))
     {
-        let home = CloneHome::of(&app, &h.id);
-        let canonical = home.dataset();
-        if h.dataset.as_deref() != Some(canonical.as_str()) {
-            tracing::warn!(
-                target: "overlay",
-                "remount: {} recorded dataset {:?}, correcting to {canonical}",
-                h.id,
-                h.dataset,
-            );
-            repaired.push((h.id.clone(), canonical));
-        }
-        rows.push((home, h.base_tag));
-    }
-    if !repaired.is_empty() {
-        app.store.mutate(|s| {
-            for (id, dataset) in &repaired {
-                if let Some(h) = s.hosts.iter_mut().find(|h| &h.id == id) {
-                    h.dataset = Some(dataset.clone());
-                }
-            }
-        });
+        rows.push((CloneHome::of(&app, &h.id), h.base_tag));
     }
     // Clones whose overlay this pass established: their containers, if already running,
     // are bound to the bare mountpoint and must be restarted.
@@ -766,23 +727,24 @@ mod tests {
     }
 
     /// `~/clones` and `~/shared` become symlinks to the mounts, which now live outside
-    /// the home. The empty mountpoint directory Docker left behind is replaced; a
-    /// directory with anything in it is the clone's and survives untouched.
+    /// the home. An entry the clone put there itself is not a symlink and survives
+    /// untouched.
     #[test]
-    fn home_links_replace_the_empty_mountpoints_but_never_a_used_directory() {
+    fn home_links_are_created_but_never_replace_a_real_directory() {
         let homes = std::env::temp_dir().join(format!("rmng-links-{}", std::process::id()));
         let home = merged_dir(&homes.to_string_lossy(), "pega-x");
-        std::fs::create_dir_all(home.join("clones")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(home.join("shared")).unwrap();
         std::fs::write(home.join("shared/keep-me"), b"x").unwrap();
 
         ensure_home_links(&home, "pega-x");
 
+        // Nothing was at `clones`, so it is created as a link.
         assert_eq!(
             std::fs::read_link(home.join("clones")).unwrap(),
             Path::new("/clones")
         );
-        // `shared` held a file, so it is still the directory it was.
+        // `shared` was a directory, so it is still the directory it was.
         assert!(home.join("shared").is_dir());
         assert!(home.join("shared/keep-me").exists());
 

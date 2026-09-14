@@ -293,9 +293,8 @@ pub struct CreateSpec {
     /// The daemon path is `<this>/clones.sock`; empty skips the mount (dev/test).
     pub sock_source: String,
     /// Merged home-overlay view on the CT (e.g. `/srv/rmng-homes/.merged/<id>`),
-    /// bound at `/home/rmng`. Always `Some` from the create path; `None` mounts no home
-    /// (only meaningful for flows that bring their own).
-    pub home_dir: Option<String>,
+    /// bound at `/home/rmng`.
+    pub home_dir: String,
     /// The merged-view root on the CT (e.g. `/srv/rmng-homes/.merged`), bound at
     /// `/clones` so every clone sees every home. Always mounted alongside `home_dir`,
     /// and reached as `~/clones` through the symlink `home_overlay::ensure_home_links`
@@ -996,57 +995,6 @@ impl DockerCtl {
         Ok(())
     }
 
-    // --- retired group-proxy sidecar ----------------------------------------------------
-
-    /// The container name of the retired `rmng-cliproxy` group-proxy sidecar.
-    ///
-    /// The group-proxy architecture is gone (RMNG owns account tokens again and injects them
-    /// straight into each clone), but a deployment upgraded from that era still has this
-    /// container on disk, and it was deliberately never auto-recreated on image drift — so it
-    /// survives a control-server update untouched.
-    pub const RETIRED_GROUP_PROXY: &str = "rmng-cliproxy";
-
-    /// Stop + remove the retired `rmng-cliproxy` sidecar, if it exists. Idempotent and
-    /// best-effort: an absent container, or no Docker daemon at all (dev mode), is a no-op.
-    ///
-    /// **Ordering is load-bearing.** This MUST run before
-    /// [`crate::token_unmigrate::unmigrate_group_proxy_tokens`] reads the per-group `auth-dir`s.
-    /// While that sidecar runs it keeps every per-group CLIProxyAPI process alive, and those
-    /// processes refresh OAuth tokens on their own schedule. A refresh token is single-use, so
-    /// a rotation landing *after* the migration copied a credential would invalidate the copy —
-    /// leaving a store full of dead tokens and forcing the operator to re-login every account,
-    /// which is exactly what the reverse migration exists to avoid.
-    pub async fn remove_retired_group_proxy(&self) {
-        let Ok(docker) = self.daemon() else {
-            return; // dev mode / no daemon: nothing to tear down
-        };
-        match docker
-            .inspect_container(
-                Self::RETIRED_GROUP_PROXY,
-                None::<bollard::query_parameters::InspectContainerOptions>,
-            )
-            .await
-        {
-            Ok(_) => {}
-            // Absent is the steady state on any deployment that never ran the group proxy.
-            Err(BollardError::DockerResponseServerError {
-                status_code: 404, ..
-            }) => return,
-            Err(e) => {
-                tracing::warn!(target: "docker", "inspecting {}: {e}", Self::RETIRED_GROUP_PROXY);
-                return;
-            }
-        }
-        self.stop_container(Self::RETIRED_GROUP_PROXY).await.ok();
-        self.remove_container(Self::RETIRED_GROUP_PROXY).await.ok();
-        tracing::info!(
-            target: "docker",
-            "removed the retired {} sidecar (the group-proxy architecture was reverted); its \
-             per-group CLIProxyAPI processes can no longer rotate the OAuth tokens RMNG now owns",
-            Self::RETIRED_GROUP_PROXY,
-        );
-    }
-
     /// Ensure one infra container matches `spec`: create-if-absent (dropping `spec.files` in
     /// before start), start-if-stopped, recreate-if-image-drifted. Best-effort image pull
     /// first. Cache volumes are external (survive the recreate).
@@ -1554,39 +1502,37 @@ impl DockerCtl {
         // Clone home: the merged overlay view at /home/rmng. Always mounted: the single
         // create caller always passes a merged path, and a clone without its home is
         // never a valid output — fail at Docker, loudly, rather than boot half a clone.
-        if let Some(dir) = spec.home_dir.as_deref() {
-            mounts.push(Mount {
-                target: Some("/home/rmng".to_string()),
-                source: Some(dir.to_string()),
-                typ: Some(MountTypeEnum::BIND),
+        mounts.push(Mount {
+            target: Some("/home/rmng".to_string()),
+            source: Some(spec.home_dir.clone()),
+            typ: Some(MountTypeEnum::BIND),
+            ..Default::default()
+        });
+        mounts.push(Mount {
+            target: Some("/clones".to_string()),
+            source: Some(spec.browse_root.clone()),
+            typ: Some(MountTypeEnum::BIND),
+            // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
+            // copies straight across any home. No `read_only` here.
+            //
+            // NOT under `/home/rmng`. GNOME's file manager lists every mount whose
+            // path is under the home directory, and each sibling home below this
+            // one is its own overlay mount, so a clone's sidebar grew a row per
+            // clone in the fleet. `~/clones` is a symlink to here.
+            //
+            // `rslave` is load-bearing. Every sibling's home is its own overlay
+            // mount UNDER this source, and a default (private) bind copies only
+            // the mounts that exist the moment the container starts: a clone
+            // created later shows up as an empty directory here, forever. As a
+            // slave of the CT's `<homes>` peer group this view tracks the CT —
+            // homes appear as clones are created and vanish as they are deleted —
+            // while mounts made inside the clone still never escape to the CT.
+            bind_options: Some(MountBindOptions {
+                propagation: Some(MountBindOptionsPropagationEnum::RSLAVE),
                 ..Default::default()
-            });
-            mounts.push(Mount {
-                target: Some("/clones".to_string()),
-                source: Some(spec.browse_root.clone()),
-                typ: Some(MountTypeEnum::BIND),
-                // Read-write by design (GEN2-CLONES.md §3.6): any clone reads or
-                // copies straight across any home. No `read_only` here.
-                //
-                // NOT under `/home/rmng`. GNOME's file manager lists every mount whose
-                // path is under the home directory, and each sibling home below this
-                // one is its own overlay mount, so a clone's sidebar grew a row per
-                // clone in the fleet. `~/clones` is a symlink to here.
-                //
-                // `rslave` is load-bearing. Every sibling's home is its own overlay
-                // mount UNDER this source, and a default (private) bind copies only
-                // the mounts that exist the moment the container starts: a clone
-                // created later shows up as an empty directory here, forever. As a
-                // slave of the CT's `<homes>` peer group this view tracks the CT —
-                // homes appear as clones are created and vanish as they are deleted —
-                // while mounts made inside the clone still never escape to the CT.
-                bind_options: Some(MountBindOptions {
-                    propagation: Some(MountBindOptionsPropagationEnum::RSLAVE),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-        }
+            }),
+            ..Default::default()
+        });
         // Shared pool, same ordinary bind: present from first boot and surviving
         // restarts, unlike the retired live mount it replaces. Always mounted, same
         // reasoning: `shared_host_dir` never yields empty, and a pool-less clone would
@@ -2180,8 +2126,8 @@ impl DockerCtl {
 
     /// Download a tar archive of `path` inside a container (works on a STOPPED
     /// container too — the daemon reads the filesystem, not the process). Used by the
-    /// gen-2 migration to copy `/home/rmng` out of a stopped gen-1 container into its
-    /// fresh dataset; the caller extracts the bytes itself.
+    /// home-overlay skeleton export to copy a template home out of a container; the
+    /// caller extracts the bytes itself.
     pub async fn download_home_tar(&self, container: &str, path: &str) -> Result<Vec<u8>> {
         let mut stream = self.daemon()?.download_from_container(
             container,
@@ -2197,36 +2143,6 @@ impl DockerCtl {
             buf.extend_from_slice(&bytes);
         }
         Ok(buf)
-    }
-
-    /// The same archive as [`Self::download_home_tar`], as a STREAM rather than one
-    /// `Vec<u8>`.
-    ///
-    /// Migration reads whole clone homes, and buffering them cost their full size in
-    /// resident memory — measured at 11.0 GiB of RSS while copying a 12.0 GB home, with
-    /// the destination still empty. That is what capped the migration at one clone at a
-    /// time; streaming into the extractor removes the ceiling and overlaps the download
-    /// with the unpack.
-    ///
-    /// Errors are mapped to `io::Error` so the stream composes with
-    /// `tokio_util::io::StreamReader`.
-    pub fn download_tar_stream(
-        &self,
-        container: &str,
-        path: &str,
-    ) -> Result<impl futures::Stream<Item = std::io::Result<bytes::Bytes>> + Unpin + use<>> {
-        let stream = self.daemon()?.download_from_container(
-            container,
-            Some(
-                bollard::query_parameters::DownloadFromContainerOptionsBuilder::new()
-                    .path(path)
-                    .build(),
-            ),
-        );
-        let what = format!("downloading {path} from {container}");
-        Ok(Box::pin(stream.map(move |chunk| {
-            chunk.map_err(|e| std::io::Error::other(format!("{what}: {e}")))
-        })))
     }
 
     /// The next chunk from an exec's output stream, or an error once it is clear none is

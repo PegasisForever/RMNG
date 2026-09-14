@@ -8,9 +8,8 @@ The Docker port collapsed RMNG's script surface to almost nothing. The old
 `redeploy.sh` / `delete.sh`) are gone too — those flows are now pure Rust in
 [`provision.rs`](../crates/control-server/src/provision.rs), driving the bollard primitives in
 [`docker.rs`](../crates/control-server/src/docker.rs). The `P <step> <msg>` / `RESULT` bash
-protocol died with them: Rust emits progress directly through a `FnMut(&str, &str)` callback,
-and a guest script's own stdout lines are line-buffered into the Operation log. Clone binaries
-also no longer deploy via a script + endpoint — the control-server installs its current
+protocol died with them: Rust emits progress directly through a `FnMut(&str, &str)` callback.
+Clone binaries also no longer deploy via a script + endpoint — the control-server installs its current
 payloads into each clone at create time, before boot (a tar upload straight from Rust; see
 [DEPLOY.md#upgrades](DEPLOY.md#upgrades)).
 
@@ -21,25 +20,27 @@ over `docker exec`, is now [`template/setup/`](../template/setup/) — ordered p
 published as an image (`pegasis0/rmng-template`) instead of provisioned per install. See
 [DEPLOY.md#publishing-the-template](DEPLOY.md#publishing-the-template).
 
-What survives at **runtime** is **two in-container guest scripts** (`include_str!`'d into the
-control-server binary and streamed to a container over `docker exec bash -s` —
-`DockerCtl::exec_script`), plus the **template build scripts** and the **gnome-patch build**
-(both Dockerfile-stage/`RUN` steps, not `docker exec`).
+There are **no in-container guest scripts** left. The account-token flows that used to run
+`claude-import.sh` / `codex-import.sh` over `docker exec` are plain Rust now (`claude.rs`,
+`codex.rs`), and the directory that held them (`crates/control-server/scripts/`) is gone. What
+the control-server still embeds with `include_str!` is documentation and a build script it
+reads, not a script it runs in a clone: [`docs/CLI.md`](CLI.md) (shipped into every clone as
+the `rmng-cli` skill) and `template/setup/30-user.sh` (a test compares it against what the
+server injects).
+
+What is left is the **template build scripts**, the **gnome-patch build** (both
+Dockerfile-stage/`RUN` steps) and the **developer scripts** in `scripts/`.
 
 | Script | Runs where | Invoked by | Purpose |
 | --- | --- | --- | --- |
-| `crates/control-server/scripts/claude-import.sh` | in a clone container (`docker exec`) | `provision::run_clone_op` (`claude.rs`) | Clear the credentials file, or install a token and the identity that goes with it |
-| `crates/control-server/scripts/codex-import.sh` | in a clone container (`docker exec`) | `clone_ops::run_clone_op` (`codex.rs`) | Read `~/.codex/auth.json` status / the auth file, clear it, or install a token |
 | `template/setup/{lib,10-desktop,15-gnome-patch,20-toolbox,30-user}.sh` | in the template build (`RUN`) | `template/Dockerfile` | Provision the clone template rootfs: desktop, patched shell, dev toolbox, the clone user + its units (the RMNG binaries are **not** baked in — the control-server injects them at clone-create time) |
 | `template/gnome-patch/build-shell-deb.sh` | the `gnome-build` stage of `template/Dockerfile` | `docker build` | Build the patched gnome-shell `.deb` |
+| `scripts/build-macos-app.sh` | a developer's Mac | by hand | Build + bundle the native macOS viewer |
+| `scripts/publish-server.sh` | a developer's machine | by hand | Build + push the control-server image |
+| `scripts/publish-template.sh` | a developer's machine | by hand | Build + push the clone template image |
 
-The two runtime guest scripts are baked in at compile time
-([provision.rs:32-33](../crates/control-server/src/provision.rs)) and fed to
-`bash -s -- <args…>` over the exec's stdin at runtime — they are **not** pre-installed in any
-container. Each emits its step lines as `[ct] <message>`, which `provision.rs` strips for
-the operation message; other stdout/stderr becomes plain log context. The template build
-scripts, by contrast, are `COPY`'d into the build context and `RUN` by the Dockerfile itself —
-they never touch the control-server binary or a live container.
+The template build scripts are `COPY`'d into the build context and `RUN` by the Dockerfile
+itself — they never touch the control-server binary or a live container.
 
 ---
 
@@ -53,39 +54,26 @@ so arm64 will launch it. The binary links only system frameworks, so the bundle 
 self-contained — no Homebrew, nothing to copy in — and runs on a Mac that has never seen this
 repo. Prints the framework/Homebrew link counts as a check. Runs on macOS only.
 
-## In-container guest scripts
+### `scripts/publish-server.sh [SERVER_REPO]`
 
-### `claude-import.sh <user> clear|apply [creds_b64] [identity_b64]`
+Builds the **control-server** image from the root [`Dockerfile`](../Dockerfile) with the repo
+root as the build context, then pushes it. Stamps `GIT_SHA` + `BUILD_DATE` build args, so the
+running server can show its version and detect updates. Tags twice: an immutable dated
+`:YYYYMMDD` and a moving `:latest`, and pushes both. The repo defaults to `pegasis0/rmng`;
+override it with the `SERVER_REPO` env var or the first argument. Rollback is repointing the
+update reference (`docker.serverImage` in the config) at an older dated tag. See
+[DEPLOY.md#upgrades](DEPLOY.md#upgrades).
 
-Runs inside the target **clone** container as the clone user, printing the raw result to
-stdout. `clear` — delete `~/.claude/.credentials.json`, print `CLEARED`. `apply` — write
-that file (0600) from the base64 JSON in `$3` (the current short-lived access token, refresh
-emptied), print `RMNG_APPLY_OK`, then merge the base64 identity in `$4` into
-`~/.claude.json`. The identity is `userID`, `machineID` and `oauthAccount`, and it names the
-account the token belongs to, which is what Claude Code reports to Anthropic on every
-request. Pass `-` for `$4` to install the token alone. The merge keeps the other keys in
-that file and prints one of `RMNG_IDENTITY_{WRITTEN,CURRENT,FAILED}`, none of which fails
-the push. Backs `claude.rs`'s `apply_clone_token`; hot-swaps a running clone's account with
-no restart (Claude Code re-reads both files per request).
+### `scripts/publish-template.sh [TEMPLATE_REPO]`
 
-### `codex-import.sh <user> status|read|clear|apply [b64]`
-
-Mirrors `claude-import.sh` for the Codex CLI. Runs inside the target **clone** container
-as the clone user. `status` — decode `~/.codex/auth.json` and print identity (email, plan,
-account_id) from the `id_token` JWT; exits non-zero if no token or if only an API key is
-present. `read` — the clone's `~/.codex/auth.json`. `clear` — delete it, print `CLEARED`.
-`apply <b64>` — write `~/.codex/auth.json` (0600) from the base64 JSON in `$3` (the
-injected token with `OPENAI_API_KEY: null`, `refresh_token: ""`, `last_refresh: <now>`).
-Backs `codex.rs`'s `{check_clone_auth, import_clone_account, apply_clone_token}`; hot-swaps
-a running clone's Codex account with no restart (the Codex CLI re-reads auth per request).
-
-> **Provisioning note:** the `codex` CLI is installed into the clone template by
-> `template/setup/30-user.sh` (warn-only — the install step does not fail the build if the
-> CLI is unavailable). The control-server also attempts a missing standalone Codex CLI
-> install at clone creation and from the clone reconciler for old running clones. A failed
-> download does not block the clone; the reconciler retries later. Codex guidance/MCP files
-> (`~/.codex/AGENTS.md`, `~/.codex/config.toml`) are written at clone creation and refreshed
-> on old running clones.
+Builds the **clone template** image from [`template/Dockerfile`](../template/Dockerfile) — also
+with the repo root as the build context, because the final stage copies `template/setup/` and
+the `gnome-build` stage payloads out of it — then pushes it. Same two tags as
+`publish-server.sh`: dated `:YYYYMMDD` plus `:latest`. The repo defaults to
+`pegasis0/rmng-template`; override it with the `TEMPLATE_REPO` env var or the first argument.
+Rollback is repointing the template reference at an older dated tag. Preset Dockerfiles take
+this image through their `FROM` line, so a new `:latest` reaches a preset only when its image
+is rebuilt. See [DEPLOY.md#publishing-the-template](DEPLOY.md#publishing-the-template).
 
 ---
 
@@ -104,7 +92,7 @@ inside the script — never baked as image `ENV`, or it would leak into the boot
 | `10-desktop.sh` | Locale/tz, headless GNOME + Mutter + VA-API + PipeWire (no gdm3/g-r-d/flatpak), the Recommends strip, container masks, the polkit sudo-group rule (DM-less ⇒ no resolvable session) |
 | `15-gnome-patch.sh` | `dpkg -i` the patched gnome-shell `.deb` (from the `gnome-build` stage) over stock |
 | `20-toolbox.sh` | Best-effort dev toolbox: CLI tools, Docker, cloud CLIs, browsers, Cursor/VS Code, HMCL/Mission Center/Monaspace, dconf defaults |
-| `30-user.sh` | The uid-1000 clone user (groups, linger, fish), preset-PATH rc, keyring, shared `CLAUDE.md`, Codex `AGENTS.md`/`config.toml`, Claude+Codex Linear MCP defaults, `claude`/`codex`/`uv`/`rustup`/`nvm` toolchains, and the three `systemd --user` units (`gnome-headless`, `rmng-clone-daemon`, `agent-wrapper`) + wants symlinks |
+| `30-user.sh` | The uid-1000 clone user (groups, linger, fish), preset-PATH rc, keyring, shared `CLAUDE.md`, Codex `AGENTS.md`/`config.toml`, Claude+Codex Linear MCP defaults, the `claude`/`codex`/`uv`/`rustup` toolchains, and the three `systemd --user` units (`gnome-headless`, `rmng-clone-daemon`, `agent-wrapper`) + wants symlinks. `claude` and `codex` are standalone installs that need no node, and **nvm is not installed at all** — a clone that needs node gets it from its preset Dockerfile |
 
 `30-user.sh` creates `/opt/rmng/bin` (root:root, 0755) **empty** — the template no longer
 carries `clone-daemon`/`agent-wrapper`; the control-server installs its own current copies

@@ -116,7 +116,7 @@ impl CloneHome {
 
     /// `zfs create` a fresh dataset for this clone.
     ///
-    /// Deliberately not an `ensure_`: the create and migrate paths call it exactly once,
+    /// Deliberately not an `ensure_`: the create path calls it exactly once,
     /// on an id that has no dataset, and an id that already has one is a bug worth an
     /// error rather than a silent reuse. [`crate::provision::HomeSource::Reuse`] is how a
     /// caller says the dataset is already there.
@@ -124,7 +124,7 @@ impl CloneHome {
         crate::zfs::create(&self.parent, &self.id)
     }
 
-    /// `zfs clone` this clone's dataset out of `snapshot` (fork, and template seeds).
+    /// `zfs clone` this clone's dataset out of `snapshot` (the fork path).
     pub(crate) fn clone_dataset_from(&self, snapshot: &str) -> Result<()> {
         crate::zfs::clone_dataset(&self.parent, snapshot, &self.id)?;
         Ok(())

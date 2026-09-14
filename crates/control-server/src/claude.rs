@@ -601,9 +601,9 @@ fn identity_json(acct: &StoredClaudeAccount) -> Option<String> {
     let mut account = serde_json::Map::new();
     account.insert("accountUuid".into(), acct.account_uuid.clone().into());
     account.insert("emailAddress".into(), acct.email.clone().into());
-    // Only when we have one. The reverse migration (`crate::token_unmigrate`) recovers
-    // accounts with no organization recorded, and naming an empty one would write that
-    // emptiness over a clone's correct value. Claude Code refills what it is not told.
+    // Only when we have one. An account can reach the store with no organization recorded,
+    // and naming an empty one would write that emptiness over a clone's correct value.
+    // Claude Code refills what it is not told.
     if !acct.org_uuid.is_empty() {
         account.insert("organizationUuid".into(), acct.org_uuid.clone().into());
         account.insert("organizationName".into(), acct.org_name.clone().into());

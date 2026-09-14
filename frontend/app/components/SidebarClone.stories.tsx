@@ -105,7 +105,7 @@ export const NoToken: Story = {
   },
 };
 
-/** Plain unmanaged row — delete only (no commit / account actions). */
+/** Plain unmanaged row — delete only (no account or container actions). */
 export const Unmanaged: Story = {
   args: { clone: cloneUnmanaged },
 };

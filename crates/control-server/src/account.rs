@@ -279,30 +279,8 @@ impl<A: AccountKind> Store<A> {
         }
     }
 
-    /// Re-read the on-disk store into memory, discarding the current snapshot.
-    ///
-    /// Exists for exactly one caller: the reverse migration
-    /// ([`crate::token_unmigrate`]) writes this file AFTER `App::new` has already loaded it, so
-    /// without a reload the process would keep running on whatever was there before — and the
-    /// first refresh would persist that stale snapshot back over the freshly recovered
-    /// credentials, then the stamp would stop it ever being retried. The recovery is silent and
-    /// permanent, so the reload is not optional.
-    pub fn reload_from_disk(&self) {
-        let fresh = std::fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|s| serde_json::from_str::<AccountsFile<A>>(&s).ok())
-            .map(|f| f.accounts)
-            .unwrap_or_default();
-        *self.accounts.lock().unwrap() = fresh;
-        // Anything recorded as pushed refers to a token from the previous snapshot; forcing a
-        // re-push is the safe direction (idempotent) versus leaving a clone on a dead token.
-        self.pushed.lock().unwrap().clear();
-    }
-
     /// Replace the whole store file with `accounts`, `0600`, via a temp file + rename so a
-    /// crash mid-write cannot leave a truncated token store behind. The reverse migration
-    /// ([`crate::token_unmigrate`]) writes its recovered set through this too, so there is no
-    /// second definition of the on-disk shape to keep in step by hand.
+    /// crash mid-write cannot leave a truncated token store behind.
     pub(crate) fn save(&self, accounts: &[A]) -> Result<()> {
         if let Some(d) = self.path.parent() {
             std::fs::create_dir_all(d).ok();

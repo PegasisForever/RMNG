@@ -10,6 +10,7 @@
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
+import type { OperationKind } from "~/lib/wire/OperationKind";
 import type { PortForward } from "~/lib/wire/PortForward";
 
 export interface MonitorSpec {
@@ -41,7 +42,7 @@ export interface Clone {
  /** True for a retained managed clone that is intentionally stopped. Unlike `offline`,
   *  this is an operator-controlled state and the clone can be started again. */
  archived?: boolean;
- /** The clone-source image reference this clone was cloned from (`pegasis0/rmng-template:latest`). */
+ /** The preset image tag this clone was built from (`rmng-p-<hash>`), or its fork source. */
  source?: string;
  /** Email of the imported Claude account whose access token the server has installed into
   *  this clone's `~/.claude/.credentials.json`. Absent when no account is assigned. */
@@ -98,25 +99,21 @@ export interface Clone {
  forwards?: PortForward[];
 }
 
-export type OperationKind =
- | "clone"
- | "delete"
- | "archive"
- | "unarchive"
- | "pull"
- | "commit"
- | "update";
+// The kind list is generated from the Rust `OperationKind` enum. Re-exported rather than
+// re-typed here, so the hand-maintained `Operation` below can never list a different set
+// of kinds than the server can file.
+export type { OperationKind };
 export type OperationStatus = "running" | "done" | "error";
 
 export interface Operation {
  id: string;
  kind: OperationKind;
  /**
-  * What the op acts on: clone id (clone/delete) or image name (pull/commit).
+  * What the op acts on: clone id (clone/delete) or image name (pull/prebuild).
   */
  target: string;
- /** Clone source image reference (clone), or source clone id (commit). Serialized as
-  *  `null` when absent (the wire type is `Option<String>` with no skip), so accept both. */
+ /** The preset image tag a create built from, or the fork's source clone id. Omitted
+  *  entirely when absent (the wire type skips a `None`), so accept both. */
  source?: string | null;
  status: OperationStatus;
  /** Current step key (maps to a coarse percentage in the UI). */
