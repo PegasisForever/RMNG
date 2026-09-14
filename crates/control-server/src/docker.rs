@@ -996,57 +996,6 @@ impl DockerCtl {
         Ok(())
     }
 
-    // --- retired group-proxy sidecar ----------------------------------------------------
-
-    /// The container name of the retired `rmng-cliproxy` group-proxy sidecar.
-    ///
-    /// The group-proxy architecture is gone (RMNG owns account tokens again and injects them
-    /// straight into each clone), but a deployment upgraded from that era still has this
-    /// container on disk, and it was deliberately never auto-recreated on image drift — so it
-    /// survives a control-server update untouched.
-    pub const RETIRED_GROUP_PROXY: &str = "rmng-cliproxy";
-
-    /// Stop + remove the retired `rmng-cliproxy` sidecar, if it exists. Idempotent and
-    /// best-effort: an absent container, or no Docker daemon at all (dev mode), is a no-op.
-    ///
-    /// **Ordering is load-bearing.** This MUST run before
-    /// [`crate::token_unmigrate::unmigrate_group_proxy_tokens`] reads the per-group `auth-dir`s.
-    /// While that sidecar runs it keeps every per-group CLIProxyAPI process alive, and those
-    /// processes refresh OAuth tokens on their own schedule. A refresh token is single-use, so
-    /// a rotation landing *after* the migration copied a credential would invalidate the copy —
-    /// leaving a store full of dead tokens and forcing the operator to re-login every account,
-    /// which is exactly what the reverse migration exists to avoid.
-    pub async fn remove_retired_group_proxy(&self) {
-        let Ok(docker) = self.daemon() else {
-            return; // dev mode / no daemon: nothing to tear down
-        };
-        match docker
-            .inspect_container(
-                Self::RETIRED_GROUP_PROXY,
-                None::<bollard::query_parameters::InspectContainerOptions>,
-            )
-            .await
-        {
-            Ok(_) => {}
-            // Absent is the steady state on any deployment that never ran the group proxy.
-            Err(BollardError::DockerResponseServerError {
-                status_code: 404, ..
-            }) => return,
-            Err(e) => {
-                tracing::warn!(target: "docker", "inspecting {}: {e}", Self::RETIRED_GROUP_PROXY);
-                return;
-            }
-        }
-        self.stop_container(Self::RETIRED_GROUP_PROXY).await.ok();
-        self.remove_container(Self::RETIRED_GROUP_PROXY).await.ok();
-        tracing::info!(
-            target: "docker",
-            "removed the retired {} sidecar (the group-proxy architecture was reverted); its \
-             per-group CLIProxyAPI processes can no longer rotate the OAuth tokens RMNG now owns",
-            Self::RETIRED_GROUP_PROXY,
-        );
-    }
-
     /// Ensure one infra container matches `spec`: create-if-absent (dropping `spec.files` in
     /// before start), start-if-stopped, recreate-if-image-drifted. Best-effort image pull
     /// first. Cache volumes are external (survive the recreate).

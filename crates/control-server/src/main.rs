@@ -41,7 +41,6 @@ mod state;
 mod stuck;
 mod stucklog;
 mod termplane;
-mod token_unmigrate;
 mod transcript;
 mod update;
 mod web;
@@ -85,11 +84,6 @@ async fn main() -> Result<()> {
     // node vanishes on CT reboot, and the host node must not be bind-mounted in.
     // Non-fatal by design.
     zfs::ensure_dev_zfs();
-
-    // Snapshot each clone's retired `group` binding BEFORE anything mutates the state store.
-    // `RmngClone` has no such field any more, so the first `store.mutate` below persists
-    // `state.json` without it and the binding is unrecoverable — see `read_raw_clone_pools`.
-    let pools_before = token_unmigrate::read_raw_clone_pools(&config::state_path());
 
     let app = app::App::new(store, cfg, wire::DATA_DIR);
 
@@ -234,27 +228,6 @@ async fn main() -> Result<()> {
             Err(_) => tracing::warn!("reconcile: listing managed containers timed out after 10s"),
         }
     }
-
-    // One-shot reverse token migration: recover the OAuth credentials the retired group-proxy
-    // era left in the per-group CLIProxyAPI `auth-dir`s and write them back into the RMNG-owned
-    // stores (claude-accounts.json / codex-accounts.json + cloneGroups/codexGroups), so an
-    // upgraded deployment carries every account across with no operator re-login. Stamp-gated
-    // (runs once) and best-effort: it must NOT block boot, so any panic is caught and logged.
-    //
-    // ORDERING IS LOAD-BEARING. The `rmng-cliproxy` sidecar is torn down FIRST: while it runs it
-    // keeps per-group CLIProxyAPI processes alive, and those refresh OAuth tokens on their own
-    // schedule. Since a refresh token is single-use, a rotation landing after we copy a
-    // credential would invalidate the copy — leaving dead tokens in the stores and forcing a
-    // re-login of every account, exactly what this migration exists to avoid.
-    app.docker.remove_retired_group_proxy().await;
-    if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        token_unmigrate::unmigrate_group_proxy_tokens(&app, &pools_before)
-    })) {
-        tracing::error!("group-proxy token reverse-migration panicked (booting anyway): {e:?}");
-    }
-    // The migration above can rebuild the pool list: re-mirror so the boot snapshot
-    // carries the migrated pools, not the pre-migration ones.
-    web::mirror_groups_to_state(&app);
 
     // GStreamer init MUST finish before smb/ssh (and any other child
     // spawners). Those supervisors otherwise inherit gst-plugin-scanner pipes and
