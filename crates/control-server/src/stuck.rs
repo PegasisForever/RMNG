@@ -457,6 +457,132 @@ fn pi_background_active(root: &Path) -> bool {
     false
 }
 
+/// The pi extension tool that blocks a turn on a person's answer
+/// (`npm:@juicesharp/rpiv-ask-user-question`). An open call of this one tool is the
+/// definition of stuck for a pi session, the way `AskUserQuestion` is for Claude Code
+/// (see [`HUMAN_WAITS`]). One name, never a list: anything else a pi session is inside
+/// is work, and judging that is the activity file's job, not this one's.
+const PI_ASK_TOOL: &str = "ask_user_question";
+
+/// Newest pi session files opened for the ask check in one pass. Pi keeps every session
+/// it has ever run; only the newest can hold a live question, and the tail read below
+/// costs one small seek per file.
+const MAX_PI_ASK_FILES: usize = 16;
+
+/// Bytes read off the end of one session file. A question call and its answer are
+/// adjacent in time, so whatever is still open is at the end. Reading from the end
+/// also makes the pairing exact: a call inside the window with no later answer inside
+/// the same window is genuinely still open, because any answer would be newer and
+/// therefore also inside the window.
+const PI_ASK_TAIL: u64 = 32 * 1024;
+
+/// One line of a pi session file, shaped only for the ask check: assistant `toolCall`
+/// blocks and `toolResult` messages. Everything else is skipped without parsing.
+#[derive(Debug, Deserialize)]
+struct PiAskLine {
+    #[serde(default)]
+    message: Option<PiAskMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PiAskMessage {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    content: Option<Value>,
+    #[serde(rename = "toolCallId", default)]
+    tool_call_id: Option<String>,
+}
+
+/// Whether any pi session in this clone is currently blocked on a person's answer.
+///
+/// Narrow on purpose: the newest [`MAX_PI_ASK_FILES`] session files, the last
+/// [`PI_ASK_TAIL`] bytes of each, one tool name. A crashed pi can leave an open call
+/// behind, but that file stops being newest as soon as anything else runs, and with no
+/// live `active` file the clone reads stuck through the registry path anyway — the same
+/// answer this gives. So a stale open call can only agree with the default, never
+/// overturn real work: live work keeps appending to its own file, which outranks the
+/// stale one by mtime.
+fn pi_ask_blocked(root: &Path) -> bool {
+    let mut files: Vec<(f64, PathBuf)> = Vec::new();
+    let mut budget = transcript::MAX_TICK_WALK_FILES;
+    transcript::walk_jsonl(
+        &root.join("home/rmng/.pi/agent/sessions"),
+        Walk::to_depth(2),
+        &mut budget,
+        &mut |e| {
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            files.push((mtime, e.path()));
+        },
+    );
+    files.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    files.truncate(MAX_PI_ASK_FILES);
+    files.iter().any(|(_, path)| pi_file_asks(path))
+}
+
+/// Whether the tail of one session file holds an `ask_user_question` call with no answer
+/// after it. Calls and answers pair by `id` / `toolCallId`; both arrive in order, so one
+/// pass over the tail settles every call it can see.
+fn pi_file_asks(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut open: HashSet<String> = HashSet::new();
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return false;
+    };
+    let from = len.saturating_sub(PI_ASK_TAIL);
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    if file.take(len - from).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    // The window can open mid-line; that leading fragment fails to parse and is skipped.
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(raw) = serde_json::from_str::<PiAskLine>(line) else {
+            continue;
+        };
+        let Some(msg) = raw.message else { continue };
+        match msg.role.as_deref() {
+            Some("assistant") => {
+                let Some(Value::Array(blocks)) = msg.content.as_ref() else {
+                    continue;
+                };
+                for b in blocks {
+                    let is_ask = b.get("type").and_then(Value::as_str) == Some("toolCall")
+                        && b.get("name").and_then(Value::as_str) == Some(PI_ASK_TOOL);
+                    if is_ask {
+                        if let Some(id) = b.get("id").and_then(Value::as_str) {
+                            open.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+            Some("toolResult") => {
+                if let Some(id) = msg.tool_call_id.as_deref() {
+                    open.remove(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    !open.is_empty()
+}
+
 /// Every record in the registry, each tagged with whether its process is still alive.
 pub fn read_sessions(root: &Path) -> Vec<Session> {
     let dir = root.join(CLAUDE_SESSIONS);
@@ -3022,7 +3148,20 @@ impl SessionCase {
 /// Every live session in one clone, read on the blocking pool from an already-resolved
 /// container root (see [`container_root`]).
 fn read_clone_at(root: &Path) -> Option<Vec<SessionCase>> {
-    // The pi-background activity file decides first and alone: a live `active` file
+    // A pi session waiting on the operator's answer decides first of all: the turn is
+    // parked on a person, so the clone is stuck even while its activity file says active.
+    if pi_ask_blocked(root) {
+        return Some(vec![SessionCase {
+            session: "pi-ask-user-question".to_string(),
+            verdict: Verdict::Stuck,
+            view: Value::Null,
+            why: "a pi session is waiting on your answer to ask_user_question".to_string(),
+            status: Some("waiting".to_string()),
+            waiting_for: Some("operator answer".to_string()),
+            prompt_age: None,
+        }]);
+    }
+    // The pi-background activity file decides next and alone: a live `active` file
     // means a pi session is working right now, whatever the registries say. No model
     // call, no transcript parse. A clone with no pi running lands here as false and
     // reads on through the registry path below.
@@ -3246,6 +3385,63 @@ mod tests {
         let cases = read_clone_at(&root).expect("a readable root always reads");
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].verdict, Verdict::Working);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn write_pi_ask_session(root: &Path, body: &str) {
+        let dir = root.join("home/rmng/.pi/agent/sessions/--home-rmng-api--");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("2026-09-08T04-08-03-092Z_01a07f33-9913-7397-ba86-9003a65261d2.jsonl"),
+            body,
+        )
+        .unwrap();
+    }
+
+    const PI_ASK_OPEN: &str = concat!(
+        "{\"type\":\"session\",\"id\":\"s\",\"cwd\":\"/home/rmng/api\"}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\"}],\"timestamp\":1000000}}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"q1\",\"name\":\"ask_user_question\",\"arguments\":{}}],\"timestamp\":1001000}}\n",
+    );
+
+    const PI_ASK_ANSWERED: &str = concat!(
+        "{\"type\":\"session\",\"id\":\"s\",\"cwd\":\"/home/rmng/api\"}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\"}],\"timestamp\":1000000}}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"q1\",\"name\":\"ask_user_question\",\"arguments\":{}}],\"timestamp\":1001000}}\n",
+        "{\"type\":\"message\",\"message\":{\"role\":\"toolResult\",\"toolCallId\":\"q1\",\"toolName\":\"ask_user_question\",\"timestamp\":1002000}}\n",
+    );
+
+    #[test]
+    fn an_open_pi_question_is_stuck_and_a_answered_one_is_not() {
+        let root = pi_state_root("ask");
+        assert!(!pi_ask_blocked(&root), "no sessions means nothing waiting");
+        write_pi_ask_session(&root, PI_ASK_OPEN);
+        assert!(pi_ask_blocked(&root), "an unanswered question is waiting");
+        write_pi_ask_session(&root, PI_ASK_ANSWERED);
+        assert!(!pi_ask_blocked(&root), "an answered question is work again");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn other_pi_tool_calls_are_not_questions() {
+        let root = pi_state_root("ask-other");
+        write_pi_ask_session(
+            &root,
+            "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"id\":\"c1\",\"name\":\"bash\",\"arguments\":{}}],\"timestamp\":1001000}}\n",
+        );
+        assert!(!pi_ask_blocked(&root), "a bash call is work, not waiting");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pi_question_overrides_a_live_active_file() {
+        let root = pi_state_root("ask-wins");
+        write_proc_stat(&root, 4711, "8231447");
+        write_pi_state(&root, "4711.json", 4711, "8231447", "active");
+        write_pi_ask_session(&root, PI_ASK_OPEN);
+        let cases = read_clone_at(&root).expect("a readable root always reads");
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].verdict, Verdict::Stuck);
         let _ = std::fs::remove_dir_all(&root);
     }
 
