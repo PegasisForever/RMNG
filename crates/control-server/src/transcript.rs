@@ -55,14 +55,6 @@ pub(crate) const CURSOR_PROJECTS: &str = ".cursor/projects";
 /// carries both the start time and the id, and the id is its last 36 characters.
 pub(crate) const CODEX_SESSIONS: &str = ".codex/sessions";
 
-/// Where the Pi coding agent files a session's transcript, under the clone's home.
-///
-/// One JSONL session per file: `~/.pi/agent/sessions/<slug>/<timestamp>_<id>.jsonl`, where
-/// `<slug>` is the working directory with separators flattened (`--home-rmng-RMNG--`) and
-/// `<id>` is the session id. The first line names the session and its `cwd`:
-/// `{"type":"session","id":"<id>","cwd":"/home/rmng/<project>"}`.
-pub(crate) const PI_SESSIONS: &str = ".pi/agent/sessions";
-
 /// How far below [`CLAUDE_PROJECTS`] a transcript can sit.
 ///
 /// Claude writes three shapes, and a walk that reaches only the first two silently drops the
