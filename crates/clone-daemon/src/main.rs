@@ -236,13 +236,13 @@ async fn run_shipping(
         &[],
     )?;
     tracing::info!("connected to media socket {socket_path} as clone '{clone_id}'");
-    // After the Hello send, not before it: only the embedded-cursor path uses GStreamer
-    // (MCP screenshots encode via `media`), and no capture can start before the server
+    // After the Hello send, not before it: no capture can start before the server
     // sees this Hello and asks for it — sequential message processing guarantees that.
-    // Default raw-PW clones skip the ~190ms init entirely.
-    if embedded {
-        gstreamer::init().context("gstreamer init")?;
-    }
+    // Unconditional: the MCP `screenshot` tool encodes via `media` (GStreamer) on every
+    // clone, while only the embedded-cursor capture path uses GStreamer. Gating init on
+    // `embedded` saved ~190ms on raw-PW clones but left screenshots panicking with
+    // "GStreamer has not been initialized".
+    gstreamer::init().context("gstreamer init")?;
 
     // Latest captured dmabuf per monitor, refreshed by the capture callbacks below; the
     // MCP `screenshot` tool dups the fd and GPU-encodes it to PNG.
