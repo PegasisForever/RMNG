@@ -82,6 +82,17 @@ const ENC_TAIL: &str = "vah264enc name=enc aud=true b-frames=0 ref-frames=1 key-
      appsink name=out emit-signals=true max-buffers=4 sync=false";
 
 impl Encoder {
+    /// Park the pipeline in NULL, stopping its streaming threads.
+    ///
+    /// Idempotent: safe to call twice (the second is a no-op state change). Never
+    /// holds any control-server lock — `set_state` blocks until the streaming
+    /// threads exit, so call sites must invoke this AFTER releasing the global
+    /// encoder map (same rule as `force_idr`). [`Drop`] calls this as a backstop
+    /// for any path that drops the last `Arc` without shutting down first.
+    pub fn shutdown(&self) {
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+
     /// `on_au(annexb, is_idr)` is called from a GStreamer thread per access unit.
     pub fn new<F: FnMut(Vec<u8>, bool) + Send + 'static>(
         chroma: ChromaMode,
@@ -247,6 +258,18 @@ impl Encoder {
             fifo.lock().unwrap().push_back(t0);
         }
         Ok(())
+    }
+}
+
+/// A dropped encoder parks its pipeline in NULL first. Destroying a PLAYING
+/// pipeline makes GStreamer tear down live streaming threads mid-flight
+/// (CRITICAL warnings, leaked VA surfaces, deadlocked `vah264enc` threads —
+/// observed as a cascade of dispose-while-PLAYING errors and `Internal data
+/// stream error`s on rapid resolution switches). Prefer explicit [`Encoder::shutdown`]
+/// outside the encoder-map lock; this only covers paths that forget.
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

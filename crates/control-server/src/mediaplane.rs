@@ -804,16 +804,25 @@ fn encoder_for(
     chroma: ChromaMode,
 ) -> Option<Arc<Encoder>> {
     // Fast path: an encoder at the right size already exists. Short critical section.
-    {
-        let map = encoders.lock().unwrap();
-        if let Some((e, ew, eh)) = map.get(&monitor_id) {
-            if *ew == w && *eh == h {
-                return Some(e.clone());
+    // A stale-size entry is REMOVED here and shut down below, outside the lock:
+    // dropping it in the map would destroy a PLAYING pipeline under the global
+    // lock (`set_state(NULL)` blocks on the streaming threads) and stall every
+    // clone's reader thread — the same rule `force_idr_all` documents.
+    let stale: Option<Arc<Encoder>> = {
+        let mut map = encoders.lock().unwrap();
+        match map.get(&monitor_id) {
+            Some((e, ew, eh)) if *ew == w && *eh == h => return Some(e.clone()),
+            Some((_, ew, eh)) => {
+                tracing::info!(
+                    "monitor {monitor_id} resolution {ew}x{eh} → {w}x{h}; rebuilding encoder"
+                );
+                map.remove(&monitor_id).map(|(e, _, _)| e)
             }
-            tracing::info!(
-                "monitor {monitor_id} resolution {ew}x{eh} → {w}x{h}; rebuilding encoder"
-            );
+            None => None,
         }
+    };
+    if let Some(old) = stale {
+        old.shutdown();
     }
     // Build with the lock RELEASED. `Encoder::new` constructs a whole GStreamer pipeline and
     // blocks in `set_state(Playing)` (hundreds of ms, longer under GPU/CPU contention). This
@@ -1325,10 +1334,28 @@ fn serve_clone(
                         // Drop encoders for monitors that no longer exist on the selected
                         // clone (added/resized ones are (re)built lazily by encoder_for on
                         // the next frame). Prevents stale encoders lingering after a switch.
+                        // Removed pipelines are shut down AFTER releasing the map: tearing
+                        // down a PLAYING pipeline blocks on its streaming threads, and doing
+                        // that under the global lock stalls every clone's reader thread.
                         // The viewer's window set comes from the configured layout (tag-3
                         // ViewSpec), not this daemon-reported one, so nothing is sent here.
                         let live: std::collections::HashSet<u32> = l.iter().map(|m| m.id).collect();
-                        encoders.lock().unwrap().retain(|mid, _| live.contains(mid));
+                        let retired: Vec<Arc<Encoder>> = {
+                            let mut encs = encoders.lock().unwrap();
+                            let mut retired = Vec::new();
+                            encs.retain(|mid, (e, _, _)| {
+                                if live.contains(mid) {
+                                    true
+                                } else {
+                                    retired.push(e.clone());
+                                    false
+                                }
+                            });
+                            retired
+                        };
+                        for e in retired {
+                            e.shutdown();
+                        }
                     }
                 }
             }
