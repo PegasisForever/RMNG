@@ -97,6 +97,17 @@ export function formatCloneUsage(
  *  rows match by construction. An archived clone drops CPU and MEM entirely rather than
  *  rendering them empty: it keeps only the token pair, which is narrower on both rows equally.
  *  The empty-slot case remains only for a caller that has no value to give. */
+/** The selection {@link AccountTag} reads the badge off: the clone-level group
+ *  binding first (it moved out of the selection string — see
+ *  `ChangeAccountModalContainer`), then a legacy per-side group, then the
+ *  side's own selection. Without this the badge always reads "auto". */
+function badgeSelection(
+  group: string | null | undefined,
+  selection?: string | null,
+): string | undefined {
+  return group ? `group:${group}` : (selection ?? undefined);
+}
+
 function MetricSlot({ metric, labelWidth = "w-6" }: { metric?: Metric; labelWidth?: string }) {
   return (
     <span
@@ -594,7 +605,10 @@ export function SidebarClone({
                   logo={claudeLogo}
                   provider="Claude"
                   email={clone.claudeAccountEmail}
-                  selection={clone.claudeSelection}
+                  selection={badgeSelection(
+                    clone.group ?? clone.claudeGroup,
+                    clone.claudeSelection,
+                  )}
                   fable={tokens?.fableActive}
                 />
                 {/* The arrow labels are one glyph, so they get their own narrow width rather
@@ -607,7 +621,10 @@ export function SidebarClone({
                   logo={chatgptLogo}
                   provider="Codex"
                   email={clone.codexAccountEmail}
-                  selection={clone.codexSelection}
+                  selection={badgeSelection(
+                    clone.group ?? clone.codexGroup,
+                    clone.codexSelection,
+                  )}
                 />
                 <MetricSlot metric={outMetric} labelWidth="w-2" />
                 {memMetric ? <MetricSlot metric={memMetric} /> : null}
