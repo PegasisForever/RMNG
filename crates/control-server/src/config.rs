@@ -160,7 +160,7 @@ mod tests {
         let merged = merge_update(&base, incoming).unwrap();
         assert_eq!(merged.groups.len(), 2);
         assert_eq!(merged.groups[0].name, "team");
-        assert_eq!(merged.groups[0].accounts, vec!["a@x.com"]);
+        assert_eq!(merged.groups[0].accounts, vec![wire::GroupMember::from("a@x.com")]);
         assert_eq!(merged.groups[1].name, "beta");
         // An empty array normalizes to the backstop pool — there is always at least one
         // group. The save sweep then deletes the accounts the emptied list orphaned.

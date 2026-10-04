@@ -22,7 +22,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use wire::{ClaudeUsage, CloneGroup, RmngClone};
+use wire::{ClaudeUsage, CloneGroup, GroupMember, RmngClone};
 
 use crate::account::{AccountKind, PUSH_CONCURRENCY, ROTATE_SECS, Store, fingerprint};
 use crate::app::App;
@@ -446,7 +446,9 @@ fn best_scored<P: PoolProvider>(app: &App) -> Option<String> {
     }
     let mut pool: Vec<&Scored> = scored.iter().filter(|s| s.eligible).collect();
     if pool.is_empty() {
-        let members: Vec<String> = scored.iter().map(|s| s.email.clone()).collect();
+        // Already this side's usable emails: untagged rows carry them unchanged.
+        let members: Vec<GroupMember> =
+            scored.iter().map(|s| GroupMember::from(s.email.as_str())).collect();
         return best_saturated_email(
             &rotation_candidates::<P>(app, &members),
             &clone_loads::<P>(app),
@@ -564,11 +566,13 @@ pub(crate) struct RotationCandidate {
     pub(crate) seven_reset: Option<i64>,
 }
 
-fn rotation_candidates<P: PoolProvider>(app: &App, members: &[String]) -> Vec<RotationCandidate> {
+fn rotation_candidates<P: PoolProvider>(app: &App, members: &[GroupMember]) -> Vec<RotationCandidate> {
     let known = P::usable_emails(app);
     let snaps = P::snapshots(app);
     members
         .iter()
+        .filter(|m| m.allows(P::PROVIDER))
+        .map(|m| &m.email)
         .filter(|email| known.iter().any(|k| k.as_str() == email.as_str()))
         .map(|email| {
             let snap = snaps.get(email.as_str()).cloned().unwrap_or_default();
@@ -600,10 +604,14 @@ fn exhausted<P: PoolProvider>(app: &App, email: &str) -> bool {
 
 /// Accounts among `members` that can take work: imported, holding a token that still
 /// works, and not exhausted. (A member with no token, or with a dead one, is dropped.)
-pub(crate) fn eligible_members<P: PoolProvider>(app: &App, members: &[String]) -> Vec<String> {
+/// Members tagged for the other provider are invisible to this side: one email can name
+/// two accounts, and a group entry claims only the side its tag allows (untagged = both).
+pub(crate) fn eligible_members<P: PoolProvider>(app: &App, members: &[GroupMember]) -> Vec<String> {
     let known = P::usable_emails(app);
     members
         .iter()
+        .filter(|m| m.allows(P::PROVIDER))
+        .map(|m| &m.email)
         .filter(|email| known.iter().any(|k| k.as_str() == email.as_str()))
         .filter(|email| !exhausted::<P>(app, email))
         .cloned()
@@ -841,7 +849,7 @@ pub(crate) fn assign_saturated_rotation<P: PoolProvider>(
 async fn rotate_pool<P: PoolProvider>(
     app: &App,
     label: &str,
-    members: &[String],
+    members: &[GroupMember],
     clones: &[RmngClone],
 ) {
     let log = P::LOG_LABEL;
@@ -967,7 +975,10 @@ pub(crate) async fn rotate_once<P: PoolProvider>(app: &App) {
     // "auto" == a live group of every account that can still run a clone.
     let auto = auto_pool_clones::<P>(&hosts);
     if !auto.is_empty() {
-        rotate_pool::<P>(app, "auto", &P::usable_emails(app), &auto).await;
+        // Untagged: the auto pool is every usable account of this side by construction.
+        let members: Vec<GroupMember> =
+            P::usable_emails(app).into_iter().map(GroupMember::from).collect();
+        rotate_pool::<P>(app, "auto", &members, &auto).await;
     }
 }
 
@@ -1108,22 +1119,50 @@ pub(crate) fn repoint_clones<P: PoolProvider>(app: &App, old: &str, new: &str) -
 /// Put `new` wherever `old` sat in `pools`, and take `old` out. Returns the pool names
 /// `new` ended up in.
 ///
-/// Membership is the whole reason a replacement account is usable at all: an account in no
-/// pool is one the rotator will never hand to a clone. Idempotent on both halves, so an
-/// account already in a pool is not duplicated and a pool without `old` is untouched.
-pub(crate) fn swap_pool_member(pools: &mut [CloneGroup], old: &str, new: &str) -> Vec<String> {
+/// Provider-aware: only entries serving side `P` move. An untagged `old` entry serves
+/// both sides, so it is *split* — the other side keeps a narrowed entry — never deleted
+/// outright. At most one row per email survives per pool (the UI keys rows by email):
+/// a merge that would duplicate an email widens the surviving row to untagged instead.
+/// Idempotent on both halves, so an account already in a pool is not duplicated and a
+/// pool without `old` is untouched.
+pub(crate) fn swap_pool_member<P: PoolProvider>(pools: &mut [CloneGroup], old: &str, new: &str) -> Vec<String> {
+    use wire::Provider;
+    let other = match P::PROVIDER {
+        Provider::Claude => Provider::Codex,
+        Provider::Codex => Provider::Claude,
+    };
     let mut joined = Vec::new();
     for pool in pools.iter_mut() {
-        if !pool.accounts.iter().any(|a| a == old) {
+        if !pool.accounts.iter().any(|m| m.email == old && m.allows(P::PROVIDER)) {
             continue;
         }
-        if !pool.accounts.iter().any(|a| a == new) {
-            pool.accounts.push(new.to_string());
+        // Drop side-P's claim on `old`; an untagged row survives narrowed to the other side.
+        let mut dropped_untagged = false;
+        pool.accounts.retain(|m| {
+            if m.email != old || !m.allows(P::PROVIDER) {
+                return true;
+            }
+            if m.provider.is_none() {
+                dropped_untagged = true;
+            }
+            false
+        });
+        if dropped_untagged {
+            pool.accounts.push(GroupMember {
+                email: old.to_string(),
+                provider: Some(other),
+            });
+        }
+        // Claim `new` for side P, widening rather than duplicating an email row.
+        match pool.accounts.iter_mut().find(|m| m.email == new) {
+            Some(row) if !row.allows(P::PROVIDER) => row.provider = None,
+            Some(_) => {}
+            None => pool.accounts.push(GroupMember {
+                email: new.to_string(),
+                provider: Some(P::PROVIDER),
+            }),
         }
         joined.push(pool.name.clone());
-    }
-    for pool in pools.iter_mut() {
-        pool.accounts.retain(|a| a != old);
     }
     joined
 }
@@ -1467,7 +1506,7 @@ pub(crate) async fn replace_account<P: PoolProvider>(
     }
 
     let mut cfg = app.config();
-    let joined = swap_pool_member(&mut cfg.groups, old_email, new_email);
+    let joined = swap_pool_member::<P>(&mut cfg.groups, old_email, new_email);
     crate::config::save(&cfg).context("saving the replacement's pool membership")?;
     *app.cfg.write().unwrap() = cfg;
 
@@ -1497,15 +1536,22 @@ pub(crate) async fn replace_account<P: PoolProvider>(
 /// clones onto surviving accounts, and refuses (Err) when a clone pins the account, which
 /// fails the save with that reason instead of stranding the pin.
 pub(crate) async fn sweep_ungrouped(app: &App) -> Result<()> {
-    let claimed: std::collections::HashSet<String> = app
-        .config()
+    // Claimedness is per side: Codex-E sitting in any pool must not shield Claude-E
+    // from pruning, and vice versa. One email can name two accounts.
+    sweep_side::<ClaudePool>(app, &claimed_for(app, wire::Provider::Claude)).await?;
+    sweep_side::<CodexPool>(app, &claimed_for(app, wire::Provider::Codex)).await?;
+    Ok(())
+}
+
+/// Emails with a group entry serving `provider` (untagged entries serve both sides).
+fn claimed_for(app: &App, provider: wire::Provider) -> std::collections::HashSet<String> {
+    app.config()
         .groups
         .iter()
-        .flat_map(|g| g.accounts.iter().cloned())
-        .collect();
-    sweep_side::<ClaudePool>(app, &claimed).await?;
-    sweep_side::<CodexPool>(app, &claimed).await?;
-    Ok(())
+        .flat_map(|g| g.accounts.iter())
+        .filter(|m| m.allows(provider))
+        .map(|m| m.email.clone())
+        .collect()
 }
 
 async fn sweep_side<P: PoolProvider>(
@@ -2002,6 +2048,14 @@ mod tests {
 
     #[test]
     fn a_replacement_inherits_every_pool_the_old_account_sat_in() {
+        use wire::{GroupMember, Provider};
+        let tagged = |email: &str, provider: Provider| GroupMember {
+            email: email.to_string(),
+            provider: Some(provider),
+        };
+        let emails = |ms: &[GroupMember]| {
+            ms.iter().map(|m| m.email.clone()).collect::<Vec<_>>()
+        };
         let mut pools = vec![
             CloneGroup {
                 name: "Personal".into(),
@@ -2016,27 +2070,42 @@ mod tests {
                 accounts: vec!["other@x".into()],
             },
         ];
-        let joined = swap_pool_member(&mut pools, "old@x", "new@x");
+        let joined = swap_pool_member::<ClaudePool>(&mut pools, "old@x", "new@x");
         assert_eq!(joined, vec!["Personal".to_string(), "Medi".to_string()]);
+        // Untagged `old` splits: the other side keeps a narrowed row, the new
+        // account arrives tagged for the replaced side.
         assert_eq!(
-            pools[0].accounts,
-            vec!["other@x".to_string(), "new@x".to_string()]
+            emails(&pools[0].accounts),
+            vec!["other@x".to_string(), "old@x".to_string(), "new@x".to_string()]
         );
-        assert_eq!(pools[1].accounts, vec!["new@x".to_string()]);
         assert_eq!(
-            pools[2].accounts,
-            vec!["other@x".to_string()],
-            "a pool without it is left alone"
+            pools[0].accounts.iter().find(|m| m.email == "new@x".to_string()).unwrap().provider,
+            Some(Provider::Claude)
         );
+        assert_eq!(
+            pools[0].accounts.iter().find(|m| m.email == "old@x".to_string()).unwrap().provider,
+            Some(Provider::Codex),
+            "the Codex side keeps its account"
+        );
+        assert_eq!(pools[2].accounts.len(), 1, "a pool without it is left alone");
 
         // Replacing with an account that is already a member neither duplicates it nor
         // leaves the old one behind.
         let mut shared = vec![CloneGroup {
             name: "Personal".into(),
-            accounts: vec!["old@x".into(), "new@x".into()],
+            accounts: vec!["old@x".into(), tagged("new@x", Provider::Claude)],
         }];
-        swap_pool_member(&mut shared, "old@x", "new@x");
-        assert_eq!(shared[0].accounts, vec!["new@x".to_string()]);
+        swap_pool_member::<ClaudePool>(&mut shared, "old@x", "new@x");
+        assert_eq!(emails(&shared[0].accounts), vec!["new@x".to_string(), "old@x".to_string()]);
+
+        // A row tagged for the other side alone is invisible to this replacement.
+        let mut other_side = vec![CloneGroup {
+            name: "Solo".into(),
+            accounts: vec![tagged("old@x", Provider::Codex)],
+        }];
+        let joined = swap_pool_member::<ClaudePool>(&mut other_side, "old@x", "new@x");
+        assert!(joined.is_empty(), "no Claude claim, no change");
+        assert_eq!(other_side[0].accounts.len(), 1);
     }
 
     // --- push scope -----------------------------------------------------------

@@ -29,6 +29,8 @@ import {
 } from "~/lib/groupTreeDrag";
 import { newGroup, type GroupDraft } from "~/lib/settingsDraft";
 import type { ClaudeUsage } from "~/lib/types";
+import type { GroupMember } from "~/lib/wire/GroupMember";
+import type { Provider } from "~/lib/wire/Provider";
 import {
   itemId,
   targetId,
@@ -41,10 +43,27 @@ const actionClass =
 const gripClass =
   "shrink-0 cursor-grab touch-none rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-2 focus-visible:outline-blue-500 active:cursor-grabbing dark:hover:bg-slate-700 dark:hover:text-slate-200";
 
+/** Which side a member row serves: untagged rows serve both. */
+type Scope = Provider | "both";
+
+function scopeOf(member: GroupMember): Scope {
+  return member.provider ?? "both";
+}
+
 function providerOf(accounts: ClaudeUsage[], email: string): string {
   return (
     accounts.find((account) => account.email === email)?.provider ?? "unknown"
   );
+}
+
+/** Provider key for claimed/ungrouped bookkeeping: one email can name two accounts. */
+function accountKey(email: string, provider: string): string {
+  return `${email} ${provider}`;
+}
+
+/** The providers one member row covers. */
+function coveredProviders(member: GroupMember): Provider[] {
+  return member.provider ? [member.provider] : ["claude", "codex"];
 }
 
 export function SettingsGroupsEditor({
@@ -152,8 +171,16 @@ export function SettingsGroupsEditor({
   };
   const duplicate =
     !!active && !!target && isDuplicateDrop(nodes, active, target);
-  const claimed = new Set(nodes.flatMap((group) => group.accounts));
-  const ungrouped = accounts.filter((account) => !claimed.has(account.email));
+  const claimed = new Set(
+    nodes.flatMap((group) =>
+      group.accounts.flatMap((member) =>
+        coveredProviders(member).map((p) => accountKey(member.email, p)),
+      ),
+    ),
+  );
+  const ungrouped = accounts.filter(
+    (account) => !claimed.has(accountKey(account.email, account.provider ?? "")),
+  );
   const sourceGroup = nodes.find((group) => group.id === active?.groupId);
   const destinationGroup =
     target?.kind === "member"
@@ -221,7 +248,9 @@ export function SettingsGroupsEditor({
                 active={active}
                 duplicate={duplicate}
                 memberships={(email) =>
-                  nodes.filter((node) => node.accounts.includes(email)).length
+                  nodes.filter((node) =>
+                    node.accounts.some((m) => m.email === email),
+                  ).length
                 }
                 onRename={(name) =>
                   updateGroup(group.id, (node) => ({ ...node, name }))
@@ -233,15 +262,28 @@ export function SettingsGroupsEditor({
                   updateGroup(group.id, (node) => ({
                     ...node,
                     accounts: node.accounts.filter(
-                      (member) => member !== email,
+                      (member) => member.email !== email,
+                    ),
+                  }))
+                }
+                onScopeChange={(email, scope) =>
+                  updateGroup(group.id, (node) => ({
+                    ...node,
+                    accounts: node.accounts.map((member) =>
+                      member.email === email
+                        ? {
+                            email: member.email,
+                            ...(scope === "both" ? {} : { provider: scope }),
+                          }
+                        : member,
                     ),
                   }))
                 }
                 onReference={(email) => {
-                  if (!group.accounts.includes(email))
+                  if (!group.accounts.some((m) => m.email === email))
                     updateGroup(group.id, (node) => ({
                       ...node,
-                      accounts: [...node.accounts, email],
+                      accounts: [...node.accounts, { email }],
                     }));
                 }}
                 onImport={(provider) => onImportAccount(provider, group.name)}
@@ -367,6 +409,7 @@ function GroupCard({
   onRename,
   onRemove,
   onRemoveMember,
+  onScopeChange,
   onReference,
   onImport,
 }: {
@@ -379,6 +422,7 @@ function GroupCard({
   onRename: (name: string) => void;
   onRemove: () => void;
   onRemoveMember: (email: string) => void;
+  onScopeChange: (email: string, scope: Scope) => void;
   onReference: (email: string) => void;
   onImport: (provider: "claude" | "codex") => void;
 }) {
@@ -390,7 +434,7 @@ function GroupCard({
     data: { groupRegion: group.id },
   });
   const referenceable = accounts.filter(
-    (account) => !group.accounts.includes(account.email),
+    (account) => !group.accounts.some((m) => m.email === account.email),
   );
   return (
     <section
@@ -440,14 +484,16 @@ function GroupCard({
             activeKind={active?.kind}
             blocked={duplicate}
           />
-          {group.accounts.map((email, memberIndex) => (
-            <Fragment key={email}>
+          {group.accounts.map((member, memberIndex) => (
+            <Fragment key={member.email}>
               <MemberRow
-                item={{ kind: "member", groupId: group.id, email }}
-                provider={providerOf(accounts, email)}
+                item={{ kind: "member", groupId: group.id, email: member.email }}
+                scope={scopeOf(member)}
+                provider={member.provider ?? providerOf(accounts, member.email)}
                 disabled={!!active}
-                lastGroup={memberships(email) <= 1}
-                onRemove={() => onRemoveMember(email)}
+                lastGroup={memberships(member.email) <= 1}
+                onRemove={() => onRemoveMember(member.email)}
+                onScopeChange={(scope) => onScopeChange(member.email, scope)}
               />
               <DropSlot
                 target={{
@@ -509,16 +555,20 @@ function GroupCard({
 
 function MemberRow({
   item,
+  scope,
   provider,
   disabled,
   lastGroup,
   onRemove,
+  onScopeChange,
 }: {
   item: Extract<TreeDragItem, { kind: "member" }>;
+  scope: Scope;
   provider: string;
   disabled: boolean;
   lastGroup: boolean;
   onRemove: () => void;
+  onScopeChange: (scope: Scope) => void;
 }) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } =
     useDraggable({ id: itemId(item), data: { item } });
@@ -540,6 +590,20 @@ function MemberRow({
         <GripVertical size={14} />
       </button>
       <AccountLabel email={item.email} provider={provider} />
+      <label className="flex shrink-0 items-center gap-1 text-[10px] text-slate-400 dark:text-slate-500">
+        serves
+        <select
+          aria-label={`which side ${item.email} serves in this group`}
+          disabled={disabled}
+          value={scope}
+          onChange={(event) => onScopeChange(event.target.value as Scope)}
+          className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px] text-slate-600 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+        >
+          <option value="both">both</option>
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+        </select>
+      </label>
       <button
         type="button"
         disabled={disabled}

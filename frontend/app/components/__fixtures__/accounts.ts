@@ -82,15 +82,24 @@ export function makeClaudeAccounts(now: number): ClaudeUsage[] {
 
 /** A named pool of accounts. */
 export function makeCloneGroup(overrides: Partial<CloneGroup> = {}): CloneGroup {
-  return { name: "pooled", accounts: ["alex@example.com"], ...overrides };
+  return { name: "pooled", accounts: [{ email: "alex@example.com" }], ...overrides };
 }
 
 /** The configured Claude pools, freshly built, down to each pool's member array. */
 /** The configured pools (one list, Claude and Codex members mixed), freshly built. */
 export function makeGroups(): CloneGroup[] {
   return [
-    makeCloneGroup({ name: "pooled", accounts: ["alex@example.com", "sam@example.com"] }),
-    makeCloneGroup({ name: "solo", accounts: ["alex@example.com"] }),
-    makeCloneGroup({ name: "team", accounts: ["alex@openai.com", "sam@example.com"] }),
+    makeCloneGroup({
+      name: "pooled",
+      accounts: [{ email: "alex@example.com" }, { email: "sam@example.com" }],
+    }),
+    makeCloneGroup({ name: "solo", accounts: [{ email: "alex@example.com" }] }),
+    makeCloneGroup({
+      name: "team",
+      accounts: [
+        { email: "alex@openai.com", provider: "codex" },
+        { email: "sam@example.com" },
+      ],
+    }),
   ];
 }

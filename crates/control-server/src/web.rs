@@ -2367,7 +2367,7 @@ mod tests {
         let groups = app.store.get().groups;
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].name, "demo");
-        assert_eq!(groups[0].accounts, vec!["a@example.com"]);
+        assert_eq!(groups[0].accounts, vec![wire::GroupMember::from("a@example.com")]);
     }
 
     /// Putting a freshly imported account into a pool must not delete that account.
@@ -2433,7 +2433,8 @@ mod tests {
         );
         assert_eq!(
             app.config().groups[0].accounts,
-            vec!["new@example.com".to_string()],
+            vec![wire::GroupMember::from("new@example.com")],
+            "a bare-string member deserializes as an untagged (both-sides) row"
         );
     }
 

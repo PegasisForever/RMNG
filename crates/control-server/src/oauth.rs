@@ -312,11 +312,13 @@ pub async fn complete(app: &App, provider: Provider, pasted: &str, group: &str) 
 /// An unknown name is an error rather than a silently created pool: pools are config the
 /// operator maintains, and inventing one here would put an account somewhere no clone is
 /// bound to. Already being a member is not an error, and does not duplicate the entry.
-fn join_group(app: &App, _provider: Provider, email: &str, group: &str) -> Result<()> {
+fn join_group(app: &App, provider: Provider, email: &str, group: &str) -> Result<()> {
     let mut cfg = app.config();
-    // One pool list for both providers; membership is by email, so joining is
-    // provider-agnostic (each side's rotator only sees its own members).
-    add_to_pool(&mut cfg.groups, email, group)?;
+    // One pool list for both providers; each row is scoped by tag, so joining is
+    // per-side: an untagged row already covers the import, a row tagged for the
+    // other side widens to both, otherwise a tagged row is added. One row per
+    // email per pool — the settings tree keys rows by email.
+    add_to_pool(&mut cfg.groups, email, Some(provider), group)?;
     crate::config::save(&cfg).context("saving the pool membership")?;
     *app.cfg.write().unwrap() = cfg;
     // The sidebar groups by the pools in the live state: mirror the new membership so
@@ -326,16 +328,32 @@ fn join_group(app: &App, _provider: Provider, email: &str, group: &str) -> Resul
     Ok(())
 }
 
-/// Put `email` in the named pool. The decision, separated from reading and writing config so
-/// it can be tested without a config file: `crate::config::save` writes a fixed relative
-/// path, so a test that called it would drop a `config.json` in whatever directory it ran in.
-fn add_to_pool(pools: &mut [wire::CloneGroup], email: &str, group: &str) -> Result<()> {
+/// Put `email` in the named pool, scoped to `provider` (`None` = both sides). The decision,
+/// separated from reading and writing config so it can be tested without a config file:
+/// `crate::config::save` writes a fixed relative path, so a test that called it would drop
+/// a `config.json` in whatever directory it ran in.
+fn add_to_pool(
+    pools: &mut [wire::CloneGroup],
+    email: &str,
+    provider: Option<Provider>,
+    group: &str,
+) -> Result<()> {
+    use wire::{GroupMember, Provider as WireProvider};
+    let tag = provider.map(|p| match p {
+        Provider::Claude => WireProvider::Claude,
+        Provider::Codex => WireProvider::Codex,
+    });
     let pool = pools
         .iter_mut()
         .find(|g| g.name == group)
         .with_context(|| format!("no pool named '{group}'"))?;
-    if !pool.accounts.iter().any(|a| a == email) {
-        pool.accounts.push(email.to_string());
+    match pool.accounts.iter_mut().find(|m| m.email == email) {
+        // Already covered for this side: nothing to do.
+        Some(row) if tag.is_none_or(|p| row.allows(p)) => {}
+        // Covered only for the other side: widen to both rather than duplicating the email.
+        Some(row) => row.provider = None,
+        // New email: tag it, so one address naming two accounts claims only this side.
+        None => pool.accounts.push(GroupMember { email: email.to_string(), provider: tag }),
     }
     Ok(())
 }
@@ -583,17 +601,33 @@ mod tests {
                 accounts: vec![],
             },
         ];
-        add_to_pool(&mut pools, "a@b.c", "Personal").unwrap();
-        add_to_pool(&mut pools, "a@b.c", "Personal").unwrap();
+        add_to_pool(&mut pools, "a@b.c", Some(Provider::Claude), "Personal").unwrap();
+        add_to_pool(&mut pools, "a@b.c", Some(Provider::Claude), "Personal").unwrap();
         assert_eq!(
             pools[0].accounts,
-            vec!["x@y.z".to_string(), "a@b.c".to_string()]
+            vec![
+                wire::GroupMember { email: "x@y.z".into(), provider: None },
+                wire::GroupMember { email: "a@b.c".into(), provider: Some(wire::Provider::Claude) },
+            ]
         );
         assert!(pools[1].accounts.is_empty(), "no other pool is touched");
 
+        // Joining the other side widens the row to both instead of duplicating the email.
+        add_to_pool(&mut pools, "a@b.c", Some(Provider::Codex), "Personal").unwrap();
+        assert_eq!(
+            pools[0].accounts.iter().filter(|m| m.email == "a@b.c").count(),
+            1,
+            "one row per email per pool"
+        );
+        assert_eq!(
+            pools[0].accounts.iter().find(|m| m.email == "a@b.c").unwrap().provider,
+            None,
+            "now serves both sides"
+        );
+
         // A name that is not a pool is a mistake worth reporting: creating it here would put
         // the account somewhere no clone is bound to.
-        let err = add_to_pool(&mut pools, "a@b.c", "Nope")
+        let err = add_to_pool(&mut pools, "a@b.c", Some(Provider::Claude), "Nope")
             .unwrap_err()
             .to_string();
         assert!(err.contains("Nope"), "{err}");

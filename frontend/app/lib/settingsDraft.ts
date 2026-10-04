@@ -17,6 +17,7 @@
 
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ChromaMode } from "~/lib/wire/ChromaMode";
+import type { GroupMember } from "~/lib/wire/GroupMember";
 import type { JudgeProvider } from "~/lib/wire/JudgeProvider";
 import type { SshConfig } from "~/lib/wire/SshConfig";
 
@@ -36,10 +37,11 @@ export interface LayoutPresetDraft {
   monitors: MonitorDraft[];
 }
 
-/** A named account pool: a name plus the member emails ticked in its checkbox grid. */
+/** A named account pool: a name plus the member rows in its grid. One row per
+ *  email: the row's scope tag (both/Claude/Codex) says which side it serves. */
 export interface GroupDraft {
   name: string;
-  accounts: string[];
+  accounts: GroupMember[];
 }
 
 /** A clone preset, as the form edits it.
@@ -202,13 +204,26 @@ function presetGroupOf(
   return poolOf(p.claudeAccount) || poolOf(p.codexAccount) || fallback;
 }
 
-/** Half-typed rows are dropped rather than saved as unnamed pools, and members are deduped —
- *  the checkbox editor cannot produce a duplicate, but a hand-edited config can, and a
- *  repeated email would skew group selection. */
+/** Half-typed rows are dropped rather than saved as unnamed pools, and rows for the
+ *  same email merge: the grid keeps one row per address, so two scopes for one address
+ *  (hand-edited, or a both-sides row plus a tag) save as a single untagged row serving
+ *  both sides. A repeated email would otherwise skew group selection. */
 function savedGroups(groups: GroupDraft[]): GroupDraft[] {
   return groups
     .filter((g) => g.name.trim())
-    .map((g) => ({ name: g.name.trim(), accounts: [...new Set(g.accounts)] }));
+    .map((g) => {
+      const merged = new Map<string, GroupMember>();
+      for (const m of g.accounts) {
+        const prev = merged.get(m.email);
+        if (!prev) {
+          merged.set(m.email, { ...m });
+        } else if (prev.provider !== m.provider) {
+          // Both scopes present (or one side plus untagged): one untagged row.
+          merged.set(m.email, { email: m.email });
+        }
+      }
+      return { name: g.name.trim(), accounts: [...merged.values()] };
+    });
 }
 
 /**

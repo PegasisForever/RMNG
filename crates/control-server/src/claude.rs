@@ -985,7 +985,7 @@ mod tests {
         let cfg = wire::AppConfig {
             groups: vec![CloneGroup {
                 name: "team".into(),
-                accounts: members.iter().map(|s| s.to_string()).collect(),
+                accounts: members.iter().map(|s| wire::GroupMember::from(s.to_string())).collect(),
             }],
             ..Default::default()
         };
@@ -1530,7 +1530,8 @@ mod tests {
         kill_token(&app, "dead@x");
 
         assert_eq!(app.claude.usable_emails(), vec!["live@x".to_string()]);
-        let members = vec!["live@x".to_string(), "dead@x".to_string()];
+        let members: Vec<wire::GroupMember> =
+            ["live@x", "dead@x"].iter().map(|s| wire::GroupMember::from(*s)).collect();
         assert_eq!(
             eligible_members::<ClaudePool>(&app, &members),
             vec!["live@x".to_string()]

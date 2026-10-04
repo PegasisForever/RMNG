@@ -1,8 +1,10 @@
 /** Editor-only identity. Names and list positions are not identities. */
+import type { GroupMember } from "~/lib/wire/GroupMember";
+
 export interface EditorGroup {
   id: string;
   name: string;
-  accounts: string[];
+  accounts: GroupMember[];
 }
 
 export type TreeDragItem =
@@ -36,7 +38,7 @@ export function applyTreeDrop(
   }
   if (item.kind !== "member" || target.kind !== "member") return null;
   const to = groups.findIndex((group) => group.id === target.groupId);
-  const index = groups[from].accounts.indexOf(item.email);
+  const index = groups[from].accounts.findIndex((m) => m.email === item.email);
   if (
     to < 0 ||
     index < 0 ||
@@ -46,15 +48,19 @@ export function applyTreeDrop(
     return null;
   if (from === to && (target.index === index || target.index === index + 1))
     return null;
-  if (from !== to && groups[to].accounts.includes(item.email)) return null;
+  if (
+    from !== to &&
+    groups[to].accounts.some((m) => m.email === item.email)
+  )
+    return null;
   const next = groups.map((group) => ({
     ...group,
     accounts: [...group.accounts],
   }));
-  next[from].accounts.splice(index, 1);
+  const [moved] = next[from].accounts.splice(index, 1);
   const insertAt =
     from === to && index < target.index ? target.index - 1 : target.index;
-  next[to].accounts.splice(insertAt, 0, item.email);
+  next[to].accounts.splice(insertAt, 0, moved);
   return next;
 }
 
@@ -69,6 +75,6 @@ export function isDuplicateDrop(
     item.groupId !== target.groupId &&
     !!groups
       .find((group) => group.id === target.groupId)
-      ?.accounts.includes(item.email)
+      ?.accounts.some((m) => m.email === item.email)
   );
 }

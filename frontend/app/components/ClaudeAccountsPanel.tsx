@@ -136,8 +136,11 @@ export function groupAccounts(
     // cosmetic account order. A member with no imported row (stale draft email) draws
     // nothing rather than an empty row.
     const accounts: ClaudeUsage[] = [];
-    for (const email of group.accounts) {
-      for (const row of byEmail.get(email) ?? []) {
+    for (const member of group.accounts) {
+      for (const row of byEmail.get(member.email) ?? []) {
+        // A tagged row shows only its own side; untagged rows show both.
+        if (member.provider && (row.provider ?? "claude") !== member.provider)
+          continue;
         accounts.push(row);
         claimed.add(row.id);
       }

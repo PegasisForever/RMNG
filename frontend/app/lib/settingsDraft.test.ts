@@ -1,6 +1,7 @@
 // The settings form's seed and save rules. These are the conditions a many-way component
 // split is most likely to drop, because none of them belongs to any one section: what a blank
 // config becomes, what a save trims, what it drops, and what it refuses to send at all.
+import type { GroupMember } from "./wire/GroupMember";
 import { expect, test } from "bun:test";
 
 import { settingsDraftFrom, settingsPatch } from "./settingsDraft";
@@ -24,7 +25,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     },
     claude: {},
     codex: { autoReset: false },
-    groups: [{ name: "pooled", accounts: ["alex@example.com"] }],
+    groups: [{ name: "pooled", accounts: [{ email: "alex@example.com" }] }],
     presets: [
       {
         name: "webapp",
@@ -54,7 +55,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
 type Patch = {
   docker: { hostnamePrefix: string };
   codex: { autoReset: boolean };
-  groups: { name: string; accounts: string[] }[];
+  groups: { name: string; accounts: GroupMember[] }[];
   layoutPresets: {
     name: string;
     monitors: {
@@ -141,12 +142,32 @@ test("the docker patch names only the fields the panel still edits", () => {
 test("a half-typed pool is dropped rather than saved unnamed", () => {
   const draft = settingsDraftFrom(config());
   draft.groups = [
-    { name: "  pooled  ", accounts: ["alex@example.com"] },
-    { name: "   ", accounts: ["sam@example.com"] },
+    { name: "  pooled  ", accounts: [{ email: "alex@example.com" }] },
+    { name: "   ", accounts: [{ email: "sam@example.com" }] },
   ];
 
   expect(patch(draft).groups).toEqual([
-    { name: "pooled", accounts: ["alex@example.com"] },
+    { name: "pooled", accounts: [{ email: "alex@example.com" }] },
+  ]);
+});
+
+test("two scopes for one email save as a single untagged row", () => {
+  // One email naming two accounts: the grid keeps one row per address, so both
+  // scopes present save as untagged (both sides) rather than skewing selection.
+  const draft = settingsDraftFrom(config());
+  draft.groups = [
+    {
+      name: "team",
+      accounts: [
+        { email: "a@x.com", provider: "claude" },
+        { email: "a@x.com", provider: "codex" },
+        { email: "b@x.com" },
+      ],
+    },
+  ];
+
+  expect(patch(draft).groups).toEqual([
+    { name: "team", accounts: [{ email: "a@x.com" }, { email: "b@x.com" }] },
   ]);
 });
 
@@ -155,11 +176,21 @@ test("repeated pool members are deduped", () => {
   // repeated email would skew group selection.
   const draft = settingsDraftFrom(config());
   draft.groups = [
-    { name: "team", accounts: ["a@x.com", "a@x.com", "b@x.com"] },
+    {
+      name: "team",
+      accounts: [
+        { email: "a@x.com" },
+        { email: "a@x.com", provider: "claude" },
+        { email: "b@x.com" },
+      ],
+    },
   ];
 
   expect(patch(draft).groups).toEqual([
-    { name: "team", accounts: ["a@x.com", "b@x.com"] },
+    {
+      name: "team",
+      accounts: [{ email: "a@x.com" }, { email: "b@x.com" }],
+    },
   ]);
 });
 

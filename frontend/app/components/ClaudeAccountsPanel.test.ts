@@ -18,10 +18,14 @@ const sam = account("sam@example.com");
 const solo = account("solo@example.com");
 const codex = account("alex@openai.com", "codex");
 
+const m = (email: string) => ({ email });
 const groups: CloneGroup[] = [
-  { name: "pooled", accounts: ["alex@example.com", "sam@example.com"] },
-  { name: "personal", accounts: ["alex@example.com"] },
-  { name: "team", accounts: ["alex@openai.com", "sam@example.com"] },
+  { name: "pooled", accounts: [m("alex@example.com"), m("sam@example.com")] },
+  { name: "personal", accounts: [m("alex@example.com")] },
+  {
+    name: "team",
+    accounts: [m("alex@openai.com"), m("sam@example.com")],
+  },
 ];
 
 test("an account in two pools is listed under both", () => {
@@ -64,7 +68,7 @@ test("member order follows the pool, not the incoming rows", () => {
   // The pool lists sam before alex; the rows arrive reversed. The settings tree owns the
   // order, so the usage column matches it rather than the cosmetic account order.
   const out = groupAccounts([sam, alex], [
-    { name: "pooled", accounts: ["alex@example.com", "sam@example.com"] },
+    { name: "pooled", accounts: [m("alex@example.com"), m("sam@example.com")] },
   ]);
 
   expect(out[0].accounts.map((a) => a.email)).toEqual(["alex@example.com", "sam@example.com"]);
@@ -80,7 +84,9 @@ test("one member email claims the row on both providers", () => {
   const asClaude = account(shared);
   const asCodex = account(shared, "codex");
 
-  const out = groupAccounts([asClaude, asCodex], [{ name: "Default", accounts: [shared] }]);
+  const out = groupAccounts([asClaude, asCodex], [
+    { name: "Default", accounts: [m(shared)] },
+  ]);
 
   expect(out).toHaveLength(1);
   expect(out[0].name).toBe("Default");
@@ -89,7 +95,28 @@ test("one member email claims the row on both providers", () => {
 });
 
 test("a pool member with no imported row draws nothing", () => {
-  const out = groupAccounts([alex], [{ name: "pooled", accounts: ["alex@example.com", "stale@x.com"] }]);
+  const out = groupAccounts([alex], [
+    { name: "pooled", accounts: [m("alex@example.com"), m("stale@x.com")] },
+  ]);
 
   expect(out[0].accounts.map((a) => a.email)).toEqual(["alex@example.com"]);
+});
+
+test("a tagged row shows only its own side", () => {
+  // One email naming two accounts, scoped to Claude in this pool: the Codex row
+  // stays ungrouped instead of drawing under a pool that cannot serve it.
+  const shared = "hello@talktomedi.com";
+  const asClaude = account(shared);
+  const asCodex = account(shared, "codex");
+
+  const out = groupAccounts([asClaude, asCodex], [
+    { name: "Default", accounts: [{ email: shared, provider: "claude" }] },
+  ]);
+
+  expect(out[0].accounts.map((a) => a.provider)).toEqual(["claude"]);
+  expect(
+    out
+      .filter((s) => s.name === null)
+      .flatMap((s) => s.accounts.map((a) => a.provider)),
+  ).toEqual(["codex"]);
 });

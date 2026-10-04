@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::control::{LayoutPreset, MonitorSpec};
+use crate::control::{LayoutPreset, MonitorSpec, Provider};
 
 /// Hardcoded control-server ports and paths (formerly the Settings "Advanced" pane).
 /// Nothing here is user-serviceable: changing a port would desync the clones that bake
@@ -247,7 +247,70 @@ pub struct PresetRedacted {
     pub dockerfile: String,
 }
 
-/// A named pool of clone accounts (by email). A clone bound to a group sticks to its
+/// One member of an account pool: an email plus which provider it serves.
+///
+/// `provider` is `None` for an untagged member, which serves both sides — that is
+/// also how every pre-tag member deserializes (a bare `"a@x"` string reads as an
+/// untagged member), so old configs keep working with unchanged behavior. Tagging
+/// matters when one email names two accounts: a Claude account and a Codex
+/// account can share an address, and without a tag one group entry claims both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct GroupMember {
+    pub email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub provider: Option<Provider>,
+}
+
+impl<'de> Deserialize<'de> for GroupMember {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Bare(String),
+            Tagged(GroupMemberWire),
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct GroupMemberWire {
+            email: String,
+            #[serde(default)]
+            provider: Option<Provider>,
+        }
+        match Wire::deserialize(d)? {
+            Wire::Bare(email) => Ok(GroupMember { email, provider: None }),
+            Wire::Tagged(w) => Ok(GroupMember { email: w.email, provider: w.provider }),
+        }
+    }
+}
+
+impl GroupMember {
+    /// Whether this member can serve `provider`: untagged members serve both sides.
+    pub fn allows(&self, provider: Provider) -> bool {
+        self.provider.is_none_or(|p| p == provider)
+    }
+}
+
+/// A bare email reads as an untagged member (both sides): every pre-tag config and
+/// every fixture written as a string keeps working with unchanged meaning.
+impl From<&str> for GroupMember {
+    fn from(email: &str) -> Self {
+        GroupMember { email: email.to_string(), provider: None }
+    }
+}
+
+impl From<String> for GroupMember {
+    fn from(email: String) -> Self {
+        GroupMember { email, provider: None }
+    }
+}
+
+/// A named pool of clone accounts. A clone bound to a group sticks to its
 /// account until that account exceeds the 5h usage cap (or leaves the group), then
 /// moves to the group's least-loaded / least-used member — sticky, because an account
 /// switch cold-starts the clone's prompt cache. Carries no secrets — just a name +
@@ -258,7 +321,7 @@ pub struct PresetRedacted {
 pub struct CloneGroup {
     pub name: String,
     #[serde(default)]
-    pub accounts: Vec<String>,
+    pub accounts: Vec<GroupMember>,
 }
 
 /// Docker backend settings for the clone fleet. No secrets — the local daemon is

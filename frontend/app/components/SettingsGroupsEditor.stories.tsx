@@ -60,7 +60,7 @@ export const Mixed: Story = { args: { groups: makeSettingsDraft().groups } };
  *  reason instead of silently vanishing on save. */
 export const UngroupedWarning: Story = {
   args: {
-    groups: [{ name: "solo", accounts: ["alex@example.com"] }],
+    groups: [{ name: "solo", accounts: [{ email: "alex@example.com" }] }],
     accounts: allAccounts(),
   },
 };
@@ -96,9 +96,12 @@ export const Interactive: Story = {
 export const DragAndDrop: Story = {
   args: {
     groups: [
-      { name: "pooled", accounts: ["alex@example.com", "sam@example.com"] },
-      { name: "team", accounts: ["alex@openai.com"] },
-      { name: "shared", accounts: ["alex@example.com"] },
+      {
+        name: "pooled",
+        accounts: [{ email: "alex@example.com" }, { email: "sam@example.com" }],
+      },
+      { name: "team", accounts: [{ email: "alex@openai.com", provider: "codex" }] },
+      { name: "shared", accounts: [{ email: "alex@example.com" }] },
       { name: "empty", accounts: [] },
     ],
   },
