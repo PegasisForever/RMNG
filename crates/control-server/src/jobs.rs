@@ -350,8 +350,19 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     let first_message = plan.first_message.clone();
     let agent_instructions = plan.agent_instructions.clone();
     let claude_instructions = plan.claude_instructions.clone();
+    let row_id = row.id.clone();
+    let forked = plan.source.is_some();
     Ok(Finish::new(message)
-        .state(move |s| s.hosts.insert(0, row))
+        .state(move |s| {
+            s.hosts.insert(0, row);
+            // A fork carries its source's transcript logs in its home. The scanner
+            // seeds a new clone's cursors at the logs' ends (see `CloneScan::seeded`),
+            // but belt out any entry that reached here another way: a fork starts at
+            // zero, never at its source's lifetime totals.
+            if forked {
+                s.clone_tokens.remove(&row_id);
+            }
+        })
         .after(move |_app, _st| async move {
             // No post-op converge on this path: the pre-boot tar already uploaded every
             // stamp the converge would check (payload, codex parity, ssh, the five

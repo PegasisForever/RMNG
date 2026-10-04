@@ -201,6 +201,12 @@ struct CloneScan {
     /// prune old sessions, so it would represent "whatever happens to be left on disk" rather
     /// than anything meaningful. Counting starts from zero and climbs with real traffic.
     seeded: bool,
+    /// Server-clock epoch ms of this entry's first pass. A file the capped walk missed at
+    /// seeding time but surfaces later — a fork carrying its source's logs past the enum
+    /// budget, or readdir order shifting after pruning — is adopted, not backfilled, when
+    /// its mtime predates this: it is inherited history, not new work. Genuinely new
+    /// session files (mtime at or after this) still count from byte 0.
+    first_seen_ms: Option<i64>,
 }
 
 /// One clone's newly-observed activity in a single pass.
@@ -571,8 +577,17 @@ fn scan_clone_capped(home: &Path, scan: &mut CloneScan, scan_cap: usize, enum_ca
     };
     for (path, flavor) in pass {
         let prev = scan.cursors.get(&path).copied();
-        // A file we have never seen, on a clone that IS seeded, is a genuinely new session:
-        // count it from the start. Only the clone's very first pass seeds wholesale.
+        // A seeded clone meeting a file for the first time: a genuinely new session
+        // counts from byte 0 — but a file OLDER than our first sight of this clone is
+        // inherited history (a fork carrying its source's logs past the enum budget, or
+        // a file the capped walk skipped at seeding time surfacing later). Adopt its
+        // end instead of booking a lifetime of tokens to the new clone.
+        if prev.is_none() && count {
+            if let Some(end) = adopt_if_older(&path, scan.first_seen_ms) {
+                scan.cursors.insert(path.clone(), end);
+                continue;
+            }
+        }
         if let Some(next) = scan_file(&path, prev, flavor, &mut scan.ledger, &mut delta, count) {
             scan.cursors.insert(path.clone(), next);
         }
@@ -583,6 +598,29 @@ fn scan_clone_capped(home: &Path, scan: &mut CloneScan, scan_cap: usize, enum_ca
     scan.cursors.retain(|p, _| files.seen.contains(p));
     scan.seeded = true;
     delta
+}
+
+/// Cursor at a file's current end when it predates our first sight of its clone —
+/// inherited history to adopt, not backfill. `None` for genuinely new files (count
+/// them from byte 0), for files we cannot stat, and when no first-sight stamp exists
+/// (tests driving [`scan_file`] directly).
+fn adopt_if_older(path: &Path, first_seen_ms: Option<i64>) -> Option<Cursor> {
+    use std::os::unix::fs::MetadataExt;
+    let since = first_seen_ms?;
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let mtime = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis() as i64;
+    (mtime < since).then(|| Cursor {
+        inode: meta.ino(),
+        offset: meta.len(),
+    })
 }
 
 /// One pass across the fleet: scan every running managed clone, stamp activity, and fold new
@@ -625,7 +663,12 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
 
     for host in &hosts {
         let home = root.join(&host.id);
-        let scan = scans.remove(&host.id).unwrap_or_default();
+        let mut scan = scans.remove(&host.id).unwrap_or_default();
+        // Stamp first sight now: files older than this that the capped walk missed at
+        // seeding time are adopted, never backfilled (see `first_seen_ms`).
+        if scan.first_seen_ms.is_none() {
+            scan.first_seen_ms = Some(now);
+        }
         if scan.timeouts >= MAX_SCAN_TIMEOUTS {
             // Quarantined (see `MAX_SCAN_TIMEOUTS`). Keep the entry so it stays quarantined,
             // and keep the clone's persisted total — it is simply frozen from here.
@@ -1360,6 +1403,46 @@ mod tests {
             6,
             "every file the walk saw is seeded, capped or not"
         );
+    }
+
+    #[test]
+    fn history_older_than_first_sight_is_adopted_not_counted() {
+        // A fork carries its source's logs. A history file the capped walk missed at
+        // seeding time surfaces later on an already-seeded clone: its mtime predates
+        // first sight, so it is inherited history — adopt the end, book nothing.
+        // A genuinely new session file written after first sight still counts.
+        let dir = tmpdir("adopt-old");
+        let proj = dir.join(".claude/projects/slug");
+        write_aged(&proj, 2);
+        let mut scan = CloneScan::default();
+        // Seeding pass with a tight enum budget: only one file is seen and adopted.
+        let d = scan_clone_capped(&dir, &mut scan, 100, 1);
+        assert!(d.is_empty());
+        assert_eq!(scan.cursors.len(), 1);
+        scan.first_seen_ms = Some(crate::clone_ops::now_ms());
+        // The walk opens up: the second history file surfaces on a seeded clone.
+        let d = scan_clone_capped(&dir, &mut scan, 100, 100);
+        assert!(
+            d.is_empty(),
+            "inherited history must not book tokens to the new clone"
+        );
+        assert_eq!(scan.cursors.len(), 2);
+        // ...but a session file written after first sight counts from byte 0.
+        // (Sleep past the millisecond boundary: an mtime in the same millisecond as
+        // first sight reads as inherited — a negligible one-time undercount in
+        // production, and flaky here without the pause.)
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::fs::write(
+            &proj.join("live.jsonl"),
+            format!(
+                "{}\n",
+                claude_msg_line("msg_live", "claude-opus-5", 12, 0, 4)
+            ),
+        )
+        .unwrap();
+        let d = scan_clone_capped(&dir, &mut scan, 100, 100);
+        assert_eq!(d.input_tokens, 12);
+        assert_eq!(d.output_tokens, 4);
     }
 
     /// Build an app whose state holds the given clones and token totals.
