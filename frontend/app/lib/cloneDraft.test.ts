@@ -179,6 +179,7 @@ test("the request carries the open tab's own fields", () => {
     group: "pooled",
     linear: { displayName: "scratch" },
     firstMessage: "go",
+    kickoff: true,
     rebuild: true,
     runStartupScript: true,
     headless: false,
@@ -201,6 +202,8 @@ test("the request carries the open tab's own fields", () => {
     displayName: "Encoder drops frames",
   });
   expect(ticket.agentInstructions).toBe("read the notes");
+  // The auto-send box starts checked on a ticket tab.
+  expect(ticket.kickoff).toBe(true);
   // Instruction overrides belong to the ticket tabs only.
   expect(
     cloneRequest(
@@ -212,4 +215,38 @@ test("the request carries the open tab's own fields", () => {
       ),
     ).agentInstructions,
   ).toBeUndefined();
+});
+
+test("the auto-send box decides the first message, and its instructions go with it", () => {
+  const unchecked = cloneRequest(
+    dialog(
+      sources("pega-we-142"),
+      edit("ticket", "WE-142"),
+      edit("agentInstructions", "read the notes"),
+      edit("claudeInstructions", "run the tests"),
+      edit("kickoff", false),
+    ),
+    { ticket: "WE-142", displayName: "Encoder drops frames" },
+  );
+  expect(unchecked.kickoff).toBe(false);
+  // Greyed out means not sent: nothing would carry them.
+  expect(unchecked.agentInstructions).toBeUndefined();
+  expect(unchecked.claudeInstructions).toBeUndefined();
+
+  // The no-ticket tab has no box: a typed message is the ask, an empty one is not.
+  const plain = (message: string) =>
+    cloneRequest(
+      dialog(
+        sources("pega-we-142"),
+        edit("mode", "plain"),
+        edit("title", "x"),
+        edit("message", message),
+      ),
+    ).kickoff;
+  expect(plain("go")).toBe(true);
+  expect(plain("   ")).toBe(false);
+  // The template tab never sends one.
+  expect(
+    cloneRequest(dialog(edit("mode", "template"), edit("title", "x"))).kickoff,
+  ).toBe(false);
 });

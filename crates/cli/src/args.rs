@@ -164,8 +164,8 @@ pub enum CloneCmd {
         /// Codex account override, same forms
         #[arg(long)]
         codex_account: Option<String>,
-        /// First message sent to the fork's agent on boot
-        /// (omitted sends nothing unless a ticket URL is inherited)
+        /// First message sent to the fork's agent on boot (omitted ⇒ nothing is sent, even
+        /// when the fork inherits its source's ticket)
         #[arg(long)]
         message: Option<String>,
         /// Read the first message from a file (`-` for stdin)

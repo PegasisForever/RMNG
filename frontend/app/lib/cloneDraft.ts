@@ -39,6 +39,9 @@ export interface CloneDraft {
  /** Ticket tabs only: appended to the agent's and Claude Code's default instructions. */
  agentInstructions: string;
  claudeInstructions: string;
+ /** Ticket tabs only: send the agent the ticket (plus the two instructions above) as its
+  *  first message once the clone is up. On unless unchecked. */
+ kickoff: boolean;
  /** Account picks: an email pins, blank follows the group. No auto option: the
   *  boxes offer Follow group plus the imported accounts, flat. */
  claudeAccount: string;
@@ -72,6 +75,7 @@ export function emptyCloneDraft(ticket = ""): CloneDraft {
   message: "",
   agentInstructions: "",
   claudeInstructions: "",
+  kickoff: true,
   claudeAccount: "",
   codexAccount: "",
   group: "",
@@ -292,6 +296,9 @@ export function cloneRequest(
 ): CloneRequest {
  const d = s.draft;
  const ticketTab = d.mode === "existing" || d.mode === "create";
+ const ticketKickoff = ticketTab && d.kickoff;
+ const firstMessage =
+  d.mode === "plain" ? d.message.trim() || undefined : undefined;
  return {
   source: d.mode === "template" ? undefined : (d.source ?? undefined),
   preset: presetOf(s)?.name,
@@ -299,13 +306,17 @@ export function cloneRequest(
   group: d.group || undefined,
   claudeAccount: d.claudeAccount || undefined,
   codexAccount: d.codexAccount || undefined,
-  firstMessage: d.mode === "plain" ? d.message.trim() || undefined : undefined,
-  agentInstructions: ticketTab
+  firstMessage,
+  // The instructions ride only a first message that is actually sent; unchecked, the
+  // greyed-out boxes send nothing.
+  agentInstructions: ticketKickoff
    ? d.agentInstructions.trim() || undefined
    : undefined,
-  claudeInstructions: ticketTab
+  claudeInstructions: ticketKickoff
    ? d.claudeInstructions.trim() || undefined
    : undefined,
+  // A ticket tab asks through its checkbox; the no-ticket tab by typing a message.
+  kickoff: ticketTab ? d.kickoff : !!firstMessage,
   headless: d.headless,
   runStartupScript: d.runStartupScript,
   rebuild: d.rebuild,

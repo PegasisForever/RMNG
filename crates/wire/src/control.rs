@@ -757,6 +757,11 @@ pub struct CloneRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub claude_instructions: Option<String>,
+    /// Send the agent its first turn once the clone is up: the ticket URL, else
+    /// `first_message`, with both instruction fields appended. Off unless asked, so a caller
+    /// that leaves it out never starts an agent — not even on a ticket a fork inherited.
+    #[serde(default)]
+    pub kickoff: bool,
     /// No desktop: the viewer shows a tmux tab view instead of a video stream.
     #[serde(default)]
     pub headless: bool,
@@ -826,6 +831,18 @@ mod tests {
             !d.contains("gdmUsername"),
             "binding camelCased gdm_username: {d}"
         );
+    }
+
+    #[test]
+    fn a_clone_request_without_kickoff_starts_no_agent() {
+        // Every client older than the field, and every caller that just leaves it out,
+        // must create a quiet clone: the first message goes out only when asked for.
+        let req: CloneRequest =
+            serde_json::from_str(r#"{"firstMessage":"go","headless":false}"#).unwrap();
+        assert!(!req.kickoff);
+        assert!(req.run_startup_script, "the other default is unchanged");
+        let req: CloneRequest = serde_json::from_str(r#"{"kickoff":true}"#).unwrap();
+        assert!(req.kickoff);
     }
 
     #[test]

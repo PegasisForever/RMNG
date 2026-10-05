@@ -54,6 +54,12 @@ firstMessage?: string,
  */
 agentInstructions?: string, claudeInstructions?: string, 
 /**
+ * Send the agent its first turn once the clone is up: the ticket URL, else
+ * `first_message`, with both instruction fields appended. Off unless asked, so a caller
+ * that leaves it out never starts an agent — not even on a ticket a fork inherited.
+ */
+kickoff: boolean, 
+/**
  * No desktop: the viewer shows a tmux tab view instead of a video stream.
  */
 headless: boolean, 

@@ -107,6 +107,21 @@ export const FromTicket: Story = {
   args: { ...sources(), ...form(makeCloneDraft({ ticket: cloneTicketUrl })) },
 };
 
+/** Auto send unchecked: the clone comes up quiet, so the two instruction boxes, which only
+ *  shape that first message, are greyed out and send nothing. */
+export const NoAutoSend: Story = {
+  args: {
+    ...sources(),
+    ...form(
+      makeCloneDraft({
+        ticket: cloneTicketUrl,
+        kickoff: false,
+        agentInstructions: "Read the VA-API notes first.",
+      }),
+    ),
+  },
+};
+
 /** The New-ticket tab. The team dropdown is also the preset selector, so the resolved-preset
  *  line is gone; the description editor takes its place. */
 export const NewTicket: Story = {

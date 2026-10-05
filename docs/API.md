@@ -591,8 +591,11 @@ because new work should land where somebody looks rather than at the bottom of a
 Start a clone. `/api/clone` builds it from a preset's image onto a fresh home; `/api/fork`
 copies a live clone's home instead, leaving the source running. Both take the same body, a
 [`wire::CloneRequest`](../crates/wire/src/control.rs), and both run async — they return an
-`Operation` at once and progress flows over `/events`. After the clone is up the server kicks
-off the agent's first message ([chat::kickoff_agent](../crates/control-server/src/chat.rs)).
+`Operation` at once and progress flows over `/events`. When the request sets `kickoff`, the
+server sends the agent its first message after the clone is up
+([chat::kickoff_agent](../crates/control-server/src/chat.rs)): the ticket URL, else
+`firstMessage`, with both instruction fields appended. Without `kickoff` nothing is sent, not
+even for a ticket a fork inherited.
 
 ```jsonc
 {
@@ -615,6 +618,7 @@ off the agent's first message ([chat::kickoff_agent](../crates/control-server/sr
   "firstMessage": "do X",
   "agentInstructions": "…",   // appended to the agent's defaults
   "claudeInstructions": "…",
+  "kickoff": true,            // send the first message; omitted = false, nothing is sent
   "headless": false,          // no desktop: the viewer shows tmux instead
   "runStartupScript": true,   // the preset's startup script, as the clone user
   "rebuild": false            // build the image fresh, with a fresh base pull

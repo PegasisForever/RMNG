@@ -42,6 +42,7 @@ test("startClone posts the request and resolves the wrapped op", async () => {
   const req = {
     linear: { displayName: "x" },
     headless: false,
+    kickoff: false,
     runStartupScript: true,
     rebuild: false,
   };
@@ -57,6 +58,7 @@ test("a fork of a live clone goes to the fork route", async () => {
   await startClone(true, {
     source: "src-id",
     headless: false,
+    kickoff: false,
     runStartupScript: true,
     rebuild: false,
   });

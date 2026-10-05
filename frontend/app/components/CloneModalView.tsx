@@ -319,10 +319,26 @@ export function CloneModalView({
               preset line. Still resizable. */}
               {draft.mode === "existing" || draft.mode === "create" ? (
                 <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
-                  <h4 className={`${cloneSectionCaption} mb-3`}>
-                    Instructions
-                  </h4>
-                  <div className="space-y-3 text-xs">
+                  {/* The checkbox decides whether the assistant gets a first message at all;
+                  the two boxes below only shape that message, so unchecked greys them out. */}
+                  <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <h4 className={cloneSectionCaption}>Instructions</h4>
+                    <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+                      <input
+                        type="checkbox"
+                        checked={draft.kickoff}
+                        onChange={(e) =>
+                          onDraftChange("kickoff", e.target.checked)
+                        }
+                        disabled={busy}
+                        className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+                      />
+                      Auto send first message to the assistant
+                    </label>
+                  </div>
+                  <div
+                    className={`space-y-3 text-xs ${draft.kickoff ? "" : "opacity-50"}`}
+                  >
                     <label className={cloneRowTop}>
                       <span className={cloneRowLabelTop}>
                         Clone agent instructions
@@ -332,11 +348,12 @@ export function CloneModalView({
                         onChange={(e) =>
                           onDraftChange("agentInstructions", e.target.value)
                         }
+                        disabled={!draft.kickoff}
                         rows={5}
                         placeholder={
                           'Appended to the default ("Follow your "Implementing a ticket" procedure"); takes precedence where they conflict.'
                         }
-                        className={`resize-y ${cloneRowField}`}
+                        className={`resize-y disabled:cursor-not-allowed ${cloneRowField}`}
                       />
                     </label>
                     <label className={cloneRowTop}>
@@ -348,9 +365,10 @@ export function CloneModalView({
                         onChange={(e) =>
                           onDraftChange("claudeInstructions", e.target.value)
                         }
+                        disabled={!draft.kickoff}
                         rows={5}
                         placeholder="Appended to the default (pull latest → switch to the feature branch → setup docs → implement); takes precedence where they conflict."
-                        className={`resize-y ${cloneRowField}`}
+                        className={`resize-y disabled:cursor-not-allowed ${cloneRowField}`}
                       />
                     </label>
                   </div>

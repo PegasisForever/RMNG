@@ -41,6 +41,8 @@ pub(crate) struct ClonePlan {
     pub first_message: Option<String>,
     pub agent_instructions: Option<String>,
     pub claude_instructions: Option<String>,
+    /// Send the agent its first turn once the clone is up ([`wire::CloneRequest::kickoff`]).
+    pub kickoff: bool,
     pub headless: bool,
     pub run_startup_script: bool,
     pub rebuild: bool,
@@ -195,6 +197,7 @@ pub(crate) fn plan(
         first_message: named(&req.first_message),
         agent_instructions: named(&req.agent_instructions),
         claude_instructions: named(&req.claude_instructions),
+        kickoff: req.kickoff,
         headless: req.headless,
         run_startup_script: req.run_startup_script,
         rebuild: req.rebuild,

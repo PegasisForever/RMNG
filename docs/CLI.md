@@ -115,15 +115,15 @@ Each prints the started op id (follow with `rmng op wait <op-id>`), or blocks wi
 
 **How a fork is named.** Without `--title` it is named after its source and takes the next
 free letter, so forking `pega-dev-123` gives `pega-dev-123a`, then `…b`. It also inherits the
-source's Linear ticket, which is what starts an agent on it. `--title` names it from that
-title instead (`--title 'ng 0c3e2998'` → `pega-ng-0c3e2998`) and makes it **standalone**: it
-inherits no ticket, so nothing kicks an agent off on it. Use `--title` when you make many
-forks of one clone — a source has only its 27 letters, and a retired name is never handed out
+source's Linear ticket; with `--message`, the agent is sent that ticket's URL, which takes
+the place of the message. `--title` names it from that title instead
+(`--title 'ng 0c3e2998'` → `pega-ng-0c3e2998`) and makes it **standalone**: it inherits no
+ticket. Use `--title` when you make many forks of one clone — a source has only its 27 letters, and a retired name is never handed out
 again.
 
 **Shared flags:** `--message <M>` | `--message-file <PATH>` (first message auto-sent to the
-agent; omitted ⇒ nothing is sent), `--column <NAME>`, `--no-startup-script`, `--wait`
-`[--timeout <N>]`.
+agent; omitted ⇒ nothing is sent, even when a fork inherits a ticket), `--column <NAME>`,
+`--no-startup-script`, `--wait` `[--timeout <N>]`.
 
 `--column` files the new clone at the **top** of that column, by title or id. The name is
 resolved before anything is created, so a typo costs no clone. The id is written to the board

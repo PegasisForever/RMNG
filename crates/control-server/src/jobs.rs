@@ -350,6 +350,7 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     let first_message = plan.first_message.clone();
     let agent_instructions = plan.agent_instructions.clone();
     let claude_instructions = plan.claude_instructions.clone();
+    let kickoff = plan.kickoff;
     let row_id = row.id.clone();
     let forked = plan.source.is_some();
     Ok(Finish::new(message)
@@ -363,40 +364,30 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
                 s.clone_tokens.remove(&row_id);
             }
         })
-        .after(move |_app, _st| async move {
+        .after(move |app, _st| async move {
             // No post-op converge on this path: the pre-boot tar already uploaded every
             // stamp the converge would check (payload, codex parity, ssh, the five
             // managed-home merges), so a fork's converge is a provable no-op wrapped in
             // a 30-minute poll task. Rebase/unarchive keep theirs (their
             // pre-boot coverage differs).
-            // TEMPORARILY DISABLED — the only automatic first message in the server, and
-            // the only way a turn starts without an operator asking for one. Nothing may
-            // prompt a clone but the web UI's composer until the kickoff is reworked.
-            //
-            // Restore by uncommenting this block, dropping the `let _` below, and removing
-            // the `#[allow(dead_code)]` from `chat::kickoff_agent` and `chat::KickoffOpts`.
-            //
-            // Start the agent on its ticket or first message; a clone with neither stays
-            // quiet.
-            // if ticket_url.is_some() || first_message.is_some() {
-            //     if let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == id) {
-            //         tokio::spawn(crate::chat::kickoff_agent(
-            //             app.clone(),
-            //             host,
-            //             crate::chat::KickoffOpts {
-            //                 ticket_url,
-            //                 message: first_message,
-            //                 agent_instructions,
-            //                 claude_instructions,
-            //             },
-            //         ));
-            //     }
-            // }
-            //
-            // The plan still carries all four: they are recorded on the row and read back by
-            // the clone dialog, so they are collected and stored exactly as before — only the
-            // send is gone.
-            let _ = (&ticket_url, &first_message, &agent_instructions, &claude_instructions);
+            // Start the agent on its ticket or first message, only when the request asked
+            // for it: the clone dialog's "auto send" box, or the CLI's `--message`. A clone
+            // with neither stays quiet, and so does one that did not ask — a fork inheriting
+            // its source's ticket never starts an agent on that alone.
+            if kickoff && (ticket_url.is_some() || first_message.is_some()) {
+                if let Some(host) = app.store.get().hosts.into_iter().find(|h| h.id == id) {
+                    tokio::spawn(crate::chat::kickoff_agent(
+                        app.clone(),
+                        host,
+                        crate::chat::KickoffOpts {
+                            ticket_url,
+                            message: first_message,
+                            agent_instructions,
+                            claude_instructions,
+                        },
+                    ));
+                }
+            }
         }))
 }
 

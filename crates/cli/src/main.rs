@@ -71,13 +71,16 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 preset,
                 common,
             } => {
+                let first_message = first_message(message.as_ref(), message_file.as_ref())?;
                 let req = wire::CloneRequest {
                     preset: preset.clone(),
                     linear: Some(wire::LinearMeta {
                         display_name: Some(title.clone()),
                         ..Default::default()
                     }),
-                    first_message: first_message(message.as_ref(), message_file.as_ref())?,
+                    first_message: first_message.clone(),
+                    // A message given here is the operator asking for it to be sent.
+                    kickoff: first_message.is_some(),
                     run_startup_script: !common.no_startup_script,
                     ..Default::default()
                 };
@@ -100,6 +103,7 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 message_file,
                 common,
             } => {
+                let first_message = first_message(message.as_ref(), message_file.as_ref())?;
                 let req = wire::CloneRequest {
                     source: source.clone(),
                     parent: parent.clone(),
@@ -112,7 +116,10 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                         display_name: Some(t.clone()),
                         ..Default::default()
                     }),
-                    first_message: first_message(message.as_ref(), message_file.as_ref())?,
+                    first_message: first_message.clone(),
+                    // Only an explicit message starts the agent. A ticket the fork inherits
+                    // from its source does not on its own.
+                    kickoff: first_message.is_some(),
                     headless: *headless,
                     run_startup_script: !common.no_startup_script,
                     ..Default::default()
