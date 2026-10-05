@@ -82,8 +82,9 @@ the same absence, so tolerating it here would only delay the failure by one pass
   `etc/fish/conf.d/rmng-preset-path.fish` + `etc/profile.d/rmng-preset-path.sh`.
 - Content: playbook (`~/.config/rmng/agent-instructions.md`, skipped when empty),
   Codex parity files + stamp, SSH host key + `authorized_keys` + stamp, probe file
-  (`~/.rmng/hook.py`), and six merge-owned files: `~/.claude.json`,
-  `~/.cursor/mcp.json`, `~/.codex/config.toml`, `~/.config/mcp/mcp.json`,
+  (`~/.rmng/hook.py`), and seven merge-owned files: `~/.claude.json`,
+  `~/.cursor/mcp.json`, `~/.codex/config.toml`, `~/.config/mcp/mcp.json` (pi before 1.0,
+  through pi-mcp-adapter), `~/.pi/agent/mcp.json` (pi 1.0 and later, built-in MCP),
   `~/.claude/settings.json`, and `~/.cursor/hooks.json`. Pre-boot and live updates
   share merge rules and five completion stamps; carried user fields survive.
   Malformed JSON fails before upload; rebase also checks before removing its container.
