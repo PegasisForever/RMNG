@@ -13,25 +13,25 @@ It holds one long-lived pi `AgentSession`, created lazily on the first prompt an
 | `POST /abort` | Interrupts the in-flight turn while keeping the session alive. |
 | `GET /health` | Returns `ok`. |
 
-Every reply carries `solicited: true`. pi has no background bash and no task notifications, so the autonomous reply the Claude Agent SDK could produce never fires.
+Every reply carries `solicited: true`. pi has no background bash and no task notifications, so it never produces an autonomous (`solicited: false`) reply.
 
 The session is in memory only: a CoW clone boots a fresh wrapper and starts a new conversation.
 
 ## Model and auth
 
-The session runs on `gpt-5.6-luna` at `xhigh` reasoning effort on the Codex "Fast" speed tier (`service_tier: priority`). None of the three is configurable: the fleet runs one model, and the clone's pushed Codex token is what authorizes it.
+The session runs on `gpt-6-luna` at `max` reasoning effort, on the default speed tier: no `service_tier` is sent, so the Codex "Fast" tier and its higher usage are never used. Neither is configurable: the fleet runs one model, and the clone's pushed Codex token is what authorizes it.
 
 Auth is file-based. The control-server signs in, refreshes, and pushes `~/.codex/auth.json` into the clone (control-server `codex.rs`). `src/auth.ts` reads that file on every request, so a rotated token lands without a restart. The pushed file carries an empty `refresh_token` on purpose, so the store reports a far-future expiry and pi never tries to refresh.
 
 ## MCP
 
-pi ships no MCP support, so [`pi-mcp-adapter`](https://www.npmjs.com/package/pi-mcp-adapter) bridges the servers into pi tools. The wrapper reads the control-server's neutral descriptor at `~/.config/rmng/mcp.json` (the single source of truth, already headless-filtered) and maps it to the adapter's config.
+pi (1.0 and later) has MCP support built in, so no adapter extension is needed. An SDK session does not load it on its own, so the wrapper adds pi's MCP extension (`createMcpExtension`) and its `tool_search` extension (`createToolSearchExtension`) to the resource loader, then calls `bindExtensions`, which is when the servers connect. The wrapper reads the control-server's neutral descriptor at `~/.config/rmng/mcp.json` (the single source of truth, already headless-filtered) and hands those servers to the MCP extension in place of `~/.pi/agent/mcp.json`, so a `pi mcp add` inside the clone does not change what the assistant can reach.
 
-The desktop server is marked `directTools` with an `eager` lifecycle in the descriptor, so its tools (`desktop_screenshot`, `desktop_left_click`, …) load as first-class pi tools. Linear stays behind the proxy tool.
+pi names MCP tools `mcp__<server>__<tool>`. The desktop server is marked `directTools` in the descriptor, so it gets `direct` exposure and its tools (`mcp__desktop__screenshot`, `mcp__desktop__left_click`, …) are declared to the model like built-in tools; the first prompt waits for it to connect. Every other server, Linear included, gets `deferred` exposure: its tools are found and loaded with `tool_search`. Codemode is not used.
 
-The loader runs with `noExtensions`, so the wrapper loads only these two inline extensions and ignores anything under `~/.pi/agent/extensions`. A discovered extension would load ahead of them and could block a tool call or rewrite the provider payload before either one runs, so a `pi install` inside the clone must not reach the assistant.
+The loader runs with `noExtensions`, so the wrapper loads only its inline extensions (MCP, tool search, and the request log) and ignores anything under `~/.pi/agent/extensions`. A discovered extension would load ahead of them and could block a tool call or rewrite the provider payload before they run, so a `pi install` inside the clone must not reach the assistant.
 
-Promotion needs the adapter's tool-metadata cache at `~/.pi/agent/mcp-cache.json`, which it fills after connecting. The startup line the wrapper logs is a snapshot taken before that first sync, so it lists only `mcp` and `mcpScript` on a cold cache. The direct tools appear once the sync lands, within the first session. The `mcp` proxy reaches the same servers meanwhile.
+The startup line the wrapper logs is a snapshot taken while the servers are still connecting, so it may not list the `mcp__desktop__*` tools yet. The first provider request also logs one line with the model, the reasoning effort, and the speed tier that actually went out.
 
 ## Config (environment)
 

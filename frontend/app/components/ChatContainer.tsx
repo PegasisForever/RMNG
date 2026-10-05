@@ -1,4 +1,4 @@
-// Per-clone chat with the in-container agent (Claude Agent SDK). Client-only, lazy-imported
+// Per-clone chat with the in-container agent (the pi coding agent). Client-only, lazy-imported
 // and keyed by clone id (same pattern as NotesEditorContainer). Subscribes to the per-clone
 // chat SSE (/api/chat/:id/events) for { busy, messages, scheduled }, so the agent's reply
 // and the "working" indicator survive a refresh — the POST only kicks the turn

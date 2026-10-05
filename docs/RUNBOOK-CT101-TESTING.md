@@ -189,13 +189,13 @@ $SSH root@10.0.0.100 'pct exec 101 -- docker exec -u rmng pi-probe bash -lc \
 A healthy start looks like this:
 
 ```
-agent-wrapper listening on http://0.0.0.0:4096 (model openai-codex/gpt-5.6-luna, thinking xhigh)
-extensions: <inline:rmng-mcp>, <inline:rmng-service-tier> | tools: read, bash, ..., desktop_screenshot, ...
-provider request: model gpt-5.6-luna, effort xhigh, service_tier priority
+agent-wrapper listening on http://0.0.0.0:4096 (model openai-codex/gpt-6-luna, thinking max)
+extensions: <inline:rmng-mcp>, <inline:rmng-tool-search>, <inline:rmng-request-log> | tools: read, bash, edit, write, tool_search
+provider request: model gpt-6-luna, effort max, service_tier default
 ```
 
-The tool list is a snapshot taken before the MCP adapter's first sync. On a cold cache it
-shows only `mcp` and `mcpScript`, and the `desktop_*` tools arrive during the first session.
+The tool list is a snapshot taken while the MCP servers are still connecting, so the
+`mcp__desktop__*` tools are usually not in it yet. The first prompt waits for them.
 
 ## Verify before you claim it works
 

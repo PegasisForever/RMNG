@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mcpConfigFromDescriptor } from "./mcp";
+import { mcpServersFromDescriptor } from "./mcp";
 
 const DESKTOP = {
   name: "desktop",
@@ -13,43 +13,43 @@ const LINEAR = {
   bearerEnv: "LINEAR_API_KEY",
 };
 
-test("maps desktop to eager direct tools with no headers", () => {
-  const { mcpServers } = mcpConfigFromDescriptor([DESKTOP], {});
-  expect(mcpServers.desktop).toEqual({
+test("maps desktop to direct exposure with no headers", () => {
+  const servers = mcpServersFromDescriptor([DESKTOP], {});
+  expect(servers.desktop).toEqual({
     url: "http://127.0.0.1:9004",
-    lifecycle: "eager",
-    directTools: true,
+    exposure: "direct",
   });
 });
 
-test("resolves linear bearer from env", () => {
-  const { mcpServers } = mcpConfigFromDescriptor([LINEAR], {
+test("resolves linear bearer from env, behind tool search", () => {
+  const servers = mcpServersFromDescriptor([LINEAR], {
     LINEAR_API_KEY: "lin_secret",
   });
-  expect(mcpServers.linear).toEqual({
+  expect(servers.linear).toEqual({
     url: "https://mcp.linear.app/mcp",
+    exposure: "deferred",
     headers: { Authorization: "Bearer lin_secret" },
   });
 });
 
 test("skips a bearer server when its env key is empty", () => {
-  expect(mcpConfigFromDescriptor([LINEAR], {}).mcpServers).toEqual({});
-  expect(
-    mcpConfigFromDescriptor([LINEAR], { LINEAR_API_KEY: "" }).mcpServers,
-  ).toEqual({});
+  expect(mcpServersFromDescriptor([LINEAR], {})).toEqual({});
+  expect(mcpServersFromDescriptor([LINEAR], { LINEAR_API_KEY: "" })).toEqual(
+    {},
+  );
 });
 
 test("headless descriptor (desktop already filtered out by the server) yields only linear", () => {
-  const { mcpServers } = mcpConfigFromDescriptor([LINEAR], {
+  const servers = mcpServersFromDescriptor([LINEAR], {
     LINEAR_API_KEY: "k",
   });
-  expect(Object.keys(mcpServers)).toEqual(["linear"]);
+  expect(Object.keys(servers)).toEqual(["linear"]);
 });
 
 test("ignores malformed entries", () => {
-  const { mcpServers } = mcpConfigFromDescriptor(
+  const servers = mcpServersFromDescriptor(
     [{ name: "", url: "x" } as never, { url: "y" } as never, DESKTOP],
     {},
   );
-  expect(Object.keys(mcpServers)).toEqual(["desktop"]);
+  expect(Object.keys(servers)).toEqual(["desktop"]);
 });

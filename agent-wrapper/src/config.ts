@@ -20,11 +20,12 @@ export const CONFIG = {
   /** Model for the session, resolved against pi's built-in `openai-codex` catalog. Fixed on
    * purpose: the fleet runs one model, and the clone's pushed Codex token is what authorizes
    * it. Qualified with the provider so a same-named model on another provider can't win. */
-  model: "openai-codex/gpt-5.6-luna",
+  model: "openai-codex/gpt-6-luna",
 
-  /** Reasoning effort. pi maps this through the model's thinkingLevelMap to
-   * `reasoning.effort`. The Fast speed tier rides separately, see serviceTier.ts. */
-  thinkingLevel: "xhigh",
+  /** Reasoning effort, the highest gpt-6-luna offers. pi maps this through the model's
+   * thinkingLevelMap to `reasoning.effort`. Requests go out on the default speed tier: no
+   * `service_tier` is set, so the Codex "Fast" tier (and its higher usage) is never used. */
+  thinkingLevel: "max",
 
   /** The Codex credential the control-server pushes (codex.rs `apply_clone_token`). Read on
    * every request so a rotated token lands without a restart. See auth.ts. */
@@ -42,8 +43,8 @@ export const CONFIG = {
    * rmng-clone-daemon.service at create time (control-server `provision.rs` HEADLESS_DISABLE_SCRIPT),
    * so nothing serves the desktop MCP on :9004. Detect that by the absence of the clone-daemon user
    * unit — a create-time-stable signal (unlike a TCP probe, it can't misfire during the boot race
-   * before the daemon has bound its port). When headless, `mcpConfig()` skips the `desktop` server
-   * so the adapter doesn't eagerly connect to a dead endpoint. */
+   * before the daemon has bound its port). When headless, `mcpServers()` skips the `desktop` server
+   * so pi doesn't connect to a dead endpoint. */
   headless: !existsSync(
     `${process.env.HOME ?? "/home/rmng"}/.config/systemd/user/rmng-clone-daemon.service`,
   ),
@@ -64,7 +65,7 @@ export const CONFIG = {
 
   /** The control-server-written MCP descriptor — the single source of truth for the managed
    * server set (`desktop`+`linear`), already headless-filtered. The wrapper reads this at
-   * startup and maps it to pi-mcp-adapter's config; absent ⇒ the built-in fallback in server.ts. */
+   * startup and maps it to pi's MCP server entries; absent ⇒ the built-in fallback in server.ts. */
   mcpConfigPath:
     process.env.RMNG_MCP_CONFIG_PATH ??
     `${process.env.HOME ?? "/home/rmng"}/.config/rmng/mcp.json`,

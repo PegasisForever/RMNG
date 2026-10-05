@@ -1,10 +1,13 @@
 // Maps the control-server's neutral MCP descriptor (~/.config/rmng/mcp.json — the single
-// source of truth, already headless-filtered) to the config shape pi-mcp-adapter takes.
-// The other agents (Claude CLI / Codex / Cursor) get the same set rendered into their own
-// config files by the control-server; this is the node-agent's consumer of that source.
+// source of truth, already headless-filtered) to the server entries pi's built-in MCP
+// extension takes. The other agents (Claude CLI / Codex / Cursor) get the same set rendered
+// into their own config files by the control-server; this is the pi agent's consumer of that
+// source.
 //
-// pi has no built-in MCP support, so the adapter is what turns these servers into tools the
-// model can call. See agent-wrapper/README.md.
+// pi connects the servers itself and names their tools `mcp__<server>__<tool>`. See
+// agent-wrapper/README.md.
+
+import type { McpServerConfig } from "@earendil-works/pi-coding-agent";
 
 /** One entry in the descriptor JSON array written by the control-server. */
 export interface McpDescriptor {
@@ -12,41 +15,30 @@ export interface McpDescriptor {
         url: string;
         /** When set, authenticate with `Authorization: Bearer <process.env[bearerEnv]>`. */
         bearerEnv?: string;
-        /** node-agent hint: promote this server's tools to first-class pi tools (e.g. `desktop`). */
+        /** Declare this server's tools to the model directly (e.g. `desktop`), so screenshot and
+         *  click are callable on the first turn without a search. */
         directTools?: boolean;
-        /** `eager` connects at startup instead of on first use (set with `directTools`). */
+        /** Written by the control-server alongside `directTools`. pi connects every server when
+         *  the session starts and waits for `direct` ones before the first prompt, so it adds
+         *  nothing here and is ignored. */
         lifecycle?: "eager" | "lazy";
-}
-
-/** One server in the adapter's config. */
-export interface McpAdapterServer {
-        url: string;
-        /** `eager` connects at startup instead of on first use. */
-        lifecycle?: "eager" | "lazy";
-        /** Promote this server's tools to first-class pi tools instead of hiding them behind the proxy. */
-        directTools?: boolean;
-        headers?: Record<string, string>;
-}
-
-export interface McpAdapterConfig {
-        mcpServers: Record<string, McpAdapterServer>;
-        /** The adapter's config accepts more keys than the wrapper sets (settings, oauth, …). */
-        [key: string]: unknown;
 }
 
 /**
- * Build the adapter config from the descriptor entries. A server whose `bearerEnv` is set
+ * Build pi's server configs from the descriptor entries. A server whose `bearerEnv` is set
  * but empty in the environment is skipped (e.g. `linear` on a clone with no `LINEAR_API_KEY`),
  * matching the behavior of the file-based agents (which only auth when the key is present).
  *
- * `directTools` + `lifecycle` pass through to the adapter verbatim: the control-server marks
- * the desktop server for promotion so screenshot and click are always callable.
+ * A `directTools` server gets `direct` exposure: its tools are declared to the model like
+ * built-in ones. Every other server gets `deferred`: its tools stay out of the declarations
+ * until pi's `tool_search` loads a match, which keeps a large server such as Linear from
+ * filling every request.
  */
-export function mcpConfigFromDescriptor(
+export function mcpServersFromDescriptor(
         entries: McpDescriptor[],
         env: Record<string, string | undefined> = process.env,
-): McpAdapterConfig {
-        const mcpServers: Record<string, McpAdapterServer> = {};
+): Record<string, McpServerConfig> {
+        const servers: Record<string, McpServerConfig> = {};
         for (const e of entries) {
                 if (
                         !e ||
@@ -63,16 +55,11 @@ export function mcpConfigFromDescriptor(
                         if (!key) continue; // no key ⇒ omit the server rather than register an unauthenticated one
                         headers = { Authorization: `Bearer ${key}` };
                 }
-                mcpServers[e.name] = {
+                servers[e.name] = {
                         url: e.url,
-                        ...(e.directTools
-                                ? { directTools: true as const }
-                                : {}),
-                        ...(e.lifecycle === "eager" || e.lifecycle === "lazy"
-                                ? { lifecycle: e.lifecycle }
-                                : {}),
+                        exposure: e.directTools ? "direct" : "deferred",
                         ...(headers ? { headers } : {}),
                 };
         }
-        return { mcpServers };
+        return servers;
 }

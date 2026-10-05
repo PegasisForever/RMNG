@@ -7,9 +7,9 @@
 // injects at clone creation if present, else the baked-in default (see instructions.ts /
 // agent-instructions.md).
 //
-// The agent runs on gpt-5.6-luna through pi's `openai-codex` provider, authenticated by the
+// The agent runs on gpt-6-luna through pi's `openai-codex` provider, authenticated by the
 // Codex token the control-server pushes into ~/.codex/auth.json (see auth.ts). Desktop and
-// Linear reach the model as tools through pi-mcp-adapter (see mcp.ts).
+// Linear reach the model as tools through pi's built-in MCP support (see mcp.ts).
 //
 //   POST /prompt { text }   queue a user turn. 202 immediately; 409 if a turn is
 //                           already running. Reply + progress arrive on /events.
@@ -17,9 +17,9 @@
 //                           { reply, solicited } / { error } per turn.
 //   POST /abort             interrupt the current turn (session stays alive).
 //
-// Every reply is solicited. pi has no background bash and no task notifications, so the
-// autonomous `{ reply, solicited:false }` frame the Claude Agent SDK could produce never
-// fires. The control-server still reads `busy` and `activity` for fleet working/idle state.
+// Every reply is solicited. pi has no background bash and no task notifications, so an
+// autonomous `{ reply, solicited:false }` frame is never produced, though the control-server
+// still accepts one. The control-server still reads `busy` and `activity` for fleet working/idle state.
 //
 // Session state is in memory only: a CoW clone boots a fresh wrapper and starts a brand-new
 // conversation.
@@ -27,20 +27,22 @@ import { readFileSync } from "node:fs";
 
 import {
   createAgentSession,
+  createMcpExtension,
+  createToolSearchExtension,
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
   type AgentSession,
   type AgentSessionEvent,
+  type McpServerConfig,
 } from "@earendil-works/pi-coding-agent";
 import type { Model } from "@earendil-works/pi-ai";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
-import { createMcpAdapter } from "pi-mcp-adapter";
 
 import { CodexFileCredentialStore } from "./auth";
-import { mcpConfigFromDescriptor, type McpAdapterConfig } from "./mcp";
+import { mcpServersFromDescriptor } from "./mcp";
+import { requestLogExtension } from "./requestLog";
 import { resolveSystemAppend } from "./instructions";
-import { serviceTierExtension } from "./serviceTier";
 
 import { CONFIG } from "./config";
 
@@ -95,18 +97,18 @@ function emitActivity(text: string): void {
 // Prefer the control-server's MCP descriptor (single source of truth, ~/.config/rmng/mcp.json,
 // already headless-filtered). Fall back to the built-in `desktop`+`linear` set when the file is
 // missing/unreadable (e.g. a clone created before this control-server, or a bare dev run).
-function mcpConfig(): McpAdapterConfig {
+function mcpServers(): Record<string, McpServerConfig> {
   try {
     const parsed = JSON.parse(readFileSync(CONFIG.mcpConfigPath, "utf8"));
-    if (Array.isArray(parsed)) return mcpConfigFromDescriptor(parsed);
+    if (Array.isArray(parsed)) return mcpServersFromDescriptor(parsed);
   } catch {
     // fall through to the built-in set
   }
-  return mcpConfigBuiltin();
+  return mcpServersBuiltin();
 }
 
 // The historical hardcoded set, kept as a fallback when no descriptor is present.
-function mcpConfigBuiltin(): McpAdapterConfig {
+function mcpServersBuiltin(): Record<string, McpServerConfig> {
   const entries = [];
   // The desktop-control MCP is served by the clone-daemon over HTTP (localhost), sharing its live
   // Mutter session. Skipped on headless clones — there is no daemon / :9004 there.
@@ -124,7 +126,28 @@ function mcpConfigBuiltin(): McpAdapterConfig {
     url: "https://mcp.linear.app/mcp",
     bearerEnv: "LINEAR_API_KEY",
   });
-  return mcpConfigFromDescriptor(entries);
+  return mcpServersFromDescriptor(entries);
+}
+
+/**
+ * pi's built-in MCP extension, fed the descriptor's servers instead of `~/.pi/agent/mcp.json`:
+ * like `noExtensions` below, a `pi mcp add` in the clone must not change what the assistant
+ * can reach. The servers are `direct` (desktop) or `deferred` (found through `tool_search`),
+ * never codemode, so codemode is not activated.
+ */
+function mcpExtension() {
+  const servers = mcpServers();
+  return createMcpExtension({
+    loadConfig: () => ({
+      servers: Object.entries(servers).map(([name, config]) => ({
+        name,
+        config,
+        source: CONFIG.mcpConfigPath,
+      })),
+      autoEnableCodemode: false,
+      errors: [],
+    }),
+  });
 }
 
 // ---- the persistent session ------------------------------------------------
@@ -157,12 +180,13 @@ async function startSession(): Promise<AgentSession> {
     cwd: process.env.HOME ?? process.cwd(),
     agentDir: CONFIG.agentDir,
     extensionFactories: [
-      { name: "rmng-mcp", factory: createMcpAdapter({ config: mcpConfig() }) },
-      { name: "rmng-service-tier", factory: serviceTierExtension },
+      { name: "rmng-mcp", factory: mcpExtension() },
+      { name: "rmng-tool-search", factory: createToolSearchExtension() },
+      { name: "rmng-request-log", factory: requestLogExtension },
     ],
-    // Load only the two factories above, never whatever sits in ~/.pi/agent/extensions.
+    // Load only the factories above, never whatever sits in ~/.pi/agent/extensions.
     // Anything installed there would load ahead of them and could block a tool call or
-    // rewrite the provider payload before either one runs. The assistant's behaviour is
+    // rewrite the provider payload before they run. The assistant's behaviour is
     // the wrapper's to define, so a `pi install` in the clone must not change it.
     noExtensions: true,
     ...(SYSTEM_APPEND ? { appendSystemPrompt: [SYSTEM_APPEND] } : {}),
@@ -179,13 +203,16 @@ async function startSession(): Promise<AgentSession> {
     sessionManager: SessionManager.inMemory(),
     resourceLoader,
   });
-  // The desktop tools reach the model only through the MCP adapter extension, so a silent
-  // load failure would leave the agent blind with no other symptom.
+  // The desktop tools reach the model only through the MCP extension, so a silent load
+  // failure would leave the agent blind with no other symptom.
   for (const e of extensionsResult.errors) {
     console.error(`extension failed: ${e.path}: ${e.error}`);
   }
-  // A snapshot taken before the adapter's first tool sync. On a cold metadata cache it lists
-  // only the mcp proxy; the promoted desktop_* tools land during the first session.
+  // Emits session_start, which is when pi's MCP extension connects the servers. Without it
+  // no server connects and the agent has no MCP tools.
+  await created.bindExtensions({});
+  // A snapshot taken while the servers are still connecting in the background, so it may not
+  // list the mcp__desktop__* tools yet. The first prompt waits for them (direct exposure).
   console.log(
     `extensions: ${extensionsResult.extensions.map((e) => e.path).join(", ") || "none"} | ` +
       `tools: ${created.agent.state.tools.map((t) => t.name).join(", ") || "none"}`,

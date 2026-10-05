@@ -59,7 +59,7 @@ running server's payloads; there's no manual redeploy step.
 | [frontend](../frontend/README.md) | web app | React Router 7 management UI, ts-rs types from `wire`, served by the control-server |
 | [template/gnome-patch](../template/gnome-patch/README.md) | tooling | builds the patched gnome-shell `.deb` (hide screen-share indicator + enable `Eval` for window-mgmt); built + installed by `template/Dockerfile`'s `gnome-build` stage into the published clone template — not a control-server payload |
 
-The per-clone **agent-wrapper** (Bun, Claude Agent SDK) is vendored at `agent-wrapper/`; the
+The per-clone **agent-wrapper** (Bun, pi coding agent) is vendored at `agent-wrapper/`; the
 control-server installs its current build into each clone at create time (the template
 doesn't carry it) and proxies chat to it. Its `desktop` MCP points at the clone-daemon
 (`http://127.0.0.1:9004`).
