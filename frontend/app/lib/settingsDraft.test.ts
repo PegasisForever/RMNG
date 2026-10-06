@@ -47,6 +47,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     agentPlaybook: "playbook",
     globalPrompt: "prompt",
     judge: { provider: "codex", geminiKey: "" },
+    assistant: { url: "", serverUrl: "" },
     ...overrides,
   };
 }
@@ -78,6 +79,7 @@ type Patch = {
     dockerfile: string;
   }[];
   judge: { provider: string; geminiKey: string };
+  assistant: { url: string; serverUrl: string };
 };
 
 const patch = (
@@ -325,4 +327,13 @@ test("the judge key round-trips verbatim like a Linear key", () => {
   );
   expect(withKey.judge.provider).toBe("gemini");
   expect(patch(withKey).judge.geminiKey).toBe("K");
+});
+
+test("the assistant addresses round-trip, trimmed", () => {
+  const draft = settingsDraftFrom(
+    config({ assistant: { url: "http://10.0.0.12:9999", serverUrl: "http://10.0.0.129:9000" } }),
+  );
+  expect(draft.assistant).toEqual({ url: "http://10.0.0.12:9999", serverUrl: "http://10.0.0.129:9000" });
+  const edited = { ...draft, assistant: { url: " http://a:1 ", serverUrl: "http://b:2\n" } };
+  expect(patch(edited).assistant).toEqual({ url: "http://a:1", serverUrl: "http://b:2" });
 });

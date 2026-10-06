@@ -241,17 +241,3 @@ export interface ChatMessage {
  text: string;
  ts: number;
 }
-
-export interface Chat {
- /**
-  * Reserved. The agent-wrapper now owns session continuity in-memory, so the
-  * control-server no longer tracks a session id here (kept for back-compat with
-  * existing chat JSON files; always null on new writes).
-  */
- sessionId: string | null;
- messages: ChatMessage[];
-}
-
-export function emptyChat(): Chat {
- return { sessionId: null, messages: [] };
-}

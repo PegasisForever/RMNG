@@ -1,40 +1,57 @@
-//! Per-clone chat with the in-container agent-wrapper. Ports `agent.server.ts` +
-//! `chats.server.ts` + `chatbus.server.ts`.
+//! Per-clone chat with the assistant: a pi-web server (Settings → Assistant). Each clone has
+//! one chat there, created by its first message; the chat's id is kept in
+//! `data/chats/<id>.json`. The assistant owns the conversation. RMNG keeps one event-stream
+//! subscription per chat ([`ensure_listener`]) and folds it into the
+//! `{ busy, activity, messages, scheduled }` frame the panel reads, on a per-clone SSE fan-out
+//! (message bodies never touch the global `/events` frame). Messages typed into the same chat
+//! somewhere else, such as the assistant's own web page, arrive the same way.
 //!
-//! Each clone has its own conversation (`data/chats/<id>.json`) and its own SSE
-//! fan-out (keyed by clone id — message bodies never touch the global `/events`
-//! frame). A turn runs **detached** from the POST request (it can take minutes; a
-//! browser refresh must not kill it). The server owns the "busy" flag so the
-//! working indicator + the eventual reply survive a reconnect. Watchdogs abort a
-//! stalled (no activity for 3m) or over-long (30m) turn.
+//! The first message of a new chat opens with a header: the RMNG server and the clone the chat
+//! is for, and the playbook (global + preset append). The panel hides that header again.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::{Value, json};
 use wire::{Chat, ChatMessage, ChatRole, RmngClone, ScheduledMessage};
 
 use crate::app::App;
 use crate::files::is_safe_id;
 
-const IDLE_TIMEOUT: Duration = Duration::from_secs(3 * 60);
-const MAX_TURN: Duration = Duration::from_secs(30 * 60);
 const ACTIVITY_MAX: usize = 200;
+/// Opens the first message of every new chat. The panel shows only what follows
+/// [`MESSAGE_MARK`].
+const HEADER_MARK: &str = "[From RMNG]";
+const MESSAGE_MARK: &str = "\n\n[Message]\n";
+/// How long a sent message counts as "busy" before the assistant's stream confirms it.
+const SENDING_GRACE: Duration = Duration::from_secs(20);
 
-/// Per-clone chat fan-out + in-flight state.
+/// Per-clone chat fan-out + the assistant chat's live state.
 #[derive(Default)]
 pub struct ChatState {
     senders: Mutex<HashMap<String, tokio::sync::broadcast::Sender<String>>>,
-    busy: Mutex<HashSet<String>>,
-    activity: Mutex<HashMap<String, String>>,
+    /// The assistant chat as its event stream last described it, per clone.
+    live: Mutex<HashMap<String, Live>>,
+    /// Clones whose message was sent but not yet confirmed by the stream. Keeps the panel
+    /// busy across the gap between the POST and the assistant's first event.
+    sending: Mutex<HashMap<String, Instant>>,
     listeners: Mutex<HashSet<String>>,
     /// Serialises the read-modify-write of `data/schedules/<id>.json`. The HTTP handlers and
     /// the scheduler tick both mutate those files, and a lost update there means a message the
     /// operator queued silently never fires (or fires twice). One process-wide lock is plenty:
     /// the critical sections are a few-KB file rewrite.
     schedule_io: Mutex<()>,
+}
+
+#[derive(Default)]
+struct Live {
+    /// User and final assistant messages, oldest first. Tool steps are left out.
+    messages: Vec<ChatMessage>,
+    busy: bool,
+    activity: Option<String>,
 }
 
 fn now_ms() -> i64 {
@@ -52,8 +69,19 @@ fn short_id() -> String {
     format!("{:08x}", (t as u64) & 0xFFFF_FFFF)
 }
 
-async fn base_url(app: &App, host: &RmngClone) -> String {
-    format!("http://{}:{}", app.dial_clone(host).await, wire::AGENT_PORT)
+/// The assistant's origin, or the sentence the panel shows when none is set.
+fn assistant_url(app: &App) -> Result<String, String> {
+    let url = app
+        .config()
+        .assistant
+        .url
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if url.is_empty() {
+        return Err("No assistant is set. Add its URL in Settings → Assistant.".into());
+    }
+    Ok(url)
 }
 
 // --- chat storage (mirrors notes) ------------------------------------------
@@ -89,10 +117,25 @@ pub fn save_chat(data_dir: &str, id: &str, chat: &Chat) {
     }
 }
 
+/// Forget the clone's chat. The assistant keeps its own copy of the conversation; the
+/// clone's listener sees the file gone and stops.
 pub fn delete_chat(data_dir: &str, id: &str) {
     if let Some(p) = chat_path(data_dir, id) {
         let _ = std::fs::remove_file(p);
     }
+}
+
+/// Add a line RMNG wrote itself (never sent to the assistant) to the clone's thread.
+fn push_notice(app: &App, host_id: &str, text: String) {
+    let data_dir = app.data_dir();
+    let mut chat = load_chat(&data_dir, host_id);
+    chat.notices.push(ChatMessage {
+        id: format!("n{}", short_id()),
+        role: ChatRole::Assistant,
+        text,
+        ts: now_ms(),
+    });
+    save_chat(&data_dir, host_id, &chat);
 }
 
 // --- scheduled-message storage ---------------------------------------------
@@ -271,14 +314,22 @@ struct ChatSnapshot {
     scheduled: Vec<ScheduledMessage>,
 }
 
-/// The `{ busy, activity, messages, scheduled }` snapshot as JSON — the chat history plus the
-/// clone agent's live working state. Used by the SSE bus and the fleet MCP `read_chat`.
+/// The `{ busy, activity, messages, scheduled }` snapshot as JSON: the assistant chat merged
+/// with RMNG's own notices by time, plus the live working state.
 pub fn snapshot_json(app: &App, host_id: &str) -> String {
     let data_dir = app.data_dir();
+    let chat = load_chat(&data_dir, host_id);
+    let (mut messages, live_busy, activity) = match app.chat.live.lock().unwrap().get(host_id) {
+        Some(l) => (l.messages.clone(), l.busy, l.activity.clone()),
+        None => (Vec::new(), false, None),
+    };
+    messages.extend(chat.notices);
+    messages.sort_by_key(|m| m.ts);
+    let busy = live_busy || is_sending(app, host_id);
     let snap = ChatSnapshot {
-        busy: app.chat.busy.lock().unwrap().contains(host_id),
-        activity: app.chat.activity.lock().unwrap().get(host_id).cloned(),
-        messages: load_chat(&data_dir, host_id).messages,
+        busy,
+        activity: activity.filter(|_| busy),
+        messages,
         scheduled: load_schedules(&data_dir, host_id),
     };
     serde_json::to_string(&snap).unwrap_or_else(|_| "{}".into())
@@ -304,35 +355,28 @@ pub fn subscribe(app: &App, host_id: &str) -> (String, tokio::sync::broadcast::R
     (snapshot_json(app, host_id), rx)
 }
 
-pub fn is_busy(app: &App, host_id: &str) -> bool {
-    app.chat.busy.lock().unwrap().contains(host_id)
-}
-
-fn set_busy(app: &App, host_id: &str, busy: bool) {
-    if busy {
-        app.chat.busy.lock().unwrap().insert(host_id.to_string());
-    } else {
-        app.chat.busy.lock().unwrap().remove(host_id);
-    }
-    app.chat.activity.lock().unwrap().remove(host_id); // only meaningful during a turn
-    broadcast(app, host_id);
-}
-
-fn set_activity(app: &App, host_id: &str, activity: String) {
-    if !is_busy(app, host_id) {
-        return; // late event after the turn ended
-    }
+fn is_sending(app: &App, host_id: &str) -> bool {
     app.chat
-        .activity
+        .sending
         .lock()
         .unwrap()
-        .insert(host_id.to_string(), activity);
-    broadcast(app, host_id);
+        .get(host_id)
+        .is_some_and(|t| t.elapsed() < SENDING_GRACE)
 }
 
-/// Broadcast that the persisted chat changed (e.g. an autonomous message landed).
-pub fn chat_changed(app: &App, host_id: &str) {
-    broadcast(app, host_id);
+fn clear_sending(app: &App, host_id: &str) {
+    app.chat.sending.lock().unwrap().remove(host_id);
+}
+
+pub fn is_busy(app: &App, host_id: &str) -> bool {
+    is_sending(app, host_id)
+        || app
+            .chat
+            .live
+            .lock()
+            .unwrap()
+            .get(host_id)
+            .is_some_and(|l| l.busy)
 }
 
 fn clip_activity(s: &str) -> String {
@@ -346,175 +390,177 @@ fn clip_activity(s: &str) -> String {
     }
 }
 
-fn push_message(app: &App, host_id: &str, role: ChatRole, text: String) {
-    let data_dir = app.data_dir();
-    let mut chat = load_chat(&data_dir, host_id);
-    chat.messages.push(ChatMessage {
-        id: short_id(),
-        role,
-        text,
-        ts: now_ms(),
-    });
-    save_chat(&data_dir, host_id, &chat);
+// --- the first message's header ---------------------------------------------
+
+/// What opens a new chat: the server and clone it is for, and the playbook. Errs when this
+/// server's own address is not set, because without it the assistant cannot reach the clone.
+fn chat_header(cfg: &wire::AppConfig, host: &RmngClone) -> Result<String, String> {
+    let server = cfg.assistant.server_url.trim().trim_end_matches('/');
+    if server.is_empty() {
+        return Err("This server's address is not set. Add it in Settings → Assistant.".into());
+    }
+    let mut h = format!(
+        "{HEADER_MARK} This chat is for one RMNG clone. Reach it with the `rmng` CLI and pass \
+         `--server {server}` on every call. You do not run inside the clone: where the playbook \
+         below says to use the `desktop` tool (or `mcp__desktop__*`), use `rmng desktop <clone> \
+         <verb>`; where it says to run a command or start an app in the clone, use \
+         `rmng clone exec <clone> -- <cmd>` (add `-d` for a GUI app).\nRMNG server: \
+         {server}\nClone: {}",
+        host.id
+    );
+    if let Some(title) = host
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        h += &format!(" ({title})");
+    }
+    if host.headless {
+        h += "\nThe clone is headless: it has no desktop, only a shell (`rmng clone exec`).";
+    }
+    if let Some(url) = host
+        .linear_ticket_url
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        h += &format!("\nTicket: {url}");
+    }
+    let preset = crate::clone_reconcile::preset_for_clone(cfg, host);
+    let playbook = crate::web::compose_playbook(cfg, preset);
+    if !playbook.is_empty() {
+        h += &format!("\n\nPlaybook for this clone, from the RMNG settings:\n\n{playbook}");
+    }
+    Ok(h)
 }
 
-// --- agent-wrapper protocol ------------------------------------------------
-
-#[derive(Deserialize)]
-struct TurnFrame {
-    #[serde(default)]
-    activity: Option<String>,
-    #[serde(default)]
-    reply: Option<String>,
-    /// false ⇒ autonomous background-task message, not the answer to a /prompt.
-    #[serde(default)]
-    solicited: Option<bool>,
-    #[serde(default)]
-    error: Option<String>,
-    /// The agent-wrapper's turn-liveness flag: `true` when a turn starts, `false` when it ends
-    /// (and once as a snapshot when the SSE stream opens). This is the fleet's `working`/`idle`
-    /// signal — see [`crate::monitor::ActivityBus`] for why it is read from here.
-    #[serde(default)]
-    busy: Option<bool>,
+/// A user message as the panel shows it: without the header of the chat's first message.
+fn visible_user_text(text: &str) -> &str {
+    if text.starts_with(HEADER_MARK) {
+        if let Some(i) = text.find(MESSAGE_MARK) {
+            return &text[i + MESSAGE_MARK.len()..];
+        }
+    }
+    text
 }
 
-async fn post_abort(app: &App, base: &str) {
-    let _ = app
+// --- talking to the assistant (pi-web HTTP API) -----------------------------
+
+async fn post_json(app: &App, url: &str, body: Value) -> Result<Value, String> {
+    let resp = app
         .http
-        .post(format!("{base}/abort"))
-        .timeout(Duration::from_secs(5))
+        .post(url)
+        .json(&body)
         .send()
-        .await;
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("HTTP {}: {}", status.as_u16(), text.trim()));
+    }
+    Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
-/// Persist the user message, kick off the turn detached, return the new chat.
+/// Send a message to the clone's assistant chat, creating the chat (with its header) on the
+/// first one. Returns once the checks pass; delivery runs detached and its reply arrives over
+/// the clone's chat stream. A delivery failure becomes a notice in the thread.
 pub fn send_chat(app: &App, host: &RmngClone, text: &str) -> Result<(), String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("empty message".into());
     }
     if is_busy(app, &host.id) {
-        return Err("a message is already being processed for this clone".into());
+        return Err("the assistant is still working on this clone's last message".into());
     }
-    push_message(app, &host.id, ChatRole::User, text.to_string());
-    set_busy(app, &host.id, true);
-    let (app2, host2, text2) = (app.clone(), host.clone(), text.to_string());
-    tokio::spawn(async move { run_turn(app2, host2, text2).await });
+    let base = assistant_url(app)?;
+    let session = load_chat(&app.data_dir(), &host.id).session_id;
+    let message = match session {
+        Some(_) => text.to_string(),
+        None => format!("{}{MESSAGE_MARK}{text}", chat_header(&app.config(), host)?),
+    };
+    app.chat
+        .sending
+        .lock()
+        .unwrap()
+        .insert(host.id.clone(), Instant::now());
+    broadcast(app, &host.id);
+    let (app, host, text) = (app.clone(), host.clone(), text.to_string());
+    tokio::spawn(async move {
+        if let Err(e) = deliver(&app, &host, &base, session, message).await {
+            tracing::warn!(
+                "chat: message for {} did not reach the assistant: {e}",
+                host.id
+            );
+            clear_sending(&app, &host.id);
+            push_notice(
+                &app,
+                &host.id,
+                format!("⚠ This message did not reach the assistant at {base}: {e}\n\n{text}"),
+            );
+            broadcast(&app, &host.id);
+        }
+    });
     Ok(())
 }
 
-async fn run_turn(app: App, host: RmngClone, text: String) {
-    let base = base_url(&app, &host).await;
-    let reply = run_turn_inner(&app, &host.id, &base, &text).await;
-    push_message(&app, &host.id, ChatRole::Assistant, reply);
-    set_busy(&app, &host.id, false);
-}
-
-/// Open the wrapper's event stream, prompt once a subscriber is live, relay
-/// activity, and return the reply text (or a ⚠ message on failure/timeout).
-async fn run_turn_inner(app: &App, host_id: &str, base: &str, text: &str) -> String {
-    let resp = match app
-        .http
-        .get(format!("{base}/events"))
-        .header("accept", "text/event-stream")
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => return format!("⚠ agent events HTTP {}", r.status().as_u16()),
-        Err(e) => return format!("⚠ {e}"),
-    };
-
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
-    let mut prompted = false;
-    let start = Instant::now();
-
-    loop {
-        if start.elapsed() > MAX_TURN {
-            post_abort(app, base).await;
-            return "⚠ The turn exceeded the time limit and was stopped.".into();
+async fn deliver(
+    app: &App,
+    host: &RmngClone,
+    base: &str,
+    session: Option<String>,
+    message: String,
+) -> Result<(), String> {
+    match session {
+        Some(sid) => {
+            post_json(
+                app,
+                &format!("{base}/api/sessions/{sid}/message"),
+                json!({ "message": message }),
+            )
+            .await?;
         }
-        let next = tokio::time::timeout(IDLE_TIMEOUT, stream.next()).await;
-        let chunk = match next {
-            Err(_) => {
-                post_abort(app, base).await;
-                return "⚠ The agent stalled (no output for a while) and was stopped.".into();
-            }
-            Ok(None) => return "⚠ event stream ended".into(),
-            Ok(Some(Err(e))) => return format!("⚠ {e}"),
-            Ok(Some(Ok(b))) => b,
-        };
-        buf.extend_from_slice(&chunk);
-
-        while let Some(pos) = find_subslice(&buf, b"\n\n") {
-            let frame: Vec<u8> = buf.drain(..pos + 2).collect();
-            let Some(json) = extract_data_line(&frame[..frame.len() - 2]) else {
-                continue;
+        None => {
+            let name = match host
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                Some(title) => format!("RMNG {}: {title}", host.id),
+                None => format!("RMNG {}", host.id),
             };
-
-            // Any data frame ⇒ the subscriber is live ⇒ safe to prompt.
-            if !prompted {
-                prompted = true;
-                if let Err(msg) = post_prompt(app, base, text).await {
-                    return msg;
-                }
-            }
-            let Ok(f) = serde_json::from_str::<TurnFrame>(&json) else {
-                continue;
-            };
-            if let Some(a) = f.activity {
-                set_activity(app, host_id, clip_activity(&a));
-            } else if let Some(r) = f.reply {
-                if f.solicited == Some(false) {
-                    continue; // autonomous → the persistent listener handles it
-                }
-                let r = r.trim();
-                return if r.is_empty() {
-                    "(no response)".into()
-                } else {
-                    r.to_string()
-                };
-            } else if let Some(e) = f.error {
-                return format!("⚠ {e}");
-            }
+            let created = post_json(
+                app,
+                &format!("{base}/api/sessions"),
+                json!({ "name": name, "message": message }),
+            )
+            .await?;
+            let sid = created["id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("the assistant created a chat but sent back no chat id")?;
+            let data_dir = app.data_dir();
+            let mut chat = load_chat(&data_dir, &host.id);
+            chat.session_id = Some(sid.to_string());
+            save_chat(&data_dir, &host.id, &chat);
         }
     }
+    ensure_listener(app, host);
+    Ok(())
 }
 
-async fn post_prompt(app: &App, base: &str, text: &str) -> Result<(), String> {
-    match app
-        .http
-        .post(format!("{base}/prompt"))
-        .json(&serde_json::json!({ "text": text }))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().as_u16() == 202 || r.status().is_success() => Ok(()),
-        Ok(r) if r.status().as_u16() == 409 => {
-            Err("⚠ the agent is already processing a turn".into())
-        }
-        Ok(r) => Err(format!("⚠ agent prompt HTTP {}", r.status().as_u16())),
-        Err(e) => Err(format!("⚠ {e}")),
-    }
-}
-
-fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    hay.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Extract the JSON after the first `data:` line of an SSE frame.
-fn extract_data_line(frame: &[u8]) -> Option<String> {
-    let s = std::str::from_utf8(frame).ok()?;
-    s.lines()
-        .find_map(|l| l.strip_prefix("data:"))
-        .map(|j| j.trim().to_string())
-        .filter(|j| !j.is_empty())
-}
-
-/// Interrupt the clone's in-flight turn (best-effort).
+/// Interrupt the assistant's current run on this clone's chat (best-effort).
 pub async fn abort_chat(app: &App, host: &RmngClone) {
-    post_abort(app, &base_url(app, host).await).await;
+    let (Ok(base), Some(sid)) = (
+        assistant_url(app),
+        load_chat(&app.data_dir(), &host.id).session_id,
+    ) else {
+        return;
+    };
+    if let Err(e) = post_json(app, &format!("{base}/api/sessions/{sid}/abort"), json!({})).await {
+        tracing::warn!("chat: abort for {} failed: {e}", host.id);
+    }
 }
 
 // --- kickoff (post-clone first message) ------------------------------------
@@ -529,9 +575,9 @@ pub struct KickoffOpts {
     pub claude_instructions: Option<String>,
 }
 
-/// After a clone, wait for the wrapper to accept its event stream, then send the kickoff
-/// message (ticket URL or plain first message + optional instruction overrides). Called
-/// only for a create that asked for it ([`wire::CloneRequest::kickoff`]).
+/// After a clone, send the assistant its first message (ticket URL or plain first message +
+/// optional instruction overrides). Called only for a create that asked for it
+/// ([`wire::CloneRequest::kickoff`]).
 pub async fn kickoff_agent(app: App, host: RmngClone, opts: KickoffOpts) {
     let mut msg = opts
         .ticket_url
@@ -543,24 +589,11 @@ pub async fn kickoff_agent(app: App, host: RmngClone, opts: KickoffOpts) {
     if msg.is_empty() {
         return;
     }
+    // The assistant starts with a screenshot, so give a headed clone's desktop up to 90 s to
+    // come up (its daemon registering) before it gets the message.
     let deadline = Instant::now() + Duration::from_secs(90);
-    while Instant::now() < deadline {
-        // Opening the SSE response verifies wrapper readiness without reviving a clone-status
-        // endpoint or creating a duplicate chat turn. Dropping the response immediately closes
-        // this probe subscriber.
-        let url = format!("{}/events", base_url(&app, &host).await);
-        let ready = app
-            .http
-            .get(&url)
-            .header("accept", "text/event-stream")
-            .timeout(Duration::from_secs(4))
-            .send()
-            .await
-            .is_ok_and(|response| response.status().is_success());
-        if ready {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(4)).await;
+    while !host.headless && !app.media.is_connected(&host.id) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
     if let Some(a) = opts
         .agent_instructions
@@ -569,7 +602,7 @@ pub async fn kickoff_agent(app: App, host: RmngClone, opts: KickoffOpts) {
         .filter(|s| !s.is_empty())
     {
         msg += &format!(
-            "\n\nAdditional clone-agent instructions (these take precedence — merge them with your procedure):\n{a}"
+            "\n\nAdditional assistant instructions (these take precedence — merge them with your procedure):\n{a}"
         );
     }
     if let Some(c) = opts
@@ -584,26 +617,13 @@ pub async fn kickoff_agent(app: App, host: RmngClone, opts: KickoffOpts) {
     }
     if let Err(e) = send_chat(&app, &host, &msg) {
         tracing::warn!("kickoff_agent: could not send to {}: {e}", host.id);
+        push_notice(
+            &app,
+            &host.id,
+            format!("⚠ The first message was not sent: {e}\n\n{msg}"),
+        );
+        broadcast(&app, &host.id);
     }
-}
-
-// --- autonomous background-task message listener ----------------------------
-
-/// Idempotent: keep one persistent `/events` subscription per clone that persists
-/// UNSOLICITED assistant messages into the chat (the Docker maintenance poller starts this for
-/// running managed clones; a dropped listener is restarted on the next tick).
-pub fn ensure_autonomous_listener(app: &App, host: &RmngClone) {
-    {
-        let mut l = app.chat.listeners.lock().unwrap();
-        if !l.insert(host.id.clone()) {
-            return; // already running
-        }
-    }
-    let (app, host) = (app.clone(), host.clone());
-    tokio::spawn(async move {
-        let _ = run_autonomous_listener(&app, &host).await;
-        app.chat.listeners.lock().unwrap().remove(&host.id);
-    });
 }
 
 // --- scheduled-message delivery loop ---------------------------------------
@@ -669,7 +689,7 @@ fn tick_schedules(app: &App) {
             // will actually look. Only for expiry — an unknown clone has no transcript to
             // write to (and is handled below).
             if host.is_some() {
-                push_message(app, &id, ChatRole::Assistant, expired_notice(m, now));
+                push_notice(app, &id, expired_notice(m, now));
             }
         }
         let mut fired: Vec<String> = expired.iter().map(|m| m.id.clone()).collect();
@@ -715,54 +735,261 @@ fn tick_schedules(app: &App) {
     }
 }
 
-async fn run_autonomous_listener(app: &App, host: &RmngClone) -> Result<(), ()> {
-    let base = base_url(app, host).await;
-    let resp = app
+// --- the assistant chat's event stream ----------------------------------------
+
+/// Idempotent: keep one subscription to the clone's assistant chat, if it has one. The
+/// monitor calls this for running clones and the panel's stream for any clone, so a dropped
+/// listener comes back on the next call. A chat with no running agent costs the assistant no
+/// process: pi-web serves it from its file.
+pub fn ensure_listener(app: &App, host: &RmngClone) {
+    if app.chat.listeners.lock().unwrap().contains(&host.id) {
+        return;
+    }
+    if load_chat(&app.data_dir(), &host.id).session_id.is_none() {
+        return;
+    }
+    if !app.chat.listeners.lock().unwrap().insert(host.id.clone()) {
+        return;
+    }
+    let (app, id) = (app.clone(), host.id.clone());
+    tokio::spawn(async move {
+        run_listener(&app, &id).await;
+        app.chat.listeners.lock().unwrap().remove(&id);
+        app.chat.live.lock().unwrap().remove(&id);
+        broadcast(&app, &id);
+    });
+}
+
+/// The clone still exists and `sid` is still its chat.
+fn still_current(app: &App, id: &str, sid: &str) -> bool {
+    load_chat(&app.data_dir(), id).session_id.as_deref() == Some(sid)
+        && app.store.get().hosts.iter().any(|h| h.id == id)
+}
+
+/// Follow the chat until the clone or its chat goes away, reconnecting with backoff.
+async fn run_listener(app: &App, id: &str) {
+    let mut backoff = Duration::from_secs(2);
+    loop {
+        let Some(sid) = load_chat(&app.data_dir(), id).session_id else {
+            return;
+        };
+        if !app.store.get().hosts.iter().any(|h| h.id == id) {
+            return;
+        }
+        let Ok(base) = assistant_url(app) else {
+            return;
+        };
+        if follow(app, id, &base, &sid).await {
+            backoff = Duration::from_secs(2);
+        }
+        if !still_current(app, id, &sid) {
+            continue; // re-read: a new chat, or nothing left to follow
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(60));
+    }
+}
+
+/// One connection to the chat's event stream. Returns whether it connected at all.
+async fn follow(app: &App, id: &str, base: &str, sid: &str) -> bool {
+    let resp = match app
         .http
-        .get(format!("{base}/events"))
+        .get(format!("{base}/api/sessions/{sid}/events"))
         .header("accept", "text/event-stream")
         .send()
         .await
-        .map_err(|_| ())?;
-    if !resp.status().is_success() {
-        return Err(());
-    }
+    {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            tracing::debug!(
+                "chat: events for {id} answered HTTP {}",
+                r.status().as_u16()
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::debug!("chat: events for {id}: {e}");
+            return false;
+        }
+    };
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(item) = stream.next().await {
-        let chunk = item.map_err(|_| ())?;
+    let mut checked = Instant::now();
+    loop {
+        // pi-web pings every 25 s, so this check runs about that often on a quiet chat.
+        if checked.elapsed() > Duration::from_secs(30) {
+            checked = Instant::now();
+            if !still_current(app, id, sid) {
+                return true;
+            }
+        }
+        let chunk = match tokio::time::timeout(Duration::from_secs(60), stream.next()).await {
+            Ok(Some(Ok(b))) => b,
+            _ => return true,
+        };
         buf.extend_from_slice(&chunk);
         while let Some(pos) = find_subslice(&buf, b"\n\n") {
             let frame: Vec<u8> = buf.drain(..pos + 2).collect();
-            let Some(json) = extract_data_line(&frame[..frame.len() - 2]) else {
+            let Some((event, data)) = parse_frame(&frame[..frame.len() - 2]) else {
                 continue;
             };
-            let Ok(f) = serde_json::from_str::<TurnFrame>(&json) else {
-                continue;
-            };
-            // Turn liveness → the monitor's working/idle signal.
-            //
-            // `busy: true` marks a turn STARTING and `activity` lines stream throughout it, so
-            // both are stamped: a turn running longer than the inactivity window would otherwise
-            // slide to `idle` mid-work, because nothing else would have touched the clock since
-            // the start frame. `busy: false` is deliberately NOT stamped — it marks the END of
-            // work, and treating it as activity would hold a finished clone at `working` for a
-            // further full window.
-            if f.busy == Some(true) || f.activity.is_some() {
-                app.activity.mark(&host.id, crate::clone_ops::now_ms());
-            }
-            if let Some(r) = f.reply {
-                if f.solicited == Some(false) {
-                    let r = r.trim();
-                    if !r.is_empty() {
-                        push_message(app, &host.id, ChatRole::Assistant, r.to_string());
-                        chat_changed(app, &host.id);
-                    }
-                }
+            match event.as_str() {
+                "snapshot" => apply_snapshot(app, id, &data),
+                "pi" => apply_event(app, id, &data),
+                "error" => return true,
+                _ => {}
             }
         }
     }
-    Ok(())
+}
+
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// `(event, data)` of one SSE frame; `None` for a comment (ping) or a frame with no data.
+fn parse_frame(frame: &[u8]) -> Option<(String, String)> {
+    let s = std::str::from_utf8(frame).ok()?;
+    let mut event = "message".to_string();
+    let mut data = String::new();
+    for line in s.lines() {
+        if let Some(e) = line.strip_prefix("event:") {
+            event = e.trim().to_string();
+        } else if let Some(d) = line.strip_prefix("data:") {
+            data.push_str(d.strip_prefix(' ').unwrap_or(d));
+        }
+    }
+    (!data.is_empty()).then_some((event, data))
+}
+
+/// The text blocks of a pi message's `content` (a string, or an array of blocks).
+fn content_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    }
+}
+
+/// A pi message as a panel bubble: user messages (without the chat header) and each run's
+/// final assistant answer. Tool steps, tool results, and other roles show nothing.
+fn bubble(m: &Value) -> Option<(ChatRole, String, i64)> {
+    let ts = m["timestamp"].as_i64().unwrap_or_else(now_ms);
+    match m["role"].as_str()? {
+        "user" => {
+            let text = content_text(&m["content"]);
+            let text = visible_user_text(&text).trim();
+            (!text.is_empty()).then(|| (ChatRole::User, text.to_string(), ts))
+        }
+        "assistant" => {
+            let text = content_text(&m["content"]).trim().to_string();
+            let text = match m["stopReason"].as_str() {
+                Some("toolUse") => return None,
+                Some("error") => format!(
+                    "⚠ {}",
+                    m["errorMessage"]
+                        .as_str()
+                        .unwrap_or("The assistant stopped with an error.")
+                ),
+                Some("aborted") if text.is_empty() => "⚠ Stopped.".to_string(),
+                Some("aborted") => format!("{text}\n\n⚠ Stopped."),
+                _ if text.is_empty() => return None,
+                _ => text,
+            };
+            Some((ChatRole::Assistant, text, ts))
+        }
+        _ => None,
+    }
+}
+
+fn push_bubble(live: &mut Live, (role, text, ts): (ChatRole, String, i64)) {
+    let id = format!("a{}", live.messages.len());
+    live.messages.push(ChatMessage { id, role, text, ts });
+}
+
+/// A full picture of the chat: on connect, and again when a stored chat comes back to life.
+fn apply_snapshot(app: &App, id: &str, data: &str) {
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    // pi-web nests the list: `messages: { messages: [...] }`.
+    let list = v["messages"]["messages"]
+        .as_array()
+        .or_else(|| v["messages"].as_array());
+    let busy = v["state"]["isStreaming"].as_bool().unwrap_or(false);
+    let mut live = Live {
+        busy,
+        ..Default::default()
+    };
+    for m in list.into_iter().flatten() {
+        if let Some(b) = bubble(m) {
+            push_bubble(&mut live, b);
+        }
+    }
+    app.chat.live.lock().unwrap().insert(id.to_string(), live);
+    if busy {
+        clear_sending(app, id);
+        app.activity.mark(id, crate::clone_ops::now_ms());
+    }
+    broadcast(app, id);
+}
+
+/// One pi event. Only the few that change what the panel shows are acted on.
+fn apply_event(app: &App, id: &str, data: &str) {
+    let Ok(ev) = serde_json::from_str::<Value>(data) else {
+        return;
+    };
+    let role = ev["message"]["role"].as_str();
+    let busy = {
+        let mut all = app.chat.live.lock().unwrap();
+        let live = all.entry(id.to_string()).or_default();
+        match ev["type"].as_str().unwrap_or("") {
+            "agent_start" => live.busy = true,
+            // `agent_settled` is pi's settle signal and `agent_end` the documented end of a
+            // run: either one ends it. A background job's notice starts a new run later.
+            "agent_end" | "agent_settled" => {
+                live.busy = false;
+                live.activity = None;
+            }
+            "tool_execution_start" => {
+                let a = &ev["args"];
+                let arg = ["command", "path", "file_path", "pattern"]
+                    .iter()
+                    .find_map(|k| a[*k].as_str().map(str::to_string))
+                    .unwrap_or_else(|| a.to_string());
+                let tool = ev["toolName"].as_str().unwrap_or("tool");
+                live.activity = Some(clip_activity(&format!("⚙ {tool}: {arg}")));
+            }
+            // User messages land on start (a steered message has no later event of its own),
+            // assistant messages on end, when their text is final.
+            "message_start" if role == Some("user") => {
+                if let Some(b) = bubble(&ev["message"]) {
+                    push_bubble(live, b);
+                }
+            }
+            "message_end" if role == Some("assistant") => match bubble(&ev["message"]) {
+                Some(b) => push_bubble(live, b),
+                None => {
+                    let text = content_text(&ev["message"]["content"]);
+                    if !text.trim().is_empty() {
+                        live.activity = Some(clip_activity(&text));
+                    }
+                }
+            },
+            _ => return,
+        }
+        live.busy
+    };
+    clear_sending(app, id);
+    if busy {
+        app.activity.mark(id, crate::clone_ops::now_ms());
+    }
+    broadcast(app, id);
 }
 
 #[cfg(test)]
@@ -929,7 +1156,7 @@ mod tests {
             "expired message is dropped"
         );
         // ...but the operator finds out where they'd actually look, with their text intact.
-        let msgs = load_chat(&dd, "wedged").messages;
+        let msgs = load_chat(&dd, "wedged").notices;
         let notice = msgs
             .last()
             .expect("an expiry notice must be written to the transcript");
@@ -962,12 +1189,83 @@ mod tests {
         list[0].at = now_ms() - 5_000;
         save_schedules(&dd, "worker", &list);
 
-        app.chat.busy.lock().unwrap().insert("worker".into());
+        app.chat
+            .sending
+            .lock()
+            .unwrap()
+            .insert("worker".into(), Instant::now());
         tick_schedules(&app);
         assert_eq!(
             load_schedules(&dd, "worker").len(),
             1,
             "busy clone must not lose the message"
         );
+    }
+
+    #[test]
+    fn the_panel_hides_the_chat_header() {
+        let first = format!("{HEADER_MARK} header\nClone: c1\n\nPlaybook{MESSAGE_MARK}fix the bug");
+        assert_eq!(visible_user_text(&first), "fix the bug");
+        assert_eq!(visible_user_text("plain"), "plain");
+        // Only a message that opens with the header is cut.
+        let quoted = format!("see{MESSAGE_MARK}this");
+        assert_eq!(visible_user_text(&quoted), quoted);
+    }
+
+    #[test]
+    fn bubbles_keep_user_messages_and_final_answers_only() {
+        let user = json!({"role":"user","timestamp":5,"content":[{"type":"text","text":"hi"}]});
+        assert_eq!(bubble(&user), Some((ChatRole::User, "hi".into(), 5)));
+        let step = json!({"role":"assistant","stopReason":"toolUse","content":[{"type":"text","text":"looking"},{"type":"toolCall","id":"t","name":"bash"}]});
+        assert_eq!(bubble(&step), None);
+        let answer = json!({"role":"assistant","stopReason":"stop","timestamp":9,"content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"done"}]});
+        assert_eq!(
+            bubble(&answer),
+            Some((ChatRole::Assistant, "done".into(), 9))
+        );
+        let failed = json!({"role":"assistant","stopReason":"error","timestamp":1,"errorMessage":"quota","content":[]});
+        assert_eq!(
+            bubble(&failed),
+            Some((ChatRole::Assistant, "⚠ quota".into(), 1))
+        );
+        assert_eq!(bubble(&json!({"role":"toolResult","content":"x"})), None);
+    }
+
+    #[test]
+    fn a_snapshot_then_events_build_the_thread() {
+        let app = App::test_app();
+        let snap = json!({
+            "state": {"isStreaming": true},
+            "messages": {"messages": [
+                {"role":"user","timestamp":1,"content":format!("{HEADER_MARK} h{MESSAGE_MARK}go")},
+                {"role":"assistant","stopReason":"toolUse","timestamp":2,"content":[{"type":"toolCall","id":"t","name":"bash"}]},
+            ]}
+        });
+        apply_snapshot(&app, "c1", &snap.to_string());
+        assert!(is_busy(&app, "c1"));
+        apply_event(&app, "c1", &json!({"type":"tool_execution_start","toolName":"bash","args":{"command":"rmng desktop c1 screenshot"}}).to_string());
+        let v: Value = serde_json::from_str(&snapshot_json(&app, "c1")).unwrap();
+        assert_eq!(v["activity"], "⚙ bash: rmng desktop c1 screenshot");
+        apply_event(&app, "c1", &json!({"type":"message_end","message":{"role":"assistant","stopReason":"stop","timestamp":3,"content":[{"type":"text","text":"it is open"}]}}).to_string());
+        apply_event(&app, "c1", &json!({"type":"agent_end"}).to_string());
+        let v: Value = serde_json::from_str(&snapshot_json(&app, "c1")).unwrap();
+        assert_eq!(v["busy"], false);
+        assert!(v.get("activity").is_none());
+        let texts: Vec<&str> = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["go", "it is open"]);
+    }
+
+    #[test]
+    fn sse_frames_parse_event_and_data() {
+        assert_eq!(
+            parse_frame(b"event: pi\ndata: {\"type\":\"agent_start\"}"),
+            Some(("pi".into(), "{\"type\":\"agent_start\"}".into()))
+        );
+        assert_eq!(parse_frame(b": ping"), None);
     }
 }

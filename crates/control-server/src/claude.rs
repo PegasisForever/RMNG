@@ -714,7 +714,7 @@ pub(crate) fn push_key(acct: &StoredClaudeAccount) -> String {
 
 /// Install `acct`'s access token AND its identity into clone `host_id` — direct file
 /// writes straight into the clone's live home, no guest shell and no daemon roundtrip. Hot-swaps
-/// a running clone with **no** agent-wrapper restart, because Claude Code re-reads both
+/// a running clone with **no** agent restart, because Claude Code re-reads both
 /// files at request time.
 /// Best-effort; errors are returned to log. Low-level: callers that target an assigned host
 /// should go through [`crate::pool::push_account_to_clone`] / [`crate::pool::push_stale_tokens`]

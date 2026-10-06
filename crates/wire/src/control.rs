@@ -659,11 +659,15 @@ pub struct ScheduledMessage {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct Chat {
-    /// Reserved; always null on new writes (agent-wrapper owns session continuity).
+    /// The clone's chat on the assistant (a pi-web session id). `None` until the first
+    /// message creates it. The assistant owns the conversation itself.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Lines RMNG wrote into the thread itself, never sent to the assistant: an expired
+    /// scheduled message, or a send that could not reach the assistant. The panel shows
+    /// them between the assistant's messages by time.
     #[serde(default)]
-    pub messages: Vec<ChatMessage>,
+    pub notices: Vec<ChatMessage>,
 }
 
 /// The Linear ticket a clone was made for: what its row stores, what the board draws, and

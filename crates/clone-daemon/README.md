@@ -9,7 +9,7 @@
 
 The Mutter sessions and the virtual monitors live in the second process, the session holder (`--session-holder`, `rmng-session-holder.service`), because Mutter destroys a session when its creating D-Bus connection drops and gnome-shell remaps every window when the monitor set empties. The daemon restarts on every payload push; the holder does not, so window positions survive an update.
 
-The control server derives clone lifecycle from Docker liveness and the agent-wrapper's activity frames; the daemon's only management surface is its clone-local desktop MCP.
+The control server derives clone lifecycle from Docker liveness, the agents' transcripts, and the clone's assistant chat; the daemon's only management surface is its clone-local desktop MCP.
 
 ## Modules
 

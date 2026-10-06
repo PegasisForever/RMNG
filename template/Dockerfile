@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # RMNG clone TEMPLATE image (pegasis0/rmng-template) — the pre-provisioned base every
 # clone is created FROM. Boots via /sbin/init.
-# Clone-daemon + agent-wrapper are NOT baked in — installed pre-boot, so the template
+# Clone-daemon + the rmng CLI are NOT baked in — installed pre-boot, so the template
 # never drifts from the server.
 # BUILD (repo root): docker build -f template/Dockerfile \
 #   -t pegasis0/rmng-template:$(date +%Y%m%d) -t pegasis0/rmng-template:latest .

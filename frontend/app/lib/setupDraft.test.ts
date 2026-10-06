@@ -37,6 +37,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     agentPlaybook: "",
     globalPrompt: "",
     judge: { provider: "codex", geminiKey: "" },
+    assistant: { url: "", serverUrl: "" },
     ...overrides,
   };
 }

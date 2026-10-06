@@ -57,6 +57,8 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: DesktopCmd,
     },
+    /// Print the full guide to this CLI (markdown), for an agent learning to use it
+    Guide,
 }
 
 /// Flags shared by the clone-creating verbs: the server names the clone, builds the image,

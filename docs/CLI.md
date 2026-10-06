@@ -8,9 +8,15 @@ API, so it needs neither Docker nor root.
 resolving the server from `$RMNG_CONTROL_URL` — a bare `rmng …` just works. The control-server
 injects the binary at create time and refreshes it on running clones after a server update.
 
+**Outside the fleet** (an assistant on another machine, an operator laptop) there is no
+`$RMNG_CONTROL_URL`, so pass `--server http://<rmng-host>:9000` on every call. Everything
+works the same except the verbs that need the caller to be a clone: `clone self` exits 1, a
+clone you create is never a sub clone of yours, and `clone ssh` prints the bastion form.
+`rmng guide` prints this whole document.
+
 What is not here: the in-clone agent's own desktop automation is the daemon MCP's job
-([MCP.md](MCP.md)), clone-agent chat is the web API's
-([API.md](API.md#per-clone-agent-chat)), and code moves via git. Source:
+([MCP.md](MCP.md)), the chat panel's assistant is the web API's
+([API.md](API.md#per-clone-assistant-chat)), and code moves via git. Source:
 [args.rs](../crates/cli/src/args.rs), [commands.rs](../crates/cli/src/commands.rs). Build:
 `cargo build -p rmng-cli`.
 
@@ -66,7 +72,7 @@ $RMNG_CONTROL_URL` hint.
 ## Commands
 
 The surface is **noun → verb**. Nouns: `clone`, `account`, `op`, `ledger`, `board`,
-`desktop`.
+`desktop`, plus `guide`, which prints this document.
 The target is always a positional **clone id** (the first column of `rmng clone ls`).
 
 ### `rmng clone ls`

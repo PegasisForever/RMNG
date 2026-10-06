@@ -66,7 +66,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 - `rmng` fleet management CLI in every clone
 - `rmng desktop` can target any clone for computer use
 - Computer use MCP inside each clone
-- Per-clone agent chat in the web UI
+- Per-clone assistant chat in the web UI, backed by an outside pi-web server that drives the clone through `rmng`
 - Passive per-clone new-token accounting and server-owned activity lifecycle
 
 **Accounts & integrations**

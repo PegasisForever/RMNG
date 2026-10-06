@@ -2,13 +2,13 @@
 
 RMNG exposes one MCP server: each clone daemon serves **JSON-RPC 2.0 over HTTP POST** at `/` on `:9004` (`RMNG_DAEMON_MCP_PORT`). It owns the clone's live Mutter desktop session.
 
-Clone lifecycle state is owned directly by the control server from Docker liveness and the agent-wrapper's activity frames. Fleet and operator desktop control use the [`rmng` CLI](CLI.md), which proxies desktop calls through the web API.
+Clone lifecycle state is owned directly by the control server from Docker liveness, the agents' transcripts, and the clone's assistant chat. Fleet and operator desktop control use the [`rmng` CLI](CLI.md), which proxies desktop calls through the web API.
 
 | Server | Where | Default port | Scope | Source |
 |---|---|---:|---|---|
 | **daemon MCP** | each clone daemon | `9004` | desktop input, capture, and window management | [clone-daemon/src/mcp.rs](../crates/clone-daemon/src/mcp.rs), [windows.rs](../crates/clone-daemon/src/windows.rs) |
 
-The agent wrapper calls `http://127.0.0.1:9004` directly. Codex receives the same `desktop` MCP entry in its managed configuration. Operators use `rmng desktop <clone> <verb>`; the control server forwards the request to that clone's daemon MCP.
+Agents that run inside the clone (Claude Code, Codex, Cursor, pi) call `http://127.0.0.1:9004` directly through the `desktop` entry in their managed MCP configuration. Operators use `rmng desktop <clone> <verb>`; the control server forwards the request to that clone's daemon MCP.
 
 ## JSON-RPC envelope
 

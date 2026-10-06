@@ -53,6 +53,7 @@ export function makeAppConfig(
     globalPrompt:
       "# Working in this clone\n\n(sample shared operating memory)\n",
     judge: { provider: "codex", geminiKey: "" },
+    assistant: { url: "http://10.0.0.12:9999", serverUrl: "http://10.0.0.129:9000" },
     ...overrides,
   };
 }

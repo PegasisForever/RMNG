@@ -4,16 +4,16 @@
 //! **Why the logs.** Both signals used to come from the `/cc` proxy sitting in the data path.
 //! It no longer does — agents talk to Anthropic and OpenAI directly, so the server never sees
 //! their traffic. What survives is that each CLI writes a JSONL transcript of its own session,
-//! and it writes it **whoever launched the agent**: RMNG's chat, the autonomous loop, or a
-//! human who SSH'd in and typed `claude`. That last case is the whole point. The agent-wrapper
-//! SSE stream (see [`crate::chat::run_autonomous_listener`]) only ever knew about turns RMNG
-//! itself drove, so a hand-run agent left its clone reading `idle` while it was visibly working.
+//! and it writes it **whoever launched the agent**: the assistant, the autonomous loop, or a
+//! human who SSH'd in and typed `claude`. That last case is the whole point. The assistant's
+//! chat stream (see [`crate::chat::ensure_listener`]) only knows about the assistant's own work,
+//! so a hand-run agent would leave its clone reading `idle` while it was visibly working.
 //!
 //! **Why it needs no clone-side cooperation.** [`crate::homes`] already maintains
 //! `<data_dir>/hosts/<clone-id>` as a symlink to the clone's merged home view
 //! (`/srv/rmng-homes/.merged/<clone-id>`) for every managed clone, running or stopped.
 //! So these are plain file reads from this process — no `docker exec`, no new connection,
-//! no agent-wrapper rebuild, and it works on clones that are already running.
+//! and it works on clones that are already running.
 //!
 //! **What was measured rather than assumed** (CT 120, both CLIs run by hand in a real clone):
 //!
@@ -739,7 +739,7 @@ async fn scan_once(app: &App, scans: &mut HashMap<String, CloneScan>) {
         if let Some(ts) = delta.last_fable_ms.filter(|ts| *ts <= believable_until) {
             scan.last_fable_ms = Some(scan.last_fable_ms.map_or(ts, |cur| cur.max(ts)));
         }
-        // Activity: the same bus the agent-wrapper SSE path feeds. Whichever observes work
+        // Activity: the same bus the assistant chat stream feeds. Whichever observes work
         // first wins; this one additionally covers agents RMNG did not launch.
         if let Some(ts) = delta.last_activity_ms.filter(|ts| *ts <= believable_until) {
             app.activity.mark(&host.id, ts);

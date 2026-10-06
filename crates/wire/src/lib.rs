@@ -31,7 +31,7 @@ pub mod socket;
 pub mod viewer;
 
 pub use config::{
-    AGENT_PORT, AppConfig, AppConfigRedacted, BUILDKIT_CACHE_GB,
+    AppConfig, AppConfigRedacted, AssistantConfig, BUILDKIT_CACHE_GB,
     BUILDKIT_IMAGE, CLAUDE_POLL_SECS, CLONE_SOCKET, CODEX_POLL_SECS,
     ChromaMode, ClaudeConfig, CloneGroup, CodexConfig, ConfigPutResponse, DATA_DIR, DOCKER_SOCKET,
     DOCKER_SUBNET, DockerConfig, EnvCheckRow, EnvVar, GroupMember, JudgeConfig, JudgeProvider,

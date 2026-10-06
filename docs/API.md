@@ -70,7 +70,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET | `/*` | SPA fallback (embedded frontend) | 200 asset / `index.html` |
 
 Error statuses: `400` validation, `404` unknown id/file, `409` chat busy / image still in
-use, `500` server (I/O), `502` the Docker daemon or agent-wrapper is unreachable. Error bodies
+use, `500` server (I/O), `502` the Docker daemon is unreachable. Error bodies
 are a plain string or `{error}`.
 
 ---
@@ -657,7 +657,7 @@ all rather than one that cannot authenticate. Cursor watches the file, so server
 without a restart.
 
 > There is no `/api/clone/redeploy` endpoint any more. Clone binaries (`clone-daemon`,
-> `agent-wrapper`, the `rmng` CLI) are installed by the control-server at create time, before
+> the `rmng` CLI) are installed by the control-server at create time, before
 > the container boots, and refreshed on running managed clones by the clone reconciler after
 > server upgrades. The reconciler also refreshes the Codex parity files above on old running
 > clones. See [DEPLOY.md#upgrades](DEPLOY.md#upgrades).
@@ -678,7 +678,6 @@ operator opened the clone.
 | `data/hosts/<id>`, the home symlink | up to 15 s | no SMB browse, no file API, no token counts, no activity signal |
 | The bastion's `PermitOpen` entry | up to 10 s | `ssh -J` to the clone is refused |
 | The `~/.codex/config.toml` MCP tables | up to 30 s | Codex starts with no managed servers |
-| The agent-wrapper env drop-in | up to 30 s | the wrapper restarts about 30 s in, through the first turn |
 | The `tmp.mount` mask, the polkit `sudo` rule | up to 30 s | only on a clone from a template older than those two steps |
 
 The Codex MCP merge, the `tmp.mount` mask and the polkit rule are container-local and run during
@@ -956,8 +955,10 @@ network, which is what makes that acceptable.
 Everything else is returned verbatim — ports, `layoutPresets`/`activeLayout`, the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
 socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`,
-`agentPlaybook` (the editable agent playbook seeded with the shipped default and injected into new
-clones — non-secret; a preset's optional `agentPlaybook` append rides along in each `presets` row),
+`agentPlaybook` (the editable assistant playbook seeded with the shipped default and written into
+the first message of each new assistant chat — non-secret; a preset's optional `agentPlaybook`
+append rides along in each `presets` row), `assistant` (`{url, serverUrl}`: the chat panel's
+pi-web server and this server's address as that assistant reaches it),
 the Claude/Codex poll config, and the single account-pool list `groups` (names +
 member emails only — no credentials, so they pass through unredacted). An empty pool list
 normalizes to one `Default` pool on save. See
@@ -1079,19 +1080,34 @@ frontend's `postJson` reads); `swap` returns a plain string, like the clone-life
 
 ---
 
-## Per-clone agent chat
+## Per-clone assistant chat
 
-The control-server proxies chat to each clone's agent-wrapper (`http://{host}:{agent_port}`,
-default `:4096`), persisting history at `data/chats/{id}.json`.
+The chat panel talks to an outside assistant: a pi-web server whose
+origin is `assistant.url` in the config (Settings → Assistant). RMNG uses only its chat routes:
+`POST /api/sessions`, `POST /api/sessions/{id}/message`, `POST /api/sessions/{id}/abort`, and
+the `GET /api/sessions/{id}/events` SSE stream. Each clone gets one chat there, created by its
+first message; RMNG keeps only the chat id (`data/chats/{id}.json`, with RMNG's own notices).
+
+The first message of a new chat opens with a header, `[From RMNG]`, that names this server
+(`assistant.serverUrl`), the clone id and title, the ticket, and the playbook (global
+`agentPlaybook` + the preset's append), then `[Message]` and the operator's text. The assistant
+reaches the clone with the `rmng` CLI (`--server <serverUrl>`). The panel hides the header.
+
+The control-server follows each chat's event stream (one connection per clone with a chat,
+reconnecting with backoff) and turns it into `ChatSnapshot`. Messages typed into the same chat
+elsewhere, such as the assistant's own web page, show up too. Busy follows the assistant's run
+(`agent_start` → `agent_end`/`agent_settled`); there is no RMNG watchdog.
 
 | Endpoint | Body | Returns | Does |
 | --- | --- | --- | --- |
-| `GET /api/chat/:id` | — | `ChatSnapshot` | `{busy, activity, messages[]}` snapshot |
-| `POST /api/chat/:id` | `{text}` | `202` / `409` if busy | Persist the user message, set busy, spawn the turn (opens the wrapper's `/events`, POSTs `/prompt`, relays activity, records the reply). Watchdog: 30 min hard / 3 min idle |
-| `GET /api/chat/:id/events` | — | SSE `ChatSnapshot` | Snapshot + a fresh one on each message/activity/busy change; 20 s ping |
-| `POST /api/chat/:id/abort` | — | `204` | Best-effort POST to the wrapper's `/abort`; clears busy |
+| `GET /api/chat/:id` | — | `ChatSnapshot` | `{busy, activity, messages[], scheduled[]}` snapshot |
+| `POST /api/chat/:id` | `{text}` | `202` / `409` | Send to the clone's chat (creating it on the first message). `409` when busy, archived, or no assistant / server address is set. A send that fails to reach the assistant leaves a `⚠` notice with the text |
+| `GET /api/chat/:id/events` | — | SSE `ChatSnapshot` | Snapshot + a fresh one on each change; 20 s ping |
+| `POST /api/chat/:id/abort` | — | `204` | Best-effort abort of the assistant's current run |
 
-`ChatMessage` = `{ id, role (user|assistant), text, ts }`.
+`ChatMessage` = `{ id, role (user|assistant), text, ts }`. `messages` holds the user messages and
+each run's final answer, merged by time with RMNG's notices; tool steps show only as the one-line
+`activity` while the run is busy.
 
 ---
 

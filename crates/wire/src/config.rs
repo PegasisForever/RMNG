@@ -31,8 +31,6 @@ pub const PORT_DAEMON_MCP: u16 = 9004;
 pub const PORT_FORWARD: u16 = 9005;
 /// The bastion `sshd` port (jump host into clones).
 pub const PORT_BASTION: u16 = 2222;
-/// agent-wrapper port on each clone (chat proxy + reload nudge).
-pub const AGENT_PORT: u16 = 4096;
 /// Data directory (state.json, chats, uploads, hosts mounts, secrets). Fixed at `/data`
 /// in the container (the mounted volume).
 pub const DATA_DIR: &str = "data";
@@ -455,6 +453,25 @@ pub struct CodexConfig {
     pub auto_reset: bool,
 }
 
+/// The chat panel's assistant: a pi-web server that RMNG talks to over its HTTP API. Each clone
+/// gets one chat there, created on its first message. Both fields are plain addresses, so they
+/// pass through redaction verbatim. An empty `url` means no assistant: the chat panel refuses to
+/// send and says so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct AssistantConfig {
+    /// The pi-web origin, e.g. `http://10.0.0.12:9999`.
+    #[serde(default)]
+    pub url: String,
+    /// This RMNG's web API origin as the assistant reaches it, e.g. `http://10.0.0.129:9000`.
+    /// Written into each new chat's first message, so the assistant knows which server to pass
+    /// to `rmng --server`. The control-server cannot work this out itself: it runs on a Docker
+    /// bridge and does not know the address other machines use for it.
+    #[serde(default)]
+    pub server_url: String,
+}
+
 /// Full server config (with secrets). Loaded from `config.json`; serialized back
 /// atomically at 0600. Not exported to TS — the browser only sees the redacted view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,10 +514,10 @@ pub struct AppConfig {
     /// through [`AppConfigRedacted`] intact.
     #[serde(default)]
     pub ssh: SshConfig,
-    /// The desktop agent's base playbook (operating notes + ticket procedure), injected into
-    /// each new clone at creation as its system-prompt append. Seeded with the shipped default
-    /// (the wrapper's `agent-instructions.md`); edited in Settings. Applies to the next clone.
-    /// (Layer **b**: node-agent extra, all presets.)
+    /// The assistant's base playbook (how to drive a clone + the ticket procedure). Written,
+    /// with the preset's append, into the first message of each new assistant chat. Seeded with
+    /// the shipped default ([`default_agent_playbook`]); edited in Settings. (Layer **b**:
+    /// assistant extra, all presets.)
     #[serde(default = "default_agent_playbook")]
     pub agent_playbook: String,
     /// The global agent prompt every coding agent reads as its native operating memory
@@ -514,6 +531,9 @@ pub struct AppConfig {
     /// Which GPT the stuck detector asks, and which Codex account pays for it.
     #[serde(default)]
     pub judge: JudgeConfig,
+    /// The chat panel's assistant (pi-web) and this server's address as it sees it.
+    #[serde(default)]
+    pub assistant: AssistantConfig,
 }
 
 impl Default for AppConfig {
@@ -532,15 +552,15 @@ impl Default for AppConfig {
             agent_playbook: default_agent_playbook(),
             global_prompt: default_global_prompt(),
             judge: JudgeConfig::default(),
+            assistant: AssistantConfig::default(),
         }
     }
 }
 
-/// The shipped agent playbook: the wrapper's merged instructions file, embedded so the
-/// control-server can seed the setting and inject it without a runtime file dependency.
-/// Same file the agent-wrapper bakes in as its fallback (single source of truth).
+/// The shipped assistant playbook, embedded so the control-server can seed the setting
+/// without a runtime file dependency.
 fn default_agent_playbook() -> String {
-    include_str!("../../../agent-wrapper/agent-instructions.md").to_string()
+    include_str!("agent-playbook.md").to_string()
 }
 /// The shipped global agent prompt (layer **a** default): the shared "operating memory" every
 /// coding agent reads as its native global rules. General engineering guidance only — the
@@ -599,6 +619,7 @@ impl AppConfig {
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
             judge: self.judge.clone(),
+            assistant: self.assistant.clone(),
         }
     }
 }
@@ -629,6 +650,7 @@ pub struct AppConfigRedacted {
     pub global_prompt: String,
     /// Which GPT the stuck detector asks, and which Codex account pays for it.
     pub judge: JudgeConfig,
+    pub assistant: AssistantConfig,
 }
 
 /// Response body for `PUT /api/config`: the redacted config after the merge, plus
@@ -1011,7 +1033,6 @@ mod port_tests {
         assert_eq!(PORT_DAEMON_MCP, 9004);
         assert_eq!(PORT_FORWARD, 9005);
         assert_eq!(PORT_BASTION, 2222);
-        assert_eq!(AGENT_PORT, 4096);
         assert_eq!(DATA_DIR, "data");
         assert_eq!(CLONE_SOCKET, "/srv/rmng-sock/clones.sock");
     }

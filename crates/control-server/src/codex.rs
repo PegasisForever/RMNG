@@ -252,9 +252,7 @@ fn auth_json(acct: &StoredCodexAccount) -> String {
 /// owns rotation and re-pushes both files roughly two hours before the real expiry, which is
 /// about nine days out. Same trick as `claude::credentials_json`.
 ///
-/// The clone's own agent-wrapper does NOT read this file. It bridges `~/.codex/auth.json`
-/// directly through its own CredentialStore, so the assistant keeps working even when this
-/// copy is stale or absent.
+/// It is read only by a `pi` someone runs by hand in the clone.
 fn pi_auth_json(acct: &StoredCodexAccount) -> String {
     format!(
         r#"{{"openai-codex":{{"type":"oauth","access":"{access}","refresh":"","expires":4102444800000,"accountId":"{acct_id}"}}}}"#,

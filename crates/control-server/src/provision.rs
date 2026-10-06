@@ -15,7 +15,7 @@
 //! stored anywhere.
 //!
 //! Guest scripts are embedded (`include_str!`) and streamed over `docker exec bash -s`:
-//! [`crate::docker::DockerCtl::exec_script`]. Binaries (clone-daemon, agent-wrapper) are
+//! [`crate::docker::DockerCtl::exec_script`]. Binaries (clone-daemon, the rmng CLI) are
 //! pushed via `upload_tar`. Clone images are preset builds (`crate::derived` builds
 //! each preset's Dockerfile into a hash tag on demand); the retired gen-1 registry-template
 //! pull is gone.
@@ -28,16 +28,8 @@ use wire::EnvVar;
 use crate::app::App;
 use crate::clone_home::CloneHome;
 use crate::clone_plan::Side;
-use crate::docker::{CLONE_USER, CreateSpec, TarEntry};
+use crate::docker::{CreateSpec, TarEntry};
 use crate::operation::OpHandle;
-
-/// The clone user's uid/gid inside every image (created uid 1000 by `template/setup/30-user.sh`
-/// at template build).
-/// tar entries under `home/rmng/**` carry this verbatim so the daemon extracts them owned
-/// by the clone user (gotcha #2).
-
-const CLONE_UID: u64 = 1000;
-const CLONE_GID: u64 = 1000;
 
 /// How long to wait for a freshly-created clone's daemon to register (`Hello`) before
 /// treating it as "started but not yet ready" (a warning, not a failure — the clone is
@@ -366,7 +358,6 @@ async fn clone_container_after_create(
     container: &str,
     hostname: &str,
     env: &[EnvVar],
-    agent_playbook: &str,
     global_prompt: &str,
     headless: bool,
     post_upload: Option<ForkPostUpload>,
@@ -377,7 +368,7 @@ async fn clone_container_after_create(
 
     // Install the clone binaries while the container is still STOPPED, into the
     // `/opt/rmng/bin` dir the template pre-creates (30-user.sh) but leaves EMPTY — the template
-    // no longer carries clone-daemon/agent-wrapper. This is the SOLE delivery path: the
+    // no longer carries clone-daemon. This is the SOLE delivery path: the
     // control-server always copies its own current payloads in before boot, so a fresh clone's
     // `systemd --user` units always exec binaries that match THIS server (no runtime
     // hash-check / hot-swap engine, and none of its create-time churn). A missing payload
@@ -410,7 +401,7 @@ async fn clone_container_after_create(
     // still stopped. A mask (symlink → /dev/null over the baked unit file) keeps the
     // session from ever starting: the wants-symlinks resolve to masked units and systemd
     // skips them. No daemon-reload, no pkill — those only existed to reap the boot race
-    // the old post-start delete allowed. `agent-wrapper` stays enabled. Fails the op:
+    // the old post-start delete allowed. Fails the op:
     // a "headless" clone with a live desktop has no loop backstop.
     // (The holder needs no mask: the template no longer bakes it and it is only
     // injected on headed clones, above.)
@@ -426,6 +417,16 @@ async fn clone_container_after_create(
                 .with_context(|| format!("clone {hostname}: masking {unit} failed"))?;
         }
     }
+
+    // The in-clone chat agent (`agent-wrapper`) is retired: the chat panel talks to an outside
+    // assistant now (see `crate::chat`). A home from an older template, or forked from an older
+    // clone, still carries its unit, which would exec a binary no longer installed. Mask it.
+    crate::home_overlay::symlink_clone_home(
+        hostname,
+        ".config/systemd/user/agent-wrapper.service",
+        "/dev/null",
+    )
+    .with_context(|| format!("clone {hostname}: masking agent-wrapper.service failed"))?;
 
     // Headed clones: mask the Evolution data-server units pre-boot. The shell activates
     // them on every start (~250ms storm serialised with our session build) and needs
@@ -505,19 +506,7 @@ async fn clone_container_after_create(
     // Render content before boot. Merge-owned files use the mounted home as their base,
     // preserving both image defaults and fork/rebase carryover.
     let mut entries: Vec<TarEntry> = Vec::new();
-    // The Settings-editable agent playbook (global + preset append), read by the agent-wrapper
-    // at startup (AGENT_INSTRUCTIONS_PATH). Empty ⇒ skip; the wrapper then uses its baked-in
-    // default. Distinct from /etc/environment (this is a multi-KB markdown blob, not a KEY=VALUE).
-    if !agent_playbook.trim().is_empty() {
-        entries.push(TarEntry {
-            path: format!("home/{CLONE_USER}/.config/rmng/agent-instructions.md"),
-            data: agent_playbook.as_bytes().to_vec(),
-            mode: 0o644,
-            uid: CLONE_UID,
-            gid: CLONE_GID,
-        });
-    }
-    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(headless, global_prompt);
+    let mut codex_entries = crate::clone_reconcile::codex_parity_entries(global_prompt);
     codex_entries.push(crate::clone_reconcile::codex_parity_stamp_entry_for(
         &codex_entries,
     ));
@@ -805,7 +794,6 @@ pub async fn clone_container_gen2_from_tag(
     hostname: &str,
     home: HomeSource,
     env: &[EnvVar],
-    agent_playbook: &str,
     global_prompt: &str,
     headless: bool,
     post_upload: Option<ForkPostUpload>,
@@ -886,7 +874,6 @@ pub async fn clone_container_gen2_from_tag(
         &container,
         hostname,
         env,
-        agent_playbook,
         global_prompt,
         headless,
         post_upload,
@@ -916,7 +903,6 @@ pub async fn fork_clone(
     source_id: &str,
     new_id: &str,
     env: &[EnvVar],
-    agent_playbook: &str,
     global_prompt: &str,
     headless: bool,
     // Effective preset (payload override wins, else the source's). The fork image
@@ -960,7 +946,6 @@ pub async fn fork_clone(
             new_id,
             HomeSource::Reuse,
             env,
-            agent_playbook,
             global_prompt,
             headless,
             post_upload,
@@ -992,7 +977,6 @@ pub async fn rebase_clone(
     host_id: &str,
     new_tag: &str,
     env: &[EnvVar],
-    agent_playbook: &str,
     global_prompt: &str,
     headless: bool,
     mut on_progress: impl FnMut(&str, &str),
@@ -1028,7 +1012,6 @@ pub async fn rebase_clone(
         host_id,
         HomeSource::Reuse,
         env,
-        agent_playbook,
         global_prompt,
         headless,
         None,
@@ -1051,7 +1034,6 @@ pub async fn rebase_clone(
                 host_id,
                 HomeSource::Reuse,
                 env,
-                agent_playbook,
                 global_prompt,
                 headless,
                 None,
@@ -1079,8 +1061,7 @@ pub async fn rebase_clone(
 /// sole source, installed at create time (see [`clone_container_after_create`]). That
 /// replaces the retired hash-check / hot-swap engine.
 pub struct CloneBinary {
-    /// Asset name passed to [`crate::assets::payload`] (`clone-daemon`, `agent-wrapper`,
-    /// `rmng-cli`).
+    /// Asset name passed to [`crate::assets::payload`] (`clone-daemon`, `rmng-cli`).
     pub payload: &'static str,
     /// The installed binary name (what the unit execs / the shell resolves).
     pub bin: &'static str,
@@ -1093,11 +1074,6 @@ pub const CLONE_BINARIES: &[CloneBinary] = &[
     CloneBinary {
         payload: "clone-daemon",
         bin: "rmng-clone-daemon",
-        dir: "opt/rmng/bin",
-    },
-    CloneBinary {
-        payload: "agent-wrapper",
-        bin: "agent-wrapper",
         dir: "opt/rmng/bin",
     },
     // Fleet management CLI, installed on every clone for explicit operator use.

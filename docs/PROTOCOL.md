@@ -16,8 +16,7 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 | web | `9000` | `listen.web` | control-server web | browser / `rmng` CLI / control-client | HTTP + SSE |
 | forward | `9005` | `listen.forward` | control-server mediaplane | native viewer | framed TCP over TCP (one conn per forwarded local socket, spliced to the clone) |
 | bastion | `2222` | `listen.bastion` | control-server ssh.rs | operator ssh client (jump) | OpenSSH; pubkey-only; forwards to `clone:22` |
-| daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agent-wrapper + `rmng desktop` proxy (via web API) | HTTP JSON-RPC |
-| agent-wrapper | `4096` | `agent_port` (config) / `AGENT_PORT` | agent-wrapper (in clone) | control-server chat proxy | HTTP + SSE |
+| daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agents in the clone + `rmng desktop` proxy (via web API) | HTTP JSON-RPC |
 | clone socket | `/srv/rmng-sock/clones.sock` | `cloneSocket` config (server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
 | holder socket | `$XDG_RUNTIME_DIR/rmng-session-holder.sock` | `RMNG_HOLDER_SOCKET` | session holder (in clone) | clone-daemon | unix `SOCK_SEQPACKET` |
 
@@ -240,7 +239,6 @@ the config. `PUT /api/config` returns
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `listen` | `ListenConfig` | see below | the web, video, daemon MCP, forward, and bastion ports |
-| `agent_port` | u16 | `4096` | agent-wrapper port on each clone |
 | `data_dir` | string | `"data"` | state, notes, uploads, chats, and private clone-token totals root; `state.json` and the `claude-accounts.json` secret store live here. **One-time** (set in the setup wizard) |
 | `static_dir` | string | `""` (embedded) | empty serves the frontend embedded in the binary; a non-empty disk path serves the bundle from there. Set in Settings → Advanced. **Restart-required** |
 | `clone_socket` | string | `/srv/rmng-sock/clones.sock` | media-plane unix socket the clone-daemons connect to; baked into the template at provision. Set in the setup wizard. **One-time** (a pre-latch edit is **restart-required** — the old path is bound at startup) |
@@ -252,8 +250,9 @@ the config. `PUT /api/config` returns
 | `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (the key is a credential, and `GET /api/config` vends it to the clients) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
 | `groups` | `CloneGroup[]` | `[]` | the single named account-pool list (Claude + Codex members mixed); a clone binds at most one pool, each rotator side only sees its own provider members (not secret) |
-| `agent_playbook` | string | shipped default | the desktop agent's base playbook (operating notes + ticket procedure), injected into each new clone at creation as its system-prompt append (written to the clone's `~/.config/rmng/agent-instructions.md`, where the agent-wrapper reads it, overriding its baked-in fallback). Seeded from the wrapper's `agent-instructions.md`; editable in Settings; **non-secret** (passes through the redacted view); applies to the next clone (**not restart-required**) |
+| `agent_playbook` | string | shipped default | the assistant's base playbook (how to drive a clone with `rmng` + the ticket procedure), sent with the preset's append in the `[From RMNG]` header of each new assistant chat's first message (see [API.md](API.md#per-clone-assistant-chat)); nothing is written into the clone. Seeded from [agent-playbook.md](../crates/wire/src/agent-playbook.md); editable in Settings; **non-secret** (passes through the redacted view); applies to the next new chat (**not restart-required**) |
 | `judge` | `JudgeConfig` | `gpt-5.6-luna` | working-vs-stuck detection: `codexModel` (default `gpt-5.6-luna`) and `codexEmail` (`null` = the first imported Codex account). No credential of its own: the calls run on that account's ChatGPT plan, using the token the server already holds to run its clones. Nothing secret, so the whole struct passes through the redacted view. No Codex account imported ⇒ no clone is ever reported `working` (see [monitorState](API.md#monitorstate)). Settings → Agents; **not restart-required** |
+| `assistant` | `AssistantConfig` | `{url: "", serverUrl: ""}` | the chat panel's assistant: `url` is the pi-web origin, `serverUrl` this server's web API origin as the assistant reaches it (written into each new chat's first message for `rmng --server`). Empty `url` ⇒ the chat panel refuses to send; empty `serverUrl` ⇒ it refuses to start a new chat. Plain addresses, so the struct passes through the redacted view. Settings → Assistant; **not restart-required** |
 
 - **`ListenConfig`**: `web 9000`, `video 9001`, `daemon_mcp 9004`, `forward 9005`, and `bastion 2222`.
 - **`DockerConfig`** (no secret — the local daemon is reached over a unix socket, so the

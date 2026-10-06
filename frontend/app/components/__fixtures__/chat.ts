@@ -1,4 +1,4 @@
-// The agent thread and its queue, so the chat pane renders without the per-clone SSE stream.
+// The assistant thread and its queue, so the chat pane renders without the per-clone SSE stream.
 //
 // `chatNow` and `chatLocale` are the clock and the locale the view is given, so the
 // scheduled-message labels ("Today 15:00") come out the same on every load and on every
@@ -35,7 +35,12 @@ export const chatMessages: ChatMessage[] = [
   makeChatMessage({
     id: "m2",
     role: "assistant",
-    text: "Both are open side by side. The metric row is 4px tighter in the mockup and the token counts sit on the second line rather than the first.",
+    // The assistant answers in markdown; the pane renders it.
+    text:
+      "Both are open side by side. Two differences:\n\n" +
+      "- The metric row is **4px tighter** in the mockup.\n" +
+      "- The token counts sit on the second line, not the first.\n\n" +
+      "The dashboard styles are in `frontend/app/components/CloneCard.tsx`.",
     ts: chatNow - 8 * 60_000,
   }),
   makeChatMessage({
@@ -45,8 +50,8 @@ export const chatMessages: ChatMessage[] = [
   }),
 ];
 
-/** The agent's current tool line, shown under the working bubble while a turn is in flight. */
-export const chatActivity = "Bash(bun run build)";
+/** The assistant's current tool line, shown under the working bubble while a turn is in flight. */
+export const chatActivity = "⚙ bash: rmng --server http://10.0.0.129:9000 desktop pega-we-142 screenshot";
 
 /** What an HTTP failure of the SEND route puts in the banner: the server's own sentence,
  *  verbatim. All four chat routes answer an error as a plain-text body (axum
@@ -69,11 +74,10 @@ export const chatError = "clone 'pega-we-142' is archived; unarchive it first";
  *  string. None of the four routes writes a sentence this long, but the body is whatever
  *  answered the request, and the banner has no height limit of its own. */
 export const chatErrorLong = serverErrorText(
-  "internal error: agent bootstrap failed for clone 'pega-we-142': POST " +
-    "http://10.99.0.14:4096/prompt: connection refused (os error 111); the clone's agent " +
-    "wrapper exited 1 during startup: rmng-agent: /root/.claude/settings.json: no such file " +
-    "or directory; retried 3 times over 12s, giving up. Check the clone's own logs for the " +
-    "wrapper's output.",
+  "502 Bad Gateway from the reverse proxy in front of the control-server: upstream " +
+    "http://127.0.0.1:9000/api/chat/pega-we-142 closed the connection before sending a " +
+    "response header (connection reset by peer); the proxy retried 3 times over 12s and " +
+    "gave up. Check the control-server's own logs for the reason it went away.",
   "chat failed",
 );
 

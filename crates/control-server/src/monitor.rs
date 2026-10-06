@@ -153,16 +153,12 @@ impl ViewTracker {
 ///
 /// **Why this exists.** Activity used to be inferred from tokens passing through the `/cc`
 /// proxy, which no longer sits in the data path (agents now talk to Anthropic directly, so the
-/// server never sees their traffic). The original pre-proxy signal — polling the agent-wrapper's
-/// `GET /status` — no longer exists either; that endpoint was removed when token accounting
-/// landed.
+/// server never sees their traffic).
 ///
-/// So we take it from the one channel that survived both: the agent-wrapper's `/events` SSE
-/// stream emits `{busy: true}` when a turn starts and `{busy: false}` when it ends, and
-/// [`crate::chat::run_autonomous_listener`] is already subscribed to it for every running managed
-/// clone. Stamping those frames here costs no new connection, no clone-side change, and — unlike
-/// reading `ChatState.busy` — covers autonomous background work, not just operator-solicited
-/// turns.
+/// So it comes from two places. [`crate::agentlog`] stamps it from the transcripts of the agents
+/// that run inside each clone. [`crate::chat`] stamps it from the clone's assistant chat, which
+/// it already follows ([`crate::chat::ensure_listener`]): a run starting, a tool call, an answer.
+/// That covers the assistant's work on the clone whoever started it, not just the panel's turns.
 ///
 /// Deliberately never persisted: a cold map after a restart reads as `idle` until the clone next
 /// works, which is the correct default (the browser re-baselines anyway).
@@ -984,7 +980,7 @@ async fn poll_once(poll: &mut FleetPoll, app: &App, probe: &impl FleetProbe) {
             .get(&host.id)
             .is_some_and(|state| *state != MonitorState::Offline)
         {
-            crate::chat::ensure_autonomous_listener(app, host);
+            crate::chat::ensure_listener(app, host);
         }
     }
 

@@ -3,8 +3,8 @@
 //! New clones get current binaries and SSH material during `provision::clone_container`.
 //! Existing running clones need an idempotent reconcile path so a control-server update can
 //! make them operational without destructive recreate: install/enable clone-side sshd, refresh
-//! injected payload binaries, then restart the clone daemon and agent wrapper so their running
-//! processes use the current payload and configuration.
+//! injected payload binaries, then restart the clone daemon so its running process uses the
+//! current payload and configuration.
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -25,8 +25,8 @@ const CLONE_GID: u64 = 1000;
 //
 // The `desktop` + `linear` set every clone agent gets, defined ONCE here and rendered into
 // each agent's own format by the emitters below (Claude `~/.claude.json` merge, Codex
-// `config.toml` merge, Cursor `~/.cursor/mcp.json` merge, and the neutral `~/.config/rmng/mcp.json`
-// the node-agent reads). Change a URL / add a server here and all agents pick it up.
+// `config.toml` merge, Cursor `~/.cursor/mcp.json` merge, and pi's `~/.pi/agent/mcp.json`).
+// Change a URL / add a server here and all agents pick it up.
 
 /// One managed MCP server. All fields are static — the list is compile-time constant.
 #[derive(Clone, Copy)]
@@ -40,8 +40,8 @@ struct ManagedMcp {
     /// `Some(env)` ⇒ authenticate with `Authorization: Bearer <$env>`, resolved from the clone
     /// env at runtime (each emitter renders the env reference in its own syntax).
     bearer_env: Option<&'static str>,
-    /// node-agent hint: promote this server's tools to first-class pi tools with an eager
-    /// connection (e.g. `desktop`). Ignored by the file-based agents (Claude CLI / Codex).
+    /// pi hint: declare this server's tools like built-in tools (`exposure: direct`) rather
+    /// than behind `tool_search` (e.g. `desktop`). Ignored by Claude CLI / Codex / Cursor.
     direct_tools: bool,
 }
 
@@ -138,31 +138,6 @@ pub(crate) fn merge_claude_mcp(
         "mcpServers",
         serde_json::Value::Object(servers),
     )
-}
-
-/// `{name,url,bearerEnv?,directTools?,lifecycle?}`. The agent-wrapper maps this to the server entries of
-/// pi's built-in MCP support (resolving `bearerEnv` from `process.env`, skipping a server whose bearer env is
-/// empty). Headless-filtered here so the wrapper needs no headless logic of its own.
-fn mcp_descriptor_json(headless: bool) -> String {
-    let servers: Vec<serde_json::Value> = active_mcp(headless)
-        .into_iter()
-        .map(|m| {
-            let mut o = serde_json::json!({ "name": m.name, "url": m.url });
-            if let Some(env) = m.bearer_env {
-                o["bearerEnv"] = serde_json::json!(env);
-            }
-            if m.direct_tools {
-                o["directTools"] = serde_json::json!(true);
-                o["lifecycle"] = serde_json::json!("eager");
-            }
-            o
-        })
-        .collect();
-    // Infallible in practice: the input is the static managed set, which always serializes.
-    // The expect (not a silent `"[]"`) keeps a serialization regression loud — an empty
-    // array here would silently strip every managed server from every clone.
-    serde_json::to_string_pretty(&serde_json::json!(servers))
-        .expect("static managed MCP set serializes")
 }
 
 /// The `mcpServers` entries Cursor should hold.
@@ -262,9 +237,8 @@ fn pi_adapter_want(headless: bool, linear_key: &str) -> serde_json::Value {
 /// pi 1.0 and later has MCP built in and reads `~/.pi/agent/mcp.json`. Its schema: `{url}`
 /// servers with an `exposure`, and the Linear key as a `${VAR}` reference in the header
 /// (pi expands it from its own environment at connect time, so no secret lands in the file).
-/// The exposure matches the clone's assistant (agent-wrapper `mcp.ts`): `direct` for the
-/// desktop, so screenshot and click are declared like built-in tools, `deferred` for the
-/// rest, found through `tool_search`.
+/// The exposure is `direct` for the desktop, so screenshot and click are declared like
+/// built-in tools, and `deferred` for the rest, found through `tool_search`.
 fn pi_native_want(headless: bool, linear_key: &str) -> serde_json::Value {
     pi_want(headless, linear_key, |m| {
         let exposure = if m.direct_tools { "direct" } else { "deferred" };
@@ -964,11 +938,10 @@ fn rmng_cli_skill_entries() -> Vec<TarEntry> {
 /// The per-clone agent config bundle: the shared **global agent prompt** (layers a+c, passed in
 /// as `global_prompt`) written to every agent's native rules file — Claude Code's
 /// `~/.claude/CLAUDE.md`, Codex's `~/.codex/AGENTS.md`, and pi's `~/.pi/agent/AGENTS.md` —
-/// plus the generated Codex config and
-/// the neutral MCP descriptor the node-agent reads. Identical body in both rules files, so a
+/// plus Cursor's rule and the `rmng-cli` skill. Identical body in every rules file, so a
 /// single source drives every agent's operating memory. The content-hash stamp on this set means
 /// a Settings edit to layer a/c re-applies on the next pass.
-pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<TarEntry> {
+pub(crate) fn codex_parity_entries(global_prompt: &str) -> Vec<TarEntry> {
     let guidance = |path: &str| TarEntry {
         path: path.to_string(),
         data: global_prompt.as_bytes().to_vec(),
@@ -980,9 +953,9 @@ pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<T
         // The global agent prompt (a+c), one identical body per agent's rules location.
         guidance("home/rmng/.claude/CLAUDE.md"),
         guidance("home/rmng/.codex/AGENTS.md"),
-        // pi (the node-agent's embedded coding agent) reads its own global context file. It
+        // pi, when someone runs it by hand in the clone, reads its own global context file. It
         // recognises AGENTS.md and CLAUDE.md at the working directory and above, but the only
-        // location it always loads is this one, and the wrapper runs with cwd = the clone home.
+        // location it always loads is this one.
         guidance("home/rmng/.pi/agent/AGENTS.md"),
         // Cursor reads neither of those. Its own user-level rules are `.mdc` files under
         // `~/.cursor/rules`, which is where it looks: `joinPath(userHome, ".cursor", "rules")`
@@ -996,15 +969,6 @@ pub(crate) fn codex_parity_entries(headless: bool, global_prompt: &str) -> Vec<T
         TarEntry {
             path: "home/rmng/.cursor/rules/rmng.mdc".to_string(),
             data: cursor_rule(global_prompt).into_bytes(),
-            mode: 0o644,
-            uid: CLONE_UID,
-            gid: CLONE_GID,
-        },
-        // The neutral MCP descriptor the node-agent (agent-wrapper) reads (single source of
-        // truth: `managed_mcp`). Headless-filtered here so the wrapper needs no headless logic.
-        TarEntry {
-            path: "home/rmng/.config/rmng/mcp.json".to_string(),
-            data: mcp_descriptor_json(headless).into_bytes(),
             mode: 0o644,
             uid: CLONE_UID,
             gid: CLONE_GID,
@@ -1323,8 +1287,8 @@ systemctl restart ssh
 /// Restart the clone-daemon after a binary refresh — but only if its unit is present AND
 /// unmasked. Headless clones MASK `rmng-clone-daemon.service` (symlink → /dev/null, laid
 /// pre-boot by the create path), so a bare `systemctl --user restart` would fail on the mask
-/// and — under `set -e` — abort the whole payload reconcile before the agent-wrapper
-/// restart + payload stamp ever run, permanently wedging binary refreshes. Guard on
+/// and — under `set -e` — abort the whole payload reconcile before the payload stamp ever
+/// runs, permanently wedging binary refreshes. Guard on
 /// `systemctl cat` (absent ⇒ skip) plus a `readlink` mask check (masked ⇒ skip); a real
 /// restart failure still surfaces under `set -e` on headed clones.
 ///
@@ -1385,9 +1349,25 @@ fn monitors_csv(monitors: &[wire::MonitorSpec]) -> String {
         .join(",")
 }
 
-fn restart_agent_wrapper_script() -> &'static str {
+/// Stop and remove the retired in-clone chat agent (`agent-wrapper`) on a clone that still
+/// has it. The chat panel talks to an outside assistant now (see [`crate::chat`]). Masking the
+/// unit, not only deleting it, keeps a home forked from an older clone from starting it again.
+/// Idempotent: on a clean clone it changes nothing and prints nothing.
+fn retire_agent_wrapper_script() -> &'static str {
     r#"set -e
-runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart agent-wrapper.service
+run_user() { runuser -u rmng -- env XDG_RUNTIME_DIR=/run/user/1000 "$@"; }
+unit=/home/rmng/.config/systemd/user/agent-wrapper.service
+if [ ! -L "$unit" ] || [ "$(readlink "$unit")" != /dev/null ]; then
+  run_user systemctl --user stop agent-wrapper.service >/dev/null 2>&1 || true
+  install -d -o rmng -g rmng "$(dirname "$unit")"
+  rm -f "$unit"
+  ln -s /dev/null "$unit"
+  chown -h rmng:rmng "$unit"
+  run_user systemctl --user daemon-reload >/dev/null 2>&1 || true
+  echo "retired agent-wrapper.service"
+fi
+rm -f /opt/rmng/bin/agent-wrapper \
+  /home/rmng/.config/rmng/agent-instructions.md /home/rmng/.config/rmng/mcp.json
 "#
 }
 
@@ -1444,9 +1424,7 @@ if [ -f "$etc" ] && cmp -s "$tmp" "$etc"; then
   exit 0
 fi
 install -m 0644 -o root -g root "$tmp" "$etc"
-# The caller keys the agent-wrapper restart off this exact line: /etc/environment is read by
-# PAM at session start, so a process already running keeps the environment it was launched
-# with FOREVER. Writing the file is therefore only half the job — see `ENV_CHANGED_MARKER`.
+# The caller logs the change off this exact line — see `ENV_CHANGED_MARKER`.
 echo "{marker}"
 "#,
         marker = ENV_CHANGED_MARKER,
@@ -1454,13 +1432,11 @@ echo "{marker}"
 }
 
 /// Printed by [`etc_environment_sync_script`] only when it actually rewrote `/etc/environment`
-/// (it exits 0 silently when the content already matched). The reconciler keys the
-/// agent-wrapper restart off this, so the restart happens on a real change and not on every
-/// 30 s pass — restarting unconditionally would interrupt an in-flight chat turn twice a
-/// minute, forever.
+/// (it exits 0 silently when the content already matched). The reconciler logs a real
+/// change off this, rather than one line every pass.
 const ENV_CHANGED_MARKER: &str = "rmng: /etc/environment updated";
 
-fn preset_for_clone<'a>(
+pub(crate) fn preset_for_clone<'a>(
     cfg: &'a wire::AppConfig,
     host: &wire::RmngClone,
 ) -> Option<&'a wire::Preset> {
@@ -1502,9 +1478,7 @@ fn preset_for_clone<'a>(
 }
 
 /// Like [`exec_ok`], but reports whether the script printed `marker` on stdout. Used for the
-/// `/etc/environment` sync, which is the only reconcile step whose *follow-up* (restarting
-/// the agent-wrapper so it picks the new env up) must be conditional on it having changed
-/// something.
+/// `/etc/environment` sync, which reports whether it changed something.
 async fn exec_ok_marked(
     app: &App,
     clone_id: &str,
@@ -1604,13 +1578,8 @@ async fn ensure_ssh_ready(app: &App, clone_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn ensure_codex_parity(
-    app: &App,
-    clone_id: &str,
-    headless: bool,
-    global_prompt: &str,
-) -> Result<bool> {
-    let entries = codex_parity_entries(headless, global_prompt);
+async fn ensure_codex_parity(app: &App, clone_id: &str, global_prompt: &str) -> Result<bool> {
+    let entries = codex_parity_entries(global_prompt);
     // The prepare script rides the stamp because it owns the parent directories these entries
     // land in. Without that, adding a directory to it would never reach a clone already stamped
     // for this content, and the tar extract would create the dir root-owned instead.
@@ -1700,8 +1669,8 @@ async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Re
     exec_ok(
         app,
         clone_id,
-        restart_agent_wrapper_script(),
-        "restart agent-wrapper",
+        retire_agent_wrapper_script(),
+        "retire agent-wrapper",
     )
     .await?;
     app.docker
@@ -1806,23 +1775,9 @@ async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSe
         Ok(changed) => {
             warned.remove(&format!("{id}:etc-env"));
             // Writing /etc/environment does NOT reach the processes already running: PAM
-            // reads it at session start, so the long-lived agent-wrapper keeps whatever it
-            // was launched with. It fronts the chat panel, so on a clone that predates an
-            // env change (the group-proxy split moved ANTHROPIC_BASE_URL) chat would talk
-            // to the old endpoint until something restarted it by hand. Restart it here —
-            // only on a real change, so an in-flight turn isn't interrupted every pass.
+            // reads it at session start. Agents started after this pick it up.
             if changed {
-                tracing::info!(target: "clone_reconcile", "clone {id}: /etc/environment changed — restarting agent-wrapper to pick it up");
-                if let Err(e) = exec_ok(
-                    app,
-                    id,
-                    restart_agent_wrapper_script(),
-                    "restart agent-wrapper (env change)",
-                )
-                .await
-                {
-                    tracing::warn!(target: "clone_reconcile", "clone {id}: agent-wrapper restart after env change failed: {e:#}");
-                }
+                tracing::info!(target: "clone_reconcile", "clone {id}: /etc/environment changed");
             }
         }
         Err(e) => {
@@ -1841,7 +1796,7 @@ async fn sync_clone_contents(app: &App, h: &wire::RmngClone, warned: &mut HashSe
     // The global agent prompt (layers a+c) is composed from config + this clone's preset, so a
     // Settings edit re-applies to existing clones on the next pass (content-hash-stamped).
     let global_prompt = crate::web::compose_global_prompt(&cfg, preset_for_clone(&cfg, h));
-    match ensure_codex_parity(app, id, h.headless, &global_prompt).await {
+    match ensure_codex_parity(app, id, &global_prompt).await {
         Ok(true) => {
             warned.remove(&format!("{id}:codex"));
             tracing::info!(
@@ -1997,9 +1952,7 @@ mod tests {
     /// A stream tag is compared against the constant, never a spelled-out literal.
     ///
     /// `exec_script` tags stdout `"out"`. `exec_ok_marked` compared against `"stdout"`, so it
-    /// never saw its marker and always returned false — meaning the agent-wrapper was never
-    /// restarted after `/etc/environment` changed, which is the one thing the marker exists to
-    /// trigger. It failed silently for months: the shell-level tests below run the script
+    /// never saw its marker and always returned false. It failed silently for months: the shell-level tests below run the script
     /// directly and grep its stdout themselves, so they never exercised the tag at all.
     #[test]
     fn a_stream_tag_is_never_compared_against_a_bare_literal() {
@@ -2043,7 +1996,7 @@ mod tests {
 
     #[test]
     fn the_template_owns_every_parity_parent_dir() {
-        for entry in codex_parity_entries(false, "prompt") {
+        for entry in codex_parity_entries("prompt") {
             let parent = std::path::Path::new(&entry.path)
                 .parent()
                 .expect("entry has a parent")
@@ -2065,7 +2018,7 @@ mod tests {
     /// this content keep the broken ownership forever.
     #[test]
     fn the_codex_parity_stamp_tracks_the_prepare_script() {
-        let entries = codex_parity_entries(false, "prompt");
+        let entries = codex_parity_entries("prompt");
         let mut h = std::collections::hash_map::DefaultHasher::new();
         desired_payload_hash(&entries).hash(&mut h);
         "a different prepare script".hash(&mut h);
@@ -2232,7 +2185,7 @@ mod tests {
     #[test]
     fn codex_parity_entries_install_global_guidance_and_linear_mcp() {
         let prompt = "# House rules\n\nBe excellent. SENTINEL-A+C.\n";
-        let entries = codex_parity_entries(false, prompt);
+        let entries = codex_parity_entries(prompt);
         // The SAME global prompt body lands in both agents' native rules files.
         for path in ["home/rmng/.claude/CLAUDE.md", "home/rmng/.codex/AGENTS.md"] {
             let e = entries
@@ -2265,15 +2218,11 @@ mod tests {
         // it root-owned.
         assert!(TEMPLATE_PHASE_30.contains("/.cursor/rules"));
 
-        // The node-agent MCP descriptor is part of the bundle.
-        let desc = entries
-            .iter()
-            .find(|e| e.path == "home/rmng/.config/rmng/mcp.json")
-            .expect("missing mcp.json descriptor");
+        // The retired in-clone agent's MCP descriptor is no longer written.
         assert!(
-            String::from_utf8(desc.data.clone())
-                .unwrap()
-                .contains("\"linear\"")
+            !entries
+                .iter()
+                .any(|e| e.path == "home/rmng/.config/rmng/mcp.json")
         );
         let agents = entries
             .iter()
@@ -2356,17 +2305,14 @@ mod tests {
         assert!(codex_headed.contains("[mcp_servers.desktop]"));
         assert!(codex_headed.contains("127.0.0.1:9004"));
 
-        // The node-agent descriptor and the Claude merge agree with it.
+        // The Claude merge agrees with it.
         let hl = merge_claude_mcp(&serde_json::json!({}), true).unwrap();
         assert!(hl["mcpServers"].get("desktop").is_none());
-        let desc_hl: serde_json::Value = serde_json::from_str(&mcp_descriptor_json(true)).unwrap();
-        assert_eq!(desc_hl.as_array().unwrap().len(), 1);
-        assert_eq!(desc_hl[0]["name"], "linear");
     }
 
     #[test]
     fn rmng_cli_skill_written_to_both_skill_locations() {
-        let entries = codex_parity_entries(false, "guide");
+        let entries = codex_parity_entries("guide");
         for path in [
             "home/rmng/.claude/skills/rmng-cli/SKILL.md",
             "home/rmng/.agents/skills/rmng-cli/SKILL.md",
@@ -2572,33 +2518,18 @@ mod tests {
             "Bearer ${LINEAR_API_KEY}"
         );
 
-        // The node-agent descriptor: desktop carries directTools + eager lifecycle, linear carries bearerEnv.
-        let desc: serde_json::Value = serde_json::from_str(&mcp_descriptor_json(false)).unwrap();
-        let arr = desc.as_array().unwrap();
-        let desktop = arr.iter().find(|s| s["name"] == "desktop").unwrap();
-        let linear = arr.iter().find(|s| s["name"] == "linear").unwrap();
-        assert_eq!(desktop["directTools"], true);
-        assert_eq!(desktop["lifecycle"], "eager");
-        assert_eq!(desktop["url"], "http://127.0.0.1:9004");
-        assert_eq!(linear["bearerEnv"], "LINEAR_API_KEY");
-        assert!(linear.get("directTools").is_none());
-        assert!(linear.get("lifecycle").is_none());
-
         // Headless: desktop is filtered out of every emitter; linear stays.
         assert!(!codex_mcp_toml(true).contains("desktop"));
         let merged_hl = merge_claude_mcp(&serde_json::json!({}), true).unwrap();
         assert!(merged_hl["mcpServers"].get("desktop").is_none());
-        let desc_hl: serde_json::Value = serde_json::from_str(&mcp_descriptor_json(true)).unwrap();
-        assert_eq!(desc_hl.as_array().unwrap().len(), 1);
-        assert_eq!(desc_hl[0]["name"], "linear");
     }
 
     #[test]
     fn codex_parity_stamp_hash_changes_when_config_changes() {
-        let original = codex_parity_stamp_entry_for(&codex_parity_entries(false, "guide"));
+        let original = codex_parity_stamp_entry_for(&codex_parity_entries("guide"));
         // Any content change in the set must move the hash; AGENTS.md stands in for the file
         // that used to be edited here (config.toml, now merged in place rather than shipped).
-        let mut changed = codex_parity_entries(false, "guide");
+        let mut changed = codex_parity_entries("guide");
         changed
             .iter_mut()
             .find(|e| e.path == "home/rmng/.codex/AGENTS.md")
@@ -2612,11 +2543,9 @@ mod tests {
         assert_ne!(original.data, updated.data);
     }
 
-    /// The agent-wrapper restart is gated on this script PRINTING the marker, and a wrapper
-    /// that never restarts keeps a stale `ANTHROPIC_BASE_URL` forever (the bug this fixes)
-    /// while one that restarts every pass interrupts chat twice a minute. Both failure modes
-    /// live in shell, not Rust, so run the real script against a real file rather than
-    /// asserting on its text.
+    /// The change report is gated on this script PRINTING the marker: only on a real change,
+    /// never on a converged pass. Both cases live in shell, not Rust, so run the real script
+    /// against a real file rather than asserting on its text.
     /// Run the real sync script against a temp `/etc/environment`, returning whether it
     /// announced a change. Redirects `$etc` so no root or container is needed.
     fn run_env_sync(etc: &std::path::Path, desired: &str) -> bool {
@@ -2660,10 +2589,7 @@ mod tests {
             &etc,
             "RMNG_CONTROL_URL=http://rmng-control:9000\nRMNG_PROXY_KEY=keepme\n",
         );
-        assert!(
-            changed,
-            "converging is a change; the agent-wrapper must restart"
-        );
+        assert!(changed, "converging is a change");
         let body = std::fs::read_to_string(&etc).unwrap();
 
         assert!(
@@ -2695,7 +2621,7 @@ mod tests {
         );
         assert!(
             !changed,
-            "a converged clone must not restart its agent-wrapper every pass"
+            "a converged clone must not report a change every pass"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2722,8 +2648,7 @@ mod tests {
             "the new value must land on disk"
         );
 
-        // Identical desired env: no rewrite, so NO marker — this is what keeps the reconciler
-        // from restarting the agent-wrapper on every 30 s pass.
+        // Identical desired env: no rewrite, so NO marker.
         let (_, printed) = run("RMNG_CONTROL_URL=http://rmng-control:9000\n");
         assert!(!printed, "an unchanged env must not announce a change");
 
@@ -2843,7 +2768,7 @@ mod tests {
             hash_of("opt/rmng/bin/rmng-clone-daemon", b"new")
         );
         assert_ne!(
-            hash_of("opt/rmng/bin/agent-wrapper", b"same"),
+            hash_of("opt/rmng/bin/rmng-clone-daemon", b"same"),
             hash_of("usr/local/bin/rmng", b"same")
         );
     }

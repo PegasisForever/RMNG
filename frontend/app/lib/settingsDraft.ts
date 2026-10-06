@@ -85,6 +85,8 @@ export interface SettingsDraft {
   ssh: SshConfig;
   /** Which backend settles stuck detection, plus the Gemini key when picked. */
   judge: { provider: JudgeProvider; geminiKey: string };
+  /** The chat panel's assistant (a pi-web origin) and this server's address as it sees it. */
+  assistant: { url: string; serverUrl: string };
 }
 
 /** The layout preset a rig with none configured is given to edit. Offering an empty list
@@ -181,6 +183,10 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     ssh: {
       authorizedKeys: c.ssh?.authorizedKeys ?? [],
     },
+    assistant: {
+      url: c.assistant?.url ?? "",
+      serverUrl: c.assistant?.serverUrl ?? "",
+    },
   };
 }
 
@@ -259,6 +265,7 @@ export function settingsPatch(
     globalPrompt: draft.globalPrompt,
     // Judge key is verbatim like preset Linear keys: blank clears it.
     judge: { ...draft.judge },
+    assistant: { url: draft.assistant.url.trim(), serverUrl: draft.assistant.serverUrl.trim() },
     presets: draft.presets
       .filter((p) => p.name.trim())
       .map((p) => ({

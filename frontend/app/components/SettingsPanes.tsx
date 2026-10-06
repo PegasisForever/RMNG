@@ -131,7 +131,7 @@ export function LayoutPane({ draft, onDraftChange }: LayoutPaneProps) {
   );
 }
 
-/** Presets: the two prompt layers every clone is built with, then Linear identity (key +
+/** Presets: the assistant, the two prompt layers, then Linear identity (key +
  *  the ticket-id prefixes that auto-select it) plus the env vars a clone is created with. */
 export function PresetsPane({
   draft,
@@ -140,12 +140,40 @@ export function PresetsPane({
 }: PresetsPaneProps) {
   return (
     <>
+      {/* The chat panel's assistant: where it is, and where it finds this server. */}
+      <Section
+        title="Assistant"
+        effect="immediate"
+        hint="The chat panel talks to an outside assistant: a pi-web server. Each clone gets one chat there, started by its first message. The assistant controls the clone with the rmng CLI, so it needs this server's address as it can reach it (not a Tailscale name it cannot resolve)."
+      >
+        <Field label="Assistant URL (pi-web)">
+          <input
+            value={draft.assistant.url}
+            onChange={(e) => onDraftChange("assistant", { ...draft.assistant, url: e.target.value })}
+            placeholder="http://10.0.0.12:9999"
+            spellCheck={false}
+            className={settingsInput}
+          />
+        </Field>
+        <Field label="This server's address, as the assistant reaches it">
+          <input
+            value={draft.assistant.serverUrl}
+            onChange={(e) =>
+              onDraftChange("assistant", { ...draft.assistant, serverUrl: e.target.value })
+            }
+            placeholder="http://10.0.0.129:9000"
+            spellCheck={false}
+            className={settingsInput}
+          />
+        </Field>
+      </Section>
+
       {/* Layer a: the shared operating memory EVERY agent reads as its native global rules
           (CLAUDE.md / AGENTS.md). Kept in sync into existing clones by the reconciler. */}
       <Section
         title="Global agent prompt (all presets)"
         effect="immediate"
-        hint="General engineering guidance written to every agent's native rules file (Claude CLAUDE.md, Codex AGENTS.md, and read by the node-agent). Applies to all presets; edits sync into existing clones. Keep desktop/Cursor ticket procedure OUT of this: that belongs in the node-agent prompt below (the inner Cursor Claude Code reads this file and would recurse)."
+        hint="General engineering guidance written to every agent's native rules file inside the clone (Claude CLAUDE.md, Codex AGENTS.md, pi AGENTS.md, a Cursor rule). Applies to all presets; edits sync into existing clones. Keep the desktop/Cursor ticket procedure OUT of this: that belongs in the assistant playbook below (the inner Cursor Claude Code reads this file and would recurse)."
       >
         <textarea
           value={draft.globalPrompt}
@@ -156,12 +184,12 @@ export function PresetsPane({
         />
       </Section>
 
-      {/* Layer b: the desktop agent's operating notes / ticket procedure, appended to its
-          system prompt at clone time. Node-agent only. */}
+      {/* Layer b: how the assistant drives a clone + the ticket procedure, sent in the first
+          message of each new assistant chat. */}
       <Section
-        title="Node-agent additional prompt (all presets)"
+        title="Assistant playbook (all presets)"
         effect="immediate"
-        hint="Extra system-prompt append for the node-agent ONLY (the desktop agent's operating notes + ticket procedure). Not given to Claude/Codex. Applies to newly created clones (existing clones keep what they were created with)."
+        hint="How the assistant drives a clone (through the rmng CLI) and the ticket procedure. Sent, with the preset's append, in the first message of each new assistant chat. Not given to Claude/Codex. A chat that already started keeps what it was sent."
       >
         <textarea
           value={draft.agentPlaybook}

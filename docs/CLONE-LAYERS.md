@@ -40,7 +40,9 @@ clone binaries.
   `codex` CLIs — the image is their sole source, no post-boot install exists; both
   installers need no node, and nvm is NOT installed — a clone that needs node gets it
   from its preset Dockerfile), and the `systemd --user` unit DEFINITIONS (headless
-  gnome-shell + clone-daemon + agent-wrapper) with their wants-symlinks. The
+  gnome-shell + clone-daemon) with their wants-symlinks. (Templates built before the
+  in-clone chat agent was retired also carry an `agent-wrapper` unit; the server masks
+  it, see list 2.) The
   session-holder unit is NOT baked (the server ships it pre-boot on headed clones).
   Pre-creates `/opt/rmng/bin` EMPTY and `~/.ssh` (700, no host keys). Blanks
   machine-id (one baked id would identify the whole fleet). Enables + hardens sshd
@@ -50,7 +52,7 @@ clone binaries.
 verbatim (no FROM rewrite, no digest pinning). Tag = hash of the file text, so any
 edit re-tags; empty text falls back to the default base Dockerfile.
 
-Deliberately NOT baked: `rmng-clone-daemon`, `agent-wrapper`, `rmng` CLI (list 2 —
+Deliberately NOT baked: `rmng-clone-daemon`, `rmng` CLI (list 2 —
 the server installs its own current copies, so a clone can never drift from it) —
 and, after the SSOT audit, none of the server-owned content either: no `CLAUDE.md` /
 `AGENTS.md` bodies, no MCP files, no `/etc/environment` session keys, no holder unit.
@@ -66,8 +68,8 @@ mounts — all fixed before start:
 Files (a missing payload fails the op — no daemonless boot; the loop hard-errors on
 the same absence, so tolerating it here would only delay the failure by one pass):
 
-- Clone binaries (`CLONE_BINARIES`, `provision.rs:1461`): `rmng-clone-daemon` +
-  `agent-wrapper` → `/opt/rmng/bin` (0755), `rmng` CLI → `/usr/local/bin` — plus,
+- Clone binaries (`CLONE_BINARIES`, `provision.rs:1073`): `rmng-clone-daemon` →
+  `/opt/rmng/bin` (0755), `rmng` CLI → `/usr/local/bin` — plus,
   on headed clones, the session-holder unit, plus the payload stamp
   (`opt/rmng/.payload-hash`) so the loop's first hash-compare is a no-op.
 - Identity: `etc/machine-id` (fresh random per clone, 0444 — systemd-in-docker
@@ -77,17 +79,20 @@ the same absence, so tolerating it here would only delay the failure by one pass
   at create/fork/rebase instead of booting a degraded URL the loop could
   never repair), headless unit MASKS (`gnome-headless` + `clone-daemon` → `/dev/null`
   symlinks over the baked unit files, so the desktop never starts — no reload, no
-  pkill, no boot race; fails the op on upload error), and, only when the preset
+  pkill, no boot race; fails the op on upload error), on every clone a mask of the
+  retired `agent-wrapper.service` (same `/dev/null` symlink, because older template
+  homes and forks still carry the unit), and, only when the preset
   sets PATH,
   `etc/fish/conf.d/rmng-preset-path.fish` + `etc/profile.d/rmng-preset-path.sh`.
-- Content: playbook (`~/.config/rmng/agent-instructions.md`, skipped when empty),
-  Codex parity files + stamp, SSH host key + `authorized_keys` + stamp, probe file
+- Content: Codex parity files + stamp, SSH host key + `authorized_keys` + stamp, probe file
   (`~/.rmng/hook.py`), and seven merge-owned files: `~/.claude.json`,
   `~/.cursor/mcp.json`, `~/.codex/config.toml`, `~/.config/mcp/mcp.json` (pi before 1.0,
   through pi-mcp-adapter), `~/.pi/agent/mcp.json` (pi 1.0 and later, built-in MCP),
   `~/.claude/settings.json`, and `~/.cursor/hooks.json`. Pre-boot and live updates
   share merge rules and five completion stamps; carried user fields survive.
   Malformed JSON fails before upload; rebase also checks before removing its container.
+  No playbook is written into the clone: the assistant playbook goes into the first
+  message of the clone's assistant chat (see [API.md](API.md#per-clone-assistant-chat)).
 
 Mounts (create-spec binds, present from first boot — always mounted, no empty skips):
 
@@ -155,5 +160,8 @@ Convergence notes:
   previously only a headless flip or key rotation did.
 - A trigger failure (wedged daemon mid-save) retries at the next trigger of any
   kind; stamps make every pass cheap and every retry safe.
+- The payload step also retires a leftover `agent-wrapper` once (stop, mask the unit,
+  delete `/opt/rmng/bin/agent-wrapper`, `~/.config/rmng/agent-instructions.md` and
+  `~/.config/rmng/mcp.json`); on a clean clone it changes nothing.
 - Manually `docker start`ing an archived container bypasses all triggers: it keeps
   whatever settings it last converged. Supported starts go through unarchive.

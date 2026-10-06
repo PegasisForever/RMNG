@@ -49,8 +49,8 @@ pub struct App {
     /// reports + data-conn counts); `/events` fans it out as a named `forwards` SSE
     /// event. SSE-only — never persisted (see [`crate::forward::ForwardBus`]).
     pub forwards: Arc<crate::forward::ForwardBus>,
-    /// Volatile per-clone agent-activity timestamps, fed by the agent-wrapper's `busy`/`activity`
-    /// SSE frames and the transcript scanner. No longer decides `working` vs `idle` — that is
+    /// Volatile per-clone agent-activity timestamps, fed by the clone's assistant chat stream
+    /// and the transcript scanner. No longer decides `working` vs `idle` — that is
     /// [`crate::stuck`] now — but it is still what `should_flag_unread` reads to tell an idle
     /// clone the operator has already seen from one that just went quiet.
     pub activity: Arc<crate::monitor::ActivityBus>,
@@ -182,8 +182,7 @@ impl App {
         Self::new(store, cfg, &dir.to_string_lossy())
     }
 
-    /// What to dial a clone's in-clone services at (agent-wrapper chat and the clone-daemon
-    /// MCP). Managed clones are addressed by container name (== clone id):
+    /// What to dial a clone's in-clone services at (the clone-daemon MCP). Managed clones are addressed by container name (== clone id):
     /// Docker's embedded DNS serves it on the rmng bridge. In dev mode the server runs
     /// on the Docker host, which can't use that resolver — so resolve the clone's bridge
     /// IP via an inspect instead (host processes can route to bridge IPs directly).

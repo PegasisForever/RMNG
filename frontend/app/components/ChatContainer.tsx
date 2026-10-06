@@ -1,6 +1,6 @@
-// Per-clone chat with the in-container agent (the pi coding agent). Client-only, lazy-imported
-// and keyed by clone id (same pattern as NotesEditorContainer). Subscribes to the per-clone
-// chat SSE (/api/chat/:id/events) for { busy, messages, scheduled }, so the agent's reply
+// Per-clone chat with the assistant (a pi-web server the control-server relays to). Client-only,
+// lazy-imported and keyed by clone id (same pattern as NotesEditorContainer). Subscribes to the
+// per-clone chat SSE (/api/chat/:id/events) for { busy, messages, scheduled }, so the reply
 // and the "working" indicator survive a refresh — the POST only kicks the turn
 // off; the reply lands over SSE. Posting a message is fire-and-forget.
 //
@@ -109,7 +109,8 @@ export default function ChatContainer({
         body: JSON.stringify({ text }),
       });
       // "unknown clone 'x'" (400), "clone 'x' is archived; unarchive it first" (409), or the
-      // reason the turn could not start ("a message is already being processed for this clone").
+      // reason the send could not start (409): still busy, or no assistant / server address set
+      // in Settings. A send that starts but cannot reach the assistant lands as a ⚠ notice.
       if (!res.ok) throw new Error(await errorText(res, "chat failed"));
       // Success: nothing to do — the SSE stream delivers the authoritative
       // messages and busy state from here.
@@ -120,7 +121,7 @@ export default function ChatContainer({
     }
   }
 
-  // Queue the composer's text for later. Unlike `send`, this is allowed while the agent is
+  // Queue the composer's text for later. Unlike `send`, this is allowed while the assistant is
   // busy — deferring a message past an in-flight turn is exactly what scheduling is for. The
   // server echoes the new queue over SSE, so there is no optimistic entry to reconcile.
   async function schedule() {
@@ -159,8 +160,8 @@ export default function ChatContainer({
     }
   }
 
-  // Interrupt the in-flight turn. The wrapper interrupts the agent and emits the
-  // aborted result over SSE, which clears `busy` (and `stopping`).
+  // Interrupt the in-flight turn. The assistant stops its run and the end of it arrives
+  // over SSE, which clears `busy` (and `stopping`).
   async function stop() {
     if (!busy || stopping || archived) return;
     setStopping(true);

@@ -133,8 +133,8 @@ Consequences worth knowing before you deploy:
   never in the inference data path. It only has to be up to *rotate* a token, and a token is
   good for the better part of an hour.
 - **The server sees no model traffic**, so it counts no tokens. The `working`/`idle` dot comes
-  from the agent-wrapper's activity stream instead (see [API.md](API.md#monitorstate) — an
-  agent you start by hand inside a clone, with no wrapper, reads as `idle`).
+  from the agents' own session files and transcripts inside each clone, and from the clone's
+  assistant chat, instead (see [API.md](API.md#monitorstate)).
 - **`RMNG_PROXY_KEY` survives under that name**, but it is no longer an inference credential — it
   is the clone's **identity** token, used to auto-detect the calling clone when it creates a sub
   clone and to choose direct clone↔clone SSH. It is now the fallback rather than the answer: the
@@ -254,13 +254,20 @@ swap. The control-server keeps its static `.2` address, so URLs baked into clone
 resolve.
 
 **Clone binaries are installed at create time and reconciled after upgrades.** The
-control-server copies its own current payloads (`clone-daemon` + `agent-wrapper` →
+control-server copies its own current payloads (`clone-daemon` →
 `/opt/rmng/bin`, the `rmng` fleet CLI → `/usr/local/bin/rmng` — see
 [`provision.rs`](../crates/control-server/src/provision.rs) `CLONE_BINARIES`) into every
 clone **before it boots**. The template carries none of them. A background reconciler also
 refreshes those payloads on running managed clones after a control-server upgrade, then
-restarts `rmng-clone-daemon` and `agent-wrapper` so the reconciled configuration takes effect.
-Active agent work is interrupted only when the payload or generated configuration changed.
+restarts `rmng-clone-daemon` so the reconciled configuration takes effect.
+
+**The retired `agent-wrapper` is removed on the same pass.** Clones used to run an in-clone chat
+agent (`agent-wrapper.service` on `:4096`); the chat panel now talks to an outside assistant
+(see [API.md](API.md#per-clone-assistant-chat)). New clones get the unit masked (symlink to
+`/dev/null`) before boot, because older template homes and forks still carry it. On a running
+clone, the next payload refresh stops it once, masks the unit, and deletes
+`/opt/rmng/bin/agent-wrapper`, `~/.config/rmng/agent-instructions.md` and
+`~/.config/rmng/mcp.json`.
 
 **Codex clone context is reconciled too.** New clones get `~/.codex/AGENTS.md` and
 `~/.codex/config.toml` at create time; old running clones get the same files from the
@@ -282,7 +289,7 @@ picks the file up over inotify, so nothing is restarted and no agent work is int
 
 **Dev caveat**: in a `cargo run` dev checkout the payloads come from
 `crates/control-server/embedded-bin/` — with nothing staged there, a clone boots without
-clone-daemon/agent-wrapper (a WARN says so at create time).
+clone-daemon (a WARN says so at create time).
 
 ### In-product restart & update (Docker deployment)
 
@@ -497,7 +504,7 @@ feeding one runtime stage:
 
 | Stage | Produces |
 | --- | --- |
-| `bun-build` | the frontend (`frontend/build/client`) + `agent-wrapper` (`bun build --compile`) |
+| `bun-build` | the frontend (`frontend/build/client`) |
 | `rust-build` | `clone-daemon` + `control-server` (`cargo build --release`) |
 | `runtime` | `ubuntu:26.04` + GStreamer/VA runtime + the payloads below |
 
@@ -513,7 +520,7 @@ payloads under `/usr/local/share/rmng/`:
 
 ```
 /usr/local/share/rmng/clone-daemon      # hot-swapped into running clones (see Upgrades)
-/usr/local/share/rmng/agent-wrapper     # hot-swapped into running clones
+/usr/local/share/rmng/rmng-cli          # installed into each clone as /usr/local/bin/rmng
 /usr/local/share/rmng/static/           # the frontend, served on port 2
 ```
 
@@ -554,7 +561,7 @@ AMD-encoded streams).
 Two options for exercising the full clone/capture/encode path against a local Docker daemon:
 
 - **Image loop**: `docker build -t rmng:latest .` then `docker compose up -d` on the GPU
-  host. The new image's `clone-daemon`/`agent-wrapper`/`rmng` CLI reach clones created
+  host. The new image's `clone-daemon`/`rmng` CLI reach clones created
   after the swap (binaries are injected at create time); see [Upgrades](#upgrades).
 - **`cargo run` loop** (fast rebuilds, no image): run `cargo run -p control-server` from the
   checkout on the GPU host. It runs in **dev mode** — no self-container, so it uses the `rmng`
@@ -567,7 +574,7 @@ Two options for exercising the full clone/capture/encode path against a local Do
 
 Then, from the dashboard: create a clone (`POST /api/clone` — its preset image builds on
 demand), select the clone, and point the viewer at the host. After a
-`clone-daemon` / `agent-wrapper` change, restage `embedded-bin/` and restart the dev server —
+`clone-daemon` / `rmng` CLI change, restage `embedded-bin/` and restart the dev server —
 the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no manual step.
 
 ## Networking & the media socket
@@ -624,7 +631,7 @@ inherits it (there's no per-install control-server payload any more; see
   `rmng-dind-<id>` volume; an unmanaged row is just unregistered).
 
 Most of these are also scriptable from any clone via the `rmng` CLI ([CLI.md](CLI.md)).
-Clone binaries (`clone-daemon`/`agent-wrapper`/the `rmng` CLI) are **not** a day-2 op — the
+Clone binaries (`clone-daemon`/the `rmng` CLI) are **not** a day-2 op — the
 control-server installs them at clone-create time; see [Upgrades](#upgrades).
 
 ## Gotchas

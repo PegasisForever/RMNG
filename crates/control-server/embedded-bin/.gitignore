@@ -1,4 +1,4 @@
-# Dev payload dir: stage plain clone-daemon / agent-wrapper / gnome-shell.deb here for
+# Dev payload dir: stage plain clone-daemon / rmng-cli / gnome-shell.deb here for
 # `cargo run -p control-server` (assets.rs reads this dir when the image install path
 # /usr/local/share/rmng doesn't exist). The Docker image does NOT use this dir.
 *

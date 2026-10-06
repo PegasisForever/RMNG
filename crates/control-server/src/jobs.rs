@@ -200,7 +200,7 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     let preset = plan.preset_name.clone();
     let mut progress = op.progress();
     let env = gen2_create_env(&app, preset.as_deref(), &id).await?;
-    let (playbook, prompt) = gen2_playbook_prompt(&app, preset.as_deref());
+    let prompt = gen2_global_prompt(&app, preset.as_deref());
     // Forks spawn accounts+settle during boot (joined inside `fork_clone`); `Some` here
     // means the inline post-ready work below is already done.
     let mut early_accounts: Option<(AccountBind, AccountBind)> = None;
@@ -217,7 +217,6 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
                 &id,
                 HomeSource::Create,
                 &env,
-                &playbook,
                 &prompt,
                 plan.headless,
                 None,
@@ -242,7 +241,6 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
                 &src.id,
                 &id,
                 &env,
-                &playbook,
                 &prompt,
                 plan.headless,
                 preset.as_deref(),
@@ -671,17 +669,13 @@ async fn gen2_create_env(
     ))
 }
 
-fn gen2_playbook_prompt(app: &App, preset_name: Option<&str>) -> (String, String) {
-    let preset = app
-        .config()
-        .presets
-        .into_iter()
-        .find(|p| Some(p.name.as_str()) == preset_name);
+fn gen2_global_prompt(app: &App, preset_name: Option<&str>) -> String {
     let cfg = app.config();
-    (
-        crate::web::compose_playbook(&cfg, preset.as_ref()),
-        crate::web::compose_global_prompt(&cfg, preset.as_ref()),
-    )
+    let preset = cfg
+        .presets
+        .iter()
+        .find(|p| Some(p.name.as_str()) == preset_name);
+    crate::web::compose_global_prompt(&cfg, preset)
 }
 
 // --- rebase ---------------------------------------------------------------------------------
@@ -742,12 +736,12 @@ async fn run_rebase(
         .find(|h| h.id == host_id)
         .ok_or_else(|| anyhow::anyhow!("unknown clone '{host_id}'"))?;
     // Image follows the TARGET preset (built lazily here, so build progress streams on
-    // this op); env/playbook stay on the clone's own bindings — rebase swaps the image
+    // this op); env/prompt stay on the clone's own bindings — rebase swaps the image
     // only, never the preset.
     let dockerfile = crate::provision::preset_dockerfile(&app, Some(&preset_name));
     let new_tag = crate::derived::ensure_image(&app, &dockerfile, rebuild, &mut progress).await?;
     let env = gen2_create_env(&app, row.preset_name.as_deref(), &host_id).await?;
-    let (playbook, prompt) = gen2_playbook_prompt(&app, row.preset_name.as_deref());
+    let prompt = gen2_global_prompt(&app, row.preset_name.as_deref());
     // An archived clone rests stopped, but the swap below boots a container. Remember the
     // rest state and put it back down afterwards.
     let was_archived = row.archived;
@@ -756,7 +750,6 @@ async fn run_rebase(
         &host_id,
         &new_tag,
         &env,
-        &playbook,
         &prompt,
         row.headless,
         progress,

@@ -6,15 +6,15 @@
 # ingest + encode, samba (clone homes over SMB), payloads, and a uid-1000 share user.
 #
 # Nothing is compiled into the server binary: the runtime assembles
-# /usr/local/share/rmng/ (clone-daemon + agent-wrapper binaries, frontend static/),
+# /usr/local/share/rmng/ (clone-daemon + rmng CLI binaries, frontend static/),
 # read at runtime. Payloads stored UNcompressed (registry pushes compress layers anyway).
 # The two build stages are independent — parallel builds, rust-only changes skip bun.
 #
-# Stages: 1. bun-build (frontend + agent-wrapper binary) 2. rust-build (3 binaries)
+# Stages: 1. bun-build (frontend) 2. rust-build (3 binaries)
 #   3. runtime (ubuntu:26.04 + runtime libs + payloads + share user, EXPOSE 9000 9001 9005 445).
 
 # ---------------------------------------------------------------------------
-# 1. bun stage: frontend build + agent-wrapper bun --compile
+# 1. bun stage: frontend build
 # ---------------------------------------------------------------------------
 FROM oven/bun:1 AS bun-build
 WORKDIR /src
@@ -24,13 +24,6 @@ COPY frontend/package.json frontend/bun.lock ./frontend/
 RUN cd frontend && bun install --frozen-lockfile
 COPY frontend/ ./frontend/
 RUN cd frontend && bun run build
-
-# agent-wrapper: single self-contained binary, installed into each clone at create time.
-COPY agent-wrapper/package.json agent-wrapper/bun.lock ./agent-wrapper/
-RUN cd agent-wrapper && bun install --frozen-lockfile
-COPY agent-wrapper/ ./agent-wrapper/
-RUN cd agent-wrapper \
- && bun build --compile src/server.ts --outfile /tmp/agent-wrapper
 
 # ---------------------------------------------------------------------------
 # 2. rust build stage — binaries only (fully parallel with 1)
@@ -105,7 +98,6 @@ COPY --from=rust-build /out/rmng-control-server /usr/local/bin/rmng-control-serv
 # delivery path); the clone template carries none of them.
 COPY --from=rust-build  /out/clone-daemon               /usr/local/share/rmng/clone-daemon
 COPY --from=rust-build  /out/rmng-cli                   /usr/local/share/rmng/rmng-cli
-COPY --from=bun-build   /tmp/agent-wrapper              /usr/local/share/rmng/agent-wrapper
 COPY --from=bun-build   /src/frontend/build/client      /usr/local/share/rmng/static
 
 # CWD-relative config.json + data/ land in the /data volume (config.rs uses relative paths).

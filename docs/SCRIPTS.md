@@ -92,10 +92,10 @@ inside the script — never baked as image `ENV`, or it would leak into the boot
 | `10-desktop.sh` | Locale/tz, headless GNOME + Mutter + VA-API + PipeWire (no gdm3/g-r-d/flatpak), the Recommends strip, container masks, the polkit sudo-group rule (DM-less ⇒ no resolvable session) |
 | `15-gnome-patch.sh` | `dpkg -i` the patched gnome-shell `.deb` (from the `gnome-build` stage) over stock |
 | `20-toolbox.sh` | Best-effort dev toolbox: CLI tools, Docker, cloud CLIs, browsers, Cursor/VS Code, HMCL/Mission Center/Monaspace, dconf defaults |
-| `30-user.sh` | The uid-1000 clone user (groups, linger, fish), preset-PATH rc, keyring, shared `CLAUDE.md`, Codex `AGENTS.md`/`config.toml`, Claude+Codex Linear MCP defaults, the `claude`/`codex`/`uv`/`rustup` toolchains, and the three `systemd --user` units (`gnome-headless`, `rmng-clone-daemon`, `agent-wrapper`) + wants symlinks. `claude` and `codex` are standalone installs that need no node, and **nvm is not installed at all** — a clone that needs node gets it from its preset Dockerfile |
+| `30-user.sh` | The uid-1000 clone user (groups, linger, fish), preset-PATH rc, keyring, shared `CLAUDE.md`, Codex `AGENTS.md`/`config.toml`, Claude+Codex Linear MCP defaults, the `claude`/`codex`/`uv`/`rustup` toolchains, and the two `systemd --user` units (`gnome-headless`, `rmng-clone-daemon`) + wants symlinks. `claude` and `codex` are standalone installs that need no node, and **nvm is not installed at all** — a clone that needs node gets it from its preset Dockerfile |
 
 `30-user.sh` creates `/opt/rmng/bin` (root:root, 0755) **empty** — the template no longer
-carries `clone-daemon`/`agent-wrapper`; the control-server installs its own current copies
+carries `clone-daemon`; the control-server installs its own current copy
 (plus the `rmng` CLI at `/usr/local/bin/rmng`) into each clone at create time, before boot
 ([`provision.rs`](../crates/control-server/src/provision.rs) `CLONE_BINARIES`) and refreshes
 them on running managed clones through the clone reconciler after server upgrades. Unlike the

@@ -125,7 +125,7 @@ install -d -m755 /etc/rmng
 log "assert user CLI present (claude)"
 test -x "/home/$USERNAME/.local/bin/claude"
 
-log "systemd --user units: headless gnome-shell + clone-daemon + agent-wrapper"
+log "systemd --user units: headless gnome-shell + clone-daemon"
 UDIR="/home/$USERNAME/.config/systemd/user"
 install -d -o "$USERNAME" -g "$USERNAME" "$UDIR"
 cat >"$UDIR/gnome-headless.service" <<UNIT
@@ -164,21 +164,6 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 UNIT
-cat >"$UDIR/agent-wrapper.service" <<UNIT
-[Unit]
-Description=rmng agent-wrapper (pi coding agent on :4096)
-After=gnome-headless.service
-[Service]
-Type=simple
-# Self-contained Bun binary (pi embedded); pushed Codex token authorizes it.
-Environment=PATH=/home/$USERNAME/.local/bin:$BINDIR:/usr/local/bin:/usr/bin:/bin
-Environment=AGENT_PORT=4096
-ExecStart=$BINDIR/agent-wrapper
-Restart=on-failure
-RestartSec=2
-[Install]
-WantedBy=default.target
-UNIT
 
 # /etc/environment is the server's (pre-boot tar + reconciler). Not baked.
 
@@ -186,7 +171,7 @@ chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config"
 # No user bus at build — symlink wants directly; linger starts the manager on boot.
 WANTS="$UDIR/default.target.wants"
 install -d -o "$USERNAME" -g "$USERNAME" "$WANTS"
-for u in gnome-headless rmng-clone-daemon agent-wrapper; do
+for u in gnome-headless rmng-clone-daemon; do
   ln -sf "../$u.service" "$WANTS/$u.service"
 done
 chown -h "$USERNAME:$USERNAME" "$WANTS"/*.service

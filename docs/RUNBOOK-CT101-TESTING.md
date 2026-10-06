@@ -43,37 +43,7 @@ The control-server container has no `python3`. Pipe its JSON to your own box ins
 curl -s http://10.0.0.178:9000/api/state | python3 -m json.tool
 ```
 
-## Fast path: swap one binary
-
-The clone binaries are standalone files inside each clone, so a change to `agent-wrapper`
-or `clone-daemon` does not need an image rebuild. This takes about a minute instead of
-five.
-
-```sh
-cd agent-wrapper && bun build --compile src/server.ts --outfile /tmp/agent-wrapper
-scp -i ~/.ssh/id_rsa -o IdentityAgent=none -o IdentitiesOnly=yes \
-    /tmp/agent-wrapper root@10.0.0.100:/tmp/agent-wrapper
-$SSH root@10.0.0.100 'pct push 101 /tmp/agent-wrapper /root/agent-wrapper \
-  && pct exec 101 -- bash -lc "docker cp /root/agent-wrapper claude-test2:/opt/rmng/bin/agent-wrapper \
-     && docker exec claude-test2 chmod 755 /opt/rmng/bin/agent-wrapper"'
-```
-
-Restart the unit as the clone user. `XDG_RUNTIME_DIR` is required, because these are
-`systemd --user` units:
-
-```sh
-$SSH root@10.0.0.100 'pct exec 101 -- docker exec -u rmng claude-test2 bash -lc \
-  "export XDG_RUNTIME_DIR=/run/user/1000; systemctl --user restart agent-wrapper.service"'
-```
-
-Compare the checksum after the copy. A silent `docker cp` failure looks exactly like a
-change that did not take effect.
-
-The reconciler will not revert this. It compares a payload stamp against the control-server
-container's own copy, so an unchanged stamp means no re-push. Publish a new image and the
-stamp changes, which overwrites your hand-pushed binary within about a minute.
-
-## Full path: publish an image and recreate
+## Publish an image and recreate
 
 ```sh
 scripts/publish-server.sh
@@ -132,7 +102,8 @@ $SSH root@10.0.0.100 'pct exec 101 -- bash -lc "docker exec rmng zfs create \
 
 Restarting resets in-memory state and drops every dashboard connection. Within about a
 minute the reconciler pushes fresh clone binaries into every running clone and restarts
-their units, with no clone recreate needed.
+the clone daemon, with no clone recreate needed. On a clone that still has the retired
+`agent-wrapper`, the same pass stops it, masks its unit, and deletes its files.
 
 ## Create a clone
 
@@ -150,13 +121,15 @@ Two traps here.
 1. The template image lags the repo. It is rebuilt by `scripts/publish-template.sh`, so a
    change to `template/setup/*.sh` does not reach a new clone until that runs. The
    reconciler is what fixes an existing clone.
-2. A clone needs a Codex account for its assistant. Without one the wrapper answers `503`
-   and the dashboard shows `agent prompt HTTP 503`.
+2. The chat panel needs Settings → Assistant filled in: `url` (the pi-web server) and
+   `serverUrl` (this server as the assistant reaches it, here `http://10.0.0.178:9000`).
+   Without them `POST /api/chat/:id` answers `409` and says which address is missing.
 
 ## Drive a real turn
 
-Prefer the dashboard API over talking to the wrapper directly. It exercises the whole path,
-including the Rust chat proxy and the persisted transcript.
+The chat panel talks to an outside assistant, not to anything inside the clone. Send
+through the dashboard API. It exercises the whole path: the first message creates the
+clone's chat on the assistant, and the control-server follows that chat's event stream.
 
 ```sh
 curl -s -XPOST http://10.0.0.178:9000/api/chat/pi-probe \
@@ -164,49 +137,31 @@ curl -s -XPOST http://10.0.0.178:9000/api/chat/pi-probe \
   -d '{"text":"Take a screenshot and say in one sentence what is on screen."}'
 ```
 
-Then poll `GET /api/chat/pi-probe` until `busy` is false and read the last message. A turn
-with a screenshot takes 20 to 60 seconds.
+Then poll `GET /api/chat/pi-probe` until `busy` is false and read the last message.
 
-To isolate the wrapper from the Rust side, hit it directly inside the clone. Open `/events`
-before you post, because the reply rides the stream:
+The assistant reaches the clone only through the `rmng` CLI. To isolate it from the chat
+side, run the call it would make, from the assistant's machine:
 
 ```sh
-$SSH root@10.0.0.100 'pct exec 101 -- docker exec -u rmng pi-probe bash -lc \
-  "curl -sS -XPOST localhost:4096/prompt -H \"content-type: application/json\" \
-   -d \"{\\\"text\\\":\\\"say ok\\\"}\""'
+rmng --server http://10.0.0.178:9000 desktop pi-probe screenshot
 ```
 
 ## Read what happened
 
-The wrapper logs to the systemd user journal. Its startup lines carry the model, the loaded
-extensions, and the tool list:
+Chat failures land in the control-server log as `chat:` lines. A send that does not reach
+the assistant also leaves a `⚠` notice in the chat itself.
 
 ```sh
-$SSH root@10.0.0.100 'pct exec 101 -- docker exec -u rmng pi-probe bash -lc \
-  "journalctl --user -u agent-wrapper.service -n 30 --no-pager -o cat"'
+$SSH root@10.0.0.100 'pct exec 101 -- docker logs --since 10m rmng 2>&1 | grep "chat:"'
 ```
-
-A healthy start looks like this:
-
-```
-agent-wrapper listening on http://0.0.0.0:4096 (model openai-codex/gpt-6-luna, thinking max)
-extensions: <inline:rmng-mcp>, <inline:rmng-tool-search>, <inline:rmng-request-log> | tools: read, bash, edit, write, tool_search
-provider request: model gpt-6-luna, effort max, service_tier default
-```
-
-The tool list is a snapshot taken while the MCP servers are still connecting, so the
-`mcp__desktop__*` tools are usually not in it yet. The first prompt waits for them.
 
 ## Verify before you claim it works
 
-Four checks caught real bugs during the pi swap.
+Two checks caught real bugs during the pi swap.
 
 1. Ownership of anything the reconciler writes. Docker's tar extract invents a missing
    parent directory as `root:root`, which silently breaks the agent's own writes.
 2. A fresh clone, not just an updated one. The provisioning path and the reconcile path
    are different code.
-3. The compiled binary, not just `bun run`. Bundling breaks dynamic imports that work fine
-   from source.
-4. The dashboard path, not just the wrapper. They are separate hops.
 
-Silence is not success. A wrapper that starts cleanly can still fail every request.
+Silence is not success. A chat that sends cleanly can still fail every turn.

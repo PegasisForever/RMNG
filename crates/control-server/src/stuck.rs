@@ -331,7 +331,7 @@ pub struct Session {
     /// One of `busy`, `shell`, `idle`, `waiting`, or absent.
     ///
     /// Absent is common, not a corner case. The record also carries an `entrypoint`, and only
-    /// `"cli"` maintains a status: `"sdk-ts"` (the agent-wrapper) and `"claude-vscode"` (the
+    /// `"cli"` maintains a status: `"sdk-ts"` (an Agent SDK caller) and `"claude-vscode"` (the
     /// Cursor/VS Code extension) write the record once at startup and never touch it again.
     /// Six clones on the pilot fleet ran `claude-vscode`.
     #[serde(default)]
@@ -1812,7 +1812,7 @@ pub fn build_session_view(session: &Session, facts: &CloneFacts, now: f64) -> Va
 ///
 /// The second arm is a deliberate reproduction rather than a found case: a real interactive
 /// `claude` in a tmux pane, told to leave `until ! pgrep -f rmng-judge-probe; do sleep 20; done`
-/// running and then stop. Driving it through the agent-wrapper instead would have proved
+/// running and then stop. Driving it through the Agent SDK instead would have proved
 /// nothing, because that entrypoint publishes no `status` and never reaches the `shell` state
 /// this failure lives in. Seven samples is small and says so.
 ///
@@ -4066,7 +4066,7 @@ mod tests {
     #[test]
     fn a_statusless_record_parses_with_no_status_rather_than_failing() {
         let root = fake_clone("statusless");
-        // What the Cursor extension and the agent-wrapper actually write: no `status` key.
+        // What the Cursor extension and an Agent SDK caller actually write: no `status` key.
         std::fs::write(
             root.join("home/rmng/.claude/sessions/873548.json"),
             br#"{"pid":873548,"sessionId":"864e6977-x","entrypoint":"claude-vscode","procStart":"104543106"}"#,

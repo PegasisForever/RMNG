@@ -65,9 +65,7 @@ pub const CLONE_USER: &str = "rmng";
 ///
 /// Constants rather than bare literals because a caller comparing against the wrong spelling
 /// fails silently, in a way no test that runs the script directly can see: `exec_ok_marked`
-/// compared against `"stdout"` for months, so it never observed its marker, and the
-/// agent-wrapper was never restarted after `/etc/environment` changed — the exact thing the
-/// marker was added to do.
+/// compared against `"stdout"` for months, so it never observed its marker.
 pub const STREAM_OUT: &str = "out";
 pub const STREAM_ERR: &str = "err";
 /// Stop timeout for systemd-PID-1 clones (with `StopSignal=SIGRTMIN+3` baked in).

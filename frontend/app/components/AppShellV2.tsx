@@ -1,5 +1,5 @@
 // The board dashboard. The clone board (control rail, operator columns) takes the width;
-// the selected clone's notes over its agent chat float on its right edge, split
+// the selected clone's notes over its assistant chat float on its right edge, split
 // three-to-one in favour of whichever of the two was touched last. The operator drags the
 // panel's left edge to set how much of the width it takes.
 //
@@ -73,7 +73,7 @@ export interface AppShellV2Props {
    *  the padding it wraps notes in, and the panel gets the whole card the way it does when a
    *  ticket takes the side panel outright. */
   cloneTicket?: ReactNode;
-  /** The agent chat for `selectedClone`. */
+  /** The assistant chat for `selectedClone`. */
   chat: ReactNode;
   /** The width the panel opens at, as a percentage of the shell. The container resolves it
    *  (the operator's remembered one, or the default) and the drag below takes it from there. */

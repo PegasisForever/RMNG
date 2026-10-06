@@ -1,6 +1,6 @@
 //! Runtime payload assets. The Docker image ships everything the control-server
 //! distributes (and the frontend it serves) on the filesystem under
-//! [`INSTALL_DIR`] — the `clone-daemon` and `agent-wrapper` binaries and `static/`
+//! [`INSTALL_DIR`] — the `clone-daemon` and `rmng-cli` binaries and `static/`
 //! (the built frontend). Everything is stored PLAIN (no gzip — registry pushes
 //! compress layers anyway) and nothing is compiled into the binary (rust-embed is
 //! gone): a payload is looked up at use time with a two-entry search path — the
@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 pub const INSTALL_DIR: &str = "/usr/local/share/rmng";
 
 /// Dev payload dir inside the repo (gitignored; stage plain `clone-daemon` /
-/// `agent-wrapper` here by hand or via a local build). Compile-time absolute so it
+/// `rmng-cli` here by hand or via a local build). Compile-time absolute so it
 /// resolves regardless of CWD; in the image the baked build path simply doesn't
 /// exist and the search falls through.
 const DEV_PAYLOAD_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/embedded-bin");
@@ -23,7 +23,7 @@ const DEV_PAYLOAD_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/embedded-bin
 const DEV_STATIC_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../frontend/build/client");
 
 /// Read the payload file `name` (a plain filename, e.g. `clone-daemon` or
-/// `agent-wrapper`), if present + non-empty. Missing payloads are tolerated by
+/// `rmng-cli`), if present + non-empty. Missing payloads are tolerated by
 /// design: callers warn and fall back (e.g. a dev checkout without a payload
 /// staged skips it).
 pub fn payload(name: &str) -> Option<Vec<u8>> {

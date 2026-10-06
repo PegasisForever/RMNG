@@ -8,7 +8,9 @@
 // so a story renders identically on every load and on every machine.
 import { CalendarClock, Clock, LoaderCircle, SendHorizontal, Square } from "lucide-react";
 import { useEffect, useRef } from "react";
+import Markdown, { type Components } from "react-markdown";
 import TextareaAutosize from "react-textarea-autosize";
+import remarkGfm from "remark-gfm";
 
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
@@ -51,7 +53,7 @@ export interface ChatViewProps {
   busy?: boolean;
   /** An abort is in flight (the Stop button's own pending state). */
   stopping?: boolean;
-  /** The agent's current tool line, shown under the working bubble. */
+  /** The assistant's current tool line, shown under the working bubble. */
   activity?: string | null;
   error?: string | null;
   /** An archived clone keeps its history but takes no new messages. */
@@ -76,18 +78,63 @@ export interface ChatViewProps {
   locale: string;
 }
 
+// The assistant answers in markdown. There is no typography plugin in this app, so each element
+// gets its own few classes here. Raw HTML in a reply is not rendered (react-markdown's default).
+const MARKDOWN: Components = {
+  p: ({ children }) => <p className="my-1.5 first:mt-0 last:mb-0">{children}</p>,
+  ul: ({ children }) => <ul className="my-1.5 list-disc pl-5">{children}</ul>,
+  ol: ({ children }) => <ol className="my-1.5 list-decimal pl-5">{children}</ol>,
+  li: ({ children }) => <li className="my-0.5">{children}</li>,
+  h1: ({ children }) => <p className="mt-2 mb-1 font-semibold first:mt-0">{children}</p>,
+  h2: ({ children }) => <p className="mt-2 mb-1 font-semibold first:mt-0">{children}</p>,
+  h3: ({ children }) => <p className="mt-2 mb-1 font-semibold first:mt-0">{children}</p>,
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="text-emerald-700 underline dark:text-emerald-400">
+      {children}
+    </a>
+  ),
+  code: ({ children }) => (
+    <code className="rounded bg-slate-100 px-1 font-mono text-[0.85em] dark:bg-slate-900">{children}</code>
+  ),
+  pre: ({ children }) => (
+    <pre className="my-1.5 overflow-x-auto rounded bg-slate-100 p-2 font-mono text-xs dark:bg-slate-900 [&_code]:bg-transparent [&_code]:p-0">
+      {children}
+    </pre>
+  ),
+  blockquote: ({ children }) => (
+    <blockquote className="my-1.5 border-l-2 border-slate-300 pl-2 text-slate-600 dark:border-slate-600 dark:text-slate-300">
+      {children}
+    </blockquote>
+  ),
+  table: ({ children }) => (
+    <div className="my-1.5 overflow-x-auto">
+      <table className="border-collapse text-xs">{children}</table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th className="border border-slate-300 px-1.5 py-0.5 text-left font-semibold dark:border-slate-600">{children}</th>
+  ),
+  td: ({ children }) => <td className="border border-slate-300 px-1.5 py-0.5 dark:border-slate-600">{children}</td>,
+};
+
 function Bubble({ m }: { m: ChatMessage }) {
   const isUser = m.role === "user";
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[88%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm ${
+        className={`max-w-[88%] min-w-0 break-words rounded-2xl px-3 py-2 text-sm ${
           isUser
-            ? "bg-emerald-600 text-white"
+            ? "whitespace-pre-wrap bg-emerald-600 text-white"
             : "border border-slate-200 bg-white text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
         }`}
       >
-        {m.text}
+        {isUser ? (
+          m.text
+        ) : (
+          <Markdown remarkPlugins={[remarkGfm]} components={MARKDOWN}>
+            {m.text}
+          </Markdown>
+        )}
       </div>
     </div>
   );
@@ -139,7 +186,7 @@ export function ChatView({
           <p className="text-sm text-slate-400 dark:text-slate-500">
             {archived
               ? "This clone is archived. Its chat history is retained."
-              : "Ask the agent anything — it can control this clone's desktop."}
+              : "Ask the assistant anything — it can control this clone's desktop."}
           </p>
         ) : (
           messages.map((m) => <Bubble key={m.id} m={m} />)
@@ -147,7 +194,7 @@ export function ChatView({
         {busy ? (
           <div className="flex justify-start">
             <div className="max-w-[88%] rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800">
-              <span className="text-slate-400 dark:text-slate-500">agent is working…</span>
+              <span className="text-slate-400 dark:text-slate-500">assistant is working…</span>
               {activity ? (
                 <span
                   className="mt-1 block break-words font-mono text-xs leading-snug text-slate-500 dark:text-slate-400"
@@ -168,7 +215,7 @@ export function ChatView({
       ) : null}
       {archived ? (
         <div className="border-t border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400">
-          Unarchive this clone to message the agent.
+          Unarchive this clone to message the assistant.
         </div>
       ) : null}
 
@@ -246,10 +293,10 @@ export function ChatView({
             maxRows={8}
             placeholder={
               archived
-                ? "Unarchive to message the agent"
+                ? "Unarchive to message the assistant"
                 : picking
                   ? "Message to deliver later…  (Enter to schedule)"
-                  : "Message the agent…  (Enter to send)"
+                  : "Message the assistant…  (Enter to send)"
             }
             // Typing stays enabled while the picker is open even mid-turn: scheduling *during*
             // a busy turn is the case the feature exists for.
@@ -286,8 +333,8 @@ export function ChatView({
               type="button"
               onClick={onStop}
               disabled={stopping}
-              title={stopping ? "Stopping…" : "Interrupt the agent's current turn"}
-              aria-label={stopping ? "Stopping…" : "Interrupt the agent's current turn"}
+              title={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
+              aria-label={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
               className="shrink-0 rounded-md bg-red-600 p-2 text-white hover:bg-red-700 disabled:opacity-50"
             >
               {/* The spinner is the only way an icon-only button can say the stop is in

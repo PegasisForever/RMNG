@@ -3,7 +3,7 @@
 The backend binary — one tokio service that is the **control plane**, the **media plane**,
 and the **fleet-automation plane**. It exposes three service ports (9000 web, 9001 video,
 9005 forward) plus the clone-home and shared-folder SMB shares on 445, and ships as a Docker image; the frontend
-and the `clone-daemon`/`agent-wrapper`/`rmng-cli` binaries are plain on-disk payloads under
+and the `clone-daemon`/`rmng-cli` binaries are plain on-disk payloads under
 `/usr/local/share/rmng/` (read at runtime, injected into clones at create time) — nothing is
 compiled into the binary. Clones themselves are created from a separately-published **template**
 image (`pegasis0/rmng-template`, built by `template/Dockerfile`) — not built in-product,
@@ -38,12 +38,13 @@ clone/delete/pull/commit Operation machine) · `naming` (clone hostname derivati
 preset lookup by ticket-id prefix)
 · `claude` / `codex` (the two account stores: usage poll + OAuth refresh + token push +
 assign/swap/rotate) · `clone_ops` (what those two share: the guest-script exec path, JWT decode,
-provider-scoped view replacement) · `chat` (agent-wrapper proxy +
-per-clone SSE + the activity stream behind working/idle) · `monitor` (Docker maintenance,
+provider-scoped view replacement) · `chat` (the per-clone assistant chat: pi-web
+sessions, one event-stream listener per clone chat, per-clone SSE, and activity marks behind
+working/idle) · `monitor` (Docker maintenance,
 CPU/RAM sampling, the activity bus and lifecycle writer) · `homes`
 (clone-home symlinks under `data/hosts/`) · `shared` (mounts `data/shared` into every running
 clone at `/home/rmng/shared`) · `smb` (smbd supervisor + the read-write `clones` and `shared`
-shares) · `files` (notes/uploads) · `assets` (on-disk clone-daemon/agent-wrapper
+shares) · `files` (notes/uploads) · `assets` (on-disk clone-daemon/rmng-cli
 payloads + the served frontend).
 
 ## Port 1 — media plane (`mediaplane` → [media](../media/README.md))
@@ -62,7 +63,7 @@ rest join its reply, because a clone can only run one selection read at a time.
 ## Port 2 — web API
 
 State store + SSE, all `/api/*` routes, the served SPA, and `/uploads`. Orchestration
-(clone/delete/pull/commit + images over the local Docker daemon, Claude, chat proxy,
+(clone/delete/pull/commit + images over the local Docker daemon, Claude, assistant chat,
 monitor poller, clone-home reconciler). Every endpoint is documented in
 [API.md](../../docs/API.md). Config is edited via the Settings UI: `GET /api/config` returns a
 redacted view, `PUT` merges + persists 0600 + applies live, `POST /api/config/test {docker}`
@@ -74,9 +75,9 @@ Operator/fleet **desktop control** uses the `rmng desktop` CLI
 clone's daemon MCP at `http://{host}:{daemon_mcp}`. Fleet management (clones, clone/delete,
 images, accounts) and `rmng exec` go through the same `rmng` CLI over the port-2 web API.
 
-The full desktop-automation surface lives in the **clone-daemon** (`:9004`), not here — the
-in-clone agent calls it directly on localhost and the `rmng desktop` CLI proxies to it via the
-web API. Every tool + args: [MCP.md](../../docs/MCP.md).
+The full desktop-automation surface lives in the **clone-daemon** (`:9004`), not here — agents
+that run inside the clone call it directly on localhost, and the `rmng desktop` CLI (used by
+operators and by the chat panel's outside assistant) proxies to it via the web API. Every tool + args: [MCP.md](../../docs/MCP.md).
 
 <a id="accounts-claude--codex"></a>
 
@@ -115,8 +116,8 @@ See [DEPLOY.md](../../docs/DEPLOY.md) and [SCRIPTS.md](../../docs/SCRIPTS.md).
 ## Clone binaries — create-time injection
 
 The server installs its own current payloads into every clone **before it boots**
-([`provision.rs`](src/provision.rs) `CLONE_BINARIES`): `clone-daemon` + `agent-wrapper` to
-`/opt/rmng/bin` (the `systemd --user` units exec them by absolute path) and the `rmng` fleet
+([`provision.rs`](src/provision.rs) `CLONE_BINARIES`): `clone-daemon` to
+`/opt/rmng/bin` (the `systemd --user` unit execs it by absolute path) and the `rmng` fleet
 CLI to `/usr/local/bin/rmng` (on every shell's PATH). This is the **sole delivery path** —
 the template carries none of them, a fresh clone always runs binaries matching the server
 that created it, and existing clones keep theirs across a server upgrade (the binswap
@@ -126,7 +127,7 @@ hot-swap engine is retired). Details: [DEPLOY.md#upgrades](../../docs/DEPLOY.md#
 
 Only the control-server needs external reachability (tailscale, manual). Clones sit on the
 user-defined `rmng` Docker bridge (static IPs: `.1` gateway, `.2` control-server, `.10+`
-clones), reachable *from* the control-server (the agent-wrapper chat proxy + the
+clones), reachable *from* the control-server (the
 `rmng desktop` → daemon-MCP proxy + `rmng exec`); media/input cross the shared
 `/srv/rmng-sock` named-volume unix socket (SCM_RIGHTS), not the network. Ports 1 and 2 are
 operator-facing; the clone daemon MCP (9004) is localhost/token-protected; the forward data
@@ -136,7 +137,7 @@ the shared folder.
 ## Dependencies
 
 `axum`/`tokio`/`tower-http` (port 2 + static files), `reqwest` (the Anthropic + OpenAI OAuth/usage
-endpoints, the two Linear image byte routes, agent-wrapper, the daemon-MCP proxy —
+endpoints, the two Linear image byte routes, the assistant's pi-web chat API, the daemon-MCP proxy —
 `rustls-tls`, since the provider calls are HTTPS), `bollard` +
 `tar` (Docker orchestration over the unix socket), `notify` (file watch), `serde_json`,
 `wire`, `media`.

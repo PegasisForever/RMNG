@@ -961,9 +961,9 @@ fn start_clone(
     ))
 }
 
-/// The effective agent playbook for a clone: the global `agentPlaybook` plus the preset's
-/// optional append (after a blank line). Empty/whitespace preset field ⇒ global only. Mirrors
-/// the wrapper's `[notes, procedure].filter(Boolean).join("\n\n")`.
+/// The effective assistant playbook for a clone: the global `agentPlaybook` plus the preset's
+/// optional append (after a blank line). Empty/whitespace preset field ⇒ global only. Goes into
+/// the first message of the clone's assistant chat ([`crate::chat`]).
 pub(crate) fn compose_playbook(cfg: &wire::AppConfig, preset: Option<&wire::Preset>) -> String {
     let base = cfg.agent_playbook.trim();
     match preset
@@ -1976,6 +1976,10 @@ async fn chat_events(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // The monitor follows running clones' chats; this covers an archived clone's history too.
+    if let Some(host) = clone_by_id(&app, &id) {
+        crate::chat::ensure_listener(&app, &host);
+    }
     let (snapshot, rx) = crate::chat::subscribe(&app, &id);
     let initial = futures::stream::once(async move { Ok(Event::default().data(snapshot)) });
     let updates = BroadcastStream::new(rx)

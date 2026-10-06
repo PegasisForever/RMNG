@@ -334,7 +334,7 @@ function PresetCard({
         </Field>
       </div>
       <div className="mt-2">
-        <Field label="Extra node-agent prompt for this preset (appended to the node-agent prompt only)">
+        <Field label="Extra assistant playbook for this preset (appended to the assistant playbook only)">
           <textarea
             value={p.agentPlaybook}
             onChange={(e) => onChange({ agentPlaybook: e.target.value })}
