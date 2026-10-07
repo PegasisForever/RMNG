@@ -71,19 +71,17 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
                 message_file,
                 common,
             } => {
-                let first_message = create::first_message(message.as_ref(), message_file.as_ref())?;
-                let req = wire::CloneRequest {
-                    source: source.clone(),
-                    parent: parent.clone(),
-                    preset: preset.clone(),
-                    // No `linear`: the copy keeps its source's ticket and is named after it.
-                    first_message: first_message.clone(),
-                    // Only an explicit message starts the agent. A ticket the fork inherits
-                    // from its source does not on its own.
-                    kickoff: first_message.is_some(),
-                    ..create::request(common)
-                };
-                create::send(client, true, req, common, json, None).await
+                create::fork(
+                    client,
+                    source.as_ref(),
+                    parent.as_ref(),
+                    preset.as_ref(),
+                    message.as_ref(),
+                    message_file.as_ref(),
+                    common,
+                    json,
+                )
+                .await
             }
             CloneCmd::Rebase {
                 clone,

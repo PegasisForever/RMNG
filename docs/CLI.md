@@ -141,8 +141,9 @@ takes from the preset, as it does for the dialog.
 
 **Flags for the three forking kinds** (`ticket`, `new-ticket`, `no-ticket`):
 
-- `--source <CLONE>`: the clone whose home is copied (live or archived). Omitted: the
-  preset's default fork clone, else the oldest forkable clone.
+- `--source <CLONE>`: the clone whose home is copied (live or archived). Omitted: the clone
+  the dashboard's dialog picks: the preset's default fork clone where that clone still
+  exists, else the newest live clone. `--dry-run` shows the pick.
 - `--parent <CLONE>`: draw the new clone under this clone's card on the dashboard.
 
 **The two ticket kinds.**
@@ -167,8 +168,8 @@ takes from the preset, as it does for the dialog.
 **The two kinds without a ticket.** `--title` names the clone: `--title 'Fix login'` gives
 `<prefix>fix-login`. A second clone with the same title gets the next letter. `--message <M>`
 or `--message-file <PATH>` sends the assistant a first message; omitted, nothing is sent.
-`no-ticket` keeps the source's preset unless `--preset` names another one. `template` needs
-`--preset` when any presets are configured. `fork` also takes `--message`; when the copy has
+`no-ticket` and `template` use the first configured preset unless `--preset` names another
+one, as the dialog's tabs start on the first preset. `fork` also takes `--message`; when the copy has
 a ticket, the ticket link is sent instead of the message.
 
 ```sh

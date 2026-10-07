@@ -103,8 +103,8 @@ pub struct CreateArgs {
 /// The clone a fork copies, for the three verbs that fork one.
 #[derive(Args, Debug, Default)]
 pub struct SourceArgs {
-    /// Clone whose home is copied. Omitted: the preset's default fork clone, else the oldest
-    /// forkable clone
+    /// Clone whose home is copied. Omitted: the one the dashboard picks: the preset's default
+    /// fork clone, else the newest live clone
     #[arg(long, value_name = "CLONE")]
     pub source: Option<String>,
     /// Record this clone as the new clone's parent (cosmetic: the dashboard draws the new
@@ -215,7 +215,7 @@ pub enum CreateCmd {
         /// Clone title. The clone id is made from it (`'Fix login'` → `<prefix>fix-login`)
         #[arg(long)]
         title: String,
-        /// Preset. Omitted: the source clone's preset
+        /// Preset. Omitted: the first preset, as in the dashboard's No ticket tab
         #[arg(long)]
         preset: Option<String>,
         #[command(flatten)]
@@ -230,7 +230,8 @@ pub enum CreateCmd {
         /// Clone title. The clone id is made from it (`'Fix login'` → `<prefix>fix-login`)
         #[arg(long)]
         title: String,
-        /// Preset whose Dockerfile builds the image. Required when any presets exist
+        /// Preset whose Dockerfile builds the image. Omitted: the first preset, as in the
+        /// dashboard's From template tab
         #[arg(long)]
         preset: Option<String>,
         #[command(flatten)]
@@ -289,8 +290,8 @@ pub enum CloneCmd {
     /// source (`pega-dev-123` → `pega-dev-123a`). For a copy with a title of its own, use
     /// `create no-ticket --source <clone>`
     Fork {
-        /// Clone to copy. Omitted: the preset's default fork clone, else the oldest
-        /// forkable clone
+        /// Clone to copy. Omitted: the --preset's default fork clone, else the newest live
+        /// clone, as the dashboard picks it
         source: Option<String>,
         /// Record this clone as the copy's parent (cosmetic: the dashboard draws the copy
         /// under the parent's card)

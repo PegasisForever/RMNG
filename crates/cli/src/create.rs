@@ -2,8 +2,10 @@
 //!
 //! `template` builds from a preset image (`POST /api/clone`); the other three fork a clone
 //! (`POST /api/fork`). The two ticket kinds first do in Linear what the dialog does in the
-//! browser ([`crate::linear`]), then hand the issue to the fork as `linear`. Everything a
-//! flag leaves out, the server fills in from the preset, the same as for the dialog.
+//! browser ([`crate::linear`]), then hand the issue to the fork as `linear`. The preset and
+//! the clone to fork are picked here, by the dialog's own defaults ([`default_preset`],
+//! [`default_source`]), so `--dry-run` shows them. The rest of what a flag leaves out, the
+//! server fills in from the preset, the same as for the dialog.
 //!
 //! The checks that can fail run before the first write to Linear, so a typo does not leave
 //! a ticket behind with no clone.
@@ -54,8 +56,9 @@ pub async fn create(client: &Client, cmd: &CreateCmd, json: bool) -> Result<u8> 
             common,
         } => {
             let first = first_message(message.message.as_ref(), message.message_file.as_ref())?;
+            let cfg = client.config().await?;
             let req = wire::CloneRequest {
-                preset: preset.clone(),
+                preset: default_preset(&cfg.presets, preset.as_deref())?,
                 linear: titled(title),
                 kickoff: first.is_some(),
                 first_message: first,
@@ -71,10 +74,13 @@ pub async fn create(client: &Client, cmd: &CreateCmd, json: bool) -> Result<u8> 
             common,
         } => {
             let first = first_message(message.message.as_ref(), message.message_file.as_ref())?;
+            let cfg = client.config().await?;
+            let preset = default_preset(&cfg.presets, preset.as_deref())?;
+            let source = fork_source(client, &cfg.presets, preset.as_deref(), source).await?;
             let req = wire::CloneRequest {
-                source: source.source.clone(),
-                parent: source.parent.clone(),
-                preset: preset.clone(),
+                source: source.source,
+                parent: source.parent,
+                preset,
                 // A title of its own: the fork does not keep its source's ticket.
                 linear: titled(title),
                 kickoff: first.is_some(),
@@ -94,7 +100,7 @@ pub async fn create(client: &Client, cmd: &CreateCmd, json: bool) -> Result<u8> 
             let column = column_id(client, common.column.as_deref()).await?;
             let cfg = client.config().await?;
             let preset = pick_preset(&cfg.presets, preset.as_deref(), &r.prefix)?;
-            check_clones(client, source).await?;
+            let source = &fork_source(client, &cfg.presets, preset.as_deref(), source).await?;
             let lin = Linear::new();
             let keys = linear::keys_for_team(&cfg.presets, &r.prefix);
             let (issue, key) = lin.find(&keys, &r).await.map_err(|e| anyhow!(e))?;
@@ -125,7 +131,7 @@ pub async fn create(client: &Client, cmd: &CreateCmd, json: bool) -> Result<u8> 
             let cfg = client.config().await?;
             let team = pick_team(&cfg.presets, team.as_deref())?;
             let preset = pick_preset(&cfg.presets, preset.as_deref(), &team)?;
-            check_clones(client, source).await?;
+            let source = &fork_source(client, &cfg.presets, preset.as_deref(), source).await?;
             let key = linear::keys_for_team(&cfg.presets, &team)
                 .into_iter()
                 .next()
@@ -360,23 +366,102 @@ fn pick_team(presets: &[wire::PresetRedacted], named: Option<&str>) -> Result<St
     }
 }
 
-/// The clones `--source` and `--parent` name exist. Checked here only to keep a typo from
-/// costing a Linear write; the server checks the rest.
-async fn check_clones(client: &Client, s: &SourceArgs) -> Result<()> {
-    let named: Vec<&str> = [&s.source, &s.parent]
-        .into_iter()
-        .filter_map(|c| c.as_deref())
-        .collect();
-    if named.is_empty() {
-        return Ok(());
+/// `rmng clone fork`: a copy that keeps its source's ticket and, unless `--preset` names
+/// another, its preset. The source is picked as [`default_source`] picks it.
+#[allow(clippy::too_many_arguments)]
+pub async fn fork(
+    client: &Client,
+    source: Option<&String>,
+    parent: Option<&String>,
+    preset: Option<&String>,
+    message: Option<&String>,
+    message_file: Option<&std::path::PathBuf>,
+    common: &CreateArgs,
+    json: bool,
+) -> Result<u8> {
+    let first = first_message(message, message_file)?;
+    let cfg = client.config().await?;
+    let preset = match preset.map(|p| p.trim()).filter(|p| !p.is_empty()) {
+        Some(name) => default_preset(&cfg.presets, Some(name))?,
+        None => None,
+    };
+    let picked = SourceArgs {
+        source: source.cloned(),
+        parent: parent.cloned(),
+    };
+    let picked = fork_source(client, &cfg.presets, preset.as_deref(), &picked).await?;
+    let req = wire::CloneRequest {
+        source: picked.source,
+        parent: picked.parent,
+        preset,
+        // No `linear`: the copy keeps its source's ticket and is named after it.
+        kickoff: first.is_some(),
+        first_message: first,
+        ..request(common)
+    };
+    send(client, true, req, common, json, None).await
+}
+
+/// The preset the dialog's "No ticket" and "From template" tabs use: the one named, else
+/// the first configured one, which is what those tabs start on. `None` with no presets.
+fn default_preset(presets: &[wire::PresetRedacted], named: Option<&str>) -> Result<Option<String>> {
+    match named.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) if presets.iter().any(|p| p.name == name) => Ok(Some(name.to_string())),
+        Some(name) => {
+            let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+            bail!("unknown preset '{name}' (configured: {})", names.join(", "))
+        }
+        None => Ok(presets.first().map(|p| p.name.clone())),
     }
+}
+
+/// The clone the dialog forks when nobody picks one (`follow` in
+/// `frontend/app/lib/cloneDraft.ts`): the preset's default fork clone where a managed clone
+/// still has that id, else the first managed clone in the server's list, live ones before
+/// archived ones. The list is newest first, so that is the newest live clone.
+pub fn default_source(
+    hosts: &[wire::RmngClone],
+    presets: &[wire::PresetRedacted],
+    preset: Option<&str>,
+) -> Result<String> {
+    let sources: Vec<&str> = hosts
+        .iter()
+        .filter(|h| h.managed && !h.archived)
+        .chain(hosts.iter().filter(|h| h.managed && h.archived))
+        .map(|h| h.id.as_str())
+        .collect();
+    let Some(first) = sources.first() else {
+        bail!("there is no clone to fork; build one with `rmng clone create template`");
+    };
+    let wanted = preset
+        .and_then(|name| presets.iter().find(|p| p.name == name))
+        .map(|p| p.default_fork_clone.trim())
+        .filter(|d| sources.contains(d));
+    Ok(wanted.unwrap_or(first).to_string())
+}
+
+/// `--source` and `--parent` as the request sends them: both checked to exist (a typo must
+/// not cost a Linear write), and the source filled in by [`default_source`] when omitted.
+async fn fork_source(
+    client: &Client,
+    presets: &[wire::PresetRedacted],
+    preset: Option<&str>,
+    s: &SourceArgs,
+) -> Result<SourceArgs> {
     let st = client.state().await?;
-    for id in named {
-        if !st.hosts.iter().any(|h| h.id == id) {
+    for id in [&s.source, &s.parent].into_iter().flatten() {
+        if !st.hosts.iter().any(|h| &h.id == id) {
             bail!("unknown clone '{id}'");
         }
     }
-    Ok(())
+    let source = match &s.source {
+        Some(id) => id.clone(),
+        None => default_source(&st.hosts, presets, preset)?,
+    };
+    Ok(SourceArgs {
+        source: Some(source),
+        parent: s.parent.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -396,6 +481,69 @@ mod tests {
             startup_script: String::new(),
             dockerfile: String::new(),
         }
+    }
+
+    fn clone(id: &str, managed: bool, archived: bool) -> wire::RmngClone {
+        wire::RmngClone {
+            id: id.into(),
+            managed,
+            archived,
+            ..Default::default()
+        }
+    }
+
+    /// The dialog's pick: the preset's default where a managed clone has that id (archived
+    /// counts), else the first live managed clone in the server's (newest first) list.
+    #[test]
+    fn the_default_source_is_the_dialogs() {
+        let hosts = [
+            clone("new-archived", true, true),
+            clone("unmanaged", false, false),
+            clone("newest-live", true, false),
+            clone("template", true, true),
+            clone("older-live", true, false),
+        ];
+        let mut p = preset("medi", &["DEV"]);
+        p.default_fork_clone = "template".into();
+        let presets = [p, preset("other", &[])];
+        assert_eq!(
+            default_source(&hosts, &presets, Some("medi")).unwrap(),
+            "template"
+        );
+        assert_eq!(
+            default_source(&hosts, &presets, Some("other")).unwrap(),
+            "newest-live"
+        );
+        assert_eq!(
+            default_source(&hosts, &presets, None).unwrap(),
+            "newest-live"
+        );
+        // A default that names no managed clone falls back.
+        let mut gone = preset("gone", &[]);
+        gone.default_fork_clone = "unmanaged".into();
+        assert_eq!(
+            default_source(&hosts, &[gone], Some("gone")).unwrap(),
+            "newest-live"
+        );
+        // Only archived clones: the first of them.
+        let archived = [clone("a1", true, true), clone("a2", true, true)];
+        assert_eq!(default_source(&archived, &[], None).unwrap(), "a1");
+        assert!(default_source(&[clone("u", false, false)], &[], None).is_err());
+    }
+
+    #[test]
+    fn the_no_ticket_and_template_kinds_start_on_the_first_preset() {
+        let presets = [preset("medi", &[]), preset("web", &[])];
+        assert_eq!(
+            default_preset(&presets, None).unwrap().as_deref(),
+            Some("medi")
+        );
+        assert_eq!(
+            default_preset(&presets, Some("web")).unwrap().as_deref(),
+            Some("web")
+        );
+        assert!(default_preset(&presets, Some("nope")).is_err());
+        assert_eq!(default_preset(&[], None).unwrap(), None);
     }
 
     #[test]
