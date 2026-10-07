@@ -214,22 +214,52 @@ pub async fn select(client: &Client, clone: Option<&str>, none: bool, json: bool
     Ok(0)
 }
 
-/// `rmng clone create-plain` / `rmng clone fork` — start a clone and follow it.
+/// `rmng clone create <kind>` / `rmng clone fork` — start a clone and follow it.
 pub async fn start_clone(
     client: &Client,
     fork: bool,
     req: wire::CloneRequest,
     common: &CreateArgs,
     json: bool,
+    ticket: Option<Value>,
 ) -> Result<u8> {
-    let column = match common.column.as_deref() {
-        Some(name) => Some(resolve_column(client, name).await?),
-        None => None,
-    };
+    let column = column_id(client, common.column.as_deref()).await?;
+    start_clone_in(
+        client,
+        fork,
+        req,
+        column.as_deref(),
+        &common.wait,
+        json,
+        ticket,
+    )
+    .await
+}
+
+/// [`start_clone`] with the board column already resolved, for a caller that checks it before
+/// it does anything that cannot be undone (opening a Linear ticket). `ticket`, when given, is
+/// added to the `--json` output under `ticket`.
+pub async fn start_clone_in(
+    client: &Client,
+    fork: bool,
+    req: wire::CloneRequest,
+    column: Option<&str>,
+    wait: &WaitArgs,
+    json: bool,
+    ticket: Option<Value>,
+) -> Result<u8> {
     let op = client.start_clone(fork, &req).await?;
-    file_started_clone(client, &op, column.as_deref()).await?;
+    file_started_clone(client, &op, column).await?;
     let verb = if fork { "fork" } else { "clone" };
-    started(client, op, &common.wait, json, verb, true).await
+    started(client, op, wait, json, verb, true, ticket).await
+}
+
+/// The stored id of the board column `--column` names, or `None` when it names none.
+pub async fn column_id(client: &Client, column: Option<&str>) -> Result<Option<String>> {
+    match column {
+        Some(name) => Ok(Some(resolve_column(client, name).await?)),
+        None => Ok(None),
+    }
 }
 
 /// `rmng clone self` — the calling clone's own record.
@@ -276,7 +306,7 @@ pub async fn clone_rm(
         }
     }
     let op = client.delete(clone).await?;
-    started(client, op, wait, json, "delete", false).await
+    started(client, op, wait, json, "delete", false, None).await
 }
 
 /// `rmng clone rebase <clone> --tag <tag>` — new system image under the kept home.
@@ -289,17 +319,17 @@ pub async fn rebase(
     json: bool,
 ) -> Result<u8> {
     let op = client.rebase(clone, preset, rebuild).await?;
-    started(client, op, wait, json, "rebase", false).await
+    started(client, op, wait, json, "rebase", false, None).await
 }
 
 pub async fn archive(client: &Client, clone: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
     let op = client.archive(clone).await?;
-    started(client, op, wait, json, "archive", false).await
+    started(client, op, wait, json, "archive", false, None).await
 }
 
 pub async fn restore(client: &Client, clone: &str, wait: &WaitArgs, json: bool) -> Result<u8> {
     let op = client.unarchive(clone).await?;
-    started(client, op, wait, json, "restore", false).await
+    started(client, op, wait, json, "restore", false, None).await
 }
 
 /// `rmng account swap <clone> <account> [--codex]` — hot-swap a clone's account for one
@@ -456,7 +486,7 @@ pub async fn op_ls(client: &Client, json: bool) -> Result<u8> {
 }
 
 pub async fn wait_cmd(client: &Client, op_id: &str, timeout: u64, json: bool) -> Result<u8> {
-    settle(client, op_id, timeout, json, false).await
+    settle(client, op_id, timeout, json, false, None).await
 }
 
 // --- the transcript ledger ---------------------------------------------------
@@ -836,10 +866,15 @@ async fn started(
     json: bool,
     verb: &str,
     with_clone: bool,
+    ticket: Option<Value>,
 ) -> Result<u8> {
     if !wait.wait {
         if json {
-            emit_json(&op)?;
+            let mut v = serde_json::to_value(&op)?;
+            if let Some(t) = ticket {
+                v["ticket"] = t;
+            }
+            emit_json(&v)?;
         } else {
             println!(
                 "{verb} started: op {} target {} (follow with `rmng op wait {}`)",
@@ -851,7 +886,7 @@ async fn started(
     if !json {
         eprintln!("{verb} started: op {} target {}", op.id, op.target);
     }
-    settle(client, &op.id, wait.timeout, json, with_clone).await
+    settle(client, &op.id, wait.timeout, json, with_clone, ticket).await
 }
 
 async fn settle(
@@ -860,6 +895,7 @@ async fn settle(
     timeout: u64,
     json: bool,
     with_clone: bool,
+    ticket: Option<Value>,
 ) -> Result<u8> {
     match wait_for_op(client, op_id, timeout).await? {
         WaitOutcome::Done(op) => {
@@ -875,6 +911,9 @@ async fn settle(
                 if let Some(rec) = settled {
                     v["clone"] = rec;
                 }
+                if let Some(t) = ticket {
+                    v["ticket"] = t;
+                }
                 emit_json(&v)?;
             } else {
                 println!("done: {} ({})", op.target, op.message);
@@ -883,7 +922,11 @@ async fn settle(
         }
         WaitOutcome::Failed(op) => {
             if json {
-                emit_json(&op)?;
+                let mut v = serde_json::to_value(&op)?;
+                if let Some(t) = ticket {
+                    v["ticket"] = t;
+                }
+                emit_json(&v)?;
             }
             eprintln!("operation failed: {}", op.message);
             Ok(3)

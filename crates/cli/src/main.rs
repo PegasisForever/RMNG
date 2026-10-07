@@ -6,6 +6,8 @@
 
 mod args;
 mod commands;
+mod create;
+mod linear;
 mod output;
 mod wait;
 
@@ -50,42 +52,12 @@ async fn main() {
     std::process::exit(code as i32);
 }
 
-/// `--message` / `--message-file`, as the request carries it: absent when neither was given.
-fn first_message(
-    inline: Option<&String>,
-    file: Option<&std::path::PathBuf>,
-) -> anyhow::Result<Option<String>> {
-    let body = args::read_text(inline, file)?;
-    Ok(Some(body).filter(|b| !b.trim().is_empty()))
-}
-
 async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
     let json = cli.json;
     match &cli.cmd {
         Cmd::Clone(cmd) => match cmd {
             CloneCmd::Ls => commands::clone_ls(client, json).await,
-            CloneCmd::CreatePlain {
-                title,
-                message,
-                message_file,
-                preset,
-                common,
-            } => {
-                let first_message = first_message(message.as_ref(), message_file.as_ref())?;
-                let req = wire::CloneRequest {
-                    preset: preset.clone(),
-                    linear: Some(wire::LinearMeta {
-                        display_name: Some(title.clone()),
-                        ..Default::default()
-                    }),
-                    first_message: first_message.clone(),
-                    // A message given here is the operator asking for it to be sent.
-                    kickoff: first_message.is_some(),
-                    run_startup_script: !common.no_startup_script,
-                    ..Default::default()
-                };
-                commands::start_clone(client, false, req, common, json).await
-            }
+            CloneCmd::Create(cmd) => create::create(client, cmd, json).await,
             CloneCmd::Rm { clone, yes, wait } => {
                 commands::clone_rm(client, clone, *yes, wait, json).await
             }
@@ -94,37 +66,24 @@ async fn run(cli: &Cli, client: &Client) -> anyhow::Result<u8> {
             CloneCmd::Fork {
                 source,
                 parent,
-                headless,
-                title,
                 preset,
-                claude_account,
-                codex_account,
                 message,
                 message_file,
                 common,
             } => {
-                let first_message = first_message(message.as_ref(), message_file.as_ref())?;
+                let first_message = create::first_message(message.as_ref(), message_file.as_ref())?;
                 let req = wire::CloneRequest {
                     source: source.clone(),
                     parent: parent.clone(),
                     preset: preset.clone(),
-                    claude_account: claude_account.clone(),
-                    codex_account: codex_account.clone(),
-                    // A title both names the fork and makes it standalone: `linear` present
-                    // is what stops the plan copying the source's ticket onto it.
-                    linear: title.as_ref().map(|t| wire::LinearMeta {
-                        display_name: Some(t.clone()),
-                        ..Default::default()
-                    }),
+                    // No `linear`: the copy keeps its source's ticket and is named after it.
                     first_message: first_message.clone(),
                     // Only an explicit message starts the agent. A ticket the fork inherits
                     // from its source does not on its own.
                     kickoff: first_message.is_some(),
-                    headless: *headless,
-                    run_startup_script: !common.no_startup_script,
-                    ..Default::default()
+                    ..create::request(common)
                 };
-                commands::start_clone(client, true, req, common, json).await
+                create::send(client, true, req, common, json, None).await
             }
             CloneCmd::Rebase {
                 clone,

@@ -33,9 +33,11 @@ pub struct Cli {
     pub cmd: Cmd,
 }
 
+// Parsed once per run, so the size of the biggest variant costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// Manage clones (the fleet unit): ls / create-* / rm / archive / restore / ssh / exec / …
+    /// Manage clones (the fleet unit): ls / create / fork / rm / archive / restore / ssh / exec / …
     #[command(subcommand)]
     Clone(CloneCmd),
     /// Imported-account operations
@@ -61,19 +63,181 @@ pub enum Cmd {
     Guide,
 }
 
-/// Flags shared by the clone-creating verbs: the server names the clone, builds the image,
-/// and applies the preset's own pool and account defaults.
+/// Flags every clone-creating verb takes: the lower half of the dashboard's "New clone"
+/// dialog. The server names the clone and fills in what is left out from the preset.
 #[derive(Args, Debug)]
 pub struct CreateArgs {
-    /// Board column to file the new clone in, by title (`"In Progress"`) or id. It goes to
-    /// the TOP of that column. Omitted, the board draws it in its home column as before.
+    /// Account pool both providers draw from, or `none` for every pool. Omitted: the
+    /// preset's pool
+    #[arg(long, value_name = "POOL")]
+    pub group: Option<String>,
+    /// Claude account: an email (pin), `auto`, or `none` (no token). Omitted: a fresh pick
+    /// in the pool
+    #[arg(long, value_name = "ACCOUNT")]
+    pub claude_account: Option<String>,
+    /// Codex account, same forms as --claude-account
+    #[arg(long, value_name = "ACCOUNT")]
+    pub codex_account: Option<String>,
+    /// No desktop, only a terminal: lighter and faster to boot, but `rmng desktop` does not
+    /// work on it
     #[arg(long)]
-    pub column: Option<String>,
-    /// Skip the preset's startup script (it runs as the clone user by default).
+    pub headless: bool,
+    /// Build the preset's image again, with a fresh base pull, even when it exists
+    #[arg(long)]
+    pub rebuild: bool,
+    /// Do not run the preset's startup script (it runs as the clone user by default)
     #[arg(long)]
     pub no_startup_script: bool,
+    /// Board column to file the new clone in, by title (`"In Progress"`) or id. It goes to
+    /// the TOP of that column. Omitted: its home column
+    #[arg(long)]
+    pub column: Option<String>,
+    /// Check the command and print the request it would send, as JSON. Nothing is created:
+    /// no clone, no ticket, no move to In Progress (a ticket is still looked up)
+    #[arg(long)]
+    pub dry_run: bool,
     #[command(flatten)]
     pub wait: WaitArgs,
+}
+
+/// The clone a fork copies, for the three verbs that fork one.
+#[derive(Args, Debug, Default)]
+pub struct SourceArgs {
+    /// Clone whose home is copied. Omitted: the preset's default fork clone, else the oldest
+    /// forkable clone
+    #[arg(long, value_name = "CLONE")]
+    pub source: Option<String>,
+    /// Record this clone as the new clone's parent (cosmetic: the dashboard draws the new
+    /// clone under the parent's card)
+    #[arg(long, value_name = "CLONE")]
+    pub parent: Option<String>,
+}
+
+/// What the assistant is sent once a clone made for a ticket is up.
+#[derive(Args, Debug, Default)]
+pub struct KickoffArgs {
+    /// Do not send the ticket to the assistant. By default it is sent as the first message
+    #[arg(long)]
+    pub no_kickoff: bool,
+    /// Extra instructions for the assistant, sent with the ticket. They take precedence over
+    /// its own procedure where the two conflict
+    #[arg(long, value_name = "TEXT", conflicts_with = "no_kickoff")]
+    pub agent_instructions: Option<String>,
+    /// Extra instructions the assistant adds to what it tells Claude Code
+    #[arg(long, value_name = "TEXT", conflicts_with = "no_kickoff")]
+    pub claude_instructions: Option<String>,
+}
+
+/// An optional first message to the assistant, for the verbs with no ticket.
+#[derive(Args, Debug, Default)]
+pub struct MessageArgs {
+    /// First message sent to the assistant once the clone is up. Omitted: nothing is sent
+    #[arg(long)]
+    pub message: Option<String>,
+    /// Read the first message from a file (`-` for stdin)
+    #[arg(long, value_name = "PATH", conflicts_with = "message")]
+    pub message_file: Option<PathBuf>,
+}
+
+/// Linear's priority scale.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    Urgent,
+    High,
+    Medium,
+    Low,
+}
+
+impl Priority {
+    /// Linear's own number: 1 urgent through 4 low.
+    pub fn linear(self) -> u8 {
+        match self {
+            Priority::Urgent => 1,
+            Priority::High => 2,
+            Priority::Medium => 3,
+            Priority::Low => 4,
+        }
+    }
+}
+
+/// `rmng clone create <kind>`: the four tabs of the dashboard's "New clone" dialog.
+#[derive(Subcommand, Debug)]
+pub enum CreateCmd {
+    /// Existing ticket: fork a clone for a Linear ticket, move the ticket to In Progress, and
+    /// send it to the assistant. The clone is named after the ticket (`WE-142` →
+    /// `<prefix>we-142`)
+    Ticket {
+        /// The ticket: an id like `WE-142`, or a Linear link
+        ticket: String,
+        /// Preset. Omitted: the preset whose label is the ticket's team (`WE`)
+        #[arg(long)]
+        preset: Option<String>,
+        #[command(flatten)]
+        source: SourceArgs,
+        #[command(flatten)]
+        kickoff: KickoffArgs,
+        #[command(flatten)]
+        common: CreateArgs,
+    },
+    /// New ticket: open a Linear ticket, then do what `create ticket` does with it
+    NewTicket {
+        /// Ticket title. It also names the clone's card
+        #[arg(long)]
+        title: String,
+        /// Linear team key (`WE`). Omitted: the only team the presets name, if there is one
+        #[arg(long)]
+        team: Option<String>,
+        /// Ticket description, in markdown
+        #[arg(long)]
+        description: Option<String>,
+        /// Read the description from a file (`-` for stdin)
+        #[arg(long, value_name = "PATH", conflicts_with = "description")]
+        description_file: Option<PathBuf>,
+        /// Ticket priority. Omitted: no priority
+        #[arg(long, value_enum)]
+        priority: Option<Priority>,
+        /// Who gets the ticket: a team member's email or name, or `me`. Omitted: the owner of
+        /// the team's Linear key
+        #[arg(long, value_name = "PERSON")]
+        assignee: Option<String>,
+        /// Preset. Omitted: the preset whose label is the team
+        #[arg(long)]
+        preset: Option<String>,
+        #[command(flatten)]
+        source: SourceArgs,
+        #[command(flatten)]
+        kickoff: KickoffArgs,
+        #[command(flatten)]
+        common: CreateArgs,
+    },
+    /// No ticket: fork a clone under a title of your own
+    NoTicket {
+        /// Clone title. The clone id is made from it (`'Fix login'` → `<prefix>fix-login`)
+        #[arg(long)]
+        title: String,
+        /// Preset. Omitted: the source clone's preset
+        #[arg(long)]
+        preset: Option<String>,
+        #[command(flatten)]
+        message: MessageArgs,
+        #[command(flatten)]
+        source: SourceArgs,
+        #[command(flatten)]
+        common: CreateArgs,
+    },
+    /// From template: build a clone from a preset's image onto an empty home (no fork)
+    Template {
+        /// Clone title. The clone id is made from it (`'Fix login'` → `<prefix>fix-login`)
+        #[arg(long)]
+        title: String,
+        /// Preset whose Dockerfile builds the image. Required when any presets exist
+        #[arg(long)]
+        preset: Option<String>,
+        #[command(flatten)]
+        message: MessageArgs,
+        #[command(flatten)]
+        common: CreateArgs,
+    },
 }
 
 /// Read `--description` / `--description-file` into one markdown string. The file form
@@ -93,24 +257,10 @@ pub fn read_text(inline: Option<&String>, file: Option<&PathBuf>) -> std::io::Re
 pub enum CloneCmd {
     /// List clones with live CPU, RAM, activity, and each provider's bound account
     Ls,
-    /// Create a template clone with a title-derived hostname. The image builds on demand
-    /// from the preset's Dockerfile.
-    CreatePlain {
-        /// Container title — the display name, and the stem of the derived hostname
-        #[arg(long)]
-        title: String,
-        /// First message auto-sent to the agent (omitted ⇒ nothing is sent)
-        #[arg(long)]
-        message: Option<String>,
-        /// Read the first message from a file (`-` for stdin)
-        #[arg(long, value_name = "PATH", conflicts_with = "message")]
-        message_file: Option<PathBuf>,
-        /// Env preset name (required when any presets are configured)
-        #[arg(long)]
-        preset: Option<String>,
-        #[command(flatten)]
-        common: CreateArgs,
-    },
+    /// Create a clone, the four ways the dashboard's "New clone" dialog does:
+    /// `ticket`, `new-ticket`, `no-ticket`, `template`
+    #[command(subcommand)]
+    Create(CreateCmd),
     /// Destroy a clone (container + volumes). Non-interactive callers must pass -y.
     Rm {
         /// Clone id
@@ -135,39 +285,22 @@ pub enum CloneCmd {
         #[command(flatten)]
         wait: WaitArgs,
     },
-    /// Fork a gen-2 clone: snapshot + clone the source home, create from its recorded
-    /// base tag (`rmng clone fork [source]`). Omitted source = the preset's default fork
-    /// clone where a managed clone still carries that id (live or archived), else the
-    /// oldest live forkable clone.
-    /// The new hostname derives server-side, from the source id (`pega-dev-123` →
-    /// `pega-dev-123a`) unless `--title` names it.
+    /// Copy a clone as it is: the copy keeps the source's ticket and is named after the
+    /// source (`pega-dev-123` → `pega-dev-123a`). For a copy with a title of its own, use
+    /// `create no-ticket --source <clone>`
     Fork {
-        /// Source gen-2 clone id (omitted = preset default, else oldest live forkable)
+        /// Clone to copy. Omitted: the preset's default fork clone, else the oldest
+        /// forkable clone
         source: Option<String>,
-        /// Record this clone id as the new clone's parent (one level deep, cosmetic:
-        /// the ls tree and mute coverage read it)
-        #[arg(long)]
+        /// Record this clone as the copy's parent (cosmetic: the dashboard draws the copy
+        /// under the parent's card)
+        #[arg(long, value_name = "CLONE")]
         parent: Option<String>,
-        /// Headless (no desktop) fork
-        #[arg(long)]
-        headless: bool,
-        /// Name the fork after this title instead of after its source. A titled fork is
-        /// standalone: it does not inherit the source's Linear ticket, so no agent
-        /// starts on it
-        #[arg(long)]
-        title: Option<String>,
-        /// Env preset name override (omitted inherits the source preset)
+        /// Preset. Omitted: the source's preset
         #[arg(long)]
         preset: Option<String>,
-        /// Claude account override: an email, `auto`, `none`, or `group:<pool>`
-        /// (omitted follows the group with a fresh pick)
-        #[arg(long)]
-        claude_account: Option<String>,
-        /// Codex account override, same forms
-        #[arg(long)]
-        codex_account: Option<String>,
-        /// First message sent to the fork's agent on boot (omitted ⇒ nothing is sent, even
-        /// when the fork inherits its source's ticket)
+        /// First message sent to the assistant once the copy is up. When the copy has a
+        /// ticket, the ticket link is sent instead. Omitted: nothing is sent
         #[arg(long)]
         message: Option<String>,
         /// Read the first message from a file (`-` for stdin)
@@ -535,38 +668,163 @@ mod tests {
         assert_eq!(cli.server.as_deref(), Some("http://x:9000"));
     }
 
-    /// `create-plain` is the only clone-creating verb: the template dialog as a command.
-    /// The hostname derives from `--title` and the image builds from `--preset`, so there is
-    /// nothing else to pass it beyond the board column and `--wait`.
+    /// `create template` is the dialog's "From template" tab: a title and a preset, and a
+    /// message only when one is given.
     #[test]
-    fn clone_create_plain_takes_title_message_and_preset() {
+    fn create_template_takes_title_message_and_preset() {
         let cli = Cli::parse_from([
             "rmng",
             "clone",
-            "create-plain",
+            "create",
+            "template",
             "--title",
             "scratch",
             "--preset",
             "p1",
+            "--headless",
+            "--rebuild",
+            "--group",
+            "gpt",
+            "--column",
+            "Done",
         ]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::CreatePlain {
+            Cmd::Clone(CloneCmd::Create(CreateCmd::Template {
                 title,
                 preset,
                 message,
-                ..
-            }) => {
+                common,
+            })) => {
                 assert_eq!(title, "scratch");
                 assert_eq!(preset.as_deref(), Some("p1"));
-                assert_eq!(message, None);
+                assert_eq!(message.message, None);
+                assert!(common.headless && common.rebuild);
+                assert_eq!(common.group.as_deref(), Some("gpt"));
+                assert_eq!(common.column.as_deref(), Some("Done"));
             }
             other => panic!("wrong cmd: {other:?}"),
         }
+        // A template build forks nothing, so it takes no source.
+        assert!(
+            Cli::try_parse_from([
+                "rmng", "clone", "create", "template", "--title", "t", "--source", "x"
+            ])
+            .is_err()
+        );
+    }
 
-        // The removed verbs stay removed: exact-hostname and ticket creates have no server
-        // mode behind them anymore.
+    /// The two ticket tabs: the ticket goes to the assistant unless `--no-kickoff`, and the
+    /// instructions only ride a ticket that is sent.
+    #[test]
+    fn create_ticket_and_new_ticket_parse() {
+        let cli = Cli::parse_from([
+            "rmng",
+            "clone",
+            "create",
+            "ticket",
+            "https://linear.app/x/issue/WE-142/a",
+            "--source",
+            "pega-we-1",
+            "--agent-instructions",
+            "be brief",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Create(CreateCmd::Ticket {
+                ticket,
+                source,
+                kickoff,
+                ..
+            })) => {
+                assert!(ticket.ends_with("WE-142/a"));
+                assert_eq!(source.source.as_deref(), Some("pega-we-1"));
+                assert!(!kickoff.no_kickoff);
+                assert_eq!(kickoff.agent_instructions.as_deref(), Some("be brief"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "rmng",
+                "clone",
+                "create",
+                "ticket",
+                "WE-1",
+                "--no-kickoff",
+                "--claude-instructions",
+                "x",
+            ])
+            .is_err()
+        );
+        let cli = Cli::parse_from([
+            "rmng",
+            "clone",
+            "create",
+            "new-ticket",
+            "--team",
+            "we",
+            "--title",
+            "Fix login",
+            "--priority",
+            "high",
+            "--assignee",
+            "me",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Create(CreateCmd::NewTicket {
+                title,
+                team,
+                priority,
+                assignee,
+                ..
+            })) => {
+                assert_eq!(title, "Fix login");
+                assert_eq!(team.as_deref(), Some("we"));
+                assert_eq!(priority.map(Priority::linear), Some(2));
+                assert_eq!(assignee.as_deref(), Some("me"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        // A new ticket needs a title.
+        assert!(Cli::try_parse_from(["rmng", "clone", "create", "new-ticket"]).is_err());
+    }
+
+    #[test]
+    fn create_no_ticket_forks_under_a_title() {
+        let cli = Cli::parse_from([
+            "rmng",
+            "clone",
+            "create",
+            "no-ticket",
+            "--title",
+            "ng 0c3e2998",
+            "--source",
+            "pega-we-1",
+            "--parent",
+            "pega-we-0",
+            "--message",
+            "hi",
+        ]);
+        match cli.cmd {
+            Cmd::Clone(CloneCmd::Create(CreateCmd::NoTicket {
+                title,
+                message,
+                source,
+                ..
+            })) => {
+                assert_eq!(title, "ng 0c3e2998");
+                assert_eq!(message.message.as_deref(), Some("hi"));
+                assert_eq!(source.source.as_deref(), Some("pega-we-1"));
+                assert_eq!(source.parent.as_deref(), Some("pega-we-0"));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+    }
+
+    /// The retired create verbs stay retired, and `fork --title` moved to `create no-ticket`.
+    #[test]
+    fn old_create_spellings_do_not_parse() {
         for old in [
-            vec!["rmng", "clone", "create", "w-cp"],
+            vec!["rmng", "clone", "create-plain", "--title", "t"],
             vec!["rmng", "clone", "create-from-ticket", "WE-142"],
             vec![
                 "rmng",
@@ -577,34 +835,13 @@ mod tests {
                 "--title",
                 "t",
             ],
-        ] {
-            assert!(
-                Cli::try_parse_from(&old).is_err(),
-                "removed verb `{}` should no longer parse",
-                old[2]
-            );
-        }
-
-        // The pre-rename spellings are gone, not aliased — `clone ticket` / `clone new-ticket`
-        // / `clone plain` didn't say they created anything. These verbs were only ever in
-        // unreleased commits, so there's nothing to keep working.
-        for old in [
-            vec!["rmng", "clone", "ticket", "WE-1"],
-            vec![
-                "rmng",
-                "clone",
-                "new-ticket",
-                "--team",
-                "we",
-                "--title",
-                "t",
-            ],
             vec!["rmng", "clone", "plain", "--title", "t"],
+            vec!["rmng", "clone", "fork", "pega-we-1", "--title", "t"],
         ] {
             assert!(
                 Cli::try_parse_from(&old).is_err(),
-                "old verb `{}` should no longer parse",
-                old[2]
+                "`{}` should not parse",
+                old.join(" ")
             );
         }
     }
@@ -624,43 +861,19 @@ mod tests {
             Cmd::Clone(CloneCmd::Fork {
                 source,
                 parent,
-                headless,
+                common,
                 ..
             }) => {
                 assert_eq!(source.as_deref(), Some("pega-we-1"));
                 assert_eq!(parent.as_deref(), Some("pega-we-0"));
-                assert!(headless);
+                assert!(common.headless);
             }
             other => panic!("wrong cmd: {other:?}"),
         }
-        // Omitted parent means top-level, and an omitted title means the server names the
-        // fork after its source.
+        // Omitted parent means top-level.
         let cli = Cli::parse_from(["rmng", "clone", "fork", "pega-we-1"]);
         match cli.cmd {
-            Cmd::Clone(CloneCmd::Fork { parent, title, .. }) => {
-                assert_eq!(parent, None);
-                assert_eq!(title, None);
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    /// `--title` is what lets a caller making many forks of one clone name each of them,
-    /// instead of drawing from that source's 27 letters.
-    #[test]
-    fn clone_fork_takes_a_title() {
-        let cli = Cli::parse_from([
-            "rmng",
-            "clone",
-            "fork",
-            "pega-we-1",
-            "--title",
-            "ng 0c3e2998",
-        ]);
-        match cli.cmd {
-            Cmd::Clone(CloneCmd::Fork { title, .. }) => {
-                assert_eq!(title.as_deref(), Some("ng 0c3e2998"));
-            }
+            Cmd::Clone(CloneCmd::Fork { parent, .. }) => assert_eq!(parent, None),
             other => panic!("wrong cmd: {other:?}"),
         }
     }
@@ -683,21 +896,42 @@ mod tests {
 
     #[test]
     fn clone_create_mutually_exclusive_flags() {
-        // --message ⊕ --message-file on create-plain.
-        assert!(
-            Cli::try_parse_from([
-                "rmng",
-                "clone",
-                "create-plain",
+        // --message ⊕ --message-file, --description ⊕ --description-file.
+        for args in [
+            vec![
+                "template",
                 "--title",
                 "t",
                 "--message",
                 "a",
                 "--message-file",
                 "b",
-            ])
-            .is_err()
-        );
+            ],
+            vec![
+                "no-ticket",
+                "--title",
+                "t",
+                "--message",
+                "a",
+                "--message-file",
+                "b",
+            ],
+            vec![
+                "new-ticket",
+                "--title",
+                "t",
+                "--description",
+                "a",
+                "--description-file",
+                "b",
+            ],
+        ] {
+            let argv = ["rmng", "clone", "create"].into_iter().chain(args.clone());
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{args:?} should not parse"
+            );
+        }
     }
 
     #[test]
@@ -806,25 +1040,6 @@ mod tests {
             restore.cmd,
             Cmd::Clone(CloneCmd::Restore { ref clone, .. }) if clone == "w-cp"
         ));
-    }
-
-    #[test]
-    fn create_plain_can_name_a_column() {
-        let cli = Cli::parse_from([
-            "rmng",
-            "clone",
-            "create-plain",
-            "--title",
-            "t",
-            "--column",
-            "Done",
-        ]);
-        match cli.cmd {
-            Cmd::Clone(CloneCmd::CreatePlain { common, .. }) => {
-                assert_eq!(common.column.as_deref(), Some("Done"));
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
     }
 
     #[test]

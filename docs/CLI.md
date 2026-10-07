@@ -51,7 +51,7 @@ $RMNG_CONTROL_URL` hint.
 | `board move` | the resolved `BoardColumn[]` after the move |
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
-| `clone create-plain`, `clone fork` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address) |
+| `clone create <kind>`, `clone fork` | the started `Operation` (the **terminal** `Operation` with `--wait`, plus a `clone` field holding the finished record once it has an address). The ticket kinds add `ticket: { identifier, title, url, opened }`, where `opened` says this run opened the ticket. With `--dry-run`: `{ dryRun, route, request, ticket? }` and nothing is created |
 | `clone rm`, `clone rebase`, `clone archive`, `clone restore` | the started `Operation` (the **terminal** `Operation` with `--wait`) |
 | `clone self` | the caller's `Clone` record, or exit 1 outside a clone |
 | `op wait` | the terminal `Operation` |
@@ -104,43 +104,81 @@ still move at the next rotation, whereas a pinned one cannot. The same six field
 present flat on the clone object (`claudeSelection`, `claudeAccountEmail`, `claudeGroup`, and
 the Codex twins); `accounts` is a convenience view over them, not extra data.
 
-### Creating clones — two verbs
+### Creating clones: `rmng clone create <kind>` and `rmng clone fork`
 
-Both build from a preset image: `create-plain` onto a fresh home, `fork` onto a copy of a
-clone's home (live or archived — an archived home is quiescent, so a stable template). The server names the clone and picks up whatever the flags leave open.
-Each prints the started op id (follow with `rmng op wait <op-id>`), or blocks with `--wait`.
+`rmng clone create` has one kind for each tab of the dashboard's "New clone" dialog. It sends
+the same request the dialog sends, so a clone made either way is the same.
 
-- `rmng clone create-plain --title <T> [--preset <P>]` — `--preset` is required when any
-  presets are configured.
-- `rmng clone fork [SOURCE] [--title <T>] [--preset <P>] [--claude-account <SEL>]
-  [--codex-account <SEL>] [--headless]` — an omitted source is the preset's default fork
-  clone where a managed clone still carries that id (live or archived), else the oldest
-  live forkable clone. An omitted preset keeps
-  the source's; naming one moves the fork to that preset's account pool. A selection is an
-  email (pin), `auto`, `none` (no token), or `group:<pool>`.
+| Kind | Dialog tab | What it does |
+| --- | --- | --- |
+| `create ticket <TICKET>` | Existing ticket | Looks up a Linear ticket (`WE-142` or a Linear link), moves it to In Progress, forks a clone named after it, and sends the ticket to the assistant. |
+| `create new-ticket --title <T> [--team <KEY>]` | New ticket | Opens a Linear ticket, then does what `create ticket` does. |
+| `create no-ticket --title <T>` | No ticket | Forks a clone under a title of your own. |
+| `create template --title <T> --preset <P>` | From template | Builds a clone from a preset's image onto an empty home. No fork. |
 
-**How a fork is named.** Without `--title` it is named after its source and takes the next
-free letter, so forking `pega-dev-123` gives `pega-dev-123a`, then `…b`. It also inherits the
-source's Linear ticket; with `--message`, the agent is sent that ticket's URL, which takes
-the place of the message. `--title` names it from that title instead
-(`--title 'ng 0c3e2998'` → `pega-ng-0c3e2998`) and makes it **standalone**: it inherits no
-ticket. Use `--title` when you make many forks of one clone — a source has only its 27 letters, and a retired name is never handed out
-again.
+`rmng clone fork [SOURCE]` has no dialog tab. It copies a clone as it is: the copy keeps the
+source's ticket and is named after the source (`pega-dev-123` → `pega-dev-123a`, then `…b`).
+A source has only 27 names, and a retired name is never given out again, so for many copies of
+one clone use `create no-ticket --source <clone>` with a different title each time.
 
-**Shared flags:** `--message <M>` | `--message-file <PATH>` (first message auto-sent to the
-agent; omitted ⇒ nothing is sent, even when a fork inherits a ticket), `--column <NAME>`,
-`--no-startup-script`, `--wait` `[--timeout <N>]`.
+**Flags for every kind (and `fork`).** Each is optional. What you leave out, the server
+takes from the preset, as it does for the dialog.
 
-`--column` files the new clone at the **top** of that column, by title or id. The name is
-resolved before anything is created, so a typo costs no clone. The id is written to the board
-as soon as the operation starts, which is why this needs no `--wait`: the board ignores an id
-matching no clone, and the card appears at the top the moment the clone does. Naming an
-archive column files the clone there without archiving it, since archiving something that is
-still being created would race its own creation.
+- `--group <POOL>`: the account pool both providers draw from, or `none` for every pool.
+  Omitted: the preset's pool.
+- `--claude-account <A>`, `--codex-account <A>`: an email (pin), `auto`, or `none` (no
+  token). Omitted: a fresh pick in the pool.
+- `--headless`: no desktop (see [Headed vs headless clones](#headed-vs-headless-clones)).
+- `--rebuild`: build the preset image again, with a fresh base pull.
+- `--no-startup-script`: do not run the preset's startup script.
+- `--column <NAME>`: file the new clone at the **top** of that board column, by title or
+  id. The name is checked before anything is created, so a typo costs no clone. Naming an
+  archive column files the clone there without archiving it.
+- `--wait [--timeout <N>]`: block until the clone is ready. Without it the command prints
+  the operation id; follow it with `rmng op wait <op-id>`.
+- `--dry-run`: check everything and print the request as JSON, but create nothing: no clone,
+  no ticket, no move to In Progress. A ticket is still looked up, so a wrong id shows here.
+
+**Flags for the three forking kinds** (`ticket`, `new-ticket`, `no-ticket`):
+
+- `--source <CLONE>`: the clone whose home is copied (live or archived). Omitted: the
+  preset's default fork clone, else the oldest forkable clone.
+- `--parent <CLONE>`: draw the new clone under this clone's card on the dashboard.
+
+**The two ticket kinds.**
+
+- The preset is the one whose label is the ticket's team (`WE-142` → a preset labelled
+  `WE`). `--preset <P>` picks another one. With presets configured and none labelled with
+  the team, the command stops, as the dialog does.
+- The ticket is sent to the assistant once the clone is up. `--no-kickoff` does not send it.
+  `--agent-instructions <TEXT>` adds instructions for the assistant, and
+  `--claude-instructions <TEXT>` adds instructions it passes on to Claude Code. Both are sent
+  with the ticket, so they cannot be used with `--no-kickoff`.
+- A ticket already in progress (or in review) is not moved back.
+- `new-ticket` takes `--team <KEY>` (omitted: the only team a preset is labelled with),
+  `--description <MD>` or `--description-file <PATH>` (`-` for stdin),
+  `--priority urgent|high|medium|low`, and `--assignee <email, name, or me>` (omitted: the
+  owner of the team's Linear key). The ticket goes into the team's first Todo state.
+- If the clone cannot start after `new-ticket` opened its ticket, the error names the ticket.
+  Run `rmng clone create ticket <ID>` to try again without a second ticket.
+- The Linear calls go from the CLI straight to `api.linear.app`, with the presets' keys from
+  `GET /api/config`, the same way the dashboard does. The machine needs internet access.
+
+**The two kinds without a ticket.** `--title` names the clone: `--title 'Fix login'` gives
+`<prefix>fix-login`. A second clone with the same title gets the next letter. `--message <M>`
+or `--message-file <PATH>` sends the assistant a first message; omitted, nothing is sent.
+`no-ticket` keeps the source's preset unless `--preset` names another one. `template` needs
+`--preset` when any presets are configured. `fork` also takes `--message`; when the copy has
+a ticket, the ticket link is sent instead of the message.
 
 ```sh
-rmng clone create-plain --title 'Fix the flaky login test' --preset work --wait
-rmng clone fork --preset work --message 'carry on from here'
+rmng clone create ticket WE-142 --wait
+rmng clone create new-ticket --team we --title 'Fix the flaky login test' \
+  --description-file notes.md --priority high --column 'In Progress'
+rmng clone create no-ticket --title 'Try the new parser' --source pega-dev-123 --headless
+rmng clone create template --title 'Clean base' --preset work --rebuild --wait
+rmng clone fork pega-dev-123 --parent pega-dev-123 --message 'carry on from here'
+rmng clone create ticket WE-142 --dry-run   # check first, create nothing
 ```
 
 ### `rmng clone rm <CLONE> [-y|--yes] [--wait] [--timeout <N>]`

@@ -597,6 +597,12 @@ server sends the agent its first message after the clone is up
 `firstMessage`, with both instruction fields appended. Without `kickoff` nothing is sent, not
 even for a ticket a fork inherited.
 
+The server makes no Linear calls here. A client that starts a clone for a ticket looks the
+ticket up (or opens it) and moves it to In Progress itself, with the preset keys from
+`GET /api/config`, then sends Linear's answer as `linear`. The dashboard's "New clone" dialog
+and `rmng clone create ticket|new-ticket` ([linear.rs](../crates/cli/src/linear.rs)) both
+do this.
+
 ```jsonc
 {
   "source": "pega-we-1",      // fork only; omitted = the preset's default fork clone
