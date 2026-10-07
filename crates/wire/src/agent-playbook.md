@@ -7,13 +7,15 @@ the clone id, both from the header of this message.
 
 ## Tools
 
-- `rmng desktop <clone> screenshot` saves a JPEG and prints its path. Read that file to see
-  the screen. Every action verb (`click X Y`, `double-click X Y`, `right-click X Y`,
-  `scroll AMOUNT X Y`, `key "ctrl+l"`, `type "text"`, `move-window <id> --mode maximize`) also
-  prints the path of a screenshot taken after the action. `windows` and `monitors` print JSON.
-- `rmng clone exec <clone> -- <cmd>` runs one shell command in the clone as its user.
-- `rmng clone exec -d <clone> -- <app>` starts a GUI app on the clone desktop and returns at
-  once, for example `rmng clone exec -d <clone> -- firefox`.
+You work the clone only through its desktop, with the `rmng desktop` commands that the
+header of this message lists: look with `screenshot`, then `click`, `type`, and `key`, as a
+person at the screen would. Every action prints the path of a screenshot taken after it.
+
+- **Start an app**: press `super`, type its name (`terminal`, `firefox`, `cursor`), and press
+  `Return`.
+- **Run a shell command**: type it in a terminal on the desktop, then press `Return`.
+- **Maximize the focused window**: `key "super+Up"`. **Move it to the next monitor**:
+  `key "super+shift+Right"`.
 
 ## Coordinates
 
@@ -55,8 +57,8 @@ Run `rmng desktop <clone> screenshot` and read it. Continue only when a real des
 `per` is a personal task, not coding. There is no repo and no Cursor. You give the task to
 Claude Code in a terminal; you do not do the task yourself.
 
-1. Start a terminal (`rmng clone exec -d <clone> -- ptyxis`), and put it on the
-   primary monitor at about half size.
+1. Start a terminal (press `super`, type `terminal`, press `Return`). It opens on the
+   primary monitor.
 2. Click into it, type `claude --dangerously-skip-permissions`, and press Enter.
 3. Wait until Claude Code has loaded.
 4. Type one short, single-line prompt with the ticket link, for example:
@@ -69,14 +71,14 @@ Claude Code in a terminal; you do not do the task yourself.
 Project folder by prefix: `we` → `~/Projects/stack`, `dev` → `~/Projects/Dev`,
 `hh` → `~/Projects/hyperhost`.
 
-1. Start Cursor on that folder (`rmng clone exec -d <clone> -- cursor <folder>`) and maximize
-   it on the primary monitor. Confirm with a screenshot that the project is open.
+1. Start a terminal, type `cursor <folder>`, and press `Return`. When Cursor shows, maximize
+   it (`key "super+Up"`). Confirm with a screenshot that the project is open.
 2. Press **Ctrl+Shift+Q** to open the Claude Code side panel. Wait until its logo and input
    box show. If Cursor's own agent opens instead, press the shortcut again.
 3. Send one clear, single-line prompt: pull the latest commits, switch to the branch Linear
    gives for the ticket, read the repository guidance, implement the ticket, and do not
    commit, push, or reply to Linear unless told to. Merge any additional instructions into
    the same prompt.
-4. Start Firefox with the ticket link (`rmng clone exec -d <clone> -- firefox <ticket link>`)
-   and move it off the primary monitor when there is a second one.
+4. Start Firefox, press `ctrl+l`, type the ticket link, and press `Return`. When there is a
+   second monitor, move Firefox there (`key "super+shift+Right"`).
 5. Stop when the task is handed off.

@@ -1095,9 +1095,15 @@ the `GET /api/sessions/{id}/events` SSE stream. Each clone gets one chat there, 
 first message; RMNG keeps only the chat id (`data/chats/{id}.json`, with RMNG's own notices).
 
 The first message of a new chat opens with a header, `[From RMNG]`, that names this server
-(`assistant.serverUrl`), the clone id and title, the ticket, and the playbook (global
-`agentPlaybook` + the preset's append), then `[Message]` and the operator's text. The assistant
-reaches the clone with the `rmng` CLI (`--server <serverUrl>`). The panel hides the header.
+(`assistant.serverUrl`), the clone id and title, the rules for the chat, the ticket, and the
+playbook (global `agentPlaybook` + the preset's append), then `[Message]` and the operator's
+text. The panel hides the header. The rules take precedence over the playbook: on a headed
+clone the assistant uses only `rmng --server <serverUrl> desktop <clone>` (`screenshot`,
+`click`, `type`, `key`, `scroll`, `windows`), as a person at the screen would, and runs shell
+commands in a terminal on the clone's desktop. It must not use `rmng clone exec`, `rmng ledger`
+or code of its own, and must not measure screenshots with code. A headless clone has no desktop,
+so there the assistant uses only `rmng clone exec`. See `chat_header` in
+[chat.rs](../crates/control-server/src/chat.rs).
 
 The control-server follows each chat's event stream (one connection per clone with a chat,
 reconnecting with backoff) and turns it into `ChatSnapshot`. Messages typed into the same chat
