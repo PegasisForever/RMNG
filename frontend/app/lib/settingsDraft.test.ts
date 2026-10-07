@@ -273,7 +273,7 @@ test("any group survives the round trip", () => {
   expect(patch(draft).presets[0].group).toBe("none");
 });
 
-test("the fork default is trimmed, blank means oldest", () => {
+test("the fork default is trimmed, blank means newest", () => {
   const draft = settingsDraftFrom(config());
   draft.presets = [{ ...draft.presets[0], defaultForkClone: "  pega-x  " }];
   expect(patch(draft).presets[0].defaultForkClone).toBe("pega-x");

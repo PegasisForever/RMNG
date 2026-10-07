@@ -56,7 +56,7 @@ export interface PresetDraft {
   linearKey: string;
   /** Default account pool (a pool name, `"none"` = any group). One pool feeds both sides. */
   group: string;
-  /** Default fork source (a clone id, or "" for the oldest forkable clone). */
+  /** Default fork source (a clone id, or "" for the newest live clone). */
   defaultForkClone: string;
   /** Environment variables for every clone of this preset. The server writes them into the
    *  clone's /etc/environment, which is what an SSH login, the desktop session and the agent
@@ -99,7 +99,7 @@ export function newLayoutPreset(name = ""): LayoutPresetDraft {
 }
 
 /** A blank preset row. The caller passes the pool it should point at (the first pool —
- *  a preset always names a default). No fork default: the oldest forkable clone. */
+ *  a preset always names a default). No fork default: the newest live clone. */
 export function newPreset(group = ""): PresetDraft {
   return {
     name: "",
@@ -278,7 +278,7 @@ export function settingsPatch(
         // A blank here cannot survive: it falls back to the first pool, so a preset
         // always names a default. `"none"` (any group) is sent as-is.
         group: p.group.trim() || fallback,
-        // Blank = oldest forkable clone; a stale id survives the round trip and falls
+        // Blank = newest live clone; a stale id survives the round trip and falls
         // back at use time, so renaming a clone never silently repoints a preset.
         defaultForkClone: p.defaultForkClone.trim(),
         // Sent whole, blank-key rows included: the server drops those and trims the keys, so

@@ -14,7 +14,7 @@ import type { LinearMeta } from "./LinearMeta";
 export type CloneRequest = { 
 /**
  * Fork only: the clone whose home is copied. Omitted, the preset's default fork clone
- * where it is still forkable, else the oldest forkable clone.
+ * where it is still forkable, else the newest live clone.
  */
 source?: string, 
 /**

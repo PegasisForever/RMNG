@@ -77,12 +77,12 @@ test("the hand-picked tabs open on the first preset, the new-ticket tab on its f
   expect(dialog(edit("mode", "create")).draft.team).toBe("we");
 });
 
-test("the fork source follows the preset's default clone, else the oldest", () => {
+test("the fork source follows the preset's default clone, else the newest", () => {
   const ticket = edit("ticket", "WE-142");
   expect(dialog(sources("a", "b"), ticket).draft.source).toBe("a");
   const pinned = [preset({ defaultForkClone: "b" }), ...presets.slice(1)];
   expect(dialogOf(pinned, sources("a", "b"), ticket).draft.source).toBe("b");
-  // A default naming no forkable clone falls back to the oldest.
+  // A default naming no forkable clone falls back to the newest (first) clone.
   const stale = [preset({ defaultForkClone: "gone" }), ...presets.slice(1)];
   expect(dialogOf(stale, sources("a", "b"), ticket).draft.source).toBe("a");
   // Blank until a preset resolves: nothing is forked from a guess.

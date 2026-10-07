@@ -715,7 +715,7 @@ pub struct LinearMeta {
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct CloneRequest {
     /// Fork only: the clone whose home is copied. Omitted, the preset's default fork clone
-    /// where it is still forkable, else the oldest forkable clone.
+    /// where it is still forkable, else the newest live clone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub source: Option<String>,

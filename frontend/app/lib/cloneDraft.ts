@@ -152,7 +152,7 @@ export interface CloneDialog {
  /** Config settled (loaded or failed). Empty presets before that are indistinguishable
   *  from none configured, which would flash the missing-key warning on every open. */
  configLoaded: boolean;
- /** Forkable clone ids, oldest first. */
+ /** Forkable clone ids, newest first: live clones, then archived ones. */
  sources: string[];
 }
 

@@ -27,7 +27,7 @@ linearKey: string,
  */
 group: string, 
 /**
- * Default fork source: a clone id, or empty for the oldest forkable clone.
+ * Default fork source: a clone id, or empty for the newest live clone.
  */
 defaultForkClone: string, 
 /**

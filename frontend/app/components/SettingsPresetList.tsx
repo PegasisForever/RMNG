@@ -28,7 +28,7 @@ export function SettingsPresetList({
   presets: PresetDraft[];
   /** The pools the form currently holds, so a pool renamed above is offered here. */
   groups: GroupDraft[];
-  /** Forkable clone ids, oldest first, for the default-source picker. */
+  /** Forkable clone ids, newest first, for the default-source picker. */
   forkSources: string[];
   onChange: (presets: PresetDraft[]) => void;
 }) {
@@ -183,21 +183,21 @@ function PresetCard({
           />
         </Field>
       </div>
-      {/* Default fork source for the clone modal's fork tabs. Blank = oldest forkable
+      {/* Default fork source for the clone modal's fork tabs. Blank = newest live
           clone; a stale id falls back the same way, so a deleted clone never strands
           the preset. */}
       <div className="mt-2">
         <Field label="Default fork clone (fork tabs)">
           <DropdownSelect
             rows={[
-              { value: "", label: "Oldest forkable clone" },
+              { value: "", label: "Newest live clone" },
               ...forkSources.map((id) => ({ value: id, label: id })),
               ...(p.defaultForkClone.trim() !== "" &&
               !forkSources.includes(p.defaultForkClone.trim())
                 ? [
                     {
                       value: p.defaultForkClone.trim(),
-                      label: `${p.defaultForkClone.trim()} (gone — falls back to oldest)`,
+                      label: `${p.defaultForkClone.trim()} (gone — falls back to newest)`,
                     },
                   ]
                 : []),

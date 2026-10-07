@@ -215,8 +215,9 @@ fn preset_pool(p: &Preset) -> Option<String> {
 
 /// The clone a fork copies: the one asked for, else the preset's default fork clone where a
 /// managed clone still carries that id (live or archived — an archived home is quiescent,
-/// which makes it the most stable template), else the oldest live forkable clone (clones
-/// are prepended as they are made, so the last row is the oldest survivor).
+/// which makes it the most stable template), else the newest live clone (clones are
+/// prepended as they are made, so the first live row is the newest). The dashboard and the
+/// CLI make the same pick themselves and send it as `source`.
 fn fork_source(
     st: &ControlState,
     asked: Option<String>,
@@ -516,7 +517,7 @@ mod tests {
 
     // --- which clone a fork copies --------------------------------------------------------
     #[test]
-    fn a_fork_without_a_source_takes_the_presets_default_then_the_oldest() {
+    fn a_fork_without_a_source_takes_the_presets_default_then_the_newest() {
         let mut preset_default = cfg();
         preset_default.presets[0].default_fork_clone = "pega-we-2".into();
         let st = state(vec![source("pega-we-1"), source("pega-we-2")]);
@@ -526,7 +527,7 @@ mod tests {
         };
         let got = plan(&preset_default, &st, &HashSet::new(), true, req.clone()).unwrap();
         assert_eq!(got.source.unwrap().id, "pega-we-2");
-        // A default naming no forkable clone falls back to the oldest.
+        // A default naming no forkable clone falls back to the newest (first) live clone.
         let got = plan_of(&st, true, req).unwrap();
         assert_eq!(got.source.unwrap().id, "pega-we-1");
     }

@@ -125,7 +125,7 @@ pub struct Preset {
     #[serde(default)]
     pub group: String,
     /// Default fork source for the clone modal's fork tabs: a clone id, or empty for the
-    /// oldest forkable clone. When the modal resolves a preset it auto-selects this source
+    /// newest live clone. When the modal resolves a preset it auto-selects this source
     /// (where it still exists and is forkable); the operator can always pick another.
     /// Non-secret.
     #[serde(default)]
@@ -234,7 +234,7 @@ pub struct PresetRedacted {
     /// Default account pool: a pool name, or `"none"` for any group (rmng picks whichever
     /// account is free in any pool) — not secret, shown verbatim.
     pub group: String,
-    /// Default fork source: a clone id, or empty for the oldest forkable clone.
+    /// Default fork source: a clone id, or empty for the newest live clone.
     pub default_fork_clone: String,
     /// The preset's environment variables, verbatim. The editor is the only way to set them,
     /// so it has to read back what is stored — same reasoning as `linear_key`.

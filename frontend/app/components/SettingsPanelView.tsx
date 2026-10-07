@@ -61,7 +61,7 @@ export interface SettingsPanelViewProps {
    *  in the browser — the control-server harvests the tokens off a clone that's
    *  already signed in. */
   onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
-  /** Forkable clone ids, oldest first, for the preset default-source picker. */
+  /** Forkable clone ids, newest first, for the preset default-source picker. */
   forkSources: string[];
 
   /** The last failed load or save, in the panel's own banner. */

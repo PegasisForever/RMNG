@@ -606,7 +606,7 @@ do this.
 ```jsonc
 {
   "source": "pega-we-1",      // fork only; omitted = the preset's default fork clone
-                              // where it is still forkable, else the oldest one.
+                              // where it is still forkable, else the newest live one.
   "preset": "<name>",         // required while any presets exist; a fork without one
                               // keeps its source's preset.
   "linear": {                 // the ticket this clone is for
