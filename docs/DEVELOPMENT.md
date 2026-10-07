@@ -60,7 +60,7 @@ running server's payloads; there's no manual redeploy step.
 | [template/gnome-patch](../template/gnome-patch/README.md) | tooling | builds the patched gnome-shell `.deb` (hide screen-share indicator + enable `Eval` for window-mgmt); built + installed by `template/Dockerfile`'s `gnome-build` stage into the published clone template — not a control-server payload |
 
 The web UI's per-clone chat panel talks to an outside **assistant** (a pi-web server, set in
-Settings → Assistant), not to a process inside the clone. The assistant drives the clone
+Settings → Presets → Assistant), not to a process inside the clone. The assistant drives the clone
 remotely with the `rmng` CLI; its default playbook is
 [crates/wire/src/agent-playbook.md](../crates/wire/src/agent-playbook.md). See
 [API.md](API.md#per-clone-assistant-chat).

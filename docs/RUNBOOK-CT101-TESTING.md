@@ -121,7 +121,7 @@ Two traps here.
 1. The template image lags the repo. It is rebuilt by `scripts/publish-template.sh`, so a
    change to `template/setup/*.sh` does not reach a new clone until that runs. The
    reconciler is what fixes an existing clone.
-2. The chat panel needs Settings → Assistant filled in: `url` (the pi-web server) and
+2. The chat panel needs Settings → Presets → Assistant filled in: `url` (the pi-web server) and
    `serverUrl` (this server as the assistant reaches it, here `http://10.0.0.178:9000`).
    Without them `POST /api/chat/:id` answers `409` and says which address is missing.
 

@@ -1,4 +1,4 @@
-//! Per-clone chat with the assistant: a pi-web server (Settings → Assistant). Each clone has
+//! Per-clone chat with the assistant: a pi-web server (Settings → Presets → Assistant). Each clone has
 //! one chat there, created by its first message; the chat's id is kept in
 //! `data/chats/<id>.json`. The assistant owns the conversation. RMNG keeps one event-stream
 //! subscription per chat ([`ensure_listener`]) and folds it into the
@@ -79,7 +79,7 @@ fn assistant_url(app: &App) -> Result<String, String> {
         .trim_end_matches('/')
         .to_string();
     if url.is_empty() {
-        return Err("No assistant is set. Add its URL in Settings → Assistant.".into());
+        return Err("No assistant is set. Add its URL in Settings → Presets → Assistant.".into());
     }
     Ok(url)
 }
@@ -397,7 +397,9 @@ fn clip_activity(s: &str) -> String {
 fn chat_header(cfg: &wire::AppConfig, host: &RmngClone) -> Result<String, String> {
     let server = cfg.assistant.server_url.trim().trim_end_matches('/');
     if server.is_empty() {
-        return Err("This server's address is not set. Add it in Settings → Assistant.".into());
+        return Err(
+            "This server's address is not set. Add it in Settings → Presets → Assistant.".into(),
+        );
     }
     let mut h = format!(
         "{HEADER_MARK} This chat is for one RMNG clone. Reach it with the `rmng` CLI and pass \

@@ -1083,7 +1083,7 @@ frontend's `postJson` reads); `swap` returns a plain string, like the clone-life
 ## Per-clone assistant chat
 
 The chat panel talks to an outside assistant: a pi-web server whose
-origin is `assistant.url` in the config (Settings → Assistant). RMNG uses only its chat routes:
+origin is `assistant.url` in the config (Settings → Presets → Assistant). RMNG uses only its chat routes:
 `POST /api/sessions`, `POST /api/sessions/{id}/message`, `POST /api/sessions/{id}/abort`, and
 the `GET /api/sessions/{id}/events` SSE stream. Each clone gets one chat there, created by its
 first message; RMNG keeps only the chat id (`data/chats/{id}.json`, with RMNG's own notices).
