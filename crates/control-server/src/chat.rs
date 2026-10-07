@@ -951,7 +951,17 @@ fn bubble(m: &Value) -> Option<(ChatRole, String, i64)> {
     }
 }
 
+/// Add a bubble unless the same message is already shown. A chat's first message is in the
+/// snapshot the stream opens with and can also arrive as the run's own `message_start` right
+/// after it; pi stamps both with one timestamp, so role, time and text name one message.
 fn push_bubble(live: &mut Live, (role, text, ts): (ChatRole, String, i64)) {
+    if live
+        .messages
+        .iter()
+        .any(|m| m.role == role && m.ts == ts && m.text == text)
+    {
+        return;
+    }
     let id = format!("a{}", live.messages.len());
     live.messages.push(ChatMessage { id, role, text, ts });
 }
@@ -1283,6 +1293,18 @@ mod tests {
 
         cfg.assistant.server_url = " ".into();
         assert!(chat_header(&cfg, &host).is_err());
+    }
+
+    /// The first message shows once, though it arrives in the snapshot and as an event.
+    #[test]
+    fn a_message_in_the_snapshot_and_an_event_shows_once() {
+        let mut live = Live::default();
+        push_bubble(&mut live, (ChatRole::User, "go".into(), 7));
+        push_bubble(&mut live, (ChatRole::User, "go".into(), 7));
+        assert_eq!(live.messages.len(), 1);
+        // The same words sent again later are a new message.
+        push_bubble(&mut live, (ChatRole::User, "go".into(), 9));
+        assert_eq!(live.messages.len(), 2);
     }
 
     #[test]
