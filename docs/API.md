@@ -961,7 +961,7 @@ network, which is what makes that acceptable.
 Everything else is returned verbatim — ports, `layoutPresets`/`activeLayout`, the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
 socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`,
-`agentPlaybook` (the editable assistant playbook seeded with the shipped default and written into
+`agentPlaybook` (the person's ticket procedure for the assistant, seeded with the shipped default and written into
 the first message of each new assistant chat — non-secret; a preset's optional `agentPlaybook`
 append rides along in each `presets` row), `assistant` (`{url, serverUrl}`: the chat panel's
 pi-web server and this server's address as that assistant reaches it),
@@ -1094,15 +1094,13 @@ origin is `assistant.url` in the config (Settings → Presets → Assistant). RM
 the `GET /api/sessions/{id}/events` SSE stream. Each clone gets one chat there, created by its
 first message; RMNG keeps only the chat id (`data/chats/{id}.json`, with RMNG's own notices).
 
-The first message of a new chat opens with a header, `[From RMNG]`, that names this server
-(`assistant.serverUrl`), the clone id and title, the rules for the chat, the ticket, and the
-playbook (global `agentPlaybook` + the preset's append), then `[Message]` and the operator's
-text. The panel hides the header. The rules take precedence over the playbook: on a headed
-clone the assistant uses only `rmng --server <serverUrl> desktop <clone>` (`screenshot`,
-`click`, `type`, `key`, `scroll`, `windows`), as a person at the screen would, and runs shell
-commands in a terminal on the clone's desktop. It must not use `rmng clone exec`, `rmng ledger`
-or code of its own, and must not measure screenshots with code. A headless clone has no desktop,
-so there the assistant uses only `rmng clone exec`. See `chat_header` in
+The first message of a new chat opens with a header, `[From RMNG]`, then `[Message]` and the
+operator's text. The panel hides the header. The header holds only what is particular to the
+chat: this server (`assistant.serverUrl`), the clone id and title, the ticket, the scope (a
+headed clone is worked only through `rmng --server <serverUrl> desktop <clone>`, a headless one
+only through `rmng clone exec`), and the person's playbook (global `agentPlaybook` + the
+preset's append). How to drive a desktop with `rmng` is the assistant's own knowledge, and the
+ticket procedure is the playbook's. See `chat_header` in
 [chat.rs](../crates/control-server/src/chat.rs).
 
 The control-server follows each chat's event stream (one connection per clone with a chat,

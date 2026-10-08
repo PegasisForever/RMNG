@@ -392,8 +392,11 @@ fn clip_activity(s: &str) -> String {
 
 // --- the first message's header ---------------------------------------------
 
-/// What opens a new chat: the server and clone it is for, and the playbook. Errs when this
-/// server's own address is not set, because without it the assistant cannot reach the clone.
+/// What opens a new chat: the facts of this chat (server, clone, ticket), its scope, and the
+/// person's playbook. Only what is particular to this chat belongs here. How to drive a
+/// desktop with `rmng` is the assistant's own knowledge (its instructions, and
+/// `rmng desktop --help`); the ticket procedure is the playbook's. Errs when this server's
+/// own address is not set, because without it the assistant cannot reach the clone.
 fn chat_header(cfg: &wire::AppConfig, host: &RmngClone) -> Result<String, String> {
     let server = cfg.assistant.server_url.trim().trim_end_matches('/');
     if server.is_empty() {
@@ -403,7 +406,7 @@ fn chat_header(cfg: &wire::AppConfig, host: &RmngClone) -> Result<String, String
     }
     let c = &host.id;
     let mut h = format!(
-        "{HEADER_MARK} This chat is for one RMNG clone.\nRMNG server: {server}\nClone: {c}"
+        "{HEADER_MARK} This chat is about one RMNG clone.\nRMNG server: {server}\nClone: {c}"
     );
     if let Some(title) = host
         .display_name
@@ -413,76 +416,33 @@ fn chat_header(cfg: &wire::AppConfig, host: &RmngClone) -> Result<String, String
     {
         h += &format!(" ({title})");
     }
-    h += "\n\n";
-    h += &if host.headless {
-        headless_rules(server, c)
-    } else {
-        desktop_rules(server, c)
-    };
     if let Some(url) = host
         .linear_ticket_url
         .as_deref()
         .filter(|s| !s.trim().is_empty())
     {
-        h += &format!("\n\nTicket: {url}");
+        h += &format!("\nTicket: {url}");
     }
+    // The scope. Without it the assistant did the steps in the clone's shell, searched the
+    // ledger, and measured screenshots with code.
+    h += &if host.headless {
+        format!(
+            "\n\nThe clone is headless: it has no desktop. Work it only with \
+             `rmng --server {server} clone exec {c} -- <command>`, and use no other command."
+        )
+    } else {
+        format!(
+            "\n\nWork this clone only through its desktop, with \
+             `rmng --server {server} desktop {c} <action>`, as a person at the screen would. \
+             Use no other command."
+        )
+    };
     let preset = crate::clone_reconcile::preset_for_clone(cfg, host);
     let playbook = crate::web::compose_playbook(cfg, preset);
     if !playbook.is_empty() {
-        h += &format!("\n\nPlaybook for this clone, from the RMNG settings:\n\n{playbook}");
+        h += &format!("\n\nThe person's playbook for this clone:\n\n{playbook}");
     }
     Ok(h)
-}
-
-/// How the assistant works a headed clone: through its desktop, the way a person at the
-/// screen would, and nothing else. Said in the first message rather than left to the
-/// assistant's own instructions, because it overrides playbooks written for the old in-clone
-/// agent (which ran inside the clone, with a shell). Without it the assistant measured
-/// screenshots with Python, searched the ledger, and did the steps in a shell.
-fn desktop_rules(server: &str, c: &str) -> String {
-    let r = format!("rmng --server {server} desktop {c}");
-    format!(
-        "Work this clone through its desktop, as a person at the screen would. These are \
-         the only commands to use. In them, <S> is `999x999` if you are Medi GPT, and \
-         `native` otherwise:\n\
-         - `{r} screenshot --resolution 1920x1080`: prints the path of a JPEG of the screen, \
-         at most 1920×1080. Read that file.\n\
-         - `{r} click X Y --resolution 1920x1080 --cursor-coordinate-space <S>` (also \
-         `double-click`, `right-click`). With `999x999`, X and Y are on a 0–999 grid over \
-         the screenshot (`0 0` top-left, `999 999` bottom-right); with `native`, they are \
-         pixels of the screenshot.\n\
-         - `{r} type \"text\" --resolution 1920x1080`\n\
-         - `{r} key \"ctrl+l\" --resolution 1920x1080`: X key names, case-sensitive \
-         (`Return`, `Escape`, `Tab`, `BackSpace`, `Up`, `F5`), joined with `ctrl`, `shift`, \
-         `alt`, `super`.\n\
-         - `{r} scroll N X Y --resolution 1920x1080 --cursor-coordinate-space <S>`: N \
-         notches, positive is down.\n\
-         - `{r} windows`: the open windows.\n\
-         \n\
-         Rules. They take precedence over the playbook below:\n\
-         - Do every step on the desktop: click, type, press keys. To run a shell command, \
-         open a terminal on the desktop (or VS Code's terminal) and type it there. Where the \
-         playbook says to use the `desktop` tool or `mcp__desktop__*`, use the commands \
-         above; where it says to use a shell, `setsid`, or the command line, use the desktop.\n\
-         - Use no other command: no `rmng clone exec`, `rmng ledger`, `rmng guide`, and no \
-         code of your own. Besides these commands, only read the screenshot files.\n\
-         - Read each screenshot yourself and click what you see. Never crop, zoom, or \
-         measure a screenshot with code (Python, PIL, ImageMagick). If you are not sure of \
-         a small target, click your best estimate, then correct it.\n\
-         - Every action prints the path of a screenshot taken after it. Read it to check the \
-         result. Take a new screenshot only when the screen was still loading.\n\
-         - Keep replies short: the person watches the same screen."
-    )
-}
-
-/// A headless clone has no desktop, so its shell is the only way in.
-fn headless_rules(server: &str, c: &str) -> String {
-    format!(
-        "The clone is headless: it has no desktop. Work it only with \
-         `rmng --server {server} clone exec {c} -- <command>`. Where the playbook says to \
-         use the `desktop` tool, there is none: do that step in the shell. Use no other \
-         `rmng` command. Keep replies short."
-    )
 }
 
 /// A user message as the panel shows it: without the header of the chat's first message.
@@ -1263,12 +1223,13 @@ mod tests {
         );
     }
 
-    /// A headed clone's chat is told to use the desktop and nothing else, over whatever the
-    /// playbook says; a headless one, which has no desktop, gets its shell instead.
+    /// The header carries this chat's facts and scope, and nothing about how to drive a
+    /// desktop: that is the assistant's own knowledge.
     #[test]
-    fn the_header_keeps_the_assistant_on_the_desktop() {
+    fn the_header_has_the_chats_facts_and_scope() {
         let mut cfg = wire::AppConfig::default();
         cfg.assistant.server_url = "http://10.0.0.129:9000/".into();
+        cfg.agent_playbook = "Do X.".into();
         let mut host = RmngClone {
             id: "pega-we-142".into(),
             display_name: Some("Fix login".into()),
@@ -1277,30 +1238,28 @@ mod tests {
         };
         let h = chat_header(&cfg, &host).unwrap();
         assert!(h.starts_with(HEADER_MARK));
-        assert!(h.contains("Clone: pega-we-142 (Fix login)"), "{h}");
+        assert!(h.contains("RMNG server: http://10.0.0.129:9000\n"), "{h}");
         assert!(
-            h.contains(
-                "`rmng --server http://10.0.0.129:9000 desktop pega-we-142 click X Y \
-                 --resolution 1920x1080 --cursor-coordinate-space <S>`"
-            ),
-            "{h}"
-        );
-        assert!(h.contains("<S> is `999x999` if you are Medi GPT"), "{h}");
-        assert!(h.contains("take precedence over the playbook"), "{h}");
-        assert!(h.contains("no `rmng clone exec`, `rmng ledger`"), "{h}");
-        assert!(
-            h.contains("Never crop, zoom, or measure a screenshot"),
+            h.contains("Clone: pega-we-142 (Fix login)\nTicket: https://linear.app/x/issue/WE-142"),
             "{h}"
         );
         assert!(
-            h.contains("Ticket: https://linear.app/x/issue/WE-142"),
+            h.contains("only through its desktop, with `rmng --server http://10.0.0.129:9000 desktop pega-we-142 <action>`"),
             "{h}"
+        );
+        assert!(
+            h.ends_with("The person's playbook for this clone:\n\nDo X."),
+            "{h}"
+        );
+        assert!(
+            !h.contains("--resolution"),
+            "how to drive a desktop is not the header's: {h}"
         );
 
         host.headless = true;
         let h = chat_header(&cfg, &host).unwrap();
         assert!(h.contains("clone exec pega-we-142 -- <command>"), "{h}");
-        assert!(!h.contains("desktop pega-we-142 click"), "{h}");
+        assert!(!h.contains("through its desktop"), "{h}");
 
         cfg.assistant.server_url = " ".into();
         assert!(chat_header(&cfg, &host).is_err());

@@ -184,12 +184,12 @@ export function PresetsPane({
         />
       </Section>
 
-      {/* Layer b: how the assistant drives a clone + the ticket procedure, sent in the first
-          message of each new assistant chat. */}
+      {/* Layer b: the person's ticket procedure, sent in the first message of each new
+          assistant chat. */}
       <Section
         title="Assistant playbook (all presets)"
         effect="immediate"
-        hint="How the assistant drives a clone (through the rmng CLI) and the ticket procedure. Sent, with the preset's append, in the first message of each new assistant chat. Not given to Claude/Codex. A chat that already started keeps what it was sent."
+        hint="Your ticket procedure for the assistant: what to do with a ticket, and app quirks. How to drive a desktop is the assistant's own knowledge, so leave it out. Sent, with the preset's append, in the first message of each new assistant chat. Not given to Claude/Codex. A chat that already started keeps what it was sent."
       >
         <textarea
           value={draft.agentPlaybook}
