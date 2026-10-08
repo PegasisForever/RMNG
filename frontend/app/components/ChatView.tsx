@@ -117,14 +117,21 @@ const MARKDOWN: Components = {
   td: ({ children }) => <td className="border border-slate-300 px-1.5 py-0.5 dark:border-slate-600">{children}</td>,
 };
 
+/** The server's id for a message sent while the assistant worked, until the assistant takes
+ *  it in at its next step. */
+export function isQueued(m: ChatMessage): boolean {
+  return m.id.startsWith("queued-");
+}
+
 function Bubble({ m }: { m: ChatMessage }) {
   const isUser = m.role === "user";
+  const queued = isQueued(m);
   return (
-    <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+    <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
       <div
         className={`max-w-[88%] min-w-0 break-words rounded-2xl px-3 py-2 text-sm ${
           isUser
-            ? "whitespace-pre-wrap bg-emerald-600 text-white"
+            ? `whitespace-pre-wrap bg-emerald-600 text-white ${queued ? "opacity-60" : ""}`
             : "border border-slate-200 bg-white text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
         }`}
       >
@@ -136,6 +143,11 @@ function Bubble({ m }: { m: ChatMessage }) {
           </Markdown>
         )}
       </div>
+      {queued ? (
+        <span className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
+          Queued: the assistant reads it at its next step
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -296,11 +308,13 @@ export function ChatView({
                 ? "Unarchive to message the assistant"
                 : picking
                   ? "Message to deliver later…  (Enter to schedule)"
-                  : "Message the assistant…  (Enter to send)"
+                  : busy
+                    ? "Steer the assistant while it works…  (Enter to send)"
+                    : "Message the assistant…  (Enter to send)"
             }
-            // Typing stays enabled while the picker is open even mid-turn: scheduling *during*
-            // a busy turn is the case the feature exists for.
-            disabled={archived || (busy && !picking)}
+            // Typing stays enabled while the assistant works: a message then steers it, the
+            // way a new Slack message in its thread does.
+            disabled={archived}
             className="min-w-0 flex-1 resize-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none disabled:opacity-60 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
           />
           <button
@@ -328,33 +342,36 @@ export function ChatView({
             >
               <CalendarClock className="size-4" />
             </button>
-          ) : busy && !archived ? (
-            <button
-              type="button"
-              onClick={onStop}
-              disabled={stopping}
-              title={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
-              aria-label={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
-              className="shrink-0 rounded-md bg-red-600 p-2 text-white hover:bg-red-700 disabled:opacity-50"
-            >
-              {/* The spinner is the only way an icon-only button can say the stop is in
-                  flight, now that "Stopping…" is not there to read. */}
-              {stopping ? (
-                <LoaderCircle className="size-4 animate-spin" />
-              ) : (
-                <Square className="size-4 fill-current" />
-              )}
-            </button>
           ) : (
-            <button
-              type="submit"
-              disabled={archived || !input.trim()}
-              title="Send this message"
-              aria-label="Send this message"
-              className="shrink-0 rounded-md bg-emerald-600 p-2 text-white hover:bg-emerald-700 disabled:opacity-40"
-            >
-              <SendHorizontal className="size-4" />
-            </button>
+            <>
+              {busy && !archived ? (
+                <button
+                  type="button"
+                  onClick={onStop}
+                  disabled={stopping}
+                  title={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
+                  aria-label={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
+                  className="shrink-0 rounded-md bg-red-600 p-2 text-white hover:bg-red-700 disabled:opacity-50"
+                >
+                  {/* The spinner is the only way an icon-only button can say the stop is in
+                      flight, now that "Stopping…" is not there to read. */}
+                  {stopping ? (
+                    <LoaderCircle className="size-4 animate-spin" />
+                  ) : (
+                    <Square className="size-4 fill-current" />
+                  )}
+                </button>
+              ) : null}
+              <button
+                type="submit"
+                disabled={archived || !input.trim()}
+                title={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
+                aria-label={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
+                className="shrink-0 rounded-md bg-emerald-600 p-2 text-white hover:bg-emerald-700 disabled:opacity-40"
+              >
+                <SendHorizontal className="size-4" />
+              </button>
+            </>
           )}
         </div>
       </form>

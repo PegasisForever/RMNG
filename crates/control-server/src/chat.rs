@@ -38,10 +38,14 @@ pub struct ChatState {
     /// Clones whose message was sent but not yet confirmed by the stream. Keeps the panel
     /// busy across the gap between the POST and the assistant's first event.
     sending: Mutex<HashMap<String, Instant>>,
-    /// The message just sent, per clone, until the assistant's stream shows it. The panel
-    /// shows it at once; without this the update that turns the panel busy would come
-    /// without it, and it would appear a second later, under the "working" line.
-    pending: Mutex<HashMap<String, Pending>>,
+    /// Messages sent but not yet shown by the assistant's stream, per clone, oldest first.
+    /// The panel shows each at once. Without this, the update that turns the panel busy
+    /// came without the message, which appeared a second later under the "working" line; and
+    /// a message sent while the assistant works (steering) waits in pi's queue until the
+    /// agent's next step.
+    pending: Mutex<HashMap<String, Vec<Pending>>>,
+    /// Numbers the pending messages, so a failed delivery removes its own and no other.
+    pending_seq: std::sync::atomic::AtomicU64,
     listeners: Mutex<HashSet<String>>,
     /// Serialises the read-modify-write of `data/schedules/<id>.json`. The HTTP handlers and
     /// the scheduler tick both mutate those files, and a lost update there means a message the
@@ -51,8 +55,9 @@ pub struct ChatState {
 }
 
 /// A sent message the stream has not shown yet. `seen` is how many user messages with the
-/// same text the thread had when it was sent, so an earlier identical message does not count
-/// as its echo.
+/// same text the thread had, or was waiting for, when it was sent, so an earlier identical
+/// message does not count as its echo. Its id is `queued-<n>` when it was sent while the
+/// assistant worked (the panel marks it as waiting), else `pending-<n>`.
 struct Pending {
     message: ChatMessage,
     seen: usize,
@@ -60,8 +65,12 @@ struct Pending {
 }
 
 /// A pending message is dropped after this long even with no echo, so a stream that never
-/// shows it cannot leave a ghost bubble.
-const PENDING_MAX: Duration = Duration::from_secs(120);
+/// shows it cannot leave a ghost bubble. Long, because a steered message waits for the
+/// agent's current step, which can be a long tool call.
+const PENDING_MAX: Duration = Duration::from_secs(15 * 60);
+/// When a run settles, pi has nothing left in its queue: a message sent before this was
+/// either shown or dropped (an abort clears the queue).
+const SETTLE_GRACE: Duration = Duration::from_secs(5);
 
 fn user_count(messages: &[ChatMessage], text: &str) -> usize {
     messages
@@ -70,21 +79,23 @@ fn user_count(messages: &[ChatMessage], text: &str) -> usize {
         .count()
 }
 
-/// Drop the pending message once the thread shows it.
-fn settle_pending(app: &App, id: &str) {
-    let mut pending = app.chat.pending.lock().unwrap();
-    let Some(p) = pending.get(id) else {
+/// Drop the pending messages the thread now shows. `settled`: the run is over, so ones sent
+/// a while ago will not be shown any more.
+fn settle_pending(app: &App, id: &str, settled: bool) {
+    let mut all = app.chat.pending.lock().unwrap();
+    let Some(list) = all.get_mut(id) else {
         return;
     };
-    let shown = app
-        .chat
-        .live
-        .lock()
-        .unwrap()
-        .get(id)
-        .is_some_and(|l| user_count(&l.messages, &p.message.text) > p.seen);
-    if shown || p.at.elapsed() > PENDING_MAX {
-        pending.remove(id);
+    let live = app.chat.live.lock().unwrap();
+    let shown = |p: &Pending| {
+        live.get(id)
+            .is_some_and(|l| user_count(&l.messages, &p.message.text) > p.seen)
+    };
+    list.retain(|p| {
+        !shown(p) && p.at.elapsed() <= PENDING_MAX && !(settled && p.at.elapsed() > SETTLE_GRACE)
+    });
+    if list.is_empty() {
+        all.remove(id);
     }
 }
 
@@ -369,10 +380,12 @@ pub fn snapshot_json(app: &App, host_id: &str) -> String {
     messages.sort_by_key(|m| m.ts);
     // Last, whatever its clock says: it is the newest message, and the assistant's clock may
     // differ from this server's.
-    if let Some(p) = app.chat.pending.lock().unwrap().get(host_id) {
-        if p.at.elapsed() <= PENDING_MAX {
-            messages.push(p.message.clone());
-        }
+    if let Some(list) = app.chat.pending.lock().unwrap().get(host_id) {
+        messages.extend(
+            list.iter()
+                .filter(|p| p.at.elapsed() <= PENDING_MAX)
+                .map(|p| p.message.clone()),
+        );
     }
     let busy = live_busy || is_sending(app, host_id);
     let snap = ChatSnapshot {
@@ -530,11 +543,16 @@ pub fn send_chat(app: &App, host: &RmngClone, text: &str) -> Result<(), String> 
     if text.is_empty() {
         return Err("empty message".into());
     }
-    if is_busy(app, &host.id) {
-        return Err("the assistant is still working on this clone's last message".into());
-    }
     let base = assistant_url(app)?;
     let session = load_chat(&app.data_dir(), &host.id).session_id;
+    // A message while the assistant works steers it: pi-web queues it into the run. Only the
+    // very first message must land alone, because it is the one that creates the chat.
+    if session.is_none() && is_sending(app, &host.id) {
+        return Err(
+            "the first message is still on its way to the assistant; send again in a moment".into(),
+        );
+    }
+    let steer = is_busy(app, &host.id);
     let message = match session {
         Some(_) => text.to_string(),
         None => format!("{}{MESSAGE_MARK}{text}", chat_header(&app.config(), host)?),
@@ -544,29 +562,37 @@ pub fn send_chat(app: &App, host: &RmngClone, text: &str) -> Result<(), String> 
         .lock()
         .unwrap()
         .insert(host.id.clone(), Instant::now());
-    let seen = app
+    let n = app
         .chat
-        .live
-        .lock()
-        .unwrap()
-        .get(&host.id)
-        .map_or(0, |l| user_count(&l.messages, text));
-    app.chat.pending.lock().unwrap().insert(
-        host.id.clone(),
-        Pending {
+        .pending_seq
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = format!("{}-{n}", if steer { "queued" } else { "pending" });
+    {
+        let mut all = app.chat.pending.lock().unwrap();
+        let list = all.entry(host.id.clone()).or_default();
+        let seen = app
+            .chat
+            .live
+            .lock()
+            .unwrap()
+            .get(&host.id)
+            .map_or(0, |l| user_count(&l.messages, text))
+            + list.iter().filter(|p| p.message.text == text).count();
+        list.push(Pending {
             message: ChatMessage {
-                id: "pending".into(),
+                id: pid.clone(),
                 role: ChatRole::User,
                 text: text.to_string(),
                 ts: now_ms(),
             },
             seen,
             at: Instant::now(),
-        },
-    );
+        });
+    }
     broadcast(app, &host.id);
     let (app, host, text) = (app.clone(), host.clone(), text.to_string());
     tokio::spawn(async move {
+        let pid = pid;
         if let Err(e) = deliver(&app, &host, &base, session, message).await {
             tracing::warn!(
                 "chat: message for {} did not reach the assistant: {e}",
@@ -574,7 +600,9 @@ pub fn send_chat(app: &App, host: &RmngClone, text: &str) -> Result<(), String> 
             );
             clear_sending(&app, &host.id);
             // The notice below quotes it, so the bubble goes.
-            app.chat.pending.lock().unwrap().remove(&host.id);
+            if let Some(list) = app.chat.pending.lock().unwrap().get_mut(&host.id) {
+                list.retain(|p| p.message.id != pid);
+            }
             push_notice(
                 &app,
                 &host.id,
@@ -791,9 +819,15 @@ fn tick_schedules(app: &App) {
                 );
             }
             Some(host) => {
-                // One per tick: `send_chat` refuses while a turn is in flight, so the rest of
-                // the queue is naturally retried on later ticks in `at` order.
-                if let Some(m) = due.first() {
+                // One per tick, and only while the assistant is idle: a scheduled message
+                // starts a turn of its own rather than steering one in flight. The rest of the
+                // queue is retried on later ticks in `at` order.
+                if is_busy(app, &id) {
+                    tracing::debug!(
+                        "clone {id} is busy; {} scheduled message(s) wait",
+                        due.len()
+                    );
+                } else if let Some(m) = due.first() {
                     match send_chat(app, &host, &m.text) {
                         Ok(()) => fired.push(m.id.clone()),
                         Err(e) => {
@@ -1024,7 +1058,7 @@ fn apply_snapshot(app: &App, id: &str, data: &str) {
         }
     }
     app.chat.live.lock().unwrap().insert(id.to_string(), live);
-    settle_pending(app, id);
+    settle_pending(app, id, !busy);
     if busy {
         clear_sending(app, id);
         app.activity.mark(id, crate::clone_ops::now_ms());
@@ -1038,6 +1072,7 @@ fn apply_event(app: &App, id: &str, data: &str) {
         return;
     };
     let role = ev["message"]["role"].as_str();
+    let settled = ev["type"] == "agent_settled";
     let busy = {
         let mut all = app.chat.live.lock().unwrap();
         let live = all.entry(id.to_string()).or_default();
@@ -1079,7 +1114,7 @@ fn apply_event(app: &App, id: &str, data: &str) {
         live.busy
     };
     clear_sending(app, id);
-    settle_pending(app, id);
+    settle_pending(app, id, settled);
     if busy {
         app.activity.mark(id, crate::clone_ops::now_ms());
     }
@@ -1345,13 +1380,22 @@ mod tests {
         let app = App::test_app();
         let pend = |text: &str, seen| Pending {
             message: ChatMessage {
-                id: "pending".into(),
+                id: "pending-1".into(),
                 role: ChatRole::User,
                 text: text.into(),
                 ts: 1,
             },
             seen,
             at: Instant::now(),
+        };
+        let add = |app: &App, p: Pending| {
+            app.chat
+                .pending
+                .lock()
+                .unwrap()
+                .entry("c1".into())
+                .or_default()
+                .push(p)
         };
         let texts = |app: &App| -> Vec<String> {
             let v: Value = serde_json::from_str(&snapshot_json(app, "c1")).unwrap();
@@ -1366,11 +1410,7 @@ mod tests {
             json!({"type":"message_start","message":{"role":"user","timestamp":ts,"content":text}})
                 .to_string()
         };
-        app.chat
-            .pending
-            .lock()
-            .unwrap()
-            .insert("c1".into(), pend("go", 0));
+        add(&app, pend("go", 0));
         assert_eq!(texts(&app), ["go"]);
         // A run starting is not the echo: the message stays.
         apply_event(&app, "c1", &json!({"type":"agent_start"}).to_string());
@@ -1379,16 +1419,72 @@ mod tests {
         assert_eq!(texts(&app), ["go"], "shown once, not twice");
         assert!(app.chat.pending.lock().unwrap().is_empty());
 
-        // The same words again: the earlier copy is not this one's echo.
+        // Two steered while it works, the second with the same words as the first message:
+        // each stays until the agent takes it in, in order.
+        add(&app, pend("left", 0));
+        add(&app, pend("go", 1));
+        assert_eq!(texts(&app), ["go", "left", "go"]);
+        apply_event(&app, "c1", &user("left", 9_000_000_000_001));
+        assert_eq!(texts(&app), ["go", "left", "go"]);
+        assert_eq!(app.chat.pending.lock().unwrap()["c1"].len(), 1);
+        apply_event(&app, "c1", &user("go", 9_000_000_000_002));
+        assert_eq!(texts(&app), ["go", "left", "go"]);
+        assert!(app.chat.pending.lock().unwrap().is_empty());
+
+        // A run that settles takes nothing more in: an old leftover goes (an abort cleared
+        // pi's queue), and one sent just now stays for the run it starts.
+        let mut old = pend("lost", 0);
+        old.at = Instant::now() - SETTLE_GRACE - Duration::from_secs(1);
+        add(&app, old);
+        add(&app, pend("next", 0));
+        apply_event(&app, "c1", &json!({"type":"agent_settled"}).to_string());
+        assert_eq!(texts(&app), ["go", "left", "go", "next"]);
+    }
+
+    /// A message while the assistant works is sent (pi-web steers it in), not refused; only
+    /// a second message before the chat exists must wait. The scheduler still waits for an
+    /// idle assistant.
+    #[tokio::test]
+    async fn a_message_while_the_assistant_works_is_sent() {
+        let app = App::test_app();
+        {
+            let mut c = app.cfg.write().unwrap();
+            // Nothing listens here: delivery fails, which this test does not look at.
+            c.assistant.url = "http://127.0.0.1:9".into();
+            c.assistant.server_url = "http://10.0.0.129:9000".into();
+        }
+        let host = RmngClone {
+            id: "c1".into(),
+            host: "c1".into(),
+            ..Default::default()
+        };
+        app.store.mutate(|s| s.hosts.push(host.clone()));
+        let dd = app.data_dir();
+
+        // No chat yet: the first message is on its way, a second one waits.
+        send_chat(&app, &host, "first").unwrap();
+        assert!(send_chat(&app, &host, "second").is_err());
+
+        // A chat that exists and is working: the message goes, marked as queued.
+        let mut chat = load_chat(&dd, "c1");
+        chat.session_id = Some("s1".into());
+        save_chat(&dd, "c1", &chat);
         app.chat
-            .pending
+            .live
             .lock()
             .unwrap()
-            .insert("c1".into(), pend("go", 1));
-        assert_eq!(texts(&app), ["go", "go"]);
-        apply_event(&app, "c1", &user("go", 9_000_000_000_001));
-        assert_eq!(texts(&app), ["go", "go"]);
-        assert!(app.chat.pending.lock().unwrap().is_empty());
+            .entry("c1".into())
+            .or_default()
+            .busy = true;
+        app.chat.pending.lock().unwrap().clear();
+        send_chat(&app, &host, "turn left").unwrap();
+        let v: Value = serde_json::from_str(&snapshot_json(&app, "c1")).unwrap();
+        let last = v["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["text"], "turn left");
+        assert!(
+            last["id"].as_str().unwrap().starts_with("queued-"),
+            "{last}"
+        );
     }
 
     /// The first message shows once, though it arrives in the snapshot and as an event.

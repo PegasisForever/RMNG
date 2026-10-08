@@ -79,10 +79,25 @@ export const Loading: Story = {
   args: { loading: true, messages: [], scheduled: [] },
 };
 
-/** Mid-turn. The working bubble carries the agent's current tool line, the composer locks,
- *  and Stop takes the send button's place. */
+/** Mid-turn. The working bubble carries the agent's current tool line. The composer stays
+ *  open: Stop sits next to Send, and a message sent now steers the turn. */
 export const AgentWorking: Story = {
   args: { busy: true, activity: chatActivity },
+};
+
+/** A message sent mid-turn waits, faded and marked queued, until the assistant takes it in
+ *  at its next step. A second one is being typed. */
+export const Steering: Story = {
+  args: {
+    busy: true,
+    activity: chatActivity,
+    scheduled: [],
+    input: "Also check the dark theme.",
+    messages: [
+      ...chatMessages,
+      makeChatMessage({ id: "queued-1", text: "Use the 4px spacing from the mockup.", ts: chatNow }),
+    ],
+  },
 };
 
 /** The abort is in flight. The Stop button spins and takes no second click until the stream
@@ -139,9 +154,15 @@ export const Interactive: Story = {
 
     const send = () => {
       const text = input.trim();
-      if (!text || busy) return;
+      if (!text) return;
       setInput("");
-      setMessages((m) => [...m, makeChatMessage({ id: `u-${m.length}`, text, ts: chatNow })]);
+      // Mid-turn, the message steers: it stays queued until the canned reply lands.
+      const id = busy ? `queued-${messages.length}` : `u-${messages.length}`;
+      setMessages((m) => [...m, makeChatMessage({ id, text, ts: chatNow })]);
+      if (busy) {
+        args.onSend();
+        return;
+      }
       setBusy(true);
       args.onSend();
       turn.current = setTimeout(() => {
@@ -154,7 +175,7 @@ export const Interactive: Story = {
             text: "Done. The screenshot is in the notes.",
             ts: chatNow,
           }),
-        ]);
+        ].map((x) => (x.id.startsWith("queued-") ? { ...x, id: `u-${x.id}` } : x)));
         setBusy(false);
       }, 1400);
     };

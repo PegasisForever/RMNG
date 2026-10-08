@@ -69,7 +69,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/server/restart` | Restart the control server | 200 `{ok}` |
 | GET | `/*` | SPA fallback (embedded frontend) | 200 asset / `index.html` |
 
-Error statuses: `400` validation, `404` unknown id/file, `409` chat busy / image still in
+Error statuses: `400` validation, `404` unknown id/file, `409` chat not ready / image still in
 use, `500` server (I/O), `502` the Docker daemon is unreachable. Error bodies
 are a plain string or `{error}`.
 
@@ -1111,13 +1111,16 @@ elsewhere, such as the assistant's own web page, show up too. Busy follows the a
 | Endpoint | Body | Returns | Does |
 | --- | --- | --- | --- |
 | `GET /api/chat/:id` | — | `ChatSnapshot` | `{busy, activity, messages[], scheduled[]}` snapshot |
-| `POST /api/chat/:id` | `{text}` | `202` / `409` | Send to the clone's chat (creating it on the first message). `409` when busy, archived, or no assistant / server address is set. A send that fails to reach the assistant leaves a `⚠` notice with the text |
+| `POST /api/chat/:id` | `{text}` | `202` / `409` | Send to the clone's chat (creating it on the first message). While the assistant works, the message steers it: pi-web queues it into the run, and the agent reads it at its next step. `409` when archived, when no assistant / server address is set, or for a second message while the chat's first one is still being created. A send that fails to reach the assistant leaves a `⚠` notice with the text |
 | `GET /api/chat/:id/events` | — | SSE `ChatSnapshot` | Snapshot + a fresh one on each change; 20 s ping |
 | `POST /api/chat/:id/abort` | — | `204` | Best-effort abort of the assistant's current run |
 
 `ChatMessage` = `{ id, role (user|assistant), text, ts }`. `messages` holds the user messages and
 each run's final answer, merged by time with RMNG's notices; tool steps show only as the one-line
-`activity` while the run is busy.
+`activity` while the run is busy. A message just sent comes last until the assistant's stream
+shows it: its id is `queued-<n>` when it was sent while the assistant worked (it waits in pi's
+queue for the agent's next step), else `pending-<n>`. Scheduled messages do not steer: each waits
+for an idle assistant and starts a turn of its own.
 
 ---
 

@@ -91,17 +91,19 @@ export default function ChatContainer({
     return () => es.close();
   }, [cloneId]);
 
-  // Fire-and-forget: the POST only starts the turn; the reply and final busy state arrive
-  // through SSE.
+  // Fire-and-forget: the POST starts a turn, or steers the one in flight (pi-web queues the
+  // message into the agent's work). The reply and the final busy state arrive through SSE.
   async function send() {
     const text = input.trim();
-    if (!text || busy || archived) return;
+    if (!text || archived) return;
+    const wasBusy = busy;
     writeInput("");
     setError(null);
     setBusy(true); // optimistic; the SSE snapshot confirms (or clears) it
-    setActivity(null);
-    // Optimistic user bubble; the server snapshot replaces it once it arrives.
-    setMessages((m) => [...m, { id: `tmp-${Date.now()}`, role: "user", text, ts: Date.now() }]);
+    if (!wasBusy) setActivity(null);
+    // Optimistic user bubble, marked queued when it steers; the server snapshot replaces it.
+    const id = `${wasBusy ? "queued" : "tmp"}-local-${Date.now()}`;
+    setMessages((m) => [...m, { id, role: "user", text, ts: Date.now() }]);
     try {
       const res = await fetch(`/api/chat/${cloneId}`, {
         method: "POST",
@@ -117,7 +119,8 @@ export default function ChatContainer({
     } catch (e) {
       setError((e as Error).message);
       writeInput(text); // restore the unsent text
-      setBusy(false); // the turn never started; SSE will reconcile messages
+      setMessages((m) => m.filter((x) => x.id !== id));
+      if (!wasBusy) setBusy(false); // the turn never started; SSE will reconcile messages
     }
   }
 
