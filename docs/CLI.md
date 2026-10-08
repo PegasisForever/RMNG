@@ -357,21 +357,23 @@ each verb maps 1:1 to a daemon-MCP tool, forwarded by the control-server to that
 daemon MCP (`http://{clone}:9004`). This is the operator-facing replacement for the retired
 global MCP — see [MCP.md](MCP.md).
 
-Verbs marked **⤢** also take `[--resolution WxH | --native]` (see "Coordinate space" below).
+Every verb that returns a screenshot needs `--resolution`, and the verbs that take `X Y` also
+need `--cursor-coordinate-space` (see "Screenshot size and cursor space" below). In the table,
+**R** marks `--resolution` and **C** marks `--cursor-coordinate-space`.
 
 | Verb | Args | Daemon tool | Does |
 | --- | --- | --- | --- |
-| `screenshot` ⤢ | `[--monitor N] [--out PATH]` | `screenshot` | JPEG of the monitor's latest frame |
+| `screenshot` | `R [--monitor N] [--out PATH]` | `screenshot` | JPEG of the monitor's latest frame |
 | `monitors` | — | `list_monitors` | `[{id,width,height,native_width,native_height}]` |
 | `windows` | — | `list_windows` | open windows (`id,title,wm_class,monitor,frame,…`) |
-| `move` ⤢ | `X Y [--monitor N] [--out PATH]` | `mouse_move` | eased glide to `x,y` |
-| `click` ⤢ | `[X Y] [--monitor N] [--out PATH]` | `left_click` | optional glide, then left click |
-| `right-click` ⤢ | `[X Y] [--monitor N] [--out PATH]` | `right_click` | right click |
-| `middle-click` ⤢ | `[X Y] [--monitor N] [--out PATH]` | `middle_click` | middle click |
-| `double-click` ⤢ | `[X Y] [--monitor N] [--out PATH]` | `left_double_click` | left double-click |
-| `scroll` ⤢ | `AMOUNT [X Y] [--monitor N] [--out PATH]` | `scroll` | `amount` vertical notches |
-| `key` | `"ctrl+c" [--out PATH]` | `key` | press a key combo |
-| `type` | `"some text" [--out PATH]` | `type` | type a Unicode string |
+| `move` | `X Y R C [--monitor N] [--out PATH]` | `mouse_move` | eased glide to `x,y` |
+| `click` | `[X Y] R C [--monitor N] [--out PATH]` | `left_click` | optional glide, then left click |
+| `right-click` | `[X Y] R C [--monitor N] [--out PATH]` | `right_click` | right click |
+| `middle-click` | `[X Y] R C [--monitor N] [--out PATH]` | `middle_click` | middle click |
+| `double-click` | `[X Y] R C [--monitor N] [--out PATH]` | `left_double_click` | left double-click |
+| `scroll` | `AMOUNT [X Y] R C [--monitor N] [--out PATH]` | `scroll` | `amount` vertical notches, positive is down |
+| `key` | `"ctrl+c" R [--out PATH]` | `key` | press a key combo |
+| `type` | `"some text" R [--out PATH]` | `type` | type a Unicode string |
 | `move-window` | `<win-id> [--monitor N] [--mode maximize\|center-half]` | `move_window` | move/place a window |
 
 > To **launch a GUI app** on the clone desktop, use `rmng clone exec -d <clone> -- <app>` (the
@@ -381,37 +383,41 @@ Verbs marked **⤢** also take `[--resolution WxH | --native]` (see "Coordinate 
 `middle-click`, `double-click`, `scroll`, `key`, `type`, `move-window`) — plus
 `screenshot` itself — always produces a post-action JPEG: the CLI writes it to a file and prints
 the file's **absolute path** on stdout (or `{screenshot, text}` under `--json`), so the calling
-agent can `Read` it. Most action tools return the daemon's settle-screenshot inline; for tools
-whose result carries no image (`type`, `move-window`) the CLI issues a follow-up
-`screenshot`. **Query verbs** (`monitors`, `windows`) print their JSON result and take no
+agent can `Read` it. **Query verbs** (`monitors`, `windows`) print their JSON result and take no
 screenshot.
 
-- `--monitor N` — which monitor to act on / screenshot (default `0`).
+- `--monitor N` — which monitor to act on / screenshot (default: the first).
 - `--out PATH` — where to write the JPEG. Default `$TMPDIR/rmng-<clone>-mon<N>.jpg`
   (`std::env::temp_dir()`), overwritten each call.
 
-**Coordinate space.** Screenshots come back at **1920×1080** by default (1080p-height,
-aspect-preserving) regardless of the monitor's native resolution, and `X Y` are read in that
-same space — so you can click straight off the image without converting anything. The daemon
-owns the scaling (see [MCP.md](MCP.md)); the CLI just forwards your choice, which means the
-image and the coordinates can never disagree.
+**Screenshot size and cursor space.**
 
-- `--resolution WxH` — use this space instead, for both the coordinates and the returned image
-  (e.g. `--resolution 1280x720` to cut tokens further). Capped at the monitor's native size.
-- `--native` — use the monitor's native resolution (e.g. 2560×1440). Mutually exclusive with
-  `--resolution`.
+- `--resolution <W>x<H>` or `--resolution native` — the size of the screenshot. A screen larger
+  than W×H is scaled down, keeping its shape, until it fits inside W×H. A screen that already
+  fits is not scaled, and nothing is scaled up. `native` is the screen's own size. Always use
+  `--resolution 1920x1080` (1080p) unless you have a special reason. Examples for
+  `1920x1080`: a 2560×1440 screen gives 1920×1080, a 3440×1440 ultrawide gives 1920×802, a
+  2560×1600 screen gives 1728×1080, and a 1280×720 screen stays 1280×720.
+- `--cursor-coordinate-space <W>x<H>` or `--cursor-coordinate-space native` — the units of
+  `X Y`. `native` means pixels of the screenshot that `--resolution` gives. `<W>x<H>` lays a
+  W×H grid over the whole screenshot: with `999x999`, `0 0` is the top-left corner,
+  `999 999` the bottom-right corner, and `499 499` the middle, whatever the screen size. If you
+  are Medi GPT, use `--cursor-coordinate-space 999x999`; otherwise use `native`.
 
-Pass the *same* flag to the action and to any screenshot you read coordinates off — each call is
-independent, so mixing spaces between calls will misplace clicks. Within one call the action and
-its settle screenshot always agree.
+Each call stands alone. Pass the same `--resolution` to a screenshot and to the actions whose
+`X Y` you read off it. Within one call, the action and its screenshot always agree.
+
+The CLI does this arithmetic itself: it reads the screen size with `list_monitors`, then sends
+the daemon an exact screenshot size (never larger than the screen) and `X Y` already in that
+size. The daemon's own `resolution` argument and default are described in [MCP.md](MCP.md).
 
 ```sh
-rmng desktop w-cp-claude screenshot          # → prints /tmp/rmng-w-cp-claude-mon0.jpg (1920×1080)
-rmng desktop w-cp-claude click 640 480       # click, then prints the settle screenshot path
-rmng desktop w-cp-claude screenshot --native # full-res 2560×1440 capture
-rmng desktop w-cp-claude click 1707 640 --native   # …and a click in that same native space
-rmng desktop w-cp-claude type "hello"        # types, follow-up screenshot, prints path
-rmng desktop w-cp-claude windows             # prints JSON, no screenshot
+rmng desktop w-cp-claude screenshot --resolution 1920x1080   # prints /tmp/rmng-w-cp-claude-mon0.jpg
+rmng desktop w-cp-claude click 640 480 --resolution 1920x1080 --cursor-coordinate-space native
+rmng desktop w-cp-claude click 333 444 --resolution 1920x1080 --cursor-coordinate-space 999x999
+rmng desktop w-cp-claude screenshot --resolution native      # the screen's own size, e.g. 2560×1440
+rmng desktop w-cp-claude type "hello" --resolution 1920x1080 # types, then prints the screenshot path
+rmng desktop w-cp-claude windows                             # prints JSON, no screenshot
 ```
 
 ### `rmng clone exec <clone> [-u|--user USER] [-w|--workdir DIR] [-e|--env KEY=VAL ...] [-d|--detach] -- <cmd> [args...]`

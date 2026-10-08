@@ -443,13 +443,20 @@ fn desktop_rules(server: &str, c: &str) -> String {
     let r = format!("rmng --server {server} desktop {c}");
     format!(
         "Work this clone through its desktop, as a person at the screen would. These are \
-         the only commands to use:\n\
-         - `{r} screenshot`: prints the path of a 1920×1080 JPEG. Read that file.\n\
-         - `{r} click X Y` (also `double-click`, `right-click`): pixels in that screenshot.\n\
-         - `{r} type \"text\"`\n\
-         - `{r} key \"ctrl+l\"`: X key names, case-sensitive (`Return`, `Escape`, `Tab`, \
-         `BackSpace`, `Up`, `F5`), joined with `ctrl`, `shift`, `alt`, `super`.\n\
-         - `{r} scroll N X Y`: N notches, positive is down.\n\
+         the only commands to use. In them, <S> is `999x999` if you are Medi GPT, and \
+         `native` otherwise:\n\
+         - `{r} screenshot --resolution 1920x1080`: prints the path of a JPEG of the screen, \
+         at most 1920×1080. Read that file.\n\
+         - `{r} click X Y --resolution 1920x1080 --cursor-coordinate-space <S>` (also \
+         `double-click`, `right-click`). With `999x999`, X and Y are on a 0–999 grid over \
+         the screenshot (`0 0` top-left, `999 999` bottom-right); with `native`, they are \
+         pixels of the screenshot.\n\
+         - `{r} type \"text\" --resolution 1920x1080`\n\
+         - `{r} key \"ctrl+l\" --resolution 1920x1080`: X key names, case-sensitive \
+         (`Return`, `Escape`, `Tab`, `BackSpace`, `Up`, `F5`), joined with `ctrl`, `shift`, \
+         `alt`, `super`.\n\
+         - `{r} scroll N X Y --resolution 1920x1080 --cursor-coordinate-space <S>`: N \
+         notches, positive is down.\n\
          - `{r} windows`: the open windows.\n\
          \n\
          Rules. They take precedence over the playbook below:\n\
@@ -1272,9 +1279,13 @@ mod tests {
         assert!(h.starts_with(HEADER_MARK));
         assert!(h.contains("Clone: pega-we-142 (Fix login)"), "{h}");
         assert!(
-            h.contains("`rmng --server http://10.0.0.129:9000 desktop pega-we-142 click X Y`"),
+            h.contains(
+                "`rmng --server http://10.0.0.129:9000 desktop pega-we-142 click X Y \
+                 --resolution 1920x1080 --cursor-coordinate-space <S>`"
+            ),
             "{h}"
         );
+        assert!(h.contains("<S> is `999x999` if you are Medi GPT"), "{h}");
         assert!(h.contains("take precedence over the playbook"), "{h}");
         assert!(h.contains("no `rmng clone exec`, `rmng ledger`"), "{h}");
         assert!(

@@ -15,6 +15,7 @@ use crate::args::{
     AccountCmd, BoardCmd, CreateArgs, DesktopCmd, LedgerCmd, Provider as CliProvider, WaitArgs,
 };
 use crate::output::{human_size, pct, table};
+use crate::space::{Space, daemon_resolution, shot_size, to_shot};
 use crate::wait::{WaitOutcome, wait_for_op};
 
 fn emit_json<T: serde::Serialize>(v: &T) -> Result<()> {
@@ -1130,25 +1131,57 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
     let n = |v: Option<u32>| v.map(Value::from).unwrap_or(Value::Null);
     let i = |v: Option<i32>| v.map(Value::from).unwrap_or(Value::Null);
 
-    // `--resolution` / `--native`, resolved once and forwarded verbatim: the daemon owns the
-    // scaling, so this one value fixes both the space `x`/`y` are read in AND the size of every
-    // image the call produces (the verb's own settle shot or the auto-snap below) — they cannot
-    // drift apart. `None` means "daemon default" and is dropped from the args by `args_obj`.
-    // Verbs that carry no coordinates or image (Monitors/Windows/Key/Type/MoveWindow) don't
-    // flatten the flags at all, hence the `_ => None` arm.
-    let resolution: Option<String> = match cmd {
-        DesktopCmd::Screenshot { resolution, .. }
-        | DesktopCmd::Move { resolution, .. }
-        | DesktopCmd::Click { resolution, .. }
-        | DesktopCmd::RightClick { resolution, .. }
-        | DesktopCmd::MiddleClick { resolution, .. }
-        | DesktopCmd::DoubleClick { resolution, .. }
-        | DesktopCmd::Scroll { resolution, .. } => {
-            resolution.resolution_arg().map_err(anyhow::Error::msg)?
+    // The verb's two spaces (see `crate::space`). The CLI does the scaling: it reads the
+    // monitor's real size, works out the screenshot size `--resolution` gives, and sends the
+    // daemon that exact size plus X and Y already in it. Verbs with no image and no X/Y
+    // (monitors, windows, move-window) take neither.
+    let (res, cursor, mon_sel): (Option<Space>, Option<Space>, Option<u32>) = match cmd {
+        DesktopCmd::Screenshot {
+            resolution,
+            monitor,
+            ..
+        } => (Some(resolution.resolution), None, *monitor),
+        DesktopCmd::Move { space, monitor, .. }
+        | DesktopCmd::Click { space, monitor, .. }
+        | DesktopCmd::RightClick { space, monitor, .. }
+        | DesktopCmd::MiddleClick { space, monitor, .. }
+        | DesktopCmd::DoubleClick { space, monitor, .. }
+        | DesktopCmd::Scroll { space, monitor, .. } => (
+            Some(space.resolution.resolution),
+            Some(space.cursor_coordinate_space),
+            *monitor,
+        ),
+        DesktopCmd::Key { resolution, .. } | DesktopCmd::Type { resolution, .. } => {
+            (Some(resolution.resolution), None, None)
         }
-        _ => None,
+        _ => (None, None, None),
     };
-    let res = || resolution.clone().map(Value::from).unwrap_or(Value::Null);
+    let geo = match res {
+        Some(r) => {
+            let native = monitor_size(client, clone, mon_sel).await?;
+            Some((native, shot_size(native, r)))
+        }
+        None => None,
+    };
+    let res = || {
+        geo.map(|(native, shot)| Value::from(daemon_resolution(native, shot)))
+            .unwrap_or(Value::Null)
+    };
+    // X and Y in the screenshot's pixels. Only the pointer verbs call this, and they always
+    // carry both spaces.
+    let at = |x: i32, y: i32| -> (Value, Value) {
+        match (cursor, geo) {
+            (Some(c), Some((_, shot))) => {
+                let (x, y) = to_shot(x as f64, y as f64, c, shot);
+                (x.into(), y.into())
+            }
+            _ => (x.into(), y.into()),
+        }
+    };
+    let at_opt = |x: Option<i32>, y: Option<i32>| match (x, y) {
+        (Some(x), Some(y)) => at(x, y),
+        _ => (i(x), i(y)),
+    };
 
     // (tool, args, kind, monitor-for-screenshots, out path)
     let (tool, args, kind, monitor, out): (&str, Value, Kind, Option<u32>, Option<PathBuf>) =
@@ -1169,8 +1202,8 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             } => (
                 "mouse_move",
                 args_obj(vec![
-                    ("x", (*x).into()),
-                    ("y", (*y).into()),
+                    ("x", at(*x, *y).0),
+                    ("y", at(*x, *y).1),
                     ("monitor", n(*monitor)),
                     ("resolution", res()),
                 ]),
@@ -1183,8 +1216,8 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             } => (
                 "left_click",
                 args_obj(vec![
-                    ("x", i(*x)),
-                    ("y", i(*y)),
+                    ("x", at_opt(*x, *y).0),
+                    ("y", at_opt(*x, *y).1),
                     ("monitor", n(*monitor)),
                     ("resolution", res()),
                 ]),
@@ -1197,8 +1230,8 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             } => (
                 "right_click",
                 args_obj(vec![
-                    ("x", i(*x)),
-                    ("y", i(*y)),
+                    ("x", at_opt(*x, *y).0),
+                    ("y", at_opt(*x, *y).1),
                     ("monitor", n(*monitor)),
                     ("resolution", res()),
                 ]),
@@ -1211,8 +1244,8 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             } => (
                 "middle_click",
                 args_obj(vec![
-                    ("x", i(*x)),
-                    ("y", i(*y)),
+                    ("x", at_opt(*x, *y).0),
+                    ("y", at_opt(*x, *y).1),
                     ("monitor", n(*monitor)),
                     ("resolution", res()),
                 ]),
@@ -1225,8 +1258,8 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             } => (
                 "left_double_click",
                 args_obj(vec![
-                    ("x", i(*x)),
-                    ("y", i(*y)),
+                    ("x", at_opt(*x, *y).0),
+                    ("y", at_opt(*x, *y).1),
                     ("monitor", n(*monitor)),
                     ("resolution", res()),
                 ]),
@@ -1245,8 +1278,8 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 "scroll",
                 args_obj(vec![
                     ("amount", (*amount).into()),
-                    ("x", i(*x)),
-                    ("y", i(*y)),
+                    ("x", at_opt(*x, *y).0),
+                    ("y", at_opt(*x, *y).1),
                     ("monitor", n(*monitor)),
                     ("resolution", res()),
                 ]),
@@ -1254,14 +1287,14 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
                 *monitor,
                 out.clone(),
             ),
-            DesktopCmd::Key { keys, out } => (
+            DesktopCmd::Key { keys, out, .. } => (
                 "key",
                 args_obj(vec![("keys", keys.clone().into())]),
                 Kind::Action,
                 None,
                 out.clone(),
             ),
-            DesktopCmd::Type { text, out } => (
+            DesktopCmd::Type { text, out, .. } => (
                 "type",
                 args_obj(vec![("text", text.clone().into())]),
                 Kind::Action,
@@ -1312,8 +1345,11 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
         Kind::Action => {
             let text = content_text(&content);
             // Guarantee a settle screenshot: reuse the action's own image if it has
-            // one, else make a follow-up `screenshot` call.
-            let shot = if content_image(&content).is_some() {
+            // one, else make a follow-up `screenshot` call. `key` and `type` take no size, so
+            // the daemon's own image after them is in its default size: replace it with one
+            // in the size this call asked for.
+            let sized = !matches!(cmd, DesktopCmd::Key { .. } | DesktopCmd::Type { .. });
+            let shot = if sized && content_image(&content).is_some() {
                 content
             } else {
                 // Same `resolution` as the action, so the follow-up image is in the space the
@@ -1340,6 +1376,32 @@ pub async fn desktop(client: &Client, clone: &str, cmd: &DesktopCmd, json: bool)
             }
             Ok(0)
         }
+    }
+}
+
+/// The real size of the monitor a desktop call acts on (`--monitor`, else the first), from
+/// the daemon's `list_monitors`.
+async fn monitor_size(client: &Client, clone: &str, monitor: Option<u32>) -> Result<(u32, u32)> {
+    let content = client
+        .desktop(clone, "list_monitors", args_obj(vec![]))
+        .await?;
+    let list: Vec<Value> = serde_json::from_str(&content_text(&content))
+        .map_err(|e| anyhow!("list_monitors sent back no monitor list: {e}"))?;
+    let m = match monitor {
+        Some(id) => list
+            .iter()
+            .find(|m| m["id"].as_u64() == Some(id as u64))
+            .ok_or_else(|| anyhow!("no monitor {id} on '{clone}'"))?,
+        None => list
+            .first()
+            .ok_or_else(|| anyhow!("'{clone}' has no monitor"))?,
+    };
+    let dim = |k: &str| m[k].as_u64().map(|v| v as u32).filter(|v| *v > 0);
+    match (dim("native_width"), dim("native_height")) {
+        (Some(w), Some(h)) => Ok((w, h)),
+        _ => bail!(
+            "'{clone}' runs a desktop service too old to report its screen size; restart the clone"
+        ),
     }
 }
 

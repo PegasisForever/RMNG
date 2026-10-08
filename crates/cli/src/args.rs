@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::space::Space;
+
 /// Default seconds to wait on an operation before giving up (shared by every `--wait`/`op wait`).
 const DEFAULT_TIMEOUT: u64 = 600;
 
@@ -489,51 +491,26 @@ pub struct WaitArgs {
     pub timeout: u64,
 }
 
-/// Optional `--resolution <W>x<H>` / `--native` for the desktop verbs that deal in
-/// coordinates or images.
-///
-/// Both the screenshot the daemon returns **and** the space its `x`/`y` are read in
-/// come from this one value, so they can never disagree — the daemon does the scaling
-/// (see `clone-daemon/src/mcp.rs`), and the CLI just forwards the choice. Omitting both
-/// flags gets the daemon's default (1080p-height, i.e. 1920×1080 on a 16:9 monitor).
-#[derive(Args, Debug, Clone, Default)]
+/// `--resolution` for every desktop verb that returns a screenshot. See [`crate::space`].
+#[derive(Args, Debug, Clone)]
 pub struct ResolutionArgs {
-    /// Coordinate + screenshot space for this call, `<W>x<H>` (e.g. `1280x720`).
-    /// Omit for the daemon default (1080p-height — 1920x1080 on a 16:9 monitor).
-    #[arg(long, value_name = "WxH", conflicts_with = "native")]
-    pub resolution: Option<String>,
-    /// Use the monitor's native resolution instead of the 1080p default.
-    #[arg(long)]
-    pub native: bool,
+    /// Screenshot size: `<W>x<H>` or `native`. A larger screen is scaled down, keeping its
+    /// shape, until it fits inside W×H; a smaller one is not scaled. Always prefer
+    /// `1920x1080` (1080p) unless you have a special reason
+    #[arg(long, value_name = "WxH|native", required = true)]
+    pub resolution: Space,
 }
 
-impl ResolutionArgs {
-    /// The value to forward to the daemon as its `resolution` argument, or `None` to let
-    /// the daemon apply its default. Validates `<W>x<H>` here so a typo fails the command
-    /// outright rather than being silently ignored on the far side.
-    pub fn resolution_arg(&self) -> Result<Option<String>, String> {
-        if self.native {
-            return Ok(Some("native".into()));
-        }
-        let Some(s) = self.resolution.as_deref() else {
-            return Ok(None);
-        };
-        let (w, h) = s
-            .split_once(['x', 'X'])
-            .ok_or_else(|| format!("--resolution: expected WxH, got '{s}'"))?;
-        let w: i32 = w
-            .trim()
-            .parse()
-            .map_err(|e| format!("--resolution: bad W: {e}"))?;
-        let h: i32 = h
-            .trim()
-            .parse()
-            .map_err(|e| format!("--resolution: bad H: {e}"))?;
-        if w <= 0 || h <= 0 {
-            return Err("--resolution: W and H must be > 0".into());
-        }
-        Ok(Some(format!("{w}x{h}")))
-    }
+/// `--resolution` and `--cursor-coordinate-space`, for the verbs that take X and Y.
+#[derive(Args, Debug, Clone)]
+pub struct PointerArgs {
+    #[command(flatten)]
+    pub resolution: ResolutionArgs,
+    /// The units X and Y are in: `native` is pixels of the screenshot (the one --resolution
+    /// gives), and `<W>x<H>` is a W×H grid over the whole screenshot. If you are Medi GPT,
+    /// use `999x999`; otherwise use `native`
+    #[arg(long, value_name = "WxH|native", required = true)]
+    pub cursor_coordinate_space: Space,
 }
 
 /// The `rmng desktop <clone> …` verbs. Each maps 1:1 to a daemon-MCP tool; action
@@ -562,7 +539,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        resolution: ResolutionArgs,
+        space: PointerArgs,
     },
     /// Left click, optionally at X Y (→ `left_click`)
     Click {
@@ -573,7 +550,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        resolution: ResolutionArgs,
+        space: PointerArgs,
     },
     /// Right click, optionally at X Y (→ `right_click`)
     RightClick {
@@ -584,7 +561,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        resolution: ResolutionArgs,
+        space: PointerArgs,
     },
     /// Middle click, optionally at X Y (→ `middle_click`)
     MiddleClick {
@@ -595,7 +572,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        resolution: ResolutionArgs,
+        space: PointerArgs,
     },
     /// Left double click, optionally at X Y (→ `left_double_click`)
     DoubleClick {
@@ -606,7 +583,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        resolution: ResolutionArgs,
+        space: PointerArgs,
     },
     /// Scroll by AMOUNT, optionally at X Y (→ `scroll`)
     Scroll {
@@ -618,7 +595,7 @@ pub enum DesktopCmd {
         #[arg(long)]
         out: Option<PathBuf>,
         #[command(flatten)]
-        resolution: ResolutionArgs,
+        space: PointerArgs,
     },
     /// Press a key chord, e.g. `ctrl+c` (→ `key`)
     Key {
@@ -626,6 +603,8 @@ pub enum DesktopCmd {
         keys: String,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        resolution: ResolutionArgs,
     },
     /// Type literal text (→ `type`)
     Type {
@@ -633,6 +612,8 @@ pub enum DesktopCmd {
         text: String,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[command(flatten)]
+        resolution: ResolutionArgs,
     },
     /// Move/arrange a window by id (→ `move_window`)
     MoveWindow {
@@ -1081,7 +1062,18 @@ mod tests {
 
     #[test]
     fn desktop_click_parses_verb_and_coords() {
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "click", "10", "20"]);
+        let cli = Cli::parse_from([
+            "rmng",
+            "desktop",
+            "w-cp",
+            "click",
+            "10",
+            "20",
+            "--resolution",
+            "1920x1080",
+            "--cursor-coordinate-space",
+            "native",
+        ]);
         match cli.cmd {
             Cmd::Desktop {
                 clone,
@@ -1109,7 +1101,18 @@ mod tests {
             );
         }
         // New spelled-out names resolve to their variants.
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "right-click", "5", "6"]);
+        let cli = Cli::parse_from([
+            "rmng",
+            "desktop",
+            "w-cp",
+            "right-click",
+            "5",
+            "6",
+            "--resolution",
+            "1920x1080",
+            "--cursor-coordinate-space",
+            "native",
+        ]);
         assert!(matches!(
             cli.cmd,
             Cmd::Desktop {
@@ -1122,14 +1125,34 @@ mod tests {
             }
         ));
         assert!(matches!(
-            Cli::parse_from(["rmng", "desktop", "w-cp", "middle-click"]).cmd,
+            Cli::parse_from([
+                "rmng",
+                "desktop",
+                "w-cp",
+                "middle-click",
+                "--resolution",
+                "1920x1080",
+                "--cursor-coordinate-space",
+                "native"
+            ])
+            .cmd,
             Cmd::Desktop {
                 cmd: DesktopCmd::MiddleClick { .. },
                 ..
             }
         ));
         assert!(matches!(
-            Cli::parse_from(["rmng", "desktop", "w-cp", "double-click"]).cmd,
+            Cli::parse_from([
+                "rmng",
+                "desktop",
+                "w-cp",
+                "double-click",
+                "--resolution",
+                "1920x1080",
+                "--cursor-coordinate-space",
+                "native"
+            ])
+            .cmd,
             Cmd::Desktop {
                 cmd: DesktopCmd::DoubleClick { .. },
                 ..
@@ -1153,91 +1176,83 @@ mod tests {
         ));
     }
 
+    /// Both spaces are required on the verbs that take X and Y, and `--resolution` on every
+    /// verb that returns a screenshot.
     #[test]
-    fn desktop_click_accepts_resolution() {
+    fn desktop_spaces_are_required() {
         let cli = Cli::parse_from([
             "rmng",
             "desktop",
             "w-cp",
             "click",
             "500",
-            "500",
+            "250",
             "--resolution",
-            "1280x720",
+            "1920x1080",
+            "--cursor-coordinate-space",
+            "999x999",
         ]);
         match cli.cmd {
             Cmd::Desktop {
-                cmd: DesktopCmd::Click {
-                    x, y, resolution, ..
+                cmd: DesktopCmd::Click { x, y, space, .. },
+                ..
+            } => {
+                assert_eq!((x, y), (Some(500), Some(250)));
+                assert_eq!(space.resolution.resolution, Space::Size(1920, 1080));
+                assert_eq!(space.cursor_coordinate_space, Space::Size(999, 999));
+            }
+            other => panic!("wrong cmd: {other:?}"),
+        }
+        let cli = Cli::parse_from([
+            "rmng",
+            "desktop",
+            "w-cp",
+            "screenshot",
+            "--resolution",
+            "native",
+        ]);
+        assert!(matches!(
+            cli.cmd,
+            Cmd::Desktop {
+                cmd: DesktopCmd::Screenshot {
+                    resolution: ResolutionArgs {
+                        resolution: Space::Native
+                    },
+                    ..
                 },
                 ..
-            } => {
-                // Coordinates are forwarded verbatim — the daemon owns the scaling now.
-                assert_eq!((x, y), (Some(500), Some(500)));
-                assert_eq!(resolution.resolution_arg(), Ok(Some("1280x720".into())));
             }
-            other => panic!("wrong cmd: {other:?}"),
+        ));
+        for argv in [
+            vec!["click", "1", "2", "--resolution", "1920x1080"],
+            vec!["click", "1", "2", "--cursor-coordinate-space", "native"],
+            vec!["scroll", "3", "--resolution", "1920x1080"],
+            vec!["screenshot"],
+            vec!["key", "Return"],
+            vec!["type", "hi"],
+            // --native is gone; `--resolution native` replaces it.
+            vec!["screenshot", "--native"],
+            vec!["screenshot", "--resolution", "1080p"],
+        ] {
+            let full = ["rmng", "desktop", "w-cp"].into_iter().chain(argv.clone());
+            assert!(
+                Cli::try_parse_from(full).is_err(),
+                "{argv:?} should not parse"
+            );
         }
-    }
-
-    #[test]
-    fn desktop_screenshot_accepts_native() {
-        let cli = Cli::parse_from(["rmng", "desktop", "w-cp", "screenshot", "--native"]);
-        match cli.cmd {
-            Cmd::Desktop {
-                cmd: DesktopCmd::Screenshot { resolution, .. },
-                ..
-            } => {
-                assert_eq!(resolution.resolution_arg(), Ok(Some("native".into())));
-            }
-            other => panic!("wrong cmd: {other:?}"),
-        }
-    }
-
-    /// The two flags name the same knob, so clap must reject them together rather than
-    /// silently letting one win.
-    #[test]
-    fn desktop_rejects_resolution_and_native_together() {
+        // Screenshot, key and type take no cursor space: they have no X or Y.
         assert!(
             Cli::try_parse_from([
                 "rmng",
                 "desktop",
                 "w-cp",
-                "screenshot",
+                "key",
+                "Return",
                 "--resolution",
-                "1280x720",
-                "--native",
+                "1920x1080",
             ])
-            .is_err()
+            .is_ok()
         );
-    }
-
-    /// Neither flag ⇒ nothing sent ⇒ the daemon applies its 1080p default.
-    #[test]
-    fn resolution_arg_validates_shape_and_case() {
-        for s in ["1280x720", "1280X720", " 1280 x 720 "] {
-            let r = ResolutionArgs {
-                resolution: Some(s.into()),
-                native: false,
-            };
-            assert_eq!(
-                r.resolution_arg(),
-                Ok(Some("1280x720".into())),
-                "input {s:?}"
-            );
-        }
-        // A typo must fail the command here rather than reach the daemon, which would fall back
-        // to native and silently put the caller's clicks in the wrong space.
-        for bad in [
-            "1920", "1920x", "x1080", "0x1080", "1920x0", "-1x-1", "axb", "",
-        ] {
-            let r = ResolutionArgs {
-                resolution: Some(bad.into()),
-                native: false,
-            };
-            assert!(r.resolution_arg().is_err(), "should reject {bad:?}");
-        }
-        assert_eq!(ResolutionArgs::default().resolution_arg(), Ok(None));
     }
 
     #[test]

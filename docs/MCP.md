@@ -43,6 +43,11 @@ a pointer call's `resolution` must **match the screenshot it is reasoning over**
 value falls back to native rather than to the default. Within one call the action and its settle
 screenshot always share a space.
 
+Note that a `"<W>x<H>"` here caps each side at the monitor's size on its own, so it does not keep
+the screen's shape. The `rmng desktop` CLI does not rely on it: it works out a size that keeps
+the shape (`--resolution`, see [CLI.md](CLI.md#rmng-desktop-clone-verb)) and its own cursor
+units (`--cursor-coordinate-space`), and sends this tool only an exact size and `x`/`y` in it.
+
 This applies only to the MCP tool channel. The operator's live-drive path (viewer →
 control-server → daemon socket) and the H.264 stream remain native — see
 [PROTOCOL.md](PROTOCOL.md).
@@ -83,5 +88,5 @@ curl -s localhost:9004/ -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"screenshot","arguments":{"monitor":0}}}'
 
 # From an operator machine: drive a clone through the control-server web proxy
-rmng desktop rmng-e2e screenshot
+rmng desktop rmng-e2e screenshot --resolution 1920x1080
 ```

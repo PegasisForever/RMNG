@@ -19,10 +19,12 @@ person at the screen would. Every action prints the path of a screenshot taken a
 
 ## Coordinates
 
-Screenshots are **1920×1080** by default, whatever the real monitor size is. Give click
-coordinates as pixels in that same image, top-left (0,0). The tool scales them for you.
-Take a new screenshot when you are not sure where something is. Monitor 0 is the primary
-monitor; pass `--monitor N` to act on another one.
+Take every screenshot and give every action `--resolution 1920x1080`: a larger screen comes
+back scaled down to fit 1920×1080, keeping its shape. Give `X Y` in the
+`--cursor-coordinate-space` that the header names: on the `999x999` grid, `0 0` is the
+top-left corner and `999 999` the bottom-right corner of the screenshot; in `native`, they are
+pixels of the screenshot. Take a new screenshot when you are not sure where something is.
+Monitor 0 is the primary monitor; pass `--monitor N` to act on another one.
 
 ## No display
 
@@ -50,7 +52,7 @@ The human can see this desktop live. Keep replies short. Do not describe each sc
 
 ## 1. Confirm a display is available
 
-Run `rmng desktop <clone> screenshot` and read it. Continue only when a real desktop shows.
+Run `rmng desktop <clone> screenshot --resolution 1920x1080` and read it. Continue only when a real desktop shows.
 
 ## 2. `per`: drive Claude Code in a terminal
 

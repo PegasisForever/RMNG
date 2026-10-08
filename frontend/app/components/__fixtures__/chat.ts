@@ -51,7 +51,7 @@ export const chatMessages: ChatMessage[] = [
 ];
 
 /** The assistant's current tool line, shown under the working bubble while a turn is in flight. */
-export const chatActivity = "⚙ bash: rmng --server http://10.0.0.129:9000 desktop pega-we-142 screenshot";
+export const chatActivity = "⚙ bash: rmng --server http://10.0.0.129:9000 desktop pega-we-142 screenshot --resolution 1920x1080";
 
 /** What an HTTP failure of the SEND route puts in the banner: the server's own sentence,
  *  verbatim. All four chat routes answer an error as a plain-text body (axum

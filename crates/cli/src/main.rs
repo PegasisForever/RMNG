@@ -9,6 +9,7 @@ mod commands;
 mod create;
 mod linear;
 mod output;
+mod space;
 mod wait;
 
 use args::{Cli, CloneCmd, Cmd, OpCmd, resolve_server};
