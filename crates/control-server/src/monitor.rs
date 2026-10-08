@@ -390,6 +390,20 @@ fn lift_sub_clone_activity(next: &mut HashMap<String, MonitorState>, clones: &[R
     }
 }
 
+/// A running clone whose assistant chat is working on it reads `working`, whatever the judge
+/// said. The assistant works the clone from outside, through `rmng`, so the agents inside it can
+/// be quiet the whole time. Runs before [`lift_sub_clone_activity`], so a parent lights up for a
+/// sub-clone's assistant too, and before [`debounce`], so the light stays on for a minute after
+/// the assistant stops, like any other work. `offline` is left alone: a stopped clone is not
+/// working, whoever is talking about it.
+fn lift_assistant_activity(next: &mut HashMap<String, MonitorState>, busy: impl Fn(&str) -> bool) {
+    for (id, state) in next.iter_mut() {
+        if matches!(*state, MonitorState::Idle | MonitorState::Unknown) && busy(id) {
+            *state = MonitorState::Working;
+        }
+    }
+}
+
 /// How long a clone has to keep reading idle before that is published.
 const DEBOUNCE: Duration = Duration::from_secs(60);
 
@@ -862,6 +876,7 @@ impl FleetPoll {
             .collect();
         let active_ids: HashSet<String> = active.iter().map(|host| host.id.clone()).collect();
         next.retain(|id, _| active_ids.contains(id));
+        lift_assistant_activity(&mut next, |id| crate::chat::is_busy(app, id));
         lift_sub_clone_activity(&mut next, &active);
         // Last of all, so a change that reverses inside a minute is never shown. See [`debounce`].
         debounce(&mut next, &active, &mut self.pending_state, now);
@@ -1440,6 +1455,26 @@ mod tests {
             "expected 10%, got {}",
             update.stats["c"].cpu_pct
         );
+    }
+
+    #[test]
+    fn a_clone_whose_assistant_is_working_reads_working() {
+        let mut next: HashMap<String, MonitorState> = [
+            ("idle".to_string(), MonitorState::Idle),
+            ("unknown".to_string(), MonitorState::Unknown),
+            ("off".to_string(), MonitorState::Offline),
+            ("quiet".to_string(), MonitorState::Idle),
+        ]
+        .into();
+        lift_assistant_activity(&mut next, |id| id != "quiet");
+        assert_eq!(next["idle"], MonitorState::Working);
+        assert_eq!(next["unknown"], MonitorState::Working);
+        assert_eq!(
+            next["off"],
+            MonitorState::Offline,
+            "a stopped clone is not working"
+        );
+        assert_eq!(next["quiet"], MonitorState::Idle);
     }
 
     #[tokio::test]

@@ -38,12 +38,54 @@ pub struct ChatState {
     /// Clones whose message was sent but not yet confirmed by the stream. Keeps the panel
     /// busy across the gap between the POST and the assistant's first event.
     sending: Mutex<HashMap<String, Instant>>,
+    /// The message just sent, per clone, until the assistant's stream shows it. The panel
+    /// shows it at once; without this the update that turns the panel busy would come
+    /// without it, and it would appear a second later, under the "working" line.
+    pending: Mutex<HashMap<String, Pending>>,
     listeners: Mutex<HashSet<String>>,
     /// Serialises the read-modify-write of `data/schedules/<id>.json`. The HTTP handlers and
     /// the scheduler tick both mutate those files, and a lost update there means a message the
     /// operator queued silently never fires (or fires twice). One process-wide lock is plenty:
     /// the critical sections are a few-KB file rewrite.
     schedule_io: Mutex<()>,
+}
+
+/// A sent message the stream has not shown yet. `seen` is how many user messages with the
+/// same text the thread had when it was sent, so an earlier identical message does not count
+/// as its echo.
+struct Pending {
+    message: ChatMessage,
+    seen: usize,
+    at: Instant,
+}
+
+/// A pending message is dropped after this long even with no echo, so a stream that never
+/// shows it cannot leave a ghost bubble.
+const PENDING_MAX: Duration = Duration::from_secs(120);
+
+fn user_count(messages: &[ChatMessage], text: &str) -> usize {
+    messages
+        .iter()
+        .filter(|m| m.role == ChatRole::User && m.text == text)
+        .count()
+}
+
+/// Drop the pending message once the thread shows it.
+fn settle_pending(app: &App, id: &str) {
+    let mut pending = app.chat.pending.lock().unwrap();
+    let Some(p) = pending.get(id) else {
+        return;
+    };
+    let shown = app
+        .chat
+        .live
+        .lock()
+        .unwrap()
+        .get(id)
+        .is_some_and(|l| user_count(&l.messages, &p.message.text) > p.seen);
+    if shown || p.at.elapsed() > PENDING_MAX {
+        pending.remove(id);
+    }
 }
 
 #[derive(Default)]
@@ -325,6 +367,13 @@ pub fn snapshot_json(app: &App, host_id: &str) -> String {
     };
     messages.extend(chat.notices);
     messages.sort_by_key(|m| m.ts);
+    // Last, whatever its clock says: it is the newest message, and the assistant's clock may
+    // differ from this server's.
+    if let Some(p) = app.chat.pending.lock().unwrap().get(host_id) {
+        if p.at.elapsed() <= PENDING_MAX {
+            messages.push(p.message.clone());
+        }
+    }
     let busy = live_busy || is_sending(app, host_id);
     let snap = ChatSnapshot {
         busy,
@@ -495,6 +544,26 @@ pub fn send_chat(app: &App, host: &RmngClone, text: &str) -> Result<(), String> 
         .lock()
         .unwrap()
         .insert(host.id.clone(), Instant::now());
+    let seen = app
+        .chat
+        .live
+        .lock()
+        .unwrap()
+        .get(&host.id)
+        .map_or(0, |l| user_count(&l.messages, text));
+    app.chat.pending.lock().unwrap().insert(
+        host.id.clone(),
+        Pending {
+            message: ChatMessage {
+                id: "pending".into(),
+                role: ChatRole::User,
+                text: text.to_string(),
+                ts: now_ms(),
+            },
+            seen,
+            at: Instant::now(),
+        },
+    );
     broadcast(app, &host.id);
     let (app, host, text) = (app.clone(), host.clone(), text.to_string());
     tokio::spawn(async move {
@@ -504,6 +573,8 @@ pub fn send_chat(app: &App, host: &RmngClone, text: &str) -> Result<(), String> 
                 host.id
             );
             clear_sending(&app, &host.id);
+            // The notice below quotes it, so the bubble goes.
+            app.chat.pending.lock().unwrap().remove(&host.id);
             push_notice(
                 &app,
                 &host.id,
@@ -953,6 +1024,7 @@ fn apply_snapshot(app: &App, id: &str, data: &str) {
         }
     }
     app.chat.live.lock().unwrap().insert(id.to_string(), live);
+    settle_pending(app, id);
     if busy {
         clear_sending(app, id);
         app.activity.mark(id, crate::clone_ops::now_ms());
@@ -1007,6 +1079,7 @@ fn apply_event(app: &App, id: &str, data: &str) {
         live.busy
     };
     clear_sending(app, id);
+    settle_pending(app, id);
     if busy {
         app.activity.mark(id, crate::clone_ops::now_ms());
     }
@@ -1263,6 +1336,59 @@ mod tests {
 
         cfg.assistant.server_url = " ".into();
         assert!(chat_header(&cfg, &host).is_err());
+    }
+
+    /// A sent message is in every update from the moment it is sent, and goes away only when
+    /// the stream shows it, so the panel never shows "working" above a missing message.
+    #[tokio::test]
+    async fn a_sent_message_shows_until_the_stream_shows_it() {
+        let app = App::test_app();
+        let pend = |text: &str, seen| Pending {
+            message: ChatMessage {
+                id: "pending".into(),
+                role: ChatRole::User,
+                text: text.into(),
+                ts: 1,
+            },
+            seen,
+            at: Instant::now(),
+        };
+        let texts = |app: &App| -> Vec<String> {
+            let v: Value = serde_json::from_str(&snapshot_json(app, "c1")).unwrap();
+            v["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["text"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let user = |text: &str, ts: i64| {
+            json!({"type":"message_start","message":{"role":"user","timestamp":ts,"content":text}})
+                .to_string()
+        };
+        app.chat
+            .pending
+            .lock()
+            .unwrap()
+            .insert("c1".into(), pend("go", 0));
+        assert_eq!(texts(&app), ["go"]);
+        // A run starting is not the echo: the message stays.
+        apply_event(&app, "c1", &json!({"type":"agent_start"}).to_string());
+        assert_eq!(texts(&app), ["go"]);
+        apply_event(&app, "c1", &user("go", 9_000_000_000_000));
+        assert_eq!(texts(&app), ["go"], "shown once, not twice");
+        assert!(app.chat.pending.lock().unwrap().is_empty());
+
+        // The same words again: the earlier copy is not this one's echo.
+        app.chat
+            .pending
+            .lock()
+            .unwrap()
+            .insert("c1".into(), pend("go", 1));
+        assert_eq!(texts(&app), ["go", "go"]);
+        apply_event(&app, "c1", &user("go", 9_000_000_000_001));
+        assert_eq!(texts(&app), ["go", "go"]);
+        assert!(app.chat.pending.lock().unwrap().is_empty());
     }
 
     /// The first message shows once, though it arrives in the snapshot and as an event.
