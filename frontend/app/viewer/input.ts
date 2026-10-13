@@ -181,7 +181,7 @@ export function wheelMessages(
 }
 
 /** Fullscreen on or off, on the screen the window is on. */
-export function toggleFullscreen() {
+function toggleFullscreen() {
   if (document.fullscreenElement) void document.exitFullscreen();
   else void document.documentElement.requestFullscreen();
 }
@@ -197,7 +197,8 @@ interface InputOptions {
   overlay: HTMLImageElement;
   monitor: number;
   send(msg: InputMsg): void;
-  onLockChange(locked: boolean): void;
+  /** Ctrl+Alt+S: show or hide the stats overlay. */
+  onToggleStats(): void;
   /** A key press or click: the user activation Chrome wants for some calls (a clipboard
    *  write it refused before). */
   onGesture(): void;
@@ -211,8 +212,6 @@ export interface Input {
   setLayout(monitors: ViewMonitor[]): void;
   onCursor(c: CursorMeta): void;
   setConnected(connected: boolean): void;
-  /** The toolbar button: the same as Ctrl+Alt+G. */
-  toggleLock(): void;
   detach(): void;
 }
 
@@ -336,15 +335,17 @@ export function attachInput(o: InputOptions): Input {
     o.onGesture();
     // Local chords, not forwarded. Their Ctrl and Alt already went to the clone, so release
     // them (and everything else held) first.
-    if (e.ctrlKey && e.altKey && (e.code === "KeyG" || e.code === "KeyP")) {
+    if (e.ctrlKey && e.altKey && (e.code === "KeyG" || e.code === "KeyP" || e.code === "KeyS")) {
       e.preventDefault();
       if (e.repeat) return;
       releaseAll();
       if (e.code === "KeyG") {
         toggleLock();
-      } else {
+      } else if (e.code === "KeyP") {
         auto.forceRelease();
         if (locked()) document.exitPointerLock();
+      } else {
+        o.onToggleStats();
       }
       return;
     }
@@ -447,7 +448,6 @@ export function attachInput(o: InputOptions): Input {
     // The lock ended while the page has focus and the policy still wants it: the user pressed
     // Esc. Treat it as Ctrl+Alt+P, or the next click would lock again.
     if (!locked() && document.hasFocus() && auto.want(now())) auto.forceRelease();
-    o.onLockChange(locked());
   };
   // Keyboard Lock only works in fullscreen, so take it on entry and give it back on exit.
   const onFullscreen = () => {
@@ -514,7 +514,6 @@ export function attachInput(o: InputOptions): Input {
         buttons.clear();
       }
     },
-    toggleLock,
     detach() {
       clearInterval(timer);
       resize.disconnect();

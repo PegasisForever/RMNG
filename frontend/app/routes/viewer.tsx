@@ -1,7 +1,7 @@
 // The browser viewer: one window per monitor, `/viewer?monitor=<id>`, opened from the
 // dashboard. The worker (`~/viewer/worker.ts`) does the socket, the decode and the drawing;
 // this page holds the canvas, the input (`~/viewer/input.ts`), the clipboard
-// (`~/viewer/clipboard.ts`), the cursor, the toolbar, the stats overlay and file drop, and is
+// (`~/viewer/clipboard.ts`), the cursor, the stats overlay (Ctrl+Alt+S) and file drop, and is
 // where server messages arrive. For a clone with no desktop, monitor 0's window shows its
 // terminal (`~/viewer/terminal.tsx`) over the canvas.
 import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
@@ -13,8 +13,7 @@ import type { ToBrowser } from "~/lib/wire/ToBrowser";
 import type { ViewContent } from "~/lib/wire/ViewContent";
 import type { ViewMonitor } from "~/lib/wire/ViewMonitor";
 import { attachClipboard } from "~/viewer/clipboard";
-import { type Input, attachInput, toggleFullscreen } from "~/viewer/input";
-import { openViewerWindows } from "~/viewer/open";
+import { type Input, attachInput } from "~/viewer/input";
 import {
   type ViewerStats,
   type WorkerIn,
@@ -62,17 +61,12 @@ export default function Viewer() {
   const [connected, setConnected] = useState(false);
   const [stats, setStats] = useState<ViewerStats | null>(null);
   const [showStats, setShowStats] = useState(false);
-  const [locked, setLocked] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
   /** The file-drop note: progress, then the result for a few seconds. */
   const [note, setNote] = useState<{ text: string; error?: boolean } | null>(null);
 
   useEffect(() => {
     document.title = `RMNG monitor ${monitor}`;
     setSecure(window.isSecureContext);
-    const onFs = () => setFullscreen(document.fullscreenElement !== null);
-    document.addEventListener("fullscreenchange", onFs);
-    return () => document.removeEventListener("fullscreenchange", onFs);
   }, [monitor]);
 
   useEffect(() => {
@@ -100,7 +94,7 @@ export default function Viewer() {
       overlay: overlay.current,
       monitor,
       send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
-      onLockChange: setLocked,
+      onToggleStats: () => setShowStats((v) => !v),
       onGesture: () => clip.onGesture(),
       onResize: (width, height) => post({ type: "resize", width, height }),
     });
@@ -195,19 +189,6 @@ export default function Viewer() {
     setTimeout(() => setNote(null), 5000);
   };
 
-  // Toolbar buttons never take focus, so Space and Enter keep going to the clone.
-  const tool = (label: string, on: boolean, act: () => void) => (
-    <button
-      type="button"
-      tabIndex={-1}
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={act}
-      className={`rounded px-1.5 py-0.5 hover:bg-white/20 ${on ? "text-sky-300" : ""}`}
-    >
-      {label}
-    </button>
-  );
-
   return (
     <main className="fixed inset-0 select-none bg-black" onDragOver={onDragOver} onDrop={onDrop}>
       <div ref={box} className="h-full w-full" />
@@ -257,21 +238,6 @@ decoder ${stats.decoder}`}
           {note.text}
         </p>
       ) : null}
-      {/* Bottom right, faint: the clone's top bar has its own menus at the top. In fullscreen,
-          and over a terminal (tmux's status line), invisible until the pointer is on it. */}
-      <div
-        className={`absolute bottom-1 right-1 flex gap-0.5 rounded bg-black/60 text-xs text-slate-300 transition-opacity hover:opacity-100 ${
-          fullscreen || content?.mode === "terminal" ? "opacity-0" : "opacity-40"
-        }`}
-      >
-        {tool(fullscreen ? "Exit fullscreen" : "Fullscreen", fullscreen, () =>
-          toggleFullscreen(),
-        )}
-        {/* Opens the windows of monitors that have none, e.g. after the layout grew. */}
-        {tool("Windows", false, () => void openViewerWindows(layout ?? undefined))}
-        {tool("Lock pointer", locked, () => input.current?.toggleLock())}
-        {tool("Stats", showStats, () => setShowStats((s) => !s))}
-      </div>
     </main>
   );
 }
