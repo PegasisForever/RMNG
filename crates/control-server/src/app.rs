@@ -45,10 +45,6 @@ pub struct App {
     /// Volatile CT 105-wide resource usage, published as the named `lxcStats` SSE event.
     /// This includes the control-server and Docker infrastructure, unlike the clone map.
     pub lxc_stats: Arc<crate::monitor::LxcStatsBus>,
-    /// Volatile port-forward runtime status. Published by the media plane (viewer
-    /// reports + data-conn counts); `/events` fans it out as a named `forwards` SSE
-    /// event. SSE-only — never persisted (see [`crate::forward::ForwardBus`]).
-    pub forwards: Arc<crate::forward::ForwardBus>,
     /// Volatile per-clone agent-activity timestamps, fed by the clone's assistant chat stream
     /// and the transcript scanner. No longer decides `working` vs `idle` — that is
     /// [`crate::stuck`] now — but it is still what `should_flag_unread` reads to tell an idle
@@ -126,7 +122,6 @@ impl App {
             docker,
             stats: Arc::new(crate::monitor::StatsBus::new()),
             lxc_stats: Arc::new(crate::monitor::LxcStatsBus::new()),
-            forwards: Arc::new(crate::forward::ForwardBus::new()),
             activity: Arc::new(crate::monitor::ActivityBus::new()),
             stuck: Arc::new(crate::stuck::Judge::new()),
             stucklog: Arc::new(crate::stucklog::Recorder::new()),

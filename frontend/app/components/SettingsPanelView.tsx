@@ -66,9 +66,6 @@ export interface SettingsPanelViewProps {
 
   /** The last failed load or save, in the panel's own banner. */
   error: string | null;
-  /** The last save touched the chroma mode, so the restart banner stands until a later
-   *  save clears it. */
-  restartRequired: boolean;
   saving: boolean;
   /** The post-save confirmation, which the container clears after a beat. */
   saved: boolean;
@@ -118,7 +115,6 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
     onImportAccount,
     forkSources,
     error,
-    restartRequired,
     saving,
     saved,
     onSave,
@@ -233,22 +229,6 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
                     {error}
                   </div>
                 ) : null}
-                {restartRequired ? (
-                  <div className="mx-5 mt-4 flex items-center gap-3 rounded border border-amber-300 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/40 px-3 py-2 text-xs text-amber-800 dark:text-amber-400">
-                    <span>
-                      Changed port/socket/video settings need a restart to
-                      apply.
-                    </span>
-                    <button
-                      type="button"
-                      onClick={onRestartServer}
-                      className="rounded border border-amber-400 dark:border-amber-700 px-2 py-1 text-xs font-medium text-amber-800 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/40"
-                    >
-                      Restart control-server
-                    </button>
-                  </div>
-                ) : null}
-
                 {/* One pane scrolls, not the whole panel, so the rail stays put while a long
                 section (the two prompts, the preset list) runs past the bottom edge. The
                 first section drops its rule: it would sit right under the rail's top border

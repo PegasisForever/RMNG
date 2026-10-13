@@ -20,8 +20,12 @@ server, with no manual redeploy step (see [Upgrades](#upgrades)).
 - A **GPU render node** `/dev/dri/renderD128` on the host (AMD radeonsi/Mesa VA-API). The
   control-server VA-API-**encodes** every clone's frames and each clone **captures** its own
   desktop — both need the render node. Validated on the AMD Radeon Pro **W6800**.
-- Ports **9000**, **9001**, **9005** (port-forward), **445** (SMB), and **2222** (SSH bastion) free
-  (web/API, video, port-forward data plane, clone-home share, and jump into clones).
+- Ports **9000** (web/API and the browser viewer), **445** (SMB, the clone-home share), and
+  **2222** (SSH bastion, jump into clones) free.
+- **Chrome** on the machine you view clones from. The viewer (`/viewer` on port 9000) needs
+  HTTPS, because WebCodecs and the async clipboard work only on HTTPS pages (or `localhost`).
+  Put HTTPS in front of port 9000 yourself, for example with `tailscale serve`. Without HTTPS
+  the dashboard works and the viewer shows a warning instead of video.
 
 ## 1. Get the image
 
@@ -53,7 +57,7 @@ docker run -d --name rmng --privileged --init --pid host --restart unless-stoppe
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
   -v /srv/rmng-homes:/srv/rmng-homes:shared \
-  -p 9000:9000 -p 9001:9001 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
+  -p 9000:9000 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
 What each piece is for:
@@ -67,14 +71,13 @@ What each piece is for:
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
 | `-v /srv/rmng-homes:/srv/rmng-homes:shared` | the clone-home datasets (gen-2). Load-bearing: datasets are created from inside this container, and only a **shared** bind propagates their mounts into dockerd's namespace (plus server-side home reads/writes). Omit it and the first create fails with `bind source path does not exist` |
-| `-p 9000:9000` and `-p 9001:9001` | the web API and video ports |
-| `-p 9005:9005` | the port-forward data plane (viewer↔clone TCP splice) |
+| `-p 9000:9000` | the web API, the dashboard and the browser viewer (video over a WebSocket on the same port) |
 | `-p 445:445` | the two SMB shares: `clones` browses every running clone's `/home/rmng`, and `shared` is the one pool every clone sees at `~/shared` |
-| `-p 2222:2222` | the SSH bastion — jump host for `ssh`/`scp`/`rsync`/VSCode Remote-SSH into any clone's own `sshd` (see [SSH into clones](#ssh-into-clones)) |
+| `-p 2222:2222` | the SSH bastion — jump host for `ssh`/`scp`/`rsync`/VSCode Remote-SSH into any clone's own `sshd` (see [SSH into clones](#ssh-into-clones)). Port forwarding goes through it too: the dashboard's "Port forward…" dialog gives an `ssh -J rmng@<host>:2222 -N -L <local>:localhost:<clone-port> rmng@<clone>` command |
 
 **There are zero `-e` configuration flags, by design.** `config.json` (edited via the
 wizard / Settings, `PUT /api/config`) is the single source of truth — subnet, hostname
-prefix, monitors, ports, clone limits, presets are all set in the UI (the no-env-settings
+prefix, monitors, clone limits, presets are all set in the UI (the no-env-settings
 invariant). The only `ENV` in the image is `RUST_LOG=info,tower_http=warn,clip=debug`, a
 logging default, not a setting.
 
@@ -296,11 +299,10 @@ clone-daemon (a WARN says so at create time).
 Once the control-server is running a build that includes the self-update feature, its
 Settings page has **Restart control-server** and **Update** buttons:
 
-- **Restart** does an in-place `docker restart` of the control-server container (applies
-  changed port/socket/static-dir/chroma settings, re-read from config.json on boot). It does
-  NOT change the container's host-published port mapping — adding a newly required published
-  port such as the SSH bastion `2222`, or moving any `listen` port outside the published
-  range, still needs a host-level recreate with the updated `docker run`/compose port map.
+- **Restart** does an in-place `docker restart` of the control-server container (it re-reads
+  config.json on boot). It does NOT change the container's host-published port mapping — a
+  container that lacks a published port (such as the SSH bastion `2222`) still needs a
+  host-level recreate with the updated `docker run`/compose port map.
 - **Update** pulls `docker.serverImage` (default `pegasis0/rmng:latest`) and swaps the
   running container onto it via a detached helper. Running clones and the data volumes
   survive.
@@ -538,20 +540,19 @@ that unit).
 
 ## The dev loop
 
-The whole workspace compiles on any Linux dev box with the desktop media/GUI dev libs (the
-[Prerequisites](DEVELOPMENT.md#prerequisites): GStreamer + GTK4 + PipeWire + libdrm + `clang`);
-a bare box without them builds only `wire`. What needs a **GPU** is *running* the pipeline —
-the control-server's VA-API **encode** and each clone's **capture** — so exercising real
-clones requires the W6800 host with Docker. The **`viewer` is the exception: it builds *and*
-runs locally** (client-side VA-API **decode** only; Intel iGPU decode is validated against
-AMD-encoded streams).
+The whole workspace compiles on any Linux dev box with the media dev libs (the
+[Prerequisites](DEVELOPMENT.md#prerequisites): GStreamer + PipeWire + libva + libdrm +
+`clang`); a bare box without them builds only `wire`. What needs a **GPU** is *running* the
+pipeline — the control-server's VA-API **encode** and each clone's **capture** — so exercising
+real clones requires the W6800 host with Docker. The viewer is part of the frontend: it runs in
+Chrome and decodes with WebCodecs, so any machine with Chrome can show it.
 
 ### Local (on your laptop)
 
 | You changed | Build & run locally | See the result |
 | --- | --- | --- |
-| **`viewer`** | `RMNG_VIDEO=<host>:9001 cargo run -p viewer` | GUI window streaming the server's *selected clone* |
-| **`viewer`**, no display | `RMNG_VIDEO=<host>:9001 RMNG_DUMP=frame.png cargo run -p viewer -- --headless` | per-monitor fps in the logs; `frame.png` = one decoded frame |
+| **viewer** (`frontend/app/viewer/*`, `routes/viewer.tsx`) | `cd frontend && bun test && bun run build`, then serve the build from a control-server (`cargo run -p control-server` reads `frontend/build/client`) | open `/viewer?monitor=0` in Chrome over HTTPS (or `localhost`); the stats overlay shows frame rate and delay |
+| frame rate, no browser | `cargo run -p control-client --bin rmng-fps -- <host>[:port] [monitor]` | frames, keyframes and megabits per second for one monitor of the *selected clone*, read from the `/api/viewer` WebSocket without decoding |
 | **frontend** | `cd frontend && bun run dev` | Vite dev server + HMR; proxies `/api` + `/events` to a running backend |
 | **`wire`** types / DTOs | `cargo test -p wire` | compiles + regenerates the frontend's ts-rs types |
 | pure logic in **any** crate | `cargo build -p <crate>` · `cargo test -p <crate>` | the whole workspace compiles locally, so the compiler + unit tests are a local loop |
@@ -573,7 +574,7 @@ Two options for exercising the full clone/capture/encode path against a local Do
   [Upgrades](#upgrades)) — restart the dev server after restaging `embedded-bin/`.
 
 Then, from the dashboard: create a clone (`POST /api/clone` — its preset image builds on
-demand), select the clone, and point the viewer at the host. After a
+demand), select the clone, and open the viewer from the dashboard. After a
 `clone-daemon` / `rmng` CLI change, restage `embedded-bin/` and restart the dev server —
 the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no manual step.
 

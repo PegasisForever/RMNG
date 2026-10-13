@@ -292,7 +292,7 @@ propagates their mounts into dockerd's namespace (without it `docker create` fai
 ```sh
 docker pull pegasis0/rmng:latest
 docker run -d --name rmng --privileged --pid=host --restart unless-stopped \
-  -p 445:445 -p 2222:2222 -p 9000:9000 -p 9001:9001 -p 9005:9005 \
+  -p 445:445 -p 2222:2222 -p 9000:9000 \
   -v /var/run/docker.sock:/var/run/docker.sock -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
   -v /srv/rmng-homes:/srv/rmng-homes:shared \
   -e RUST_LOG=info,tower_http=warn pegasis0/rmng:latest

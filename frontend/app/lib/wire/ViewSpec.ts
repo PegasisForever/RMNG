@@ -3,7 +3,7 @@ import type { ViewContent } from "./ViewContent";
 import type { ViewMonitor } from "./ViewMonitor";
 
 /**
- * Server → viewer (port-1 tag 3): the complete view for the selected clone. `monitors` is
- * empty when nothing is selected — the viewer then shows only its keep-alive window.
+ * Server → browser: the complete view for the selected clone, sent at connect and on every
+ * selection or layout change. `monitors` is empty when nothing is selected.
  */
 export type ViewSpec = { monitors: Array<ViewMonitor>, content: ViewContent, };

@@ -33,7 +33,7 @@ docs/
 .claude/
 
 # Repo-root scripts. Host-only convenience wrappers (publish-server.sh,
-# publish-template.sh, build-macos-app.sh): run on the host, never consumed by an image
+# publish-template.sh): run on the host, never consumed by an image
 # build, so they stay out of the context. Root-anchored (leading `/`) so it excludes this
 # directory only, never a `scripts/` dir at any deeper level.
 /scripts/

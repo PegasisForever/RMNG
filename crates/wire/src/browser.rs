@@ -6,15 +6,14 @@
 //!   a [`VideoHeader`] ([`VIDEO_HEADER_LEN`] bytes), then one Annex-B access unit. Kind
 //!   [`KIND_CLIPBOARD_DATA`] (both directions) is one clipboard reply
 //!   ([`encode_clipboard_data`]), so an image crosses as raw bytes, not base64 in JSON.
-//! - Everything else is a **JSON text** message: [`ToBrowser`] out, [`FromBrowser`] in. Both
-//!   reuse the port-1 types, so the server's handlers are the same for both kinds of viewer.
-//!   A `ClipboardMsg::Data` never travels as JSON here.
+//! - Everything else is a **JSON text** message: [`ToBrowser`] out, [`FromBrowser`] in. Input,
+//!   cursor and clipboard reuse the clone-daemon socket types ([`crate::socket`]). A
+//!   `ClipboardMsg::Data` never travels as JSON here.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::socket::{ClipboardData, ClipboardMsg, CursorMeta, InputMsg};
-use crate::viewer::{ModeMsg, RequestKeyframe, TermData, TermInput, TermResize, ViewSpec};
 
 /// Byte 0 of a binary message: a video frame ([`VideoHeader`]).
 pub const KIND_VIDEO: u8 = 0;
@@ -92,7 +91,6 @@ pub fn decode_clipboard_data(b: &[u8]) -> Option<ClipboardData> {
 #[serde(tag = "t", rename_all = "snake_case")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum ToBrowser {
-    Mode(ModeMsg),
     ViewSpec(ViewSpec),
     Cursor(CursorMeta),
     Clipboard(ClipboardMsg),
@@ -111,6 +109,84 @@ pub enum FromBrowser {
     TermNewSession,
     /// Encode the monitor's next frame as a keyframe: at connect, and after a decode error.
     RequestKeyframe(RequestKeyframe),
+}
+
+/// Browser → server: encode the monitor's next frame as a keyframe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct RequestKeyframe {
+    pub monitor_id: u32,
+}
+
+/// One monitor of the view; the browser opens one window per monitor. `id` is the layout slot
+/// index (`0..n-1`). Geometry is unified-desktop px, taken from the server's **configured**
+/// layout (fleet-wide, always known — not the daemon's live report), so the window set is the
+/// same for every clone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct ViewMonitor {
+    pub id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+/// What the windows in a [`ViewSpec`] show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub enum ViewContent {
+    /// Headed clone: every window shows its monitor's H.264 desktop stream. (The video surface is
+    /// clone-agnostic, so no clone id is needed here.)
+    Desktop,
+    /// Headless clone: a terminal with one tab per tmux session in `sessions`, and no video.
+    /// `clone` is the selected clone id, so the viewer rebuilds the terminal (fresh scrollback)
+    /// when the selection moves to another headless clone: two clones can share a session name
+    /// (`main`), so the name alone does not tell them apart.
+    Terminal {
+        clone: String,
+        sessions: Vec<String>,
+    },
+}
+
+/// Server → browser: the complete view for the selected clone, sent at connect and on every
+/// selection or layout change. `monitors` is empty when nothing is selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct ViewSpec {
+    pub monitors: Vec<ViewMonitor>,
+    pub content: ViewContent,
+}
+
+/// Server → browser: a chunk of raw terminal output for `session` (the bytes a
+/// tmux client would write to its terminal — already VT/ANSI-encoded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct TermData {
+    pub session: String,
+    #[serde(with = "crate::socket::serde_bytes_b64")]
+    #[ts(type = "string")]
+    pub data: Vec<u8>,
+}
+
+/// Browser → server: keystrokes / pasted bytes for `session` (fed to the tmux client's stdin).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct TermInput {
+    pub session: String,
+    #[serde(with = "crate::socket::serde_bytes_b64")]
+    #[ts(type = "string")]
+    pub data: Vec<u8>,
+}
+
+/// Browser → server: the terminal for `session` was resized (characters).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct TermResize {
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[cfg(test)]

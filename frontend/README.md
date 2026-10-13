@@ -4,10 +4,11 @@ The web app — the **management UI** (port 2). It is the existing React Router 
 (`../../control-server/app`) kept and extended with a Settings page, built to a static
 bundle and **served by the Rust control-server**.
 
-It is **management only**: host selection, clone orchestration, Claude accounts, chat,
-notes, and settings. **The live monitor viewer is not here** — viewing is the native GTK
-[viewer](../crates/viewer/README.md) on port 1. There is **no `MonitorViewer`, no WebRTC,
-no signaling** in this app.
+It does host selection, clone orchestration, Claude accounts, chat, notes, and settings.
+It also holds the **viewer**: `/viewer?monitor=<id>` (`app/routes/viewer.tsx`,
+`app/viewer/*`) opens one browser window per monitor of the selected clone. Each window gets
+its monitor's H.264 over a WebSocket (`/api/viewer`) and decodes it with WebCodecs. The
+protocol is in `../docs/PROTOCOL.md`.
 
 ## What's reused (≈99% of the current UI)
 
@@ -28,8 +29,8 @@ planned "monitor" pane is dropped.
 
 - **`Settings.tsx`** — per-section forms for **all** configuration (the Docker backend —
   daemon socket / `rmng`-network subnet / hostname prefix / per-clone limits, presets —
-  Linear key + auto-select ticket-id prefixes + env vars, Claude polling/groups, monitor defaults, the
-  four listen ports), replacing hand-edited `config.json`. Secret fields are
+  Linear key + auto-select ticket-id prefixes + env vars, Claude polling/groups, monitor
+  defaults), replacing hand-edited `config.json`. Secret fields are
   masked/write-only with **Test connection** buttons (`POST /api/config/test`); saves go to
   `PUT /api/config` and apply live. Claude accounts are imported from a signed-in clone
   (`ClaudeAccountsPanel`), not entered here. Reads the redacted `GET /api/config`, which

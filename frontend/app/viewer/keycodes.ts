@@ -1,8 +1,7 @@
 // `KeyboardEvent.code` → Linux evdev keycode (`KEY_*` in input-event-codes.h), sent as
-// `key_code`. `code` names the physical key, so the clone's own keyboard layout applies, as in
-// the native viewers. Values from Chromium's `ui/events/keycodes/dom/dom_code_data.inc`, which
-// ties each DOM code to its evdev code; the native macOS viewer's `kvk_evdev.rs` uses the same
-// source, so Command is KEY_LEFTMETA / KEY_RIGHTMETA here too.
+// `key_code`. `code` names the physical key, so the clone's own keyboard layout applies. Values
+// from Chromium's `ui/events/keycodes/dom/dom_code_data.inc`, which ties each DOM code to its
+// evdev code, so Command is KEY_LEFTMETA / KEY_RIGHTMETA.
 //
 // A code that is not in the table is not sent.
 

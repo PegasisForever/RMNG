@@ -1,8 +1,9 @@
 # control-server
 
 The backend binary — one tokio service that is the **control plane**, the **media plane**,
-and the **fleet-automation plane**. It exposes three service ports (9000 web, 9001 video,
-9005 forward) plus the clone-home and shared-folder SMB shares on 445, and ships as a Docker image; the frontend
+and the **fleet-automation plane**. It exposes the web port 9000 (API, dashboard and browser
+viewer) and the SSH bastion on 2222, plus the clone-home and shared-folder SMB shares on 445,
+and ships as a Docker image; the frontend
 and the `clone-daemon`/`rmng-cli` binaries are plain on-disk payloads under
 `/usr/local/share/rmng/` (read at runtime, injected into clones at create time) — nothing is
 compiled into the binary. Clones themselves are created from a separately-published **template**
@@ -12,9 +13,8 @@ so the patched gnome-shell `.deb` isn't a control-server payload at all. Full re
 
 | Port | Default | Transport | Serves |
 | --- | --- | --- | --- |
-| **1 — video** | 9001 | framed H.264/JSON over TCP | the native [viewer](../viewer/README.md): selected clone's monitors out; input/clipboard/cursor |
-| **2 — web API** | 9000 | `axum` HTTP + SSE + embedded frontend | the [frontend](../../frontend/README.md): `/events`, all `/api/*`, the SPA |
-| **4 — forward** | 9005 | framed TCP over TCP | the viewer's port-forward data plane: one TCP connection per accepted local socket, spliced to the clone |
+| **web** | 9000 | `axum` HTTP + SSE + WebSocket + embedded frontend | the [frontend](../../frontend/README.md): `/events`, all `/api/*`, the SPA, and the browser viewer's WebSocket `/api/viewer?monitor=<id>` (selected clone's video for one monitor; input/clipboard/cursor/terminal) |
+| **bastion** | 2222 | OpenSSH | jump host into clones (`ssh -J rmng@<host>:2222 rmng@<clone>`); also carries port forwarding with `-L` |
 | **SMB** | 445 | SMB (smbd) | two shares, fixed cred `rmng`/`rmng`: `clones` browses each running clone's `/home/rmng` at `smb://<host>/clones`, and `shared` is the pool every clone sees at `/home/rmng/shared` |
 
 **No clone model traffic passes through this process.** Agents dial their providers directly and
@@ -26,11 +26,12 @@ control-server safe while clones are mid-turn.
 
 `app` (shared state holder) · `state` (in-memory `ControlState` + atomic `state.json` persist
 
-+ file-watch + SSE bus) · `config` (load/merge/redact `config.json` at 0600) · `web` (port 2
++ file-watch + SSE bus) · `config` (load/merge/redact `config.json` at 0600) · `web` (web
 routes + SSE + SPA + the desktop/exec proxy endpoints for `rmng desktop`/`rmng exec`) ·
-`clonekey` (per-clone identity bearers, `RMNG_PROXY_KEY`) · `mediaplane` (port 1: clone-socket
-ingest → `media` encode → viewer; input routing;
-clipboard broker) · `forward` (port-forward data plane: viewer TCP spliced to the clone) ·
+`clonekey` (per-clone identity bearers, `RMNG_PROXY_KEY`) · `mediaplane` (clone-socket
+ingest → `media` encode → viewers; input routing; clipboard broker) · `webviewer` (the
+browser viewer's WebSocket and file upload) · `termplane` (tmux sessions of a clone with no
+desktop, proxied to the viewer) ·
 `docker` (bollard primitives against the local daemon) · `provision` (clone/pull/commit/delete
 flows over those primitives) · `clone_reconcile` (content convergence over running
 clones: payloads, sshd, `/etc/environment`, the generated agent configs) · `jobs` (the
@@ -47,20 +48,22 @@ clone at `/home/rmng/shared`) · `smb` (smbd supervisor + the read-write `clones
 shares) · `files` (notes/uploads) · `assets` (on-disk clone-daemon/rmng-cli
 payloads + the served frontend).
 
-## Port 1 — media plane (`mediaplane` → [media](../media/README.md))
+## Media plane and browser viewer (`mediaplane`, `webviewer` → [media](../media/README.md))
 
-Streams the **selected** clone's monitors, one H.264 stream per monitor over one TCP
-connection (1-byte tag framing: video / clipboard / cursor / layout — see
-[PROTOCOL.md](../../docs/PROTOCOL.md#port-1-viewer-protocol-viewer--control-server)). On
-`state.selected` change it re-points at the new clone's daemon socket, renegotiates the
-monitor set, and forces an IDR. Viewer input is relayed to the selected clone. control-server
-is also the **clipboard broker**: it tracks the current owner and fans each `ClipboardOffer`
-to the viewer **and every other clone** (remote↔local + remote↔remote), routing requests to
+Streams the **selected** clone's monitors, one H.264 encoder per monitor. Each browser viewer
+window opens one WebSocket (`/api/viewer?monitor=<id>`) and gets the video of its monitor
+plus the control messages (see
+[PROTOCOL.md](../../docs/PROTOCOL.md#browser-viewer-protocol-browser--control-server)). Each
+broadcast builds the WebSocket message once and queues it to every window. A window whose
+128-message queue is full is closed; the browser reconnects and gets a keyframe. On
+`state.selected` change it sends the new view spec and forces an IDR. Viewer input is relayed
+to the selected clone. control-server is also the **clipboard broker**: it tracks the current
+owner and fans each `ClipboardOffer` to every viewer window **and every other clone** (remote↔local + remote↔remote), routing requests to
 the owner and bytes back to the requester, re-binding as `selected` changes. Endpoints asking
 for the same `(serial, mime_type)` share one fetch: the first request goes to the owner, the
 rest join its reply, because a clone can only run one selection read at a time.
 
-## Port 2 — web API
+## Web API
 
 State store + SSE, all `/api/*` routes, the served SPA, and `/uploads`. Orchestration
 (clone/delete/pull/commit + images over the local Docker daemon, Claude, assistant chat,
@@ -73,7 +76,7 @@ Operator/fleet **desktop control** uses the `rmng desktop` CLI
 ([crates/cli](../cli/README.md)), which posts to the web port's
 `POST /api/hosts/:id/mcp` endpoint; the server forwards each call verbatim to the addressed
 clone's daemon MCP at `http://{host}:{daemon_mcp}`. Fleet management (clones, clone/delete,
-images, accounts) and `rmng exec` go through the same `rmng` CLI over the port-2 web API.
+images, accounts) and `rmng exec` go through the same `rmng` CLI over the web API.
 
 The full desktop-automation surface lives in the **clone-daemon** (`:9004`), not here — agents
 that run inside the clone call it directly on localhost, and the `rmng desktop` CLI (used by
@@ -129,14 +132,14 @@ Only the control-server needs external reachability (tailscale, manual). Clones 
 user-defined `rmng` Docker bridge (static IPs: `.1` gateway, `.2` control-server, `.10+`
 clones), reachable *from* the control-server (the
 `rmng desktop` → daemon-MCP proxy + `rmng exec`); media/input cross the shared
-`/srv/rmng-sock` named-volume unix socket (SCM_RIGHTS), not the network. Ports 1 and 2 are
-operator-facing; the clone daemon MCP (9004) is localhost/token-protected; the forward data
-plane (9005) and the SMB shares (445) are published for the viewer, clone-home browsing, and
-the shared folder.
+`/srv/rmng-sock` named-volume unix socket (SCM_RIGHTS), not the network. The web port (9000)
+and the bastion (2222) are operator-facing; the clone daemon MCP (9004) is
+localhost/token-protected; the SMB shares (445) are published for clone-home browsing and the
+shared folder.
 
 ## Dependencies
 
-`axum`/`tokio`/`tower-http` (port 2 + static files), `reqwest` (the Anthropic + OpenAI OAuth/usage
+`axum`/`tokio`/`tower-http` (web port, WebSocket + static files), `reqwest` (the Anthropic + OpenAI OAuth/usage
 endpoints, the two Linear image byte routes, the assistant's pi-web chat API, the daemon-MCP proxy —
 `rustls-tls`, since the provider calls are HTTPS), `bollard` +
 `tar` (Docker orchestration over the unix socket), `notify` (file watch), `serde_json`,
@@ -149,5 +152,5 @@ subnet/IP allocator + image-reference canonicalization + step→percentage table
 account scoring / assignment / rotation for both providers, the injected credential-file shapes
 (access token in, refresh token emptied), provider usage-window parsing, the completed reverse
 token migration (parse, dedupe, 0600 stores), per-clone identity keys, the `/etc/environment` sync's
-retired-key stripping, config defaults/merge/redaction + one-time/restart-required categories,
+retired-key stripping, config defaults/merge/redaction,
 Docker lifecycle transitions, and `in_use_by` accounting.

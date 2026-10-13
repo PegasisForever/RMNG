@@ -4,16 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Shared boundary types for rmng: control state, config, socket + viewer protocols, MCP DTOs."
+description = "Shared boundary types for rmng: control state, config, socket + browser viewer protocols, MCP DTOs."
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 ts-rs.workspace = true
-# Keepalive tuning for the port-1 boundary this crate describes (wire::net).
-# `all`: the keepalive-retries / user-timeout setters are gated behind it (they
-# are not cross-platform); request it here so `wire` builds standalone rather than
-# only when another crate's socket2 features happen to unify in.
-socket2 = { workspace = true, features = ["all"] }
 
 [dev-dependencies]

@@ -87,21 +87,6 @@ export const archiveClone = (id: string) =>
 /** Restart a retained archived clone. */
 export const unarchiveClone = (id: string) =>
  postJson(`/api/hosts/${encodeURIComponent(id)}/unarchive`, {});
-/** Replace a clone's port-forward rules. New rules omit `id` (server derives it as
- *  `f<localPort>`). 400 on a local-port conflict (validated server-side); the UI
- *  refreshes from the next `/events` frame. */
-export const putForwards = (
- cloneId: string,
- forwards: Array<{
-  id?: string;
-  remotePort: number;
-  localPort: number;
-  enabled: boolean;
-  label?: string;
- }>,
-) =>
- putJson(`/api/hosts/${encodeURIComponent(cloneId)}/forwards`, { forwards });
-
 /** Replace the board's columns wholesale. The client owns the layout rules and sends the
  *  settled list; the server just stores it and broadcasts the new state. */
 export const putBoardColumns = (columns: BoardColumn[]) =>
@@ -243,8 +228,7 @@ function putJson(url: string, body: unknown): Promise<unknown> {
 export const getConfig = () =>
  getJson("/api/config") as Promise<AppConfigRedacted>;
 /** Merge a partial config update (empty-string secrets are left unchanged), persist,
- *  apply live. Returns the new redacted config plus whether a restart is required to
- *  apply restart-scoped settings (ports, cloneSocket, staticDir, chroma). When the
+ *  apply live. Returns the new redacted config. When the
  *  patch flips `setupComplete` (wizard finish), the server also ensures the `rmng`
  *  network; a non-fatal failure rides along as `networkWarning`. */
 export const putConfig = (patch: unknown) =>

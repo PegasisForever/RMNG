@@ -93,7 +93,6 @@ pub fn router(app: App) -> Router {
             "/api/chat/:id/schedule/:sid",
             axum::routing::delete(chat_schedule_cancel),
         )
-        .route("/api/hosts/:id/forwards", put(forwards_put))
         .route("/api/hosts/:id/archive", post(archive))
         .route("/api/hosts/:id/unarchive", post(unarchive))
         .route("/api/hosts/:id/mcp", post(clone_mcp))
@@ -160,18 +159,17 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `GET /events` — five multiplexed streams on one connection:
+/// `GET /events` — four multiplexed streams on one connection:
 ///   - the persisted `ControlState` as the default (unnamed) event → the client's
 ///     `onmessage`: full snapshot on connect, then one frame per change;
 ///   - the volatile per-clone CPU/RAM map as a named `stats` event → the client's
 ///     `addEventListener("stats")`: latest snapshot on connect, then one per poll tick;
 ///   - CT-wide CPU/RAM/disk as a named `lxcStats` event;
-///   - the volatile port-forward runtime map as a named `forwards` event;
 ///   - safe per-clone newly-processed token totals as a named `tokens` event.
 ///
-/// Stats, LXC stats, forwards, and tokens ride separate SSE-only buses
+/// Stats, LXC stats, and tokens ride separate SSE-only buses
 /// ([`crate::monitor::StatsBus`], [`crate::monitor::LxcStatsBus`],
-/// [`crate::forward::ForwardBus`], [`crate::tokens::TokenBus`]) so they never enter `ControlState` / `state.json`
+/// [`crate::tokens::TokenBus`]) so they never enter `ControlState` / `state.json`
 /// (which persists on every mutation). Plus a named `ping` event every 15s (an
 /// observable heartbeat the client's reconnect watchdog measures) and a 20s low-level
 /// keep-alive comment.
@@ -212,19 +210,6 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     });
     let lxc_stream = lxc_initial.chain(lxc_updates);
 
-    let (fwd_snapshot, fwd_rx) = app.forwards.subscribe();
-    let fwd_initial =
-        futures::stream::once(
-            async move { Ok(Event::default().event("forwards").data(fwd_snapshot)) },
-        );
-    let fwd_updates = BroadcastStream::new(fwd_rx).filter_map(|r| async move {
-        match r {
-            Ok(json) => Some(Ok(Event::default().event("forwards").data(json))),
-            Err(_) => None,
-        }
-    });
-    let fwd_stream = fwd_initial.chain(fwd_updates);
-
     // Who the browser is talking to, sent once per connection. A page that sees this change
     // between connections is running a bundle from a server that no longer exists, so it
     // reloads itself. An upgrade drops every SSE connection, which is what makes one frame on
@@ -251,7 +236,7 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
         futures::stream::select(
             futures::stream::select(
                 futures::stream::select(stats_stream, lxc_stream),
-                futures::stream::select(fwd_stream, version_stream),
+                version_stream,
             ),
             heartbeat,
         ),
@@ -431,85 +416,6 @@ async fn muted_put(State(app): State<App>, Json(req): Json<MutedPutReq>) -> Json
     ids.sort_unstable();
     ids.dedup();
     Json(app.store.mutate(|s| s.muted_clones = ids))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ForwardsPutReq {
-    forwards: Vec<ForwardInput>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ForwardInput {
-    #[serde(default)]
-    id: Option<String>,
-    remote_port: u16,
-    local_port: u16,
-    #[serde(default)]
-    enabled: bool,
-    #[serde(default)]
-    label: Option<String>,
-}
-
-/// Validate a clone's proposed forward set against the whole state and normalize it into
-/// `PortForward`s (ids derived `f{local_port}`). Errors: port 0, duplicate local port
-/// within the request, or a local port already claimed by a *different* clone (the viewer
-/// binds them all on one machine → the local-port space is global).
-fn validate_forwards(
-    state: &wire::ControlState,
-    host_id: &str,
-    inputs: Vec<ForwardInput>,
-) -> Result<Vec<wire::PortForward>, (StatusCode, String)> {
-    let bad = |m: String| (StatusCode::BAD_REQUEST, m);
-    // Local ports claimed by OTHER clones.
-    let mut taken: std::collections::HashSet<u16> = state
-        .hosts
-        .iter()
-        .filter(|h| h.id != host_id)
-        .flat_map(|h| h.forwards.iter().map(|f| f.local_port))
-        .collect();
-    let mut out = Vec::with_capacity(inputs.len());
-    for inp in inputs {
-        if inp.remote_port == 0 || inp.local_port == 0 {
-            return Err(bad("ports must be 1–65535".into()));
-        }
-        if !taken.insert(inp.local_port) {
-            return Err(bad(format!(
-                "local port {} is already in use",
-                inp.local_port
-            )));
-        }
-        out.push(wire::PortForward {
-            id: inp.id.unwrap_or_else(|| format!("f{}", inp.local_port)),
-            remote_port: inp.remote_port,
-            local_port: inp.local_port,
-            enabled: inp.enabled,
-            label: inp.label,
-        });
-    }
-    Ok(out)
-}
-
-/// `PUT /api/hosts/:id/forwards` — replace a clone's forward rules. Validated
-/// synchronously (returns 400 on conflict); persisted to `state.json`; the media plane
-/// re-pushes the new set to the viewer off the store broadcast.
-async fn forwards_put(
-    State(app): State<App>,
-    AxPath(id): AxPath<String>,
-    Json(req): Json<ForwardsPutReq>,
-) -> Result<Json<ControlState>, (StatusCode, String)> {
-    let state = app.store.get();
-    if !state.hosts.iter().any(|h| h.id == id) {
-        return Err((StatusCode::NOT_FOUND, format!("no clone '{id}'")));
-    }
-    let validated = validate_forwards(&state, &id, req.forwards)?;
-    let next = app.store.mutate(|s| {
-        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
-            h.forwards = validated;
-        }
-    });
-    Ok(Json(next))
 }
 
 // --- desktop proxy + exec (the `rmng desktop` / `rmng exec` backends) -------
@@ -1755,7 +1661,7 @@ async fn config_put(
     // caller had just added to a pool still counted as claimed by nobody, and was deleted.
     // Adding a freshly imported account to a pool could therefore never succeed — the file
     // ended up correct and the account was gone. Nothing between here and the end wants the
-    // old value: `heal_dangling_pool_bindings` and `restart_required` take `old` explicitly.
+    // old value: `heal_dangling_pool_bindings` takes `old` explicitly.
     *app.cfg.write().unwrap() = merged.clone();
     // Account pools are replaced wholesale by this endpoint, so an omitted pool is a deletion —
     // and a clone still naming it would be stranded: `claude::rotate_once` skips a group it
@@ -1771,7 +1677,6 @@ async fn config_put(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     }
-    let restart_required = config::restart_required(&old, &merged);
     // Keep the DockerCtl's cached subnet in lockstep with the just-saved config BEFORE the
     // lazy `rmng` bridge is materialized (the wizard-finish flip below, and the first clone).
     // The ctl snapshots the subnet at boot from the DEFAULT config; without this, finishing
@@ -1852,7 +1757,6 @@ async fn config_put(
         }
     }
     let resp = ConfigPutResponse {
-        restart_required,
         config: merged.redacted(),
     };
     let mut body = serde_json::to_value(&resp)
@@ -1938,9 +1842,8 @@ async fn server_update(State(app): State<App>) -> Result<Json<Operation>, (Statu
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
-/// `POST /api/server/restart` — restart the control-server in place to apply restart-required
-/// settings (ports / sockets / static dir / chroma), re-read from config.json on boot. The
-/// response is sent before the daemon tears us down; the UI reconnects when we're back.
+/// `POST /api/server/restart` — restart the control-server in place; it re-reads config.json
+/// on boot. The response is sent before the daemon tears us down; the UI reconnects when we're back.
 async fn server_restart(
     State(app): State<App>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -3700,9 +3603,9 @@ PLAIN=plainvalue
     // What stays here is the control-server half of the boundary: the internal token-delta
     // intake's auth.
 
-    /// Spin up `/events` and read the opening bytes. All three multiplexed streams send a
+    /// Spin up `/events` and read the opening bytes. The multiplexed streams send a
     /// snapshot on connect: the default (unnamed) `ControlState` frame plus the named
-    /// `stats` and `forwards` snapshots. Guards the stream `select` wiring.
+    /// `stats` and `version` frames. Guards the stream `select` wiring.
     #[tokio::test]
     async fn events_stream_multiplexes_snapshots_on_connect() {
         use futures::stream::StreamExt;
@@ -3725,9 +3628,7 @@ PLAIN=plainvalue
         {
             buf.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
             let seen = buf.replace(' ', "");
-            if seen.contains("event:stats")
-                && seen.contains("event:forwards")
-                && seen.contains("event:version")
+            if seen.contains("event:stats") && seen.contains("event:version")
             {
                 break;
             }
@@ -3737,10 +3638,6 @@ PLAIN=plainvalue
         assert!(
             seen.contains("event:stats"),
             "no stats snapshot in: {buf:?}"
-        );
-        assert!(
-            seen.contains("event:forwards"),
-            "no forwards snapshot in: {buf:?}"
         );
         // The browser reloads when this changes between connections, so it has to be here
         // on every connect and it has to carry a value.
@@ -3776,75 +3673,6 @@ PLAIN=plainvalue
 
         app.set_build_id("2ae7f50");
         assert_eq!(app.build_id(), "2ae7f50");
-    }
-}
-
-#[cfg(test)]
-mod forwards_validation_tests {
-    use super::*;
-    use wire::{ControlState, RmngClone};
-
-    fn state_with(hosts: Vec<RmngClone>) -> ControlState {
-        ControlState {
-            hosts,
-            ..Default::default()
-        }
-    }
-
-    fn host(id: &str) -> RmngClone {
-        RmngClone {
-            id: id.into(),
-            host: id.into(),
-            ..Default::default()
-        }
-    }
-
-    fn input(remote: u16, local: u16) -> ForwardInput {
-        ForwardInput {
-            id: None,
-            remote_port: remote,
-            local_port: local,
-            enabled: true,
-            label: None,
-        }
-    }
-
-    #[test]
-    fn assigns_ids_from_local_port() {
-        let st = state_with(vec![host("a")]);
-        let out = validate_forwards(&st, "a", vec![input(3000, 8080)]).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].id, "f8080");
-        assert_eq!(out[0].remote_port, 3000);
-    }
-
-    #[test]
-    fn rejects_zero_port() {
-        let st = state_with(vec![host("a")]);
-        let err = validate_forwards(&st, "a", vec![input(0, 8080)]).unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn rejects_duplicate_local_within_request() {
-        let st = state_with(vec![host("a")]);
-        let err = validate_forwards(&st, "a", vec![input(1, 8080), input(2, 8080)]).unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn rejects_local_port_used_by_another_clone() {
-        let mut other = host("b");
-        other.forwards = vec![wire::PortForward {
-            id: "f8080".into(),
-            remote_port: 9,
-            local_port: 8080,
-            enabled: true,
-            label: None,
-        }];
-        let st = state_with(vec![host("a"), other]);
-        let err = validate_forwards(&st, "a", vec![input(3000, 8080)]).unwrap_err();
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 }
 

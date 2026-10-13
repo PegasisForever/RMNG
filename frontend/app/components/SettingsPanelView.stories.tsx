@@ -102,7 +102,6 @@ const meta = {
       "SignedIn",
     ),
     error: null,
-    restartRequired: false,
     saving: false,
     saved: false,
     onSave: fn(),
@@ -168,12 +167,6 @@ export const NoBoard: Story = {
  *  footer: there is nothing to save yet. */
 export const Loading: Story = {
   args: { ...base(), draft: null },
-};
-
-/** After a save that touched a restart-required setting. The banner sits above the rail, so
- *  it stands whichever pane the save was made from. */
-export const RestartRequired: Story = {
-  args: { ...base(), restartRequired: true, category: "server" },
 };
 
 /** First-run setup: the server pane (Docker settings) before any clone exists. */

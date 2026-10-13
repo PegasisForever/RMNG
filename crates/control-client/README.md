@@ -12,7 +12,8 @@ never its own schema.
   triggers on any non-JSON reply, not just 404 — an old server answers unknown routes with
   the SPA's `index.html`).
 - `Client::events()` — `/events` as a typed `Stream<Item = Result<ControlState>>`: default
-  (unnamed) frames only; named `stats`/`forwards` events and keep-alive comments are skipped.
+  (unnamed) frames only; named events (`stats`, `lxcStats`, `version`) and keep-alive comments
+  are skipped.
 - Typed wrappers for the fleet actions: `activate`, `start_clone` (`POST /api/clone` and
   `POST /api/fork`, both taking a `wire::CloneRequest`), `delete`, `images`/`image_pull`/`image_commit`/`image_delete`,
   `claude_swap`/`codex_swap`, `config` (redacted).
@@ -26,6 +27,17 @@ return either a plain-string body or `{error}` — both are accepted).
 
 `reqwest` (async), `wire`, `futures`, `tokio`, `serde`/`serde_json`, `anyhow`. No CLI here —
 the binary lives in [`crates/cli`](../cli/README.md).
+
+## `rmng-fps`
+
+`src/bin/rmng-fps.rs` is the frame-rate test tool for the browser viewer. It joins
+`ws://<host>/api/viewer?monitor=<n>` like one viewer window, reads each video message's header
+without decoding, and prints frames, keyframes and megabits per second. It shows the selected
+clone. It uses `tokio-tungstenite`.
+
+```sh
+cargo run -p control-client --bin rmng-fps -- <host>[:port] [monitor]   # port 9000, monitor 0 by default
+```
 
 ## Tests
 

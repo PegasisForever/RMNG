@@ -1,15 +1,12 @@
 // Step 2 of the first-run wizard: the fleet's server-side defaults. Clone naming, the
-// per-clone resource limits, the monitor arrangement every clone boots with, and the
-// viewer's chroma mode. (Ports and directories used to be editable here; they are
+// per-clone resource limits, and the monitor arrangement every clone boots with. (Ports and directories used to be editable here; they are
 // hardcoded now, so this step edits everything the wizard still owns.)
 //
 // It takes the wizard's whole model plus one updater, the same pair `SetupWizardView` holds
 // and `SetupReviewStep` reads, rather than a value/setter couple per field.
 import { MonitorsEditor } from "~/components/MonitorsEditor";
-import { DropdownSelect } from "~/components/DropdownSelect";
 import { Field, settingsInput } from "~/components/SettingsFields";
 import type { SetupDraft } from "~/lib/setupDraft";
-import type { ChromaMode } from "~/lib/wire/ChromaMode";
 
 export function SetupServerStep({
   draft,
@@ -80,18 +77,6 @@ export function SetupServerStep({
         />
       </div>
 
-      <Field label="Chroma mode">
-        <DropdownSelect
-          rows={[
-            { value: "yuv420", label: "4:2:0 (default)" },
-            { value: "yuv444", label: "4:4:4 (AVC444, ≤1440p/monitor)" },
-          ]}
-          value={draft.chroma}
-          onChange={(value) => onDraftChange("chroma", value as ChromaMode)}
-          label="Chroma mode"
-          className={settingsInput}
-        />
-      </Field>
     </div>
   );
 }

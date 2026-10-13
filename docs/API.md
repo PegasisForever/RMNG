@@ -1,7 +1,7 @@
 # HTTP API reference — web port (default `:9000`)
 
-The control-server's **port 2** serves the React management UI (a static SPA served from
-disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}`.
+The control-server's web port serves the React management UI (a static SPA served from
+disk), the JSON control API, two SSE streams, and the browser viewer's WebSocket. It binds `0.0.0.0:9000`.
 
 - **No auth.** All endpoints are open; the server is meant to sit behind a tailnet /
   firewall. Path params that hit the filesystem (`notes`, `uploads`) are validated as
@@ -28,10 +28,12 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 
 | Method | Path | Purpose | Success |
 | --- | --- | --- | --- |
-| GET | `/events` | Global state SSE plus named `stats`, `lxcStats`, `forwards`, and `version` events | 200 SSE `ControlState` |
+| GET | `/events` | Global state SSE plus named `stats`, `lxcStats`, and `version` events | 200 SSE `ControlState` |
 | GET | `/api/state` | Single-shot persisted `ControlState` snapshot | 200 `ControlState` |
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
 | POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
+| GET | `/api/viewer?monitor=<id>` | The browser viewer's WebSocket for one monitor (protocol in [PROTOCOL.md](PROTOCOL.md)) | 101 WebSocket |
+| POST | `/api/viewer/upload?name=<file>` | Write a file dropped on a viewer window into the selected clone's home (`~/`); raw body | 200 `{name}` |
 | PUT | `/api/board` | Replace the board's columns | 200 `ControlState` |
 | PUT | `/api/tickets/order` | Replace the ticket column's arrangement | 200 `ControlState` |
 | PUT | `/api/clones/muted` | Replace the set of clones whose notifications are silenced | 200 `ControlState` |
@@ -41,7 +43,6 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | POST | `/api/delete` | Destroy a clone / unregister an unmanaged clone | 200 `Operation` |
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
-| PUT | `/api/hosts/:id/forwards` | Replace a clone's port-forward rules | 200 `ControlState` |
 | GET | `/api/self` | The calling clone's own record, by the address it called from | 200 `Clone` / 404 |
 | POST | `/api/layout/activate` | Make a layout preset active and live-apply it to the selected clone | 200 `{ok,applied,errors}` |
 | POST | `/api/images/prebuild` | Warm a preset image without creating (build posted Dockerfile on miss) | 200 `{ok,op}` |
@@ -52,7 +53,7 @@ disk), the JSON control API, and two SSE streams. It binds `0.0.0.0:{listen.web}
 | GET | `/api/ledger/read?clone=&session=` | Read a byte range of one session's ledger | 200 `{clone,session,offset,len,size,text}` |
 | POST | `/api/linear/upload-relay` | Replay one PUT to a Linear-signed bucket URL (multipart) | 200 `{ok,status}` |
 | GET | `/api/linear/asset?url=` | Read one Linear-hosted image with a preset's key | 200 binary |
-| GET/PUT | `/api/config` | Read redacted config or merge a partial update | 200 `AppConfigRedacted` / `{config,restartRequired,networkWarning?}` |
+| GET/PUT | `/api/config` | Read redacted config or merge a partial update | 200 `AppConfigRedacted` / `{config,networkWarning?}` |
 | POST | `/api/config/test` | Test a setting (`"docker"`, `"judge"`) | 200 `{ok,message}` |
 | GET | `/api/setup/env` | Setup wizard environment preflight rows | 200 `SetupEnv` |
 | POST | `/api/login/begin` | Start an account sign-in and get the URL to open | 200 `{url}` |
@@ -135,8 +136,8 @@ row), `archived` (a retained, intentionally stopped managed clone), the `source`
 reference, the six account-binding fields (`claudeAccountEmail`/`claudeGroup`/`claudeSelection`
 and the Codex twins — see [Accounts](#accounts-claude--codex)), Linear metadata (`linearWorkspace`,
 `linearTicket`, `linearBranch`, …), the server-owned `monitorState` (`working`/`idle`/`offline`),
-`unread` transition marker, and `forwards` (`PortForward[]` — the clone's persisted port-forward
-rules; live status rides the `forwards` SSE event below, never `ControlState`).
+and the `unread` transition marker. An old `state.json` whose clones still carry a `forwards`
+list loads; the field is ignored and dropped on the next save.
 `Operation` carries `id`, `kind` (clone/delete/archive/unarchive/pull/commit/update — a persisted
 legacy `"bootstrap"` op still loads, aliased onto `pull`), `target`, `source`, `status`, `step`,
 `pct`, a rolling `log`, and timestamps.
@@ -173,15 +174,6 @@ There is intentionally no logical/pre-compression
 disk value because it is not observable from the unprivileged LXC. `cpuPct` is `null` until a
 second CPU sample establishes a rate; `diskUsed` is `null` when the stat is unavailable.
 Like `stats`, this event is SSE-only and never writes `state.json`.
-
-### `forwards` event
-
-The same `/events` connection multiplexes a fourth, named SSE event: `forwards`, the volatile
-port-forward **runtime** map — the live status of each clone's forward rules as the viewer
-opens/closes its local listeners. A new subscriber gets the current snapshot immediately, then
-one push per status change. It rides its own SSE-only bus (`crate::forward::ForwardBus`), so —
-like `stats` — it never enters `ControlState`/`state.json`. The *desired* rules themselves are
-persisted on `Clone.forwards` and edited via `PUT /api/hosts/:id/forwards`.
 
 <a id="clonetokens"></a>
 
@@ -540,7 +532,7 @@ which is why the comparison above is stated as a gap against an age rather than 
 ### `POST /api/activate` — body `{ "id": string | null }`
 
 Set `selected` (or clear with `null`). Returns the updated `ControlState`. The media plane
-re-targets port 1 to the newly selected clone.
+sends every open viewer window the newly selected clone (a fresh `ViewSpec` and keyframe).
 
 A clone coming on screen also gets a `ServerMsg::SetMonitors` carrying the active layout
 preset, which is where a preset activated while the operator was elsewhere reaches it. The
@@ -958,9 +950,9 @@ returns an empty `text` rather than an error. An unknown clone or session is a 4
 The full config, preset Linear keys included as `linearKey: string`. The browser lists Linear
 issues itself, so this is where it gets a key; the server answers only on a Tailscale-only
 network, which is what makes that acceptable.
-Everything else is returned verbatim — ports, `layoutPresets`/`activeLayout`, the `docker` block
+Everything else is returned verbatim — `layoutPresets`/`activeLayout`, the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
-socket needs none), `staticDir`/`cloneSocket`/`chroma`, `setupComplete`,
+socket needs none), `setupComplete`,
 `agentPlaybook` (the person's ticket procedure for the assistant, seeded with the shipped default and written into
 the first message of each new assistant chat — non-secret; a preset's optional `agentPlaybook`
 append rides along in each `presets` row), `assistant` (`{url, serverUrl}`: the chat panel's
@@ -970,13 +962,10 @@ member emails only — no credentials, so they pass through unredacted). An empt
 normalizes to one `Default` pool on save. See
 [PROTOCOL.md](PROTOCOL.md#config-schema) for the schema.
 
-### `PUT /api/config` (partial merge) → `{ config, restartRequired, networkWarning? }`
+### `PUT /api/config` (partial merge) → `{ config, networkWarning? }`
 
 Deep-merge a partial config over the stored one, persist to disk at `0600`, apply live.
-Returns the redacted config plus `restartRequired: boolean` — set when a restart-required
-field changed (the four listen ports, `cloneSocket`, `docker.socket`, `staticDir`, `chroma`)
-so the UI can prompt for a restart. `cloneSocket` still triggers this pre-latch (the server
-bound the old path at startup) even though it is a one-time field (see below). A wizard-finish
+Returns the redacted config. A wizard-finish
 flip (`setupComplete` false → true) materializes the lazy `rmng` network here; a failure is
 non-fatal and echoed as `networkWarning`. Merge rules: an **empty string keeps** the stored
 value; a non-empty string replaces it; `presets` rows merge by name (blank `linearKey` keeps

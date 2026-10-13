@@ -48,8 +48,8 @@ the screen's shape. The `rmng desktop` CLI does not rely on it: it works out a s
 the shape (`--resolution`, see [CLI.md](CLI.md#rmng-desktop-clone-verb)) and its own cursor
 units (`--cursor-coordinate-space`), and sends this tool only an exact size and `x`/`y` in it.
 
-This applies only to the MCP tool channel. The operator's live-drive path (viewer →
-control-server → daemon socket) and the H.264 stream remain native — see
+This applies only to the MCP tool channel. The operator's live-drive path (browser viewer →
+control-server → daemon socket) and the H.264 stream use native pixels — see
 [PROTOCOL.md](PROTOCOL.md).
 
 ### Input and capture tools

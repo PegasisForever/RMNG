@@ -1,17 +1,12 @@
 // Shared types for the control plane.
 //
-// `ControlState` is a superset of the legacy Rust `ControlState`
-// (`{selected, hosts, monitors}`). The native RDP client deserializes the SSE
-// payload as that Rust struct, and serde ignores unknown fields — so the extra
-// `operations` field (and the per-clone `container`/`source` extras) ride along
-// invisibly. In-progress clones are kept OUT of `hosts` until they are fully
-// provisioned, so the client never tries to connect to a half-built container.
+// In-progress clones are kept OUT of `hosts` until they are fully provisioned, so the
+// viewer never tries to show a half-built container.
 
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { OperationKind } from "~/lib/wire/OperationKind";
-import type { PortForward } from "~/lib/wire/PortForward";
 
 export interface MonitorSpec {
  width: number;
@@ -94,9 +89,6 @@ export interface Clone {
  /** Preset binding recorded at create/fork (server `preset_name`). Preselects the rebase
   *  dialog's target — rebase itself never changes this binding. */
  presetName?: string | null;
- /** Local port-forward rules; the native viewer runs the listeners. Live status
-  *  arrives separately via the `forwards` SSE event, keyed by clone id then rule id. */
- forwards?: PortForward[];
 }
 
 // The kind list is generated from the Rust `OperationKind` enum. Re-exported rather than
@@ -132,7 +124,7 @@ export interface Operation {
 // A non-secret per-account view derived by the usage poller and broadcast in
 // `ControlState`. The OAuth tokens themselves live ONLY in the server-side
 // secret store (data/claude-accounts.json) and never enter this struct, so they
-// never ride the SSE frame to the web UI or the native RDP client.
+// never ride the SSE frame to the web UI.
 
 export interface ClaudeUsageWindow {
  /** 0–100 utilization percent for the rolling window. */

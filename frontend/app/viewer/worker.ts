@@ -97,7 +97,7 @@ function configure(c: string) {
     optimizeForLatency: true,
     // The 4:2:0 encoder writes BT.709 matrix, limited range, and leaves the desktop's sRGB
     // transfer as it is; the stream carries no colour data. A BT.709 transfer here would make
-    // dark areas grey (the native viewer's `VIDEO_COLORIMETRY` has the same fix).
+    // dark areas grey.
     colorSpace: { primaries: "bt709", transfer: "iec61966-2-1", matrix: "bt709", fullRange: false },
     hardwareAcceleration: software ? "prefer-software" : "no-preference",
   };

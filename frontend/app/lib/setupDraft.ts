@@ -18,7 +18,6 @@
 import { monitorPatch, type MonitorDraft } from "~/lib/settingsDraft";
 import type { Operation } from "~/lib/types";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
-import type { ChromaMode } from "~/lib/wire/ChromaMode";
 
 /** The wizard's steps, in order. The indexes are the step numbers everywhere else. */
 export const SETUP_STEPS = ["Environment", "Server", "Finish"] as const;
@@ -31,7 +30,6 @@ export interface SetupDraft {
  /** The one monitor arrangement the wizard edits. Which named preset it belongs to comes
   *  from the config, not from here — the wizard has no preset picker. */
  monitors: MonitorDraft[];
- chroma: ChromaMode;
 }
 
 /** The name of the arrangement the wizard edits, mirroring the server's
@@ -59,7 +57,6 @@ export function setupDraftFrom(c: AppConfigRedacted): SetupDraft {
   monitors: active?.monitors.length
    ? active.monitors.map((m) => ({ ...m }))
    : [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
-  chroma: c.chroma,
  };
 }
 
@@ -108,7 +105,6 @@ export function serverPatch(
    cloneMemoryMb: draft.cloneMemoryMb,
   },
   layoutPresets: layoutPresetsPatch(draft, config),
-  chroma: draft.chroma,
  };
 }
 

@@ -105,9 +105,6 @@ export function SettingsPanelContainer({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [judgeTestMsg, setJudgeTestMsg] = useState<string | null>(null);
-  // True after a save that touched a restart-required setting (docker socket /
-  // chroma) — surfaces a persistent banner until a later save clears it.
-  const [restartRequired, setRestartRequired] = useState(false);
   // Control-server's own version + update-available status (fetched on open; re-checked
   // on demand via the "Check for updates" button).
   const [serverStatus, setServerStatus] = useState<UpdateStatus | null>(null);
@@ -199,7 +196,7 @@ export function SettingsPanelContainer({
   async function doRestart() {
     if (
       !confirm(
-        "Restart the control-server now to apply the changed settings?\n\nThe UI will briefly disconnect and reconnect; running clones are unaffected.",
+        "Restart the control-server now?\n\nThe UI will briefly disconnect and reconnect; running clones are unaffected.",
       )
     )
       return;
@@ -221,7 +218,6 @@ export function SettingsPanelContainer({
         settingsPatch(draft, !!config?.setupComplete),
       );
       load(res.config); // re-seed from the server's redacted view; clears write-only inputs
-      setRestartRequired(res.restartRequired); // shows/clears the restart banner
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {
@@ -258,7 +254,6 @@ export function SettingsPanelContainer({
       onImportAccount={onImportAccount}
       forkSources={forkSources}
       error={error}
-      restartRequired={restartRequired}
       saving={saving}
       saved={saved}
       onSave={save}

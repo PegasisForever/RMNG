@@ -1,6 +1,6 @@
 # RMNG control-server. `docker compose up -d --build` brings up the hub; open
 # http://localhost:9000 → the first-run wizard does the rest (subnet, prefix, monitors,
-# ports, limits, presets). By design there are ZERO `-e` configuration flags: config.json
+# limits, presets). By design there are ZERO `-e` configuration flags: config.json
 # (edited via the wizard / Settings) is the single source of truth (no-env-settings
 # invariant). The only ENV in play is RUST_LOG, baked into the image as a logging default.
 #
@@ -9,7 +9,7 @@
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
 #     -v /srv/rmng-homes:/srv/rmng-homes:rshared \
-#     -p 9000:9000 -p 9001:9001 -p 9005:9005 -p 445:445 -p 2222:2222 rmng:latest
+#     -p 9000:9000 -p 445:445 -p 2222:2222 rmng:latest
 # The rshared homes bind is LOAD-BEARING for gen-2: home datasets are created from
 # inside this container, and only a shared bind propagates their mounts into dockerd's
 # namespace (plus server-side home reads/writes).
@@ -45,10 +45,8 @@ services:
       # inside this container into dockerd's namespace (plus server-side home reads).
       - /srv/rmng-homes:/srv/rmng-homes:rshared
     ports:
-      # 9000 web/API, 9001 video, 9005 forward, 445 SMB, 2222 SSH bastion.
+      # 9000 web/API + browser viewer, 445 SMB, 2222 SSH bastion.
       - "9000:9000"
-      - "9001:9001"
-      - "9005:9005"
       - "445:445"  # 445 SMB — clone-home share
       - "2222:2222"  # 2222 SSH bastion (jump into clones)
 

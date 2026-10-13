@@ -10,7 +10,7 @@ Running one agent to develop software is easy. Running a dozen of them is painfu
 
 You need a **separate sandbox** for each agent. RMNG gives each agent a full GNOME desktop, gpu acceleration, seperate network namespace, and seperate filesystem. Agents run real services side by side and never step on each other.
 
-You need to **see and steer** each agent. A coding agent designing a web app or driving a GUI app is invisible from a terminal, and a laggy remote desktop makes supervising several of them miserable. RMNG's viewer is native and hardware-accelerated, runs at 60fps on LAN, and switches between clones instantly.
+You need to **see and steer** each agent. A coding agent designing a web app or driving a GUI app is invisible from a terminal, and a laggy remote desktop makes supervising several of them miserable. RMNG's viewer runs in Chrome with hardware decode, runs at 60fps on LAN, and switches between clones instantly.
 
 You need to **pack** a lot of agents onto one machine. RMNG's custom GPU accelerated remote desktop stack with a patched GNOME encodes only the clone you are watching, and lets you fit far more of them on the same hardware.
 
@@ -18,7 +18,7 @@ You need to **efficiently multi-task** with the fleet. RMNG watchs every desktop
 
 ## How does it solve it?
 
-A remote-desktop stack written from scratch is the core of RMNG. It collects frames from every clone, encodes the selected clone's frames, and decodes them in a custom-built viewer with multi-monitor support over a zero-copy, GPU-accelerated H.264 pipeline that hits 60fps on LAN and preserves full-chroma 4:4:4 color even on hardware that only encodes 4:2:0. See the [Features](#features) section for the full list.
+A remote-desktop stack written from scratch is the core of RMNG. It collects frames from every clone, encodes the selected clone's frames, and sends them to a browser viewer with multi-monitor support. The pipeline is zero-copy, GPU-accelerated H.264, and hits 60fps on LAN. See the [Features](#features) section for the full list.
 
 ## How does it compare?
 
@@ -28,7 +28,7 @@ RMNG sits in the gap between desktop infrastructure and agent orchestration: rea
 | --------------------------------------------------------------------------- | ---- | ----------------------------------------------- | --------------------------------------- | ----------------- | ----------------------------------------- | -------------------------- |
 | Full GPU Linux desktop per agent                                            | ✅    | ❌ terminal/git only                             | ❌ inside the editor                     | ⚠️ opaque cloud VM | ✅                                         | ✅                          |
 | One human oversees many agents at once                                      | ✅    | ⚠️ text panes                                    | ❌ one at a time                         | ❌ per-task        | ❌ infra, not oversight                    | ❌                          |
-| Native hardware-accelerated viewer (60fps, multi-monitor, instant takeover) | ✅    | ❌                                               | ❌                                       | ❌                 | ⚠️ browser/WebRTC                          | ⚠️ browser/WebRTC           |
+| Hardware-accelerated viewer (60fps, multi-monitor, instant takeover)        | ✅    | ❌                                               | ❌                                       | ❌                 | ⚠️ browser/WebRTC                          | ⚠️ browser/WebRTC           |
 | Self hosted                                                                 | ✅    | ✅                                               | ❌ cloud                                 | ❌ cloud           | ❌ mostly hosted                           | ✅                          |
 | Built for AI agents from the ground up                                      | ✅    | ✅                                               | ✅                                       | ✅                 | ✅                                         | ❌ VDI heritage             |
 
@@ -42,15 +42,17 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 
 **Remote Desktop**
 
-- Zero-copy full-chroma 4:4:4 hardware H.264 pipeline end to end (even on hardware that only supports 4:2:0!)
-- Native hardware-accelerated viewer on Linux (GTK/VA-API) and macOS (AppKit/Metal/VideoToolbox)
-- Browser viewer in Chrome, one window per monitor. Each window goes fullscreen on its screen without a click only when the dashboard address is in Chrome's `AutomaticFullscreenAllowedForUrls` policy.
+- Zero-copy hardware H.264 pipeline (VA-API encode on the server)
+- Browser viewer in Chrome: H.264 over a WebSocket, decoded with WebCodecs
+- One browser window per monitor. Each window goes fullscreen on its screen without a click only when the dashboard address is in Chrome's `AutomaticFullscreenAllowedForUrls` policy.
 - 60fps on local network
 - Multi-monitor
 - Instant swap between clones
 - Absolute and relative pointer
 - Rich clipboard bridge, remote↔remote and local↔remote
-- Port forwarding
+- Drop a file on a viewer window to upload it to the clone's home folder
+- Terminal view for clones with no desktop
+- Port forwarding: the dashboard gives an `ssh` command that forwards a local port to a clone port through the bastion
 
 **Fleet Management**
 
@@ -103,7 +105,7 @@ of which protected against anyone who was not already the owner. Simpler is corr
 
 ## Quick start
 
-> **Hardware support:** the encode path (control-server, VA-API H.264) has only been tested on an AMD Radeon Pro W6800; the decode path has only been tested on Intel integrated graphics (`viewer`, Linux) and Apple M-series (`viewer-macos`). Other GPUs may work but are untested.
+> **Hardware support:** the encode path (control-server, VA-API H.264) has only been tested on an AMD Radeon Pro W6800. Other GPUs may work but are untested. The viewer needs Chrome.
 
 Needs a Linux host with Docker, a GPU render node (`/dev/dri/renderD128`), and a ZFS dataset mounted at `/srv/rmng-homes` to hold the clone homes (one child dataset per clone). Pull the published image (or `docker build -t rmng:latest .` from a checkout), then run the hub:
 
@@ -112,9 +114,11 @@ docker run -d --name rmng --privileged --init --pid host --restart unless-stoppe
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v rmng-data:/data -v rmng-sock:/srv/rmng-sock \
   -v /srv/rmng-homes:/srv/rmng-homes:shared \
-  -p 9000:9000 -p 9001:9001 -p 9005:9005 -p 445:445 -p 2222:2222 pegasis0/rmng
+  -p 9000:9000 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
-Ports: `9000` web UI/API · `9001` video · `9005` port-forward data plane · `445` SMB, serving both the clone-home share and the shared folder (host `445` must be free) · `2222` SSH bastion (jump into clones). The clone-local desktop MCP remains on internal port `9004`.
+Ports: `9000` web UI/API and the browser viewer · `445` SMB, serving both the clone-home share and the shared folder (host `445` must be free) · `2222` SSH bastion (jump into clones). The clone-local desktop MCP remains on internal port `9004`.
 
 Open `http://<host>:9000`. The **first-run setup wizard** walks through the environment checklist, server settings, and setup completion. There is no template download step: a clone's system image is built from its preset's Dockerfile, lazily, the first time a create needs it. Full flow, image build, template publishing, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).
+
+**The viewer needs HTTPS.** Chrome allows WebCodecs, the async clipboard and Keyboard Lock only on a secure page (HTTPS or `localhost`). `http://<tailscale-ip>:9000` is not enough. Put HTTPS in front of port 9000 with your own Tailscale setup (for example `tailscale serve`), then open the viewer from `https://<host>/`. Without HTTPS the dashboard works, and the viewer window shows a warning instead of video.

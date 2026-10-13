@@ -43,7 +43,6 @@ export function makeAppConfig(
     // The same set both dialogs resolve against: the config IS where their team keys come
     // from, so the Settings panel lists exactly the presets the ticket dialog offers.
     presets: makeClonePresets(),
-    chroma: "yuv420",
     ssh: {
       authorizedKeys: [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeStorybookDemoKeyOnly alex@laptop",

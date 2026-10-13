@@ -32,7 +32,6 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
     codex: { autoReset: false },
     groups: [],
     presets: [],
-    chroma: "yuv420",
     ssh: { authorizedKeys: [] },
     agentPlaybook: "",
     globalPrompt: "",
@@ -47,7 +46,6 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
 type ServerPatch = {
   docker: Record<string, unknown>;
   layoutPresets: { name: string; monitors: { width: number; x: number }[] }[];
-  chroma: string;
 };
 
 test("a rig with no layout preset gets one 1080p monitor to edit", () => {

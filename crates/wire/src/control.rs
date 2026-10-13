@@ -114,23 +114,6 @@ impl serde::Serialize for MonitorState {
     }
 }
 
-/// One local-forward rule: a TCP port inside this clone (`remote_port`) exposed at
-/// `127.0.0.1:<local_port>` on the machine running the native viewer. Persisted in
-/// `state.json`; the viewer runs the listener. `id` is derived server-side as
-/// `f{local_port}` (local ports are globally unique across all clones' rules).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct PortForward {
-    pub id: String,
-    pub remote_port: u16,
-    pub local_port: u16,
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
 #[serde(rename_all = "camelCase")]
 // The Rust type is `RmngClone` (a bare `Clone` would shadow `std::clone::Clone`); the
@@ -281,11 +264,6 @@ pub struct RmngClone {
     /// its parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    /// Local port-forward rules for this clone (see [`PortForward`]). Persisted; the
-    /// viewer runs the listeners and reports status out-of-band (volatile `forwards`
-    /// SSE event, never stored here).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub forwards: Vec<PortForward>,
     /// Gen-2 home dataset name, e.g. `tank/rmng/homes/<id>`. `None` on pre-gen-2 rows
     /// (serde-defaulted so old `state.json` loads); the dataset bind mount on the
     /// container marks a gen-2 clone, no separate gen label is kept.
@@ -985,12 +963,13 @@ mod tests {
 mod forward_tests {
     use super::*;
 
+    /// Clones once stored port-forward rules. A `state.json` written then still loads, and
+    /// the next save drops them.
     #[test]
-    fn clone_forwards_defaults_empty_and_is_omitted() {
-        let json = r#"{"id":"h","host":"h"}"#;
-        let h: RmngClone = serde_json::from_str(json).unwrap();
-        assert!(h.forwards.is_empty());
-        // empty forwards must not serialize (skip_serializing_if)
-        assert!(!serde_json::to_string(&h).unwrap().contains("forwards"));
+    fn an_old_clone_with_forwards_still_loads() {
+        let json = r#"{"selected":"h","hosts":[{"id":"h","host":"h","forwards":[{"id":"f8080","remotePort":8080,"localPort":8080,"enabled":true}]}]}"#;
+        let st: ControlState = serde_json::from_str(json).unwrap();
+        assert_eq!(st.hosts[0].id, "h");
+        assert!(!serde_json::to_string(&st).unwrap().contains("forwards"));
     }
 }

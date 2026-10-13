@@ -40,7 +40,6 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
         dockerfile: "FROM pegasis0/rmng-template:latest",
       },
     ],
-    chroma: "yuv420",
     ssh: {
       authorizedKeys: ["ssh-ed25519 AAAA me@laptop"],
     },

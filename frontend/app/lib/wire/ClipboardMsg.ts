@@ -4,7 +4,8 @@ import type { ClipboardOffer } from "./ClipboardOffer";
 import type { ClipboardRequest } from "./ClipboardRequest";
 
 /**
- * Clipboard message on the **viewer** protocol (port-1 tag 1), both directions.
+ * Clipboard message between the browser viewer and the server (`ToBrowser`/`FromBrowser`),
+ * both directions.
  * Rich + lazy: `Offer` advertises types, `Request` fetches one, `Data` delivers it.
  */
 export type ClipboardMsg = { "k": "offer" } & ClipboardOffer | { "k": "request" } & ClipboardRequest | { "k": "data" } & ClipboardData;

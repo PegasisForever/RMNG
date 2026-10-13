@@ -1,16 +1,16 @@
 # media
 
 The media plane library used by [control-server](../control-server/README.md). It turns
-raw GPU frames shipped by the clones into **H.264 for the native viewer** (port 1) and
+raw GPU frames shipped by the clones into **H.264 for the browser viewer** and
 **still images for the desktop MCP** (ports 3/4), and routes input back. This is the
-novel, performance-critical part of `RMNG`. Transport is plain framed H.264 over TCP
-into a hardware-decode client (no WebRTC).
+novel, performance-critical part of `RMNG`. The control-server sends the H.264 to the
+browser over a WebSocket on port 9000, where Chrome decodes it with WebCodecs (no WebRTC).
 
 ## Pipeline
 
 ```
                          ┌─ continuous (selected clone) → VA-API H.264/monitor ─┐
-clone-daemon ──dmabuf────┤                                                       ├─▶ port 1 (viewer)
+clone-daemon ──dmabuf────┤                                                       ├─▶ :9000 /api/viewer
  (SCM_RIGHTS, per mon)   └─ on demand  (any clone)      → VA-API → JPEG ─────────┴─▶ ports 3/4 (screenshot)
         ▲                                                                            │
         └────────── input (InputMsg) ◀── route from viewer / port-3 agent / port-4 ─┘
@@ -31,14 +31,14 @@ clone-daemon ──dmabuf────┤                                        
    device-chain pattern in `../../core/src/rdp/hwdecode.rs`), VPP → NV12, H.264
    low-latency (no B-frames, small/zero GOP, CQP/CBR as tuned in Phase 0),
    **force-IDR on demand**. One encoder per monitor of the selected clone. Emit Annex-B
-   access units tagged `{monitor_id, idr}` for the `wire` viewer protocol.
-   - Carry forward Phase-0 tuning: `constrained-baseline` isn't required without browsers,
-     but keep `aud=true`, `key-int-max` short for fast reconnect, and ample decoder/encoder
+   access units tagged `{monitor_id, idr}` for the browser viewer protocol (`wire::browser`).
+   - The stream is `constrained-baseline` with `aud=true`, `key-int-max` short for fast reconnect, and ample decoder/encoder
      surface headroom (the large-window 60fps cap was decoder surface starvation).
    - **Colour**: pin `colorimetry=2:3:0:0` on the NV12 caps (limited range, BT.709 matrix,
      transfer left unset). The encoder writes no VUI colour description, so the viewer has to
      assume a matrix, and an unpinned one follows the frame size. Naming a transfer here would
-     make `vapostproc` convert the samples; the viewer supplies the missing sRGB transfer.
+     make `vapostproc` convert the samples; the browser viewer supplies the missing sRGB
+     transfer in its decoder config.
 3. **Encode (screenshot)** — import an on-demand dmabuf → VA download/VPP → JPEG for
    the MCP `Screenshot` tool. Infrequent and request-driven; proven by PoC R3 (cross-
    container dmabuf → JPEG). Optional fallback: have the daemon ship RGB for screenshots if
@@ -46,11 +46,10 @@ clone-daemon ──dmabuf────┤                                        
    - **Colour**: convert to `colorimetry=1:4:0:0` (full range, BT.601) before `jpegenc`, the
      JFIF convention. A JPEG carries no colour description, so a reader that gets limited-range
      BT.709 lifts blacks ~15, crushes whites ~20, and drains ~37 out of saturated red.
-4. **Serve port 1** — multiplex the selected clone's monitor streams over one TCP
-   connection to the viewer; honor `RequestKeyframe` (→ force IDR) and a fresh-connect IDR.
-   Pace at the sender on a steady clock (Phase-0 R8: damage-driven capture is bursty;
-   smooth pacing is the feel-critical task). One connection = one viewer.
-5. **Input routing** — a single per-clone input sink: `ViewerInput` (port 1, selected
+4. **Serve the viewer** — the control-server (`mediaplane`, `webviewer`) sends each monitor's
+   stream to the browser windows of that monitor, one WebSocket per window; it honors
+   `RequestKeyframe` (→ force IDR) and a fresh-connect IDR.
+5. **Input routing** — a single per-clone input sink: viewer `InputMsg` (selected
    clone), port-3 agent actions (that clone), and port-4 actions (named clone) all funnel
    to the target clone's daemon socket. **Coalesce pointer motion** (latest-wins, flush
    ~120 Hz; buttons/keys flush the pending move first) — Phase-0 R8's dominant "latency"
@@ -78,8 +77,8 @@ which also removes the crypto-provider clash the old plan worried about.
   ffprobe/decode) — the foundational check.
 - **dmabuf → JPEG**: a single on-demand frame round-trips to a correct screenshot.
 - **sync**: sustained capture+encode with no tearing under back-pressure + explicit-sync.
-- **viewer protocol**: frame the multiplexed stream to a stub client; `RequestKeyframe`
-  forces an IDR; one connection only.
+- **viewer protocol**: `rmng-fps` (control-client) joins `/api/viewer` and counts the frames
+  that arrive.
 - **multi-monitor + switch**: N encoders; switch `selected` → re-target + IDR within a
   frame or two.
 - **input**: coalesced pointer motion never backlogs; a click lands at the latest position.

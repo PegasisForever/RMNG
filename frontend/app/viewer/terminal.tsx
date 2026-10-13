@@ -1,6 +1,5 @@
 // The terminal of a clone with no desktop: monitor 0's window shows it in place of the video.
-// One xterm.js terminal per tmux session, as tabs, with a "+" that makes a new session, like the
-// native viewer (`crates/viewer/src/terminal.rs`). The server (`control-server/src/termplane.rs`)
+// One xterm.js terminal per tmux session, as tabs, with a "+" that makes a new session. The server (`control-server/src/termplane.rs`)
 // sends each session's tmux output (`term_data`) and resizes every session to the one grid this
 // view reports (`term_resize`). xterm.js does the keys, the mouse modes, selection and
 // scrollback; Ctrl+Shift+C copies and Ctrl+Shift+V pastes.
@@ -13,7 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FromBrowser } from "~/lib/wire/FromBrowser";
 import type { TermData } from "~/lib/wire/TermData";
 
-/** The native viewer's dark theme (`viewer-core/src/terminal.rs`). */
+/** A dark theme. */
 const THEME: ITheme = {
   foreground: "#ffffff",
   background: "#1c1c1f",
@@ -38,7 +37,7 @@ const THEME: ITheme = {
 };
 
 /** A window drag crosses many cell sizes, and each resize repaints every tmux session: send
- *  only the size the window settles on (the native viewer's debounce). */
+ *  only the size the window settles on. */
 const RESIZE_DEBOUNCE_MS = 90;
 
 function toBase64(bytes: Uint8Array) {
@@ -194,7 +193,7 @@ export function TermView({
           +
         </button>
       </div>
-      {/* Padding like the native viewer's half-cell inset. */}
+      {/* A half-cell inset. */}
       <div className="relative min-h-0 flex-1 pl-1.5 pt-1">
         <div ref={box} className="relative h-full w-full" />
       </div>

@@ -1,7 +1,7 @@
 //! control-server — the fleet hub (see ../README.md).
 //!
-//! One tokio service binding the video plane, web API + SSE + static frontend, port-forward
-//! data plane (9005), and SSH bastion; `smbd` serves retained clone homes on port 445.
+//! One tokio service binding the web API + SSE + static frontend + browser viewer (9000) and
+//! the SSH bastion (2222); `smbd` serves retained clone homes on port 445.
 
 mod account;
 mod agentlog;
@@ -22,7 +22,6 @@ mod config;
 mod derived;
 mod docker;
 mod files;
-mod forward;
 mod home_gc;
 mod home_overlay;
 mod homes;
@@ -234,7 +233,7 @@ async fn main() -> Result<()> {
 
     // GStreamer init MUST finish before smb/ssh (and any other child
     // spawners). Those supervisors otherwise inherit gst-plugin-scanner pipes and
-    // hang media init forever — web/video/forward never bind.
+    // hang media init forever — the clone socket never binds.
     let app_for_bg = app.clone();
     let app_for_media = app.clone();
     boot::run_late_boot(
@@ -309,7 +308,7 @@ async fn main() -> Result<()> {
             tokio::spawn(codex::run_rotator(app_for_bg.clone()));
         },
         move |media_init| {
-            // Port 1 (video) — ingest clone dmabufs, VA-API encode, serve the viewer.
+            // Media plane: ingest clone dmabufs, VA-API encode, feed the browser viewers.
             mediaplane::spawn(app_for_media, media_init);
         },
     );

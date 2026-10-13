@@ -3,8 +3,7 @@
 // events and pointer lock work on it) and keys from `window`. Each event becomes an `InputMsg`
 // that the page hands to the worker, which sends it on the socket.
 //
-// The behaviour follows the native viewers (`crates/viewer/src/main.rs`, `crates/viewer-macos`,
-// `crates/viewer-core/src/auto_lock.rs`): Linux evdev keycodes, evdev buttons, wheel notches
+// What it sends: Linux evdev keycodes, evdev buttons, wheel notches
 // or smooth finger scroll, pointer lock with relative motion that engages by itself while the
 // clone hides its cursor, the Ctrl+Alt+G / Ctrl+Alt+P chords, and the agent-warp rules.
 import type { CursorMeta } from "../lib/wire/CursorMeta";
@@ -63,8 +62,8 @@ export function toMonitor(
   };
 }
 
-/** A drag at unclamped `origin`-monitor coords → the monitor it is over and the coords there
- *  (`viewer-core/src/drag_route.rs`). The point is lifted into desktop coords through the
+/** A drag at unclamped `origin`-monitor coords → the monitor it is over and the coords there.
+ *  The point is lifted into desktop coords through the
  *  layout; dead space (a gap, or outside the desktop) pins it to the origin's edge. Null when
  *  the origin is not in the layout. */
 export function routeDrag(
@@ -87,8 +86,7 @@ export function routeDrag(
 }
 
 /** The cursor sprite as straight RGBA. The daemon sends SPA cursor bytes, which are BGRA
- *  premultiplied despite the field name (the GTK viewer reads them as
- *  `B8g8r8a8Premultiplied`, the macOS viewer as premultiplied-first little-endian). */
+ *  premultiplied despite the field name. */
 export function shapeToRgba(shape: CursorShape): Uint8ClampedArray<ArrayBuffer> {
   const src = Uint8Array.from(atob(shape.rgba), (c) => c.charCodeAt(0));
   const out = new Uint8ClampedArray(shape.width * shape.height * 4);
@@ -103,7 +101,7 @@ export function shapeToRgba(shape: CursorShape): Uint8ClampedArray<ArrayBuffer> 
   return out;
 }
 
-/** The automatic pointer-lock policy, ported from `viewer-core/src/auto_lock.rs` (times in ms):
+/** The automatic pointer-lock policy (times in ms):
  *  engage after the remote cursor stays hidden ENGAGE_MS, release after it stays visible
  *  RELEASE_MS. The chords override it until the policy agrees with the override again. */
 export class AutoLock {
@@ -148,8 +146,7 @@ export class AutoLock {
 }
 
 /** One wheel event → input messages. A mouse wheel (Chrome reports `wheelDelta` in multiples
- *  of 120 per notch) becomes `axis` notches with the fraction carried in `rem`, like the
- *  native viewers' wheel path; anything finer (a trackpad) becomes smooth finger scroll in
+ *  of 120 per notch) becomes `axis` notches with the fraction carried in `rem`; anything finer (a trackpad) becomes smooth finger scroll in
  *  CSS pixels. `fingers`: a finger scroll is still running, so this event belongs to it even
  *  if its delta happens to look like a notch. Browser and Mutter agree on the direction:
  *  positive is down and right. */
@@ -280,7 +277,8 @@ export function attachInput(o: InputOptions): Input {
    *  page means release. Also shows or hides the cursor overlay. */
   function tick() {
     const t = now();
-    const want = auto.want(t);
+    // No monitor (terminal mode): never lock, whatever the last desktop clone's cursor was.
+    const want = size !== null && auto.want(t);
     const target = document.hasFocus() && document.visibilityState === "visible";
     if (want && target && !locked() && !needGesture) requestLock();
     else if ((!want || !target) && locked()) document.exitPointerLock();
@@ -333,10 +331,11 @@ export function attachInput(o: InputOptions): Input {
   const forPage = (e: KeyboardEvent) => e.target instanceof HTMLTextAreaElement;
 
   function onKeyDown(e: KeyboardEvent) {
-    if (forPage(e)) return;
+    // No monitor (terminal mode): a key outside xterm must not reach the clone's desktop.
+    if (forPage(e) || !size) return;
     o.onGesture();
     // Local chords, not forwarded. Their Ctrl and Alt already went to the clone, so release
-    // them (and everything else held) first, as the native viewer does.
+    // them (and everything else held) first.
     if (e.ctrlKey && e.altKey && (e.code === "KeyG" || e.code === "KeyP")) {
       e.preventDefault();
       if (e.repeat) return;
@@ -367,7 +366,7 @@ export function attachInput(o: InputOptions): Input {
   }
 
   function onKeyUp(e: KeyboardEvent) {
-    if (forPage(e)) return;
+    if (forPage(e) || !size) return;
     const k = CODE_TO_EVDEV[e.code];
     if (k === undefined) return;
     e.preventDefault();
@@ -410,7 +409,7 @@ export function attachInput(o: InputOptions): Input {
     // A click is the gesture Chrome wants after the user left the lock with Esc.
     if (needGesture) {
       needGesture = false;
-      if (auto.want(now())) requestLock();
+      if (size && auto.want(now())) requestLock();
     }
     if (b === undefined || !connected || buttons.has(b)) return;
     buttons.add(b);

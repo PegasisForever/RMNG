@@ -268,27 +268,6 @@ mod tests {
         assert!(ok.setup_complete);
     }
 
-    #[test]
-    fn restart_required_matrix() {
-        let base = AppConfig::default();
-        // No change → no restart.
-        assert!(!restart_required(&base, &base.clone()));
-
-        // The only restart-required trigger flips it true.
-        let mut n = base.clone();
-        n.chroma = wire::ChromaMode::Yuv444;
-        assert!(restart_required(&base, &n));
-
-        // A non-trigger field (immediate-apply) does NOT require a restart.
-        let mut n = base.clone();
-        n.docker.hostname_prefix = "other-".into();
-        assert!(!restart_required(&base, &n));
-        // Changing keys alone is live-apply, NOT restart-required.
-        let mut n = base.clone();
-        n.ssh.authorized_keys = vec!["ssh-ed25519 AAAA x".into()];
-        assert!(!restart_required(&base, &n));
-    }
-
     fn ms(w: u32, h: u32) -> wire::MonitorSpec {
         wire::MonitorSpec {
             width: w,
@@ -551,16 +530,6 @@ fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Whether applying `new` over `old` requires a server restart to take effect. The only
-/// restart-required setting left is the chroma mode (wired once at startup). Ports, paths,
-/// directories, sockets, subnets, images, and poll intervals are hardcoded now (see
-/// `wire`), not settings at all. Everything else applies live. Consumed by web.rs's
-/// `PUT /api/config` handler, which surfaces the result as
-/// `ConfigPutResponse.restart_required`.
-pub fn restart_required(old: &AppConfig, new: &AppConfig) -> bool {
-    old.chroma != new.chroma
 }
 
 /// Merge the UI's preset rows by name: every field is taken verbatim from the row

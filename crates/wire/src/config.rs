@@ -21,14 +21,10 @@ use crate::control::{LayoutPreset, MonitorSpec, Provider};
 /// they live in code, not in `config.json` (old files still carrying the keys load fine;
 /// serde drops unknown fields).
 pub const PORT_WEB: u16 = 9000;
-pub const PORT_VIDEO: u16 = 9001;
 /// The clone-daemon's in-clone HTTP MCP port. The control-server proxies desktop/window
 /// tools (`POST /api/hosts/:id/mcp`) to `http://{clone}:{PORT_DAEMON_MCP}`; each
 /// clone-daemon listens here (set via `RMNG_DAEMON_MCP_PORT`). Same value for every clone.
 pub const PORT_DAEMON_MCP: u16 = 9004;
-/// The control-server's port-forward data plane. The viewer opens one TCP connection here
-/// per accepted local socket; the server splices to the clone.
-pub const PORT_FORWARD: u16 = 9005;
 /// The bastion `sshd` port (jump host into clones).
 pub const PORT_BASTION: u16 = 2222;
 /// Data directory (state.json, chats, uploads, hosts mounts, secrets). Fixed at `/data`
@@ -52,24 +48,6 @@ pub const BUILDKIT_CACHE_GB: u32 = 40;
 /// Usage poll intervals (seconds, floored at 15 by the pollers). Nobody changes these.
 pub const CLAUDE_POLL_SECS: u64 = 600;
 pub const CODEX_POLL_SECS: u64 = 600;
-
-/// Chroma subsampling mode for the port-1 viewer video stream.
-///
-/// `Yuv420` is today's hardware path (one `W×H` NV12 H.264 stream per monitor).
-/// `Yuv444` recovers full chroma using the RDP **AVC444** packing carried in a single
-/// double-height `W×2H` stream (main view stacked over an auxiliary chroma view),
-/// reassembled to 4:4:4 on the GPU at the viewer. Server-wide, chosen at launch
-/// (`config.chroma`); the viewer learns the active mode from the port-1 connect handshake.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
-#[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub enum ChromaMode {
-    /// 4:2:0 — today's single-stream hardware path (default).
-    #[default]
-    Yuv420,
-    /// 4:4:4 — AVC444 double-height stream (≤1440p per monitor).
-    Yuv444,
-}
 
 /// SSH access settings. The control-server always runs a jump-only bastion `sshd`
 /// (no enable/disable toggle — same as the SMB share); these keys are installed on the
@@ -506,10 +484,6 @@ pub struct AppConfig {
     /// by ticket label when cloning from a ticket; required pick otherwise.
     #[serde(default)]
     pub presets: Vec<Preset>,
-    /// Chroma subsampling for the viewer video stream (default 4:2:0). Restart-required
-    /// (the media plane's encode path is wired at startup).
-    #[serde(default)]
-    pub chroma: ChromaMode,
     /// SSH bastion access settings (jump host into clones). Non-secret — public keys pass
     /// through [`AppConfigRedacted`] intact.
     #[serde(default)]
@@ -547,7 +521,6 @@ impl Default for AppConfig {
             codex: CodexConfig::default(),
             groups: Vec::new(),
             presets: Vec::new(),
-            chroma: ChromaMode::default(),
             ssh: SshConfig::default(),
             agent_playbook: default_agent_playbook(),
             global_prompt: default_global_prompt(),
@@ -614,7 +587,6 @@ impl AppConfig {
             codex: self.codex.clone(),
             groups: self.groups.clone(),
             presets: self.presets.iter().map(Preset::redacted).collect(),
-            chroma: self.chroma,
             ssh: self.ssh.clone(),
             agent_playbook: self.agent_playbook.clone(),
             global_prompt: self.global_prompt.clone(),
@@ -644,7 +616,6 @@ pub struct AppConfigRedacted {
     pub codex: CodexConfig,
     pub groups: Vec<CloneGroup>,
     pub presets: Vec<PresetRedacted>,
-    pub chroma: ChromaMode,
     pub ssh: SshConfig,
     pub agent_playbook: String,
     pub global_prompt: String,
@@ -653,15 +624,12 @@ pub struct AppConfigRedacted {
     pub assistant: AssistantConfig,
 }
 
-/// Response body for `PUT /api/config`: the redacted config after the merge, plus
-/// whether the change touched a restart-required setting (the UI surfaces a restart
-/// prompt when `restartRequired` is true).
+/// Response body for `PUT /api/config`: the redacted config after the merge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ConfigPutResponse {
     pub config: AppConfigRedacted,
-    pub restart_required: bool,
 }
 
 /// One row of the setup wizard's environment preflight (`GET /api/setup/env`): a named
@@ -708,8 +676,9 @@ mod tests {
         // Missing keys fall back to the same defaults (older config.json stays valid).
         let d: AppConfig = serde_json::from_str("{}").unwrap();
         // Retired Advanced-pane keys in an old file are dropped, never an error.
+        // So are the native viewer's settings: its ports and the 4:4:4 `chroma` mode.
         let old: AppConfig = serde_json::from_str(
-            r#"{"listen":{"web":9000},"agentPort":4096,"dataDir":"data","staticDir":"","cloneSocket":"/srv/rmng-sock/clones.sock"}"#,
+            r#"{"listen":{"web":9000,"video":9001,"forward":9005},"agentPort":4096,"dataDir":"data","staticDir":"","cloneSocket":"/srv/rmng-sock/clones.sock","chroma":"yuv444"}"#,
         )
         .unwrap();
         assert!(!old.setup_complete);
@@ -753,32 +722,6 @@ mod tests {
         let cfg: DockerConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.hostname_prefix, "pega-");
         assert_eq!(cfg.clone_cpus, 16);
-    }
-
-    #[test]
-    fn chroma_mode_defaults_and_serde() {
-        // Default is 4:2:0 (today's behavior / full capacity).
-        assert_eq!(ChromaMode::default(), ChromaMode::Yuv420);
-        assert_eq!(AppConfig::default().chroma, ChromaMode::Yuv420);
-        // Wire/JSON representation is lowercase.
-        assert_eq!(
-            serde_json::to_string(&ChromaMode::Yuv420).unwrap(),
-            "\"yuv420\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ChromaMode::Yuv444).unwrap(),
-            "\"yuv444\""
-        );
-        // Missing field falls back to the default (older config.json stays valid).
-        let c: AppConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(c.chroma, ChromaMode::Yuv420);
-        // Redaction passes chroma through (non-secret).
-        let r = AppConfig {
-            chroma: ChromaMode::Yuv444,
-            ..Default::default()
-        }
-        .redacted();
-        assert_eq!(r.chroma, ChromaMode::Yuv444);
     }
 
     #[test]
@@ -1029,9 +972,7 @@ mod port_tests {
     #[test]
     fn hardcoded_ports_match_the_old_defaults() {
         assert_eq!(PORT_WEB, 9000);
-        assert_eq!(PORT_VIDEO, 9001);
         assert_eq!(PORT_DAEMON_MCP, 9004);
-        assert_eq!(PORT_FORWARD, 9005);
         assert_eq!(PORT_BASTION, 2222);
         assert_eq!(DATA_DIR, "data");
         assert_eq!(CLONE_SOCKET, "/srv/rmng-sock/clones.sock");

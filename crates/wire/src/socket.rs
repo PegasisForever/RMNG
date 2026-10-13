@@ -113,7 +113,7 @@ pub enum InputMsg {
     AxisContinuous { dx: f64, dy: f64, flags: u32 },
     /// Key by X11 keysym (used by the MCP `key`/`type` tools for text/combos).
     Key { keysym: u32, pressed: bool },
-    /// Key by evdev keycode (the viewer supplies `hardware_keycode - 8`) — faithful
+    /// Key by evdev keycode (the browser viewer maps `KeyboardEvent.code`) — faithful
     /// physical-key identity so games that read raw keys (Minecraft/GLFW) behave.
     KeyCode { keycode: u32, pressed: bool },
 }
@@ -221,7 +221,8 @@ pub enum DaemonMsg {
     Unknown,
 }
 
-/// Clipboard message on the **viewer** protocol (port-1 tag 1), both directions.
+/// Clipboard message between the browser viewer and the server (`ToBrowser`/`FromBrowser`),
+/// both directions.
 /// Rich + lazy: `Offer` advertises types, `Request` fetches one, `Data` delivers it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "k", rename_all = "snake_case")]

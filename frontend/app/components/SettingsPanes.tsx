@@ -8,7 +8,6 @@
 // and one assembly branch — not all five panes.
 
 import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
-import { DropdownSelect } from "~/components/DropdownSelect";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
 import { Field, Section, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
@@ -20,7 +19,6 @@ import { SettingsSshSection } from "~/components/SettingsSshSection";
 import { SettingsStuckSection } from "~/components/SettingsStuckSection";
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import type { SettingsDraft } from "~/lib/settingsDraft";
-import type { ChromaMode } from "~/lib/wire/ChromaMode";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
 /** Write one field of the settings form back. Same shape as the panel's writer; kept here so each pane seam declares its own use. */
@@ -312,26 +310,6 @@ export function ServerPane({
           onUpdate={onUpdateServer}
           onRestart={onRestartServer}
         />
-      </Section>
-
-      {/* Chroma subsampling for the port-1 viewer stream, server-wide, chosen at launch. */}
-      <Section
-        title="Video"
-        effect="restart"
-        hint="Chroma subsampling for the port-1 viewer stream, server-wide. 4:4:4 recovers full chroma via AVC444 packing (a double-height stream reassembled on the GPU); keep monitors ≤1440p in that mode."
-      >
-        <Field label="Chroma mode">
-          <DropdownSelect
-            rows={[
-              { value: "yuv420", label: "4:2:0 (default)" },
-              { value: "yuv444", label: "4:4:4 (AVC444, ≤1440p/monitor)" },
-            ]}
-            value={draft.chroma}
-            onChange={(value) => onDraftChange("chroma", value as ChromaMode)}
-            label="Chroma mode"
-            className={settingsInput}
-          />
-        </Field>
       </Section>
 
       {/* The Docker settings every new clone is created with. Clone images are gen-2 preset

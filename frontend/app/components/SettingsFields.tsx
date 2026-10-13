@@ -14,7 +14,7 @@ export type SettingEffect = "immediate" | "restart" | "one-time";
 
 /** When a changed setting takes effect. Placed on section headers / fields to set
  *  expectations: `immediate` applies on save, `restart` needs a control-server
- *  restart (ports, staticDir, chroma, docker socket), `one-time` is baked in at
+ *  restart, `one-time` is baked in at
  *  first-run setup and can't change afterwards (subnet; dataDir/cloneSocket are
  *  fixed by the container image). */
 export function EffectBadge({ effect }: { effect: SettingEffect }) {

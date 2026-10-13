@@ -35,7 +35,6 @@ Dockerfile-stage/`RUN` steps) and the **developer scripts** in `scripts/`.
 | --- | --- | --- | --- |
 | `template/setup/{lib,10-desktop,15-gnome-patch,20-toolbox,30-user}.sh` | in the template build (`RUN`) | `template/Dockerfile` | Provision the clone template rootfs: desktop, patched shell, dev toolbox, the clone user + its units (the RMNG binaries are **not** baked in — the control-server injects them at clone-create time) |
 | `template/gnome-patch/build-shell-deb.sh` | the `gnome-build` stage of `template/Dockerfile` | `docker build` | Build the patched gnome-shell `.deb` |
-| `scripts/build-macos-app.sh` | a developer's Mac | by hand | Build + bundle the native macOS viewer |
 | `scripts/publish-server.sh` | a developer's machine | by hand | Build + push the control-server image |
 | `scripts/publish-template.sh` | a developer's machine | by hand | Build + push the clone template image |
 
@@ -45,14 +44,6 @@ itself — they never touch the control-server binary or a live container.
 ---
 
 ## Developer scripts
-
-### `scripts/build-macos-app.sh [OUTPUT_DIR]`
-
-Builds the native macOS viewer ([`crates/viewer-macos`](../crates/viewer-macos/README.md)) in
-release and wraps it in `OUTPUT_DIR/RMNG Viewer.app` (default `target/macos`), ad-hoc signing it
-so arm64 will launch it. The binary links only system frameworks, so the bundle is
-self-contained — no Homebrew, nothing to copy in — and runs on a Mac that has never seen this
-repo. Prints the framework/Homebrew link counts as a check. Runs on macOS only.
 
 ### `scripts/publish-server.sh [SERVER_REPO]`
 

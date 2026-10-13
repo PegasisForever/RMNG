@@ -2,14 +2,14 @@
 //!
 //! A headless clone (`RmngClone.headless`) runs no desktop and streams no video. When such a clone
 //! is the selected clone and at least one viewer is connected, this plane proxies each of its
-//! tmux sessions to the viewer over port 1: it enumerates `tmux list-sessions`, opens one
+//! tmux sessions to the browser viewer: it enumerates `tmux list-sessions`, opens one
 //! interactive `tmux attach` PTY per session via `docker exec` (bollard TTY exec), and pumps
-//! bytes both ways. The viewer renders one terminal tab per session on its primary window.
+//! bytes both ways. The viewer renders one terminal tab per session.
 //!
-//! Wire (port 1): the session list rides in the tag-3 [`wire::viewer::ViewSpec`]
-//! (`ViewContent::Terminal`); per-session output is [`wire::viewer::TermData`] (tag 7). Viewer→
-//! server [`wire::viewer::TermInput`], [`wire::viewer::TermResize`],
-//! [`wire::viewer::TermNewSession`] (parsed in `mediaplane`'s `read_viewer_input`, dispatched here).
+//! Wire: the session list rides in the [`wire::browser::ViewSpec`] (`ViewContent::Terminal`);
+//! per-session output is [`wire::browser::TermData`]. Browser→server
+//! [`wire::browser::TermInput`], [`wire::browser::TermResize`] and `TermNewSession` (parsed in
+//! `webviewer`, dispatched here by `mediaplane::handle_viewer_msg`).
 //!
 //! Lifecycle: exactly one clone is "active" at a time (the selected headless clone). Activation
 //! spawns a manager task; deactivation drops it, which aborts the manager and every per-session
@@ -30,7 +30,8 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::app::App;
-use crate::mediaplane::{T_TERM_DATA, T_VIEWSPEC, Viewers, broadcast_json, configured_monitors};
+use crate::mediaplane::{Viewers, broadcast, configured_monitors};
+use wire::browser::{TermData, ToBrowser, ViewContent, ViewSpec};
 
 /// The clone user every session PTY runs as (uid 1000).
 const CLONE_USER: &str = "rmng";
@@ -288,19 +289,18 @@ async fn run_manager(
     }
 }
 
-/// Broadcast the current tmux session list to all viewers as a `Terminal` [`wire::viewer::ViewSpec`]
-/// (tag 3): the stable window set (configured monitors) + the owning clone id + the session names
+/// Broadcast the current tmux session list to all viewers as a `Terminal` [`ViewSpec`]: the stable window set (configured monitors) + the owning clone id + the session names
 /// for the tab bar. The clone id lets the viewer rebuild the terminal when the selection moves to a
 /// different headless clone (session names alone can't distinguish two clones' `main` sessions).
 fn broadcast_view_spec(app: &App, viewers: &Viewers, clone_id: &str, sessions: Vec<String>) {
-    let spec = wire::viewer::ViewSpec {
+    let spec = ViewSpec {
         monitors: configured_monitors(&app.config()),
-        content: wire::viewer::ViewContent::Terminal {
+        content: ViewContent::Terminal {
             clone: clone_id.to_string(),
             sessions,
         },
     };
-    broadcast_json(viewers, T_VIEWSPEC, &spec);
+    broadcast(viewers, &ToBrowser::ViewSpec(spec));
 }
 
 /// Enumerate the clone's tmux sessions (creating a default `main` if none exist) and broadcast the
@@ -435,10 +435,9 @@ async fn pump_session(
                 Some(Ok(log)) => {
                     let bytes = log.into_bytes();
                     if !bytes.is_empty() {
-                        broadcast_json(
+                        broadcast(
                             &viewers,
-                            T_TERM_DATA,
-                            &wire::viewer::TermData { session: session.clone(), data: bytes.to_vec() },
+                            &ToBrowser::TermData(TermData { session: session.clone(), data: bytes.to_vec() }),
                         );
                     }
                 }

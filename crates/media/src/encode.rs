@@ -1,15 +1,7 @@
 //! VA-API H.264 encoder: import a received dmabuf (DMA_DRM) into an appsrc and
 //! encode to Annex-B H.264. One encoder per monitor of the selected clone.
 //!
-//! - [`ChromaMode::Yuv420`] (default): the standard single pipeline
-//!   `appsrc → vapostproc → NV12 → vah264enc`, one `W×H` 4:2:0 stream.
-//! - [`ChromaMode::Yuv444`]: full chroma via the AVC444 double-height trick, as a **single
-//!   zero-copy GPU pipeline**: `appsrc(dmabuf) → glupload → rmngavc444pack →
-//!   vapostproc(VAMemory NV12) → vah264enc`. The custom [`crate::glpack`] element packs main+aux
-//!   into one stacked `W×2H` NV12 frame and renders it straight into a VA-allocated dmabuf
-//!   surface — colour-convert, pack and GL→VA bridge fused into one GPU pass (byte-compatible
-//!   with [`wire::avc444`]); only the compressed AU leaves the GPU. The viewer reassembles
-//!   4:4:4. Requires the headless-GL env set in [`crate::init`].
+//! The pipeline is `appsrc → vapostproc → NV12 → vah264enc`, one `W×H` 4:2:0 stream.
 
 use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -20,10 +12,9 @@ use anyhow::{Context, Result, anyhow};
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app::{AppSink, AppSrc};
-use wire::ChromaMode;
 
 pub struct Encoder {
-    /// dmabuf input (both modes feed this).
+    /// dmabuf input.
     appsrc: AppSrc,
     /// The whole encode pipeline (where `vah264enc` lives, so `force_idr` targets it).
     pipeline: gst::Pipeline,
@@ -42,15 +33,13 @@ fn fourcc_str(fourcc: u32) -> String {
     String::from_utf8_lossy(&fourcc.to_le_bytes()).trim_end_matches('\0').to_string()
 }
 
-/// Input-queue bound for the appsrc, shared by both modes. Without it the appsrc queue is
+/// Input-queue bound for the appsrc. Without it the appsrc queue is
 /// unbounded: under any encode slowdown frames pile up and per-frame latency grows without recovery
-/// (bufferbloat). Measured on the W6800 at a paced 60 fps push, the unbounded 4:4:4 path reached
-/// p99 ≈ 115 ms / a 7–8 frame backlog while the median stayed ≈ 13 ms; under sustained overload it
-/// runs to seconds. `leaky-type=downstream` drops the OLDEST queued frame when full, so the encoder
+/// (bufferbloat); under sustained overload it runs to seconds. `leaky-type=downstream` drops the OLDEST queued frame when full, so the encoder
 /// always pulls the freshest capture (latest-frame-wins — the right policy for a live desktop; a
 /// dropped *raw* frame just skips a visual state, unlike a dropped encoded AU which would corrupt
 /// the H.264 reference chain, so the appsink stays lossless). `max-buffers=2` keeps a little
-/// pack/encode pipelining slack while bounding the input to ~2 frames. Tighter (`=1`) trims the
+/// encode pipelining slack while bounding the input to ~2 frames. Tighter (`=1`) trims the
 /// tail a few ms more but removes that slack. `do-timestamp` is unaffected.
 const APPSRC_BOUND: &str = "max-buffers=2 leaky-type=downstream";
 
@@ -65,15 +54,14 @@ const APPSRC_BOUND: &str = "max-buffers=2 leaky-type=downstream";
 /// The transfer stays unset **on purpose**. Naming one (even the true `sRGB`) makes `vapostproc`
 /// apply a transfer conversion on top of the matrix, which crushes the dark end: a source 16
 /// lands on luma 22 instead of 30. The samples we want are a plain matrix + range change, and
-/// the viewer supplies the missing transfer on the way out (`viewer::VIDEO_COLORIMETRY`).
+/// the browser viewer supplies the missing transfer in its decoder config (`viewer/worker.ts`).
 const ENC_COLORIMETRY: &str = "2:3:0:0";
 
-/// `vah264enc → h264parse → appsink` tail, shared by both modes.
+/// `vah264enc → h264parse → appsink` tail.
 ///
 /// `target-usage=1` is deliberate and **counterintuitive**: on this AMD VCN the usage mapping is
-/// effectively inverted — `tu=1` (the "quality" preset) encodes the stacked 2880p Yuv444 frame at
-/// ~71fps while `tu=7` (the "speed" preset) manages only ~41fps (measured via `avc444_e2e bench`).
-/// `tu=1` is what lets the Yuv444 path keep up with the 60Hz capture; Yuv420 has headroom either way.
+/// effectively inverted — `tu=1` (the "quality" preset) encodes faster than `tu=7` (the "speed"
+/// preset).
 const ENC_TAIL: &str = "vah264enc name=enc aud=true b-frames=0 ref-frames=1 key-int-max=30 \
        rate-control=cqp qpi=23 qpp=25 target-usage=1 ! \
      video/x-h264,profile=constrained-baseline ! \
@@ -94,17 +82,7 @@ impl Encoder {
     }
 
     /// `on_au(annexb, is_idr)` is called from a GStreamer thread per access unit.
-    pub fn new<F: FnMut(Vec<u8>, bool) + Send + 'static>(
-        chroma: ChromaMode,
-        on_au: F,
-    ) -> Result<Self> {
-        match chroma {
-            ChromaMode::Yuv420 => Self::new_yuv420(on_au),
-            ChromaMode::Yuv444 => Self::new_yuv444(on_au),
-        }
-    }
-
-    fn new_yuv420<F: FnMut(Vec<u8>, bool) + Send + 'static>(on_au: F) -> Result<Self> {
+    pub fn new<F: FnMut(Vec<u8>, bool) + Send + 'static>(on_au: F) -> Result<Self> {
         let desc = format!(
             "appsrc name=src is-live=true format=time do-timestamp=true {APPSRC_BOUND} ! \
              vapostproc ! video/x-raw(memory:VAMemory),format=NV12,colorimetry={ENC_COLORIMETRY} ! \
@@ -118,31 +96,7 @@ impl Encoder {
         Ok(Self { appsrc, pipeline, cur: Mutex::new(None), lat })
     }
 
-    fn new_yuv444<F: FnMut(Vec<u8>, bool) + Send + 'static>(on_au: F) -> Result<Self> {
-        // Register our GPU packer before referencing it by name.
-        crate::glpack::register()?;
-        // Single zero-copy GPU pipeline: `glupload` imports the capture dmabuf as a GL texture,
-        // then `rmngavc444pack` (colour-convert + AVC444 pack + GL→VA bridge fused into one pass)
-        // renders the packed stacked-NV12 planes straight into a VA-allocated dmabuf surface —
-        // GstGL's gldownload can't export AMD's tiled GL textures in a layout VA accepts, so we
-        // invert ownership (VA allocates, GL writes in place), which vapostproc/vah264enc consume.
-        // No per-frame host transfers. (push() attaches a VideoMeta so glupload can EGL-import the
-        // bare compositor dmabuf zero-copy — without it glupload derives 0 planes and CPU-mmaps.)
-        let desc = format!(
-            "appsrc name=src is-live=true format=time do-timestamp=true {APPSRC_BOUND} ! \
-             glupload ! rmngavc444pack ! \
-             vapostproc ! video/x-raw(memory:VAMemory),format=NV12 ! {ENC_TAIL}"
-        );
-        let pipeline = launch_pipeline(&desc)?;
-        let appsrc = by_name_appsrc(&pipeline, "src")?;
-        let lat = lat_fifo();
-        attach_au_sink(&pipeline, on_au, lat.clone())?;
-        pipeline.set_state(gst::State::Playing).context("encoder PLAYING")?;
-        Ok(Self { appsrc, pipeline, cur: Mutex::new(None), lat })
-    }
-
-    /// Force the next encoded frame to be an IDR (keyframe). The event reaches `vah264enc`
-    /// in the single pipeline.
+    /// Force the next encoded frame to be an IDR (keyframe).
     pub fn force_idr(&self) {
         let ev = gstreamer_video::UpstreamForceKeyUnitEvent::builder().all_headers(true).build();
         self.pipeline.send_event(ev);
@@ -198,13 +152,9 @@ impl Encoder {
         {
             let b = buffer.get_mut().unwrap();
             b.append_memory(mem);
-            // Attach plane metadata so GL import (glupload, Yuv444 path) works: the bare
-            // dmabuf buffer carries none, so glupload derives 0 planes and falls back to a
-            // failing CPU mmap. The layout must be the *real* one the compositor allocated:
-            // the GPU pads pitches (width 1440 → a 256-byte-aligned pitch, not 1440·4), and
-            // an EGL import with a wrong pitch is rejected, killing the stream. VA (Yuv420
-            // path) ignores the meta and derives the layout itself, so this is safe for
-            // both modes.
+            // Attach the real plane layout, as the screenshot path does. The GPU pads pitches
+            // (width 1440 → a 256-byte-aligned pitch, not 1440·4), so the meta carries the
+            // daemon-reported one. `vapostproc` derives the layout itself.
             let vfmt = video_format_for(fourcc);
             let (offsets, strides) = meta_layout(w, planes);
             let _ = gstreamer_video::VideoMeta::add_full(

@@ -11,7 +11,7 @@
 # The two build stages are independent — parallel builds, rust-only changes skip bun.
 #
 # Stages: 1. bun-build (frontend) 2. rust-build (3 binaries)
-#   3. runtime (ubuntu:26.04 + runtime libs + payloads + share user, EXPOSE 9000 9001 9005 445).
+#   3. runtime (ubuntu:26.04 + runtime libs + payloads + share user, EXPOSE 9000 445 2222).
 
 # ---------------------------------------------------------------------------
 # 1. bun stage: frontend build
@@ -31,12 +31,11 @@ RUN cd frontend && bun run build
 FROM ubuntu:26.04 AS rust-build
 ENV DEBIAN_FRONTEND=noninteractive
 # *-sys crates need cc/pkg-config; media needs gstreamer/VA/drm/pipewire dev files.
-# libgtk-4-dev arrives via the workspace toolchain (viewer); harmless here.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       build-essential pkg-config clang git curl ca-certificates \
       libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-      libva-dev libdrm-dev libpipewire-0.3-dev libgtk-4-dev \
+      libva-dev libdrm-dev libpipewire-0.3-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # apt rustc is too old for edition 2024 — rustup stable instead.
@@ -65,15 +64,12 @@ FROM ubuntu:26.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 # samba: serves clone homes over SMB. openssh-server: sshd + ssh-keygen for the :2222
 # bastion and per-clone host keys (control plane itself uses unix sockets, no SSH).
-# gstreamer1.0-gl: separate package shipping glupload — without it the zero-copy AVC444
-# encode bridge dies at init and viewers hang on "connected, waiting for video".
 # zfsutils-linux: LOAD-BEARING — the server creates, snapshots, clones and destroys every
 # clone's home dataset itself (`zfs.rs`), through the CT's /dev/zfs node. The CT does not
 # and must not have these binaries (see docs/PROXMOX-LXC.md §1c).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-      gstreamer1.0-gl \
       libva2 libva-drm2 va-driver-all libdrm2 \
       ca-certificates samba openssh-server zfsutils-linux \
  && rm -rf /var/lib/apt/lists/*
@@ -102,8 +98,8 @@ COPY --from=bun-build   /src/frontend/build/client      /usr/local/share/rmng/st
 
 # CWD-relative config.json + data/ land in the /data volume (config.rs uses relative paths).
 WORKDIR /data
-# 9000 web/API, 9001 video, 9005 forward, 445 SMB (clone homes).
-EXPOSE 9000 9001 9005 445
+# 9000 web/API + browser viewer, 445 SMB (clone homes), 2222 SSH bastion.
+EXPOSE 9000 445 2222
 # Logging default only (no config lives in env, per the no-env invariant).
 ENV RUST_LOG=info,tower_http=warn,clip=debug
 ENTRYPOINT ["/usr/local/bin/rmng-control-server"]

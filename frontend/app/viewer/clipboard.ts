@@ -1,5 +1,5 @@
 // The browser viewer's clipboard: each viewer window is one endpoint of the server's clipboard
-// broker (docs/PROTOCOL.md "Clipboard (rich + lazy)"), as the native viewer's GTK clipboard is.
+// broker (docs/PROTOCOL.md "Clipboard (rich + lazy)").
 //
 // Chrome lets a page use the clipboard only while the page has focus, and it has no "clipboard
 // changed" event. So:
@@ -7,7 +7,7 @@
 //   viewer window last saw it, offer it to the server, keep the bytes, and answer the server's
 //   requests from them.
 // - Clone → local: an offer becomes the shared "pending" offer. The focused window asks at once
-//   for the best type of each kind (image, HTML, text), as the native viewer does, and writes
+//   for the best type of each kind (image, HTML, text), and writes
 //   what came after each reply. With no window focused, the next window that gets focus does
 //   it, so an agent's copy still reaches the local clipboard. A write that Chrome refuses is
 //   tried again on the next key press or click.
@@ -37,7 +37,7 @@ const PENDING_KEY = "rmng-viewer-clipboard-pending";
  *  (`own`) the one a viewer window made. */
 type Pending = ClipboardOffer & { own?: boolean };
 
-/** The clone's names for plain text (`crates/viewer`'s `is_text_mime`). */
+/** The clone's names for plain text. */
 export const isTextMime = (m: string) =>
   m.startsWith("text/plain") || m === "UTF8_STRING" || m === "TEXT";
 
@@ -56,8 +56,7 @@ export function localTypeFor(mime: string): LocalType | null {
   return mime === "text/html" || mime === "image/png" ? mime : null;
 }
 
-/** What to fetch from a clone's offer (`crates/viewer`'s `pick_mimes`, limited to what Chrome
- *  can write): the PNG image, the HTML and the best plain text, each with the Chrome type it
+/** What to fetch from a clone's offer (limited to what Chrome can write): the PNG image, the HTML and the best plain text, each with the Chrome type it
  *  becomes. Plain text comes with the HTML, so a paste into a plain-text field still works. */
 export function pickMimes(mimes: string[]): { mime: string; type: LocalType }[] {
   const out: { mime: string; type: LocalType }[] = [];
@@ -177,7 +176,7 @@ export function attachClipboard(o: ClipboardOptions): ViewerClipboard {
 
   async function serve(serial: number, mime: string) {
     const type = localTypeFor(mime);
-    // The serial is not checked, as in the native viewer: the server sends a request only to
+    // The serial is not checked: the server sends a request only to
     // the current owner, and a clone can ask under the serial of the offer before (its paste
     // raced the new offer).
     const blob = type ? owned?.get(type) : undefined;

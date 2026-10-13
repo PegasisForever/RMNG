@@ -5,11 +5,8 @@ members = [
     "crates/control-server",
     "crates/media",
     "crates/clone-daemon",
-    "crates/viewer",
     "crates/control-client",
     "crates/cli",
-    "crates/viewer-core",
-    "crates/viewer-macos",
 ]
 
 [workspace.package]
@@ -37,8 +34,6 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
-# TCP keepalive / user-timeout tuning for the port-1 viewer link (wire::net).
-socket2 = "0.6"
 
 # async / server
 tokio = { version = "1", features = ["full"] }

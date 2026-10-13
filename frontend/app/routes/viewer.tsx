@@ -126,8 +126,6 @@ export default function Viewer() {
         case "term_data":
           termSink.current?.(msg);
           break;
-        case "mode":
-          break;
       }
     };
     worker.onmessage = (e: MessageEvent<WorkerOut>) => {

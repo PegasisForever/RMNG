@@ -2,8 +2,6 @@
 import type { AppConfigRedacted } from "./AppConfigRedacted";
 
 /**
- * Response body for `PUT /api/config`: the redacted config after the merge, plus
- * whether the change touched a restart-required setting (the UI surfaces a restart
- * prompt when `restartRequired` is true).
+ * Response body for `PUT /api/config`: the redacted config after the merge.
  */
-export type ConfigPutResponse = { config: AppConfigRedacted, restartRequired: boolean, };
+export type ConfigPutResponse = { config: AppConfigRedacted, };

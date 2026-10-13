@@ -6,13 +6,15 @@ process boundary in `RMNG`:
 1. **Control state** broadcast over `/events` (port 2) and persisted to `state.json`.
 2. The **clone-daemon ⇄ control-server unix-socket protocol** (dmabuf frame
    descriptors, input events, acks).
-3. The **viewer protocol** (port 1): framed H.264 + cursor/clipboard out, input in.
+3. The **browser viewer protocol** (`browser`, a WebSocket on port 9000): binary H.264 +
+   JSON view spec/cursor/clipboard/terminal out, input/clipboard/terminal in.
 4. **MCP DTOs** for the clone-local desktop-automation tool schemas.
 
 Control-plane types derive `serde::{Serialize, Deserialize}` and `ts-rs::TS` so the
 **frontend's TypeScript types are generated** from this crate (eliminating the
-hand-synced `control-server/app/lib/types.ts` drift that exists today). Internal
-transport types (socket, viewer) are serde-only.
+hand-synced `control-server/app/lib/types.ts` drift that exists today). The browser
+viewer's messages (`ToBrowser`, `FromBrowser` and the types they carry) are exported too.
+The other transport types (socket, holder) are serde-only.
 
 ## Responsibilities
 
@@ -21,8 +23,9 @@ transport types (socket, viewer) are serde-only.
   TS `../../control-server/app/lib/types.ts` extras (`Clone` server-only fields,
   `Operation`, `ClaudeUsage`, `Chat`/`ChatMessage`, `templates`).
 - Define the **socket** protocol (`FrameMsg`, `InputMsg`, `Ack`, monitor descriptors).
-- Define the **viewer** protocol (server→viewer video/cursor/clipboard/monitor-list;
-  viewer→server input/clipboard/keyframe-request/hello).
+- Define the **browser viewer** protocol (`VideoHeader`, the clipboard binary layout,
+  `ToBrowser`: view spec/cursor/clipboard/terminal data; `FromBrowser`:
+  input/clipboard/terminal input/keyframe request).
 - Define **MCP DTOs** for clone-local desktop automation; the control-server's web API proxies
   operator requests to that clone-local surface.
 - Emit `.ts` bindings consumed by `frontend`.
@@ -52,8 +55,9 @@ AppConfig { docker{hostname_prefix, clone_cpus, clone_memory_mb, homes_parent},
             clone_groups: [{name, accounts: [email]}],
             codex{autoReset},
             codex_groups: [{name, accounts: [email]}],
-            clone_socket, data_dir, static_dir, chroma, setup_complete,
-            monitors: [MonitorSpec], listen{video, web, daemon_mcp, forward, bastion}, agent{port} }
+            setup_complete, layout_presets, active_layout, ssh, ... }
+# Ports, data dir and sockets are constants (PORT_WEB, PORT_BASTION, PORT_DAEMON_MCP,
+# DATA_DIR, CLONE_SOCKET, DOCKER_SOCKET), not config. Old keys in config.json are ignored.
 # Clone images are gen-2 preset builds (each preset's Dockerfile into a hash tag, built on
 # demand); the stock base is pegasis0/rmng-template:latest. See docs/API.md + docs/DEPLOY.md.
 # A preset's `labels` auto-select it when cloning from a Linear ticket; `linear_key` is what
@@ -87,15 +91,15 @@ ClipboardOffer  { serial, mime_types: [String] }      # "selection changed; thes
 ClipboardRequest{ serial, mime_type }                  # "give me bytes for this type"
 ClipboardData   { serial, mime_type, bytes }           # the bytes (lazy fetch)
 
-# viewer protocol (port 1: native GTK viewer ⇄ control-server)  [length-prefixed frames]
-ViewerHello { token?, capabilities }                  # viewer → server
-MonitorList { monitors: [{id, x, y, width, height}] }  # server → viewer
-VideoAu { monitor_id, idr: bool, pts, annexb }         # server → viewer (H.264 access unit)
-CursorMeta { monitor_id, x, y, hotspot, shape? }       # server → viewer (drawn client-side)
-ViewerInput { monitor_id, InputMsg-like }              # viewer → server
-RequestKeyframe { monitor_id }                         # viewer → server (reconnect/seek)
-# clipboard: same Offer/Request/Data triple as the socket, both directions through the broker
-ClipboardOffer/ClipboardRequest/ClipboardData { … }   # viewer ⇄ server
+# browser viewer protocol (WebSocket /api/viewer?monitor=<id> on port 9000)
+VideoHeader { monitor_id, seq, key, server_us }        # binary, 18 bytes + Annex-B AU
+encode_clipboard_data / decode_clipboard_data          # binary ClipboardData, both ways
+ToBrowser   (JSON, tag "t"): view_spec(ViewSpec) | cursor(CursorMeta)
+            | clipboard(ClipboardMsg) | term_data(TermData)
+FromBrowser (JSON, tag "t"): input(InputMsg) | clipboard(ClipboardMsg) | term_input
+            | term_resize | term_new_session | request_keyframe{monitor_id}
+ViewSpec { monitors: [ViewMonitor{id, x, y, width, height, primary}],
+           content: desktop | terminal{clone, sessions} }
 
 # Clone-local daemon MCP DTOs — JSON-RPC tool inputs/outputs
 Screenshot{} Click{x,y,button} Type{text} Key{keysym} Move{x,y} Scroll{dx,dy} ...
@@ -104,7 +108,7 @@ Screenshot{} Click{x,y,button} Type{text} Key{keysym} Move{x,y} Scroll{dx,dy} ..
 
 Field names/casing must match the wire format the existing `/events` consumers expect
 (camelCase JSON for the control-plane types — `#[serde(rename_all = "camelCase")]`).
-Internal socket/viewer types may use snake_case.
+Internal socket and browser viewer types may use snake_case.
 
 ## Contract preservation
 
@@ -124,11 +128,10 @@ payloads are carried as byte slices; `wire` defines headers/descriptors, not cod
 
 - Round-trip JSON for every control-plane type; golden-file the `ControlState` JSON shape
   against a capture from the current Bun server.
-- Round-trip the binary socket/viewer headers.
+- Round-trip the binary socket and browser viewer headers (`VideoHeader`, clipboard data).
 - `ts-rs` export produces TS that type-checks in `frontend`.
 
 ## Open questions
 
 - Whether to split into `wire-control` (ts-rs) / `wire-media` (serde-only) so the ts-rs
   export covers only control-plane types.
-- Binary framing detail for port 1 (fixed header + length prefix vs a small varint codec).

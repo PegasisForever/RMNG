@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let first_idr = Arc::new(AtomicBool::new(true));
     let enc = {
         let (e, b, fi) = (encoded.clone(), bytes.clone(), first_idr.clone());
-        Encoder::new(wire::ChromaMode::Yuv420, move |au, idr| {
+        Encoder::new(move |au, idr| {
             e.fetch_add(1, Ordering::Relaxed);
             b.fetch_add(au.len() as u64, Ordering::Relaxed);
             if idr && fi.swap(false, Ordering::Relaxed) {

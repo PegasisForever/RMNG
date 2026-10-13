@@ -16,7 +16,6 @@
 // alongside the store and the sort it belongs with.)
 
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
-import type { ChromaMode } from "~/lib/wire/ChromaMode";
 import type { GroupMember } from "~/lib/wire/GroupMember";
 import type { JudgeProvider } from "~/lib/wire/JudgeProvider";
 import type { SshConfig } from "~/lib/wire/SshConfig";
@@ -79,7 +78,6 @@ export interface SettingsDraft {
   /** The single pool list: each pool may mix Claude and Codex accounts. */
   groups: GroupDraft[];
   codex: { autoReset: boolean };
-  chroma: ChromaMode;
   agentPlaybook: string;
   globalPrompt: string;
   ssh: SshConfig;
@@ -173,7 +171,6 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
     codex: {
       autoReset: c.codex.autoReset,
     },
-    chroma: c.chroma,
     agentPlaybook: c.agentPlaybook,
     globalPrompt: c.globalPrompt,
     judge: {
@@ -259,7 +256,6 @@ export function settingsPatch(
     },
     groups,
     codex: { autoReset: draft.codex.autoReset },
-    chroma: draft.chroma,
     ssh: draft.ssh,
     agentPlaybook: draft.agentPlaybook,
     globalPrompt: draft.globalPrompt,
