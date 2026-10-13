@@ -171,7 +171,7 @@ Each row that depends on one of these answers names its question ID.
 | ID | Feature | Proposed | Effort | How | Notes | Decision |
 |---|---|---|---|---|---|---|
 | M1 | One browser window per monitor, opened from the ViewSpec | Yes | M | R | Each window can have its own WebSocket for its monitor, or one window can feed the others. Decide this in the prototype. | Yes |
-| M2 | Put each window on its screen and make it fullscreen (Window Management API) | Yes | M | R | Chrome only, which is the only target (Q2). | Yes |
+| M2 | Put each window on its screen and make it fullscreen (Window Management API) | No | M | R | Removed after round 9: windows open as plain windows, and the operator places, sizes and fullscreens them. | No |
 | M3 | Drag across the edge between two monitors (`drag_route.rs`) | Yes | L | K | The windows are separate, so they must coordinate (for example with `BroadcastChannel`). | Yes |
 | M4 | Resize the remote monitor to the browser window | No | M | R | Depends on Q5. RMNG uses fixed layout presets today. | No (Q5) |
 | M5 | Scale to fit (letterbox) when the window is smaller than the monitor | Yes | S | R |  | Yes |

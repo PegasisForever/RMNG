@@ -13,7 +13,7 @@ import type { ToBrowser } from "~/lib/wire/ToBrowser";
 import type { ViewContent } from "~/lib/wire/ViewContent";
 import type { ViewMonitor } from "~/lib/wire/ViewMonitor";
 import { attachClipboard } from "~/viewer/clipboard";
-import { type Input, attachInput, requestFullscreen, toggleFullscreen } from "~/viewer/input";
+import { type Input, attachInput, toggleFullscreen } from "~/viewer/input";
 import { openViewerWindows } from "~/viewer/open";
 import {
   type ViewerStats,
@@ -46,8 +46,6 @@ function uploadFile(file: File, onProgress: (fraction: number) => void): Promise
 export default function Viewer() {
   const [params] = useSearchParams();
   const monitor = Number(params.get("monitor") ?? 0);
-  /** Opened by `openViewerWindows` on a screen of its own: go fullscreen there. */
-  const placed = params.get("fullscreen") === "1";
   const box = useRef<HTMLDivElement>(null);
   const overlay = useRef<HTMLImageElement>(null);
   const input = useRef<Input | null>(null);
@@ -157,13 +155,6 @@ export default function Viewer() {
       canvas.remove();
     };
   }, [secure, monitor]);
-
-  // `openViewerWindows` put a placed window on its screen; fullscreen uses the window's own
-  // screen. Chrome allows it without a click only for sites in its
-  // AutomaticFullscreenAllowedForUrls policy; otherwise the toolbar's Fullscreen button does it.
-  useEffect(() => {
-    if (placed) requestFullscreen().catch(() => {});
-  }, [placed]);
 
   if (secure === false) {
     return (

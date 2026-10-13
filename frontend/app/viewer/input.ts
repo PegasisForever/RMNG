@@ -183,11 +183,7 @@ export function wheelMessages(
 /** Fullscreen on or off, on the screen the window is on. */
 export function toggleFullscreen() {
   if (document.fullscreenElement) void document.exitFullscreen();
-  else void requestFullscreen();
-}
-
-export function requestFullscreen() {
-  return document.documentElement.requestFullscreen();
+  else void document.documentElement.requestFullscreen();
 }
 
 /** Chrome's Keyboard Lock API; not in TypeScript's DOM types. */

@@ -44,7 +44,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 
 - Zero-copy hardware H.264 pipeline (VA-API encode on the server)
 - Browser viewer in Chrome: H.264 over a WebSocket, decoded with WebCodecs
-- One browser window per monitor. Each window goes fullscreen on its screen without a click only when the dashboard address is in Chrome's `AutomaticFullscreenAllowedForUrls` policy.
+- One browser window per monitor. You move, size and fullscreen each window yourself.
 - 60fps on local network
 - Multi-monitor
 - Instant swap between clones
