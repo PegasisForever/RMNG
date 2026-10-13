@@ -3147,6 +3147,7 @@ mod hook_tests {
         assert!(merge_pi_native_mcp(&serde_json::json!([1]), false, "lin_key").is_err());
     }
 
+    #[test]
     fn a_headless_clone_skips_desktop_and_a_keyless_one_skips_linear() {
         let dir = tmpdir("cursordrop");
         let path = dir.join("mcp.json");

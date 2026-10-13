@@ -153,7 +153,9 @@ a daemon older than it reads as "the holder was already running" and is left alo
 
 `ServerMsg` (server → daemon), serde tag `t`: `ack
 {monitor_id, seq}` (flow control — the daemon waits for the ack before the next frame),
-`input(InputMsg)`, the three `clipboard_*` messages, and `set_monitors {monitors:
+`input(InputMsg)`, the three `clipboard_*` messages, `capture {active}` — start or stop
+the clone's capture (the server keeps it on only for the selected clone while a viewer is
+connected), and `set_monitors {monitors:
 MonitorSpec[]}` — apply a layout **live**: the daemon does a make-before-break session swap
 (rebuilds a fresh Mutter session with the desired monitors, switches capture + input to it,
 then stops the old one, so running apps never close). Sent to the selected clone: on its

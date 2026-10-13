@@ -34,14 +34,14 @@ mkdir -p /etc/sysctl.d && echo 'net.ipv4.ping_group_range = 0 65534' >/etc/sysct
 ln -sf /dev/null /etc/sysctl.d/30-localsearch.conf
 
 log "headless GNOME + Mutter + VA-API + PipeWire (NO gdm/g-r-d)"
-# vapostproc (screenshot encode) is plugins-bad, pngenc -good, base in -base. sudo +
+# vapostproc (screenshot encode) is plugins-bad, jpegenc -good, base in -base. sudo +
 # openssh-server: the docker image ships neither.
 apt-get install -y -qq \
   sudo \
   gnome-session gnome-shell mutter ptyxis nautilus gnome-text-editor loupe \
   dbus-user-session xwayland \
   mesa-va-drivers libva2 va-driver-all vainfo \
-  pipewire wireplumber gstreamer1.0-pipewire \
+  pipewire wireplumber \
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   fonts-cantarell adwaita-icon-theme jq \
   openssh-server

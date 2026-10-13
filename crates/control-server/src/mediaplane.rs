@@ -923,7 +923,16 @@ fn prime_viewer_video(
         .get(&sel)
         .and_then(|m| m.get(&monitor))
         .and_then(LatestFrame::dup);
-    let Some(f) = frame else { return };
+    let Some(f) = frame else {
+        // No stored frame, but an encoder may already be running: ask it for a keyframe, or
+        // a joining window waits for a periodic one that a still screen never brings. Clone
+        // the handle out first; `force_idr` must not run under the map lock (`force_idr_all`).
+        let enc = encoders.lock().unwrap().get(&monitor).map(|(e, _, _)| e.clone());
+        if let Some(enc) = enc {
+            enc.force_idr();
+        }
+        return;
+    };
     if let Some(enc) = encoder_for(encoders, viewers, monitor, f.width, f.height) {
         enc.force_idr();
         if let Err(e) = f.push_to(&enc) {
