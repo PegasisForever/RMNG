@@ -10,7 +10,7 @@ import type { CursorMeta } from "../lib/wire/CursorMeta";
 import type { CursorShape } from "../lib/wire/CursorShape";
 import type { InputMsg } from "../lib/wire/InputMsg";
 import type { ViewMonitor } from "../lib/wire/ViewMonitor";
-import { CODE_TO_EVDEV } from "./keycodes";
+import { evdevFor } from "./keycodes";
 
 /** Engage the automatic pointer lock after the remote cursor stays hidden this long. */
 export const ENGAGE_MS = 180;
@@ -351,7 +351,8 @@ export function attachInput(o: InputOptions): Input {
       toggleFullscreen();
       return;
     }
-    const k = CODE_TO_EVDEV[e.code];
+    if (isMac && e.code === "CapsLock") return capsTap(e);
+    const k = evdevFor(e.code, isMac);
     if (k === undefined) return;
     e.preventDefault();
     // The clone runs its own key repeat, so the browser's repeats are not sent.
@@ -365,14 +366,24 @@ export function attachInput(o: InputOptions): Input {
 
   function onKeyUp(e: KeyboardEvent) {
     if (forPage(e) || !size) return;
-    const k = CODE_TO_EVDEV[e.code];
+    if (isMac && e.code === "CapsLock") return capsTap(e);
+    const k = evdevFor(e.code, isMac);
     if (k === undefined) return;
     e.preventDefault();
     if (!connected || !keys.delete(k)) return;
     send({ kind: "key_code", keycode: k, pressed: false });
     // Chrome on macOS fires no keyup for a key released while Command is down (Cmd+C sends
     // only C's keydown), so Command's own release ends every key pressed with it.
-    if (isMac && (k === 125 || k === 126)) releaseAll();
+    if (isMac && (e.code === "MetaLeft" || e.code === "MetaRight")) releaseAll();
+  }
+
+  /** Chrome on macOS reports Caps Lock as down when the lock goes on and up when it goes off, so
+   *  each event is one press of the key: a tap flips the clone's own lock. */
+  function capsTap(e: KeyboardEvent) {
+    e.preventDefault();
+    if (!connected) return;
+    send({ kind: "key_code", keycode: 58, pressed: true });
+    send({ kind: "key_code", keycode: 58, pressed: false });
   }
 
   function onPointerMove(e: PointerEvent) {

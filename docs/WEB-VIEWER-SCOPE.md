@@ -132,7 +132,7 @@ Each row that depends on one of these answers names its question ID.
 |---|---|---|---|---|---|---|
 | I1 | Keyboard: `KeyboardEvent.code` to Linux keycode (`key_code`) | Yes | M | R | Selkies sends X11 keysyms through the noVNC tables. We do not need them. The remote keyboard layout applies, as in the native viewer. | Yes |
 | I2 | Track held keys. Release all of them when the window loses focus or the tab is hidden. | Yes | S | R | Prevents stuck keys. | Yes |
-| I3 | macOS Command key: same mapping as the native macOS viewer | Yes | S | K |  | Yes |
+| I3 | macOS Command key: same mapping as the native macOS viewer | Yes | S | K | As the native macOS viewer did by default: Cmd sends Ctrl, Ctrl sends Super, and Caps Lock is sent as a tap. Fixed after round 9; the first version sent Cmd as Super. | Yes |
 | I4 | Keyboard Lock in fullscreen, so Chrome passes Ctrl+W, Alt+Tab and Super to the clone | Yes | S | R | Chrome only, which is the only target (Q2). | Yes |
 | I5 | IME composition (Chinese, Japanese, Korean input) | No | L | — | The native viewer has no IME either. | No |
 | I6 | Keyboard layout detection | No | — | — | Not needed with Linux keycodes. | No |

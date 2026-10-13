@@ -1,9 +1,21 @@
 // `KeyboardEvent.code` → Linux evdev keycode (`KEY_*` in input-event-codes.h), sent as
 // `key_code`. `code` names the physical key, so the clone's own keyboard layout applies. Values
 // from Chromium's `ui/events/keycodes/dom/dom_code_data.inc`, which ties each DOM code to its
-// evdev code, so Command is KEY_LEFTMETA / KEY_RIGHTMETA.
+// evdev code, so Command is KEY_LEFTMETA / KEY_RIGHTMETA here; on a Mac `evdevFor` swaps it
+// with Control.
 //
 // A code that is not in the table is not sent.
+
+/** On a Mac, Command and Control swap, as the native macOS viewer did by default: Mac chords
+ *  (Cmd+C, Cmd+T) reach GNOME as Ctrl, and Control becomes Super, so the overview stays
+ *  reachable. */
+const MAC_SWAP: Readonly<Record<number, number>> = { 125: 29, 126: 97, 29: 125, 97: 126 };
+
+/** The evdev code a key sends, or undefined for a key that is not sent. */
+export function evdevFor(code: string, mac: boolean): number | undefined {
+  const k = CODE_TO_EVDEV[code];
+  return mac && k !== undefined ? (MAC_SWAP[k] ?? k) : k;
+}
 
 export const CODE_TO_EVDEV: Readonly<Record<string, number>> = {
   Escape: 1,

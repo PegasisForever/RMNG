@@ -10,11 +10,22 @@ import {
   toMonitor,
   wheelMessages,
 } from "./input";
-import { CODE_TO_EVDEV } from "./keycodes";
+import { CODE_TO_EVDEV, evdevFor } from "./keycodes";
 
 test("no two codes share an evdev code", () => {
   const values = Object.values(CODE_TO_EVDEV);
   expect(new Set(values).size).toBe(values.length);
+});
+
+test("on a Mac, Command and Control swap; elsewhere they do not", () => {
+  expect(evdevFor("MetaLeft", true)).toBe(29);
+  expect(evdevFor("MetaRight", true)).toBe(97);
+  expect(evdevFor("ControlLeft", true)).toBe(125);
+  expect(evdevFor("ControlRight", true)).toBe(126);
+  expect(evdevFor("KeyC", true)).toBe(46);
+  expect(evdevFor("MetaLeft", false)).toBe(125);
+  expect(evdevFor("ControlLeft", false)).toBe(29);
+  expect(evdevFor("Nope", true)).toBeUndefined();
 });
 
 test("page points map through the letterbox to monitor pixels", () => {
