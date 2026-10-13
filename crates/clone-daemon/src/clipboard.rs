@@ -18,7 +18,7 @@
 //!      `SelectionWrite` the bytes to Mutter's fd.
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -167,34 +167,17 @@ pub async fn run(
                 let (rd, out, gate) = (rd.clone(), out.clone(), read_gate.clone());
                 tokio::spawn(async move {
                     let started = std::time::Instant::now();
-                    let guard = gate.lock_owned().await;
+                    // Held until the read ends: by EOF, by error, or by the timeout, which
+                    // closes the fd and so ends Mutter's transfer.
+                    let _guard = gate.lock_owned().await;
                     let bytes = match selection_read_retrying(&rd, &r.mime_type).await {
-                        Ok(fd) => {
-                            // The guard rides into the blocking read and is released only when
-                            // the transfer really ends. On a timeout we answer empty, but
-                            // Mutter's transfer is still open, so the next read must keep
-                            // waiting rather than collide with it.
-                            let read = tokio::task::spawn_blocking(move || {
-                                let out = read_all(fd);
-                                drop(guard);
-                                out
-                            });
-                            match tokio::time::timeout(std::time::Duration::from_secs(5), read).await {
-                                Ok(Ok(Ok(bytes))) => bytes,
-                                Ok(Ok(Err(e))) => {
-                                    tracing::warn!("SelectionRead({}) read: {e}", r.mime_type);
-                                    Vec::new()
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::warn!("SelectionRead({}) join: {e}", r.mime_type);
-                                    Vec::new()
-                                }
-                                Err(_) => {
-                                    tracing::warn!("SelectionRead({}) timed out after 5s (source app not responding?)", r.mime_type);
-                                    Vec::new()
-                                }
+                        Ok(fd) => match read_selection(fd).await {
+                            Ok(bytes) => bytes,
+                            Err(e) => {
+                                tracing::warn!("SelectionRead({}) read: {e}", r.mime_type);
+                                Vec::new()
                             }
-                        }
+                        },
                         Err(e) => {
                             tracing::warn!("SelectionRead({}): {e}", r.mime_type);
                             Vec::new()
@@ -346,9 +329,9 @@ fn opt_bool(opts: &HashMap<String, OwnedValue>, key: &str) -> bool {
     opts.get(key).and_then(|v| find(v)).unwrap_or(false)
 }
 
-/// Mutter hands back **non-blocking** pipe fds for SelectionRead/Write, so a plain
-/// `read_to_end`/`write_all` fails with EAGAIN (os error 11) instead of waiting. Clear
-/// `O_NONBLOCK` first so the synchronous transfer blocks until data / EOF.
+/// Mutter hands back **non-blocking** pipe fds for SelectionWrite, so a plain `write_all`
+/// fails with EAGAIN (os error 11) instead of waiting. Clear `O_NONBLOCK` first so the
+/// synchronous write blocks until the reader takes the bytes.
 fn set_blocking(fd: std::os::fd::RawFd) {
     unsafe {
         let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -358,15 +341,21 @@ fn set_blocking(fd: std::os::fd::RawFd) {
     }
 }
 
-/// Read a SelectionRead fd to EOF.
-fn read_all(fd: zbus::zvariant::OwnedFd) -> std::io::Result<Vec<u8>> {
-    use std::os::fd::AsRawFd;
-    let owned = std::os::fd::OwnedFd::from(fd);
-    set_blocking(owned.as_raw_fd());
-    let mut f = std::fs::File::from(owned);
+/// Read a SelectionRead fd to EOF, for at most 5 s. Mutter hands back a non-blocking pipe, so
+/// it is read as a tokio pipe; on the timeout the fd is dropped (closed), so a transfer that
+/// never ends (seen with a 5 MB image from `xclip`) cannot hold the read gate forever.
+async fn read_selection(fd: zbus::zvariant::OwnedFd) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut pipe = tokio::net::unix::pipe::Receiver::from_owned_fd(fd.into())?;
     let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
-    Ok(buf)
+    let read = pipe.read_to_end(&mut buf);
+    match tokio::time::timeout(std::time::Duration::from_secs(5), read).await {
+        Ok(r) => r.map(|_| buf),
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "timed out after 5s (source app not responding?)",
+        )),
+    }
 }
 
 /// Write all bytes to a SelectionWrite fd, then close it.
