@@ -212,3 +212,157 @@ pub(crate) fn destroy_snapshot_if_unreferenced(parent: &str, snapshot: &str) -> 
     run(&["destroy", snapshot])?;
     Ok(())
 }
+
+/// `zfs destroy` failed because a mount still holds the dataset (in any namespace).
+pub(crate) fn is_busy(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("dataset is busy")
+}
+
+/// `zfs destroy` failed because a fork clone still depends on one of the snapshots.
+pub(crate) fn has_dependents(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("dependent clones")
+}
+
+/// `zfs destroy` failed because the dataset is already gone.
+pub(crate) fn is_missing(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("does not exist")
+}
+
+/// One dataset directly under the homes parent, as the orphan sweep sees it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HomeDataset {
+    /// The clone id: the dataset name with the parent stripped.
+    pub id: String,
+    /// The `name@snap` it was cloned from, when it is a fork.
+    pub origin: Option<String>,
+    pub mountpoint: String,
+}
+
+/// One snapshot of a dataset directly under the homes parent.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HomeSnapshot {
+    /// Full `name@snap`.
+    pub name: String,
+    /// Whether any dataset was cloned from it.
+    pub has_clones: bool,
+}
+
+/// Every dataset directly under `parent` (`zfs list -d 1`). Read-only.
+pub(crate) fn list_homes(parent: &str) -> Result<Vec<HomeDataset>> {
+    let out = run(&[
+        "list",
+        "-H",
+        "-p",
+        "-d",
+        "1",
+        "-t",
+        "filesystem",
+        "-o",
+        "name,origin,mountpoint",
+        parent,
+    ])?;
+    Ok(parse_homes(parent, &out))
+}
+
+/// Every snapshot of every dataset directly under `parent`. Read-only.
+pub(crate) fn list_snapshots(parent: &str) -> Result<Vec<HomeSnapshot>> {
+    let out = run(&[
+        "list",
+        "-H",
+        "-p",
+        "-r",
+        "-d",
+        "2",
+        "-t",
+        "snapshot",
+        "-o",
+        "name,clones",
+        parent,
+    ])?;
+    Ok(parse_snapshots(parent, &out))
+}
+
+fn parse_homes(parent: &str, out: &str) -> Vec<HomeDataset> {
+    out.lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let name = f.next()?;
+            let origin = f.next()?;
+            let mountpoint = f.next()?.trim();
+            check_dataset(parent, name).ok()?;
+            Some(HomeDataset {
+                id: name.strip_prefix(&format!("{parent}/"))?.to_string(),
+                origin: (!origin.is_empty() && origin != "-").then(|| origin.to_string()),
+                mountpoint: mountpoint.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_snapshots(parent: &str, out: &str) -> Vec<HomeSnapshot> {
+    out.lines()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let name = f.next()?;
+            let clones = f.next().unwrap_or("").trim();
+            check_snapshot(parent, name).ok()?;
+            Some(HomeSnapshot {
+                name: name.to_string(),
+                has_clones: !clones.is_empty() && clones != "-",
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const P: &str = "rpool/rmng-homes-101";
+
+    #[test]
+    fn homes_listing_skips_the_parent_and_reads_origins() {
+        let out = "rpool/rmng-homes-101\t-\t/srv/rmng-homes-101\n\
+                   rpool/rmng-homes-101/a\t-\t/srv/rmng-homes/a\n\
+                   rpool/rmng-homes-101/b\trpool/rmng-homes-101/a@fork-b-1\t/srv/rmng-homes/b\n";
+        let got = parse_homes(P, out);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].id, "a");
+        assert_eq!(got[0].origin, None);
+        assert_eq!(got[1].id, "b");
+        assert_eq!(
+            got[1].origin.as_deref(),
+            Some("rpool/rmng-homes-101/a@fork-b-1")
+        );
+    }
+
+    #[test]
+    fn homes_listing_never_yields_a_dataset_outside_the_parent() {
+        let out = "rpool/data/subvol-204-disk-0\t-\t/x\n\
+                   rpool/rmng-homes-1010/a\t-\t/srv/rmng-homes/a\n\
+                   rpool/rmng-homes-101/a/deeper\t-\t/y\n";
+        assert!(parse_homes(P, out).is_empty());
+    }
+
+    #[test]
+    fn snapshot_listing_reads_clones() {
+        let out = "rpool/rmng-homes-101/a@fork-b-1\trpool/rmng-homes-101/b\n\
+                   rpool/rmng-homes-101/a@fork-c-2\t\n\
+                   rpool/rmng-homes-101/a@fork-d-3\t-\n";
+        let got = parse_snapshots(P, out);
+        assert_eq!(got.len(), 3);
+        assert!(got[0].has_clones);
+        assert!(!got[1].has_clones);
+        assert!(!got[2].has_clones);
+    }
+
+    #[test]
+    fn destroy_errors_are_classified() {
+        let busy = anyhow::anyhow!("zfs destroy -r x failed: cannot destroy 'x': dataset is busy");
+        let deps = anyhow::anyhow!(
+            "zfs destroy -r x failed: cannot destroy 'x@s': snapshot has dependent clones"
+        );
+        assert!(is_busy(&busy) && !has_dependents(&busy));
+        assert!(has_dependents(&deps) && !is_busy(&deps));
+    }
+}

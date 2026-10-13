@@ -138,6 +138,17 @@ marks one.
   snapshot when no other dataset references it (fork creates pair them 1:1, so this is
   exact in the common case; shared origins are kept) → `rmi` the base tag when no
   remaining clone references it.
+- Orphan sweep (`home_gc.rs`): the delete removes the row even when the dataset
+  cannot go yet — a fork parent deleted before its forks, or a home that another
+  mount namespace still holds busy. A sweep after every delete and once at boot (no
+  timer) destroys, leaf-first, every dataset under the homes parent that has no state
+  row, no container and no running operation, carries the pinned `/srv/rmng-homes/<id>`
+  mountpoint and has no fork clones left. So a fork parent
+  goes as soon as its last fork does. It also drops `fork-*` snapshots that nothing
+  was cloned from. On `dataset is busy` the destroy detaches the home's mount copies
+  in every other mount namespace with a raw `umount2(MNT_DETACH)` and retries. The
+  sweep does not run while `state.json` fails to parse. The homes parent must belong
+  to one server only.
 
 ### 3.5 Env and presets
 

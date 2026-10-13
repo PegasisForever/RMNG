@@ -75,6 +75,12 @@ impl StateStore {
         self.inner.read().unwrap().state.clone()
     }
 
+    /// True while the last disk read failed to parse. The in-memory fleet may then be
+    /// empty or stale, so nothing may act on what is MISSING from it (the orphan sweep).
+    pub fn is_degraded(&self) -> bool {
+        self.inner.read().unwrap().degraded
+    }
+
     /// Cheap read of just the selected clone id (hot path: media frame routing).
     pub fn selected(&self) -> Option<String> {
         self.inner.read().unwrap().state.selected.clone()

@@ -271,8 +271,20 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
         Some(v) => v,
         None => {
             tokio::join!(
-                bind_side::<crate::pool::ClaudePool>(&app, &op, &id, plan.group.clone(), &plan.claude),
-                bind_side::<crate::pool::CodexPool>(&app, &op, &id, plan.group.clone(), &plan.codex)
+                bind_side::<crate::pool::ClaudePool>(
+                    &app,
+                    &op,
+                    &id,
+                    plan.group.clone(),
+                    &plan.claude
+                ),
+                bind_side::<crate::pool::CodexPool>(
+                    &app,
+                    &op,
+                    &id,
+                    plan.group.clone(),
+                    &plan.codex
+                )
             )
         }
     };
@@ -641,6 +653,11 @@ async fn run_delete(app: App, op: OpHandle, host_id: String) -> anyhow::Result<F
             // Anything the operator queued for a clone that no longer exists can never be
             // delivered.
             crate::chat::delete_schedules(&dd, &host_id);
+            // The row is gone now, so a fork parent kept only for this clone is an orphan
+            // the sweep can destroy, and so is this clone's own dataset if it stayed busy.
+            if managed {
+                crate::home_gc::kick(&app);
+            }
         }))
 }
 

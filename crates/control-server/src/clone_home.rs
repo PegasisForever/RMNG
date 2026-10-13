@@ -208,8 +208,22 @@ impl CloneHome {
     }
 
     /// `zfs destroy [-r]` the dataset and drop its mountpoint directory.
+    ///
+    /// On `dataset is busy`, detach the copies of this home's mounts that other mount
+    /// namespaces still hold (see [`crate::mountns`]) and try again. Blocking: a retry
+    /// waits a second, so async callers run it under `spawn_blocking`.
     pub(crate) fn destroy(&self, recursive: bool) -> Result<()> {
-        crate::zfs::destroy(&self.parent, &self.id, recursive)
+        let mut result = crate::zfs::destroy(&self.parent, &self.id, recursive);
+        for _ in 0..3 {
+            match &result {
+                Err(e) if crate::zfs::is_busy(e) => {}
+                _ => break,
+            }
+            crate::mountns::detach_foreign_copies(&self.dataset(), &self.dataset_dir());
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            result = crate::zfs::destroy(&self.parent, &self.id, recursive);
+        }
+        result
     }
 }
 

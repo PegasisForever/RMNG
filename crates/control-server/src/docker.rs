@@ -24,7 +24,7 @@
 //! - Stale same-named containers 409 on create — callers get the daemon message
 //!   verbatim (gotcha #7).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -1445,6 +1445,24 @@ impl DockerCtl {
                     Some(bollard::models::ContainerSummaryStateEnum::RUNNING)
                 ),
             })
+            .collect())
+    }
+
+    /// The name of every container on the daemon, managed or not, running or not. The
+    /// orphan home sweep keeps any dataset whose id still names a container.
+    pub async fn container_names(&self) -> Result<HashSet<String>> {
+        let opts = bollard::query_parameters::ListContainersOptionsBuilder::new()
+            .all(true)
+            .build();
+        let list = self
+            .daemon()?
+            .list_containers(Some(opts))
+            .await
+            .context("listing containers")?;
+        Ok(list
+            .into_iter()
+            .flat_map(|c| c.names.unwrap_or_default())
+            .map(|n| n.trim_start_matches('/').to_string())
             .collect())
     }
 

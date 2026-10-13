@@ -23,12 +23,14 @@ mod derived;
 mod docker;
 mod files;
 mod forward;
+mod home_gc;
 mod home_overlay;
 mod homes;
 mod jobs;
 mod ledger;
 mod mediaplane;
 mod monitor;
+mod mountns;
 mod naming;
 mod oauth;
 mod operation;
@@ -253,7 +255,11 @@ async fn main() -> Result<()> {
                     home_overlay::remount_all(app.clone()).await;
                     // 2. The fleet: every managed, non-archived clone.
                     jobs::boot_start_fleet(&app).await;
-                    // 3. Only now: the daemon no longer revives a crashed clone, so we do.
+                    // 3. Home datasets no clone owns: fork parents deleted before their
+                    //    forks, homes a busy mount kept, leftovers of older builds. After
+                    //    this, only a delete makes an orphan, and the delete sweeps it.
+                    home_gc::boot(&app).await;
+                    // 4. Only now: the daemon no longer revives a crashed clone, so we do.
                     jobs::crash_recovery(app).await;
                 }
             });

@@ -494,7 +494,8 @@ fn mount_overlay(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> Resu
 fn unmount_merged(merged: &Path) {
     match nix::mount::umount2(merged, nix::mount::MntFlags::MNT_DETACH) {
         Ok(()) => {}
-        Err(nix::errno::Errno::EINVAL) => {} // not mounted
+        // Not mounted, or no mountpoint at all (an orphan home that never had an overlay).
+        Err(nix::errno::Errno::EINVAL | nix::errno::Errno::ENOENT) => {}
         Err(e) => tracing::warn!(target: "overlay", "unmounting {}: {e}", merged.display()),
     }
 }

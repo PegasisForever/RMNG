@@ -639,8 +639,8 @@ pub(crate) fn delete_pct(step: &str) -> Option<f64> {
 /// volume is logged, not fatal (the container removal is what matters). `host_id` is both
 /// the container name to stop/remove and the volume-name stem (`rmng-dind-<host_id>`).
 ///
-/// Gen-2 tail: destroy the home dataset (kept, with a warning, when fork clones still
-/// reference it), destroy the origin snapshot it was cloned from when nothing references
+/// Gen-2 tail: destroy the home dataset (kept when fork clones still reference it, or
+/// when it stays busy; [`crate::home_gc`] destroys it later), destroy the origin snapshot it was cloned from when nothing references
 /// it anymore, and remove the base image tag when no remaining clone row references it.
 pub async fn delete_clone(
     app: &App,
@@ -684,7 +684,15 @@ pub async fn delete_clone(
         on_progress("remove", "destroying the home dataset");
         // Read the origin BEFORE the destroy: afterwards there is nothing left to ask.
         let origin = home.origin();
-        match home.destroy(false) {
+        // `-r` takes any leftover snapshots with it and still refuses while a fork clone
+        // depends on one. Blocking: a busy dataset is retried after a detach.
+        let destroyed = {
+            let home = CloneHome::of(app, host_id);
+            tokio::task::spawn_blocking(move || home.destroy(true))
+                .await
+                .unwrap_or_else(|e| Err(anyhow::anyhow!("destroy task: {e}")))
+        };
+        match destroyed {
             Ok(()) => {
                 if let Some(snap) = origin {
                     if let Err(e) = home.drop_snapshot(&snap) {
@@ -694,9 +702,13 @@ pub async fn delete_clone(
                     }
                 }
             }
+            // Not leaked: the row goes, and the orphan sweep (`home_gc`) destroys this
+            // dataset once its last fork is deleted.
+            Err(e) if crate::zfs::has_dependents(&e) => tracing::info!(
+                "delete {host_id}: keeping home dataset until its fork clones are deleted"
+            ),
             Err(e) => tracing::warn!(
-                "delete {host_id}: keeping home dataset ({e}); fork clones may still \
-                 reference it (non-fatal)"
+                "delete {host_id}: keeping home dataset ({e:#}); the orphan sweep retries it"
             ),
         }
         if let Some(tag) = row.base_tag {
@@ -817,18 +829,15 @@ pub async fn clone_container_gen2_from_tag(
     // The daemon network and the home dataset do not touch each other: one wait
     // instead of two. Either error fails the op exactly as before (network first,
     // matching the old serial order).
-    let (net, created_dataset) = tokio::join!(
-        docker.ensure_network(),
-        async {
-            Ok::<bool, anyhow::Error>(match home {
-                HomeSource::Create => {
-                    clone_home.create_dataset()?;
-                    true
-                }
-                HomeSource::Reuse => false,
-            })
-        }
-    );
+    let (net, created_dataset) = tokio::join!(docker.ensure_network(), async {
+        Ok::<bool, anyhow::Error>(match home {
+            HomeSource::Create => {
+                clone_home.create_dataset()?;
+                true
+            }
+            HomeSource::Reuse => false,
+        })
+    });
     net?;
     let created_dataset = created_dataset?;
 
