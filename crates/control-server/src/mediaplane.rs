@@ -1480,7 +1480,9 @@ pub(crate) fn join_viewer(
         &plane.viewers,
         selected,
         plane.chroma,
-        None,
+        // A browser window primes only its own monitor, so it does not re-key the others'
+        // windows; a port-1 viewer (`None`) shows every monitor.
+        monitor,
     );
     // If the selected clone is headless, activate its tmux view and prime this
     // viewer with the current session list.

@@ -3,6 +3,7 @@
 //
 // The worker imports this file, so it uses relative imports only: Vite builds the worker
 // without the app's path aliases.
+import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
 
 export const VIDEO_HEADER_LEN = 18;
@@ -46,12 +47,11 @@ export function codecFromAnnexB(au: Uint8Array): string | null {
   return null;
 }
 
-/** Page → worker, once: the canvas to draw on and the socket to read. */
-export interface WorkerInit {
-  canvas: OffscreenCanvas;
-  url: string;
-  monitor: number;
-}
+/** Page → worker: first the canvas to draw on and the socket to read (`init`, once), then a
+ *  message to send on the socket (`send`; dropped while the socket is closed). */
+export type WorkerIn =
+  | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number }
+  | { type: "send"; msg: FromBrowser };
 
 export interface ViewerStats {
   /** Frames drawn in the last second. */

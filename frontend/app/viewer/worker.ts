@@ -14,7 +14,7 @@ import type { ToBrowser } from "../lib/wire/ToBrowser";
 import {
   VIDEO_HEADER_LEN,
   type ViewerStats,
-  type WorkerInit,
+  type WorkerIn,
   type WorkerOut,
   codecFromAnnexB,
   parseVideoHeader,
@@ -25,8 +25,10 @@ const post = (m: WorkerOut) => scope.postMessage(m);
 
 /** Wait this long after the socket closes before connecting again. */
 const RECONNECT_MS = 1000;
-/** After this many decoder errors in a row, ask Chrome for its software decoder. */
+/** After this many decoder errors, each within ERROR_WINDOW_MS of the one before, use Chrome's
+ *  software decoder for the rest of the page's life. */
 const SOFTWARE_AFTER_ERRORS = 3;
+const ERROR_WINDOW_MS = 5000;
 /** More chunks than this waiting in the decoder: drop until the next keyframe to catch up. */
 const DECODE_BACKLOG_MAX = 8;
 
@@ -40,9 +42,12 @@ let decoder: VideoDecoder | null = null;
 let codec = "";
 /** Drop frames until a keyframe: at start, after a reconnect and after a decoder error. */
 let waitKey = true;
-/** Decoder errors since the last decoded frame. */
+/** Decoder errors in the current run (errors less than ERROR_WINDOW_MS apart). */
 let errors = 0;
-let decoderKind: ViewerStats["decoder"] = "default";
+let lastErrorAt = -Infinity;
+/** Set once the errors reach SOFTWARE_AFTER_ERRORS; never cleared. A decoder that decodes one
+ *  keyframe and then fails again would otherwise never get here. */
+let software = false;
 
 // Stats for the current second.
 let frames = 0;
@@ -72,14 +77,17 @@ function resetDecoder() {
 }
 
 function onDecoderError(e: DOMException) {
+  const now = performance.now();
+  if (now - lastErrorAt > ERROR_WINDOW_MS) errors = 0;
+  lastErrorAt = now;
   errors++;
+  if (errors >= SOFTWARE_AFTER_ERRORS) software = true;
   console.warn(`decoder error ${errors}:`, e);
   resetDecoder();
   requestKeyframe();
 }
 
 function configure(c: string) {
-  const software = errors >= SOFTWARE_AFTER_ERRORS;
   const config: VideoDecoderConfig = {
     codec: c,
     optimizeForLatency: true,
@@ -91,7 +99,6 @@ function configure(c: string) {
   };
   decoder!.configure(config);
   codec = c;
-  decoderKind = software ? "software" : "default";
 }
 
 function onVideo(buf: ArrayBuffer) {
@@ -108,8 +115,11 @@ function onVideo(buf: ArrayBuffer) {
     if (c && c !== codec) configure(c);
   }
   if (!codec) return; // a keyframe without an SPS before any with one: wait for the next
-  if (decoder!.decodeQueueSize > DECODE_BACKLOG_MAX) {
+  // Never drop the keyframe itself: it is the frame that ends the wait. Ask for one, or a
+  // still screen would stay stale until the encoder's next periodic keyframe.
+  if (!h.key && decoder!.decodeQueueSize > DECODE_BACKLOG_MAX) {
     waitKey = true;
+    requestKeyframe();
     return;
   }
   waitKey = false;
@@ -133,14 +143,13 @@ function onFrame(frame: VideoFrame) {
   ctx.drawImage(frame, 0, 0);
   frame.close();
   frames++;
-  errors = 0;
 }
 
 function connect() {
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
-    // No keyframe request: joining primes every monitor with a fresh keyframe.
+    // No keyframe request: joining primes this monitor with a fresh keyframe.
     post({ type: "connected", connected: true });
     waitKey = true;
   };
@@ -168,7 +177,7 @@ function reportStats() {
       fps: frames,
       decodeMs: frames ? decodeSum / frames : 0,
       delayMs: delayCount ? delaySum / delayCount - floor : 0,
-      decoder: decoderKind,
+      decoder: software ? "software" : "default",
     },
   });
   frames = 0;
@@ -178,9 +187,14 @@ function reportStats() {
   delayMin = Infinity;
 }
 
-scope.onmessage = (e: MessageEvent<WorkerInit>) => {
-  ({ url, monitor } = e.data);
-  ctx = e.data.canvas.getContext("2d")!;
+scope.onmessage = (e: MessageEvent<WorkerIn>) => {
+  const m = e.data;
+  if (m.type === "send") {
+    send(m.msg);
+    return;
+  }
+  ({ url, monitor } = m);
+  ctx = m.canvas.getContext("2d")!;
   resetDecoder();
   connect();
   setInterval(reportStats, 1000);
