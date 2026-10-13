@@ -7,8 +7,10 @@ import { type DragEvent, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
+import type { ViewMonitor } from "~/lib/wire/ViewMonitor";
 import { attachClipboard } from "~/viewer/clipboard";
-import { type Input, attachInput, toggleFullscreen } from "~/viewer/input";
+import { type Input, attachInput, requestFullscreen, toggleFullscreen } from "~/viewer/input";
+import { matchScreens, openViewerWindows, screens } from "~/viewer/open";
 import {
   type ViewerStats,
   type WorkerIn,
@@ -39,9 +41,15 @@ function uploadFile(file: File, onProgress: (fraction: number) => void): Promise
 export default function Viewer() {
   const [params] = useSearchParams();
   const monitor = Number(params.get("monitor") ?? 0);
+  /** Opened by `openViewerWindows` on a screen of its own: go fullscreen there. */
+  const placed = params.get("fullscreen") === "1";
   const box = useRef<HTMLDivElement>(null);
   const overlay = useRef<HTMLImageElement>(null);
   const input = useRef<Input | null>(null);
+  /** The screen this window's monitor goes on (Window Management API), once looked up. */
+  const screen = useRef<object | undefined>(undefined);
+  /** The view spec's monitors; null until the first view spec. */
+  const [layout, setLayout] = useState<ViewMonitor[] | null>(null);
   // Null until the effect has looked: the page has no `window` while it is built.
   const [secure, setSecure] = useState<boolean | null>(null);
   const [connected, setConnected] = useState(false);
@@ -65,7 +73,7 @@ export default function Viewer() {
     // A fresh canvas per run: a canvas can hand its drawing to a worker only once. The
     // placeholder stays in the page and takes the input.
     const canvas = document.createElement("canvas");
-    canvas.className = "h-full w-full object-contain";
+    canvas.className = "block h-full w-full";
     box.current.append(canvas);
     const offscreen = canvas.transferControlToOffscreen();
     const worker = new Worker(new URL("../viewer/worker.ts", import.meta.url), {
@@ -86,17 +94,17 @@ export default function Viewer() {
       send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
       onLockChange: setLocked,
       onGesture: () => clip.onGesture(),
+      onResize: (width, height) => post({ type: "resize", width, height }),
     });
     input.current = inp;
 
     // Every server message other than video arrives here. Later rounds act on the rest.
     const onServerMessage = (msg: ToBrowser) => {
       switch (msg.t) {
-        case "view_spec": {
-          const m = msg.monitors.find((v) => v.id === monitor);
-          if (m) inp.setMonitorSize(m.width, m.height);
+        case "view_spec":
+          inp.setLayout(msg.monitors);
+          setLayout(msg.monitors);
           break;
-        }
         case "cursor":
           inp.onCursor(msg);
           break;
@@ -136,6 +144,21 @@ export default function Viewer() {
       canvas.remove();
     };
   }, [secure, monitor]);
+
+  // A placed window looks up its screen and asks for fullscreen. Chrome allows that without a
+  // click only for sites in its AutomaticFullscreenAllowedForUrls policy, and then only on the
+  // screen the window is on (where `openViewerWindows` put it). Otherwise the toolbar's
+  // Fullscreen button does it with one click, on the window's own screen.
+  const hasLayout = layout !== null;
+  useEffect(() => {
+    if (!placed || !hasLayout) return;
+    void screens().then((all) => {
+      screen.current = matchScreens(layout ?? [], all ?? []).get(monitor);
+      if (screen.current && !document.fullscreenElement) requestFullscreen().catch(() => {});
+    });
+    // Once per window, on the first view spec.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [placed, hasLayout, monitor]);
 
   if (secure === false) {
     return (
@@ -198,7 +221,13 @@ export default function Viewer() {
         hidden
         className="pointer-events-none fixed left-0 top-0 max-w-none"
       />
-      {!connected ? (
+      {layout && !layout.some((m) => m.id === monitor) ? (
+        <p className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-slate-400">
+          {layout.length
+            ? `Monitor ${monitor} is not in the current layout. Close this window.`
+            : "No clone is selected."}
+        </p>
+      ) : !connected ? (
         <p className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-slate-400">
           Connecting…
         </p>
@@ -227,7 +256,11 @@ decoder ${stats.decoder}`}
           fullscreen ? "opacity-0" : "opacity-40"
         }`}
       >
-        {tool(fullscreen ? "Exit fullscreen" : "Fullscreen", fullscreen, toggleFullscreen)}
+        {tool(fullscreen ? "Exit fullscreen" : "Fullscreen", fullscreen, () =>
+          toggleFullscreen(screen.current),
+        )}
+        {/* Opens the windows of monitors that have none, e.g. after the layout grew. */}
+        {tool("Windows", false, () => void openViewerWindows(layout ?? undefined))}
         {tool("Lock pointer", locked, () => input.current?.toggleLock())}
         {tool("Stats", showStats, () => setShowStats((s) => !s))}
       </div>

@@ -10,6 +10,7 @@
 import type { CursorMeta } from "../lib/wire/CursorMeta";
 import type { CursorShape } from "../lib/wire/CursorShape";
 import type { InputMsg } from "../lib/wire/InputMsg";
+import type { ViewMonitor } from "../lib/wire/ViewMonitor";
 import { CODE_TO_EVDEV } from "./keycodes";
 
 /** Engage the automatic pointer lock after the remote cursor stays hidden this long. */
@@ -31,28 +32,58 @@ const BUTTONS = [0x110, 0x112, 0x111, 0x113, 0x114];
 const AXIS_FINISH = 1;
 const AXIS_SOURCE_FINGER = 4;
 
-/** Where a monitor of `monW`×`monH` is drawn in a box of `boxW`×`boxH` (`object-contain`):
- *  CSS pixels per monitor pixel, and the offset of the picture in the box. */
+/** Where a monitor of `monW`×`monH` is drawn in a box of `boxW`×`boxH` (scale to fit): box
+ *  pixels per monitor pixel, and the offset of the picture in the box, in whole box pixels so
+ *  that at scale 1 each monitor pixel lands on one box pixel. The worker draws with it in
+ *  device pixels, and input maps back through it, so the two always agree. */
 export function letterbox(boxW: number, boxH: number, monW: number, monH: number) {
   const scale = Math.min(boxW / monW, boxH / monH);
-  return { scale, offX: (boxW - monW * scale) / 2, offY: (boxH - monH * scale) / 2 };
+  return {
+    scale,
+    offX: Math.round((boxW - monW * scale) / 2),
+    offY: Math.round((boxH - monH * scale) / 2),
+  };
 }
 
-/** A page point (CSS pixels, e.g. `clientX`) → monitor pixels, clamped to the monitor. Device
- *  pixel ratio does not enter: the rect and the event are both in CSS pixels. */
+/** A page point (CSS pixels, e.g. `clientX`) → monitor pixels, not clamped. The canvas covers
+ *  `rect` (CSS pixels) and holds `box` device pixels, in which the worker draws the monitor
+ *  through `letterbox`. */
 export function toMonitor(
   px: number,
   py: number,
   rect: { left: number; top: number; width: number; height: number },
+  box: { w: number; h: number },
   monW: number,
   monH: number,
 ) {
-  const { scale, offX, offY } = letterbox(rect.width, rect.height, monW, monH);
-  const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), max);
+  const { scale, offX, offY } = letterbox(box.w, box.h, monW, monH);
   return {
-    x: clamp((px - rect.left - offX) / scale, monW),
-    y: clamp((py - rect.top - offY) / scale, monH),
+    x: (((px - rect.left) * box.w) / rect.width - offX) / scale,
+    y: (((py - rect.top) * box.h) / rect.height - offY) / scale,
   };
+}
+
+/** A drag at unclamped `origin`-monitor coords → the monitor it is over and the coords there
+ *  (`viewer-core/src/drag_route.rs`). The point is lifted into desktop coords through the
+ *  layout; dead space (a gap, or outside the desktop) pins it to the origin's edge. Null when
+ *  the origin is not in the layout. */
+export function routeDrag(
+  layout: ViewMonitor[],
+  origin: number,
+  mx: number,
+  my: number,
+): { id: number; x: number; y: number } | null {
+  const o = layout.find((m) => m.id === origin);
+  if (!o) return null;
+  const ux = o.x + mx;
+  const uy = o.y + my;
+  for (const m of layout) {
+    if (ux >= m.x && ux < m.x + m.width && uy >= m.y && uy < m.y + m.height) {
+      return { id: m.id, x: ux - m.x, y: uy - m.y };
+    }
+  }
+  const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), Math.max(max - 1, 0));
+  return { id: origin, x: clamp(mx, o.width), y: clamp(my, o.height) };
 }
 
 /** The cursor sprite as straight RGBA. The daemon sends SPA cursor bytes, which are BGRA
@@ -148,9 +179,19 @@ export function wheelMessages(
   return out;
 }
 
-export function toggleFullscreen() {
+/** Fullscreen on or off. `screen` (a `ScreenDetailed` from the Window Management API) puts the
+ *  window on that screen; without it Chrome uses the screen the window is on. */
+export function toggleFullscreen(screen?: object) {
   if (document.fullscreenElement) void document.exitFullscreen();
-  else void document.documentElement.requestFullscreen();
+  else void requestFullscreen(screen);
+}
+
+/** Chrome treats a request that names a screen as a move to another screen, which always needs
+ *  a click, even for a site its AutomaticFullscreenAllowedForUrls policy lists. So the screen
+ *  is named only when there is one. */
+export function requestFullscreen(screen?: object) {
+  const el = document.documentElement;
+  return screen ? el.requestFullscreen({ screen } as FullscreenOptions) : el.requestFullscreen();
 }
 
 /** Chrome's Keyboard Lock API; not in TypeScript's DOM types. */
@@ -168,11 +209,14 @@ export interface InputOptions {
   /** A key press or click: the user activation Chrome wants for some calls (a clipboard
    *  write it refused before). */
   onGesture(): void;
+  /** The canvas's size in device pixels changed: the worker draws at this size. */
+  onResize(width: number, height: number): void;
 }
 
 export interface Input {
-  /** The monitor's size from the view spec; no pointer moves are sent until it is known. */
-  setMonitorSize(width: number, height: number): void;
+  /** The monitors of the view spec. No pointer moves are sent while this window's monitor is
+   *  not among them. */
+  setLayout(monitors: ViewMonitor[]): void;
   onCursor(c: CursorMeta): void;
   setConnected(connected: boolean): void;
   /** The toolbar button: the same as Ctrl+Alt+G. */
@@ -183,7 +227,11 @@ export interface Input {
 export function attachInput(o: InputOptions): Input {
   const { canvas, overlay, monitor, send } = o;
   const isMac = /Mac/.test(navigator.platform);
+  let layout: ViewMonitor[] = [];
+  /** This window's monitor in the layout. */
   let size: { w: number; h: number } | null = null;
+  /** The canvas in device pixels. */
+  let box: { w: number; h: number } | null = null;
   let connected = false;
   const keys = new Set<number>();
   const buttons = new Set<number>();
@@ -248,12 +296,15 @@ export function attachInput(o: InputOptions): Input {
    *  large for Chrome or an agent just moved it, the overlay. */
   function drawCursor(t: number) {
     const rect = canvas.getBoundingClientRect();
-    if (!size || !shape || hidden) {
+    if (!size || !box || !shape || hidden) {
       canvas.style.cursor = hidden ? "none" : "";
       overlay.hidden = true;
       return;
     }
-    const { scale, offX, offY } = letterbox(rect.width, rect.height, size.w, size.h);
+    // The letterbox in device pixels, turned into CSS pixels.
+    const lb = letterbox(box.w, box.h, size.w, size.h);
+    const k = rect.width / box.w;
+    const [scale, offX, offY] = [lb.scale * k, lb.offX * k, lb.offY * k];
     const dpr = devicePixelRatio;
     const key = `${scale}/${dpr}`;
     if (built?.key !== key) built = buildCursor(shape, scale, dpr, key);
@@ -336,10 +387,21 @@ export function attachInput(o: InputOptions): Input {
       }
       return;
     }
-    if (!size) return;
-    const p = toMonitor(e.clientX, e.clientY, canvas.getBoundingClientRect(), size.w, size.h);
-    send({ kind: "pointer_move", monitor_id: monitor, x: p.x, y: p.y });
+    if (!size || !box) return;
+    const p = toMonitor(e.clientX, e.clientY, canvas.getBoundingClientRect(), box, size.w, size.h);
+    if (buttons.size) {
+      // A drag: the pointer capture keeps the moves coming here past the window's edge, so a
+      // drag that leaves the window goes on in the neighbouring monitor.
+      const r = routeDrag(layout, monitor, p.x, p.y);
+      if (r) send({ kind: "pointer_move", monitor_id: r.id, x: r.x, y: r.y });
+      return;
+    }
+    const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), max);
+    send({ kind: "pointer_move", monitor_id: monitor, x: clamp(p.x, size.w), y: clamp(p.y, size.h) });
   }
+
+  // Moves past the window's edge during a drag keep coming to this window.
+  const onPointerDown = (e: PointerEvent) => canvas.setPointerCapture(e.pointerId);
 
   // Buttons use mouse events: a pointer event reports a second button pressed during a first
   // one as a move, not as a press.
@@ -414,11 +476,21 @@ export function attachInput(o: InputOptions): Input {
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("pointerlockchange", onLockChange);
   document.addEventListener("fullscreenchange", onFullscreen);
+  canvas.addEventListener("pointerdown", onPointerDown);
   const timer = setInterval(tick, 50);
+  const resize = new ResizeObserver(([entry]) => {
+    const d = entry.devicePixelContentBoxSize[0];
+    box = { w: d.inlineSize, h: d.blockSize };
+    built = null;
+    o.onResize(box.w, box.h);
+  });
+  resize.observe(canvas, { box: "device-pixel-content-box" });
 
   return {
-    setMonitorSize(w, h) {
-      size = { w, h };
+    setLayout(monitors) {
+      layout = monitors;
+      const m = monitors.find((v) => v.id === monitor);
+      size = m ? { w: m.width, h: m.height } : null;
     },
     onCursor(c) {
       if (c.monitor_id !== monitor) return;
@@ -450,6 +522,8 @@ export function attachInput(o: InputOptions): Input {
     toggleLock,
     detach() {
       clearInterval(timer);
+      resize.disconnect();
+      canvas.removeEventListener("pointerdown", onPointerDown);
       clearTimeout(scrollEnd);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);

@@ -33,6 +33,7 @@ use crate::clone_home::CloneHome;
 use crate::mediaplane::{
     self, Queued, T_CLIPBOARD, T_CURSOR, T_MODE, T_TERM_DATA, T_VIDEO, T_VIEWSPEC,
 };
+use crate::shared::CLONE_UID;
 
 /// A send that makes no progress for this long closes the socket (the browser stopped reading).
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -83,14 +84,24 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
 
         let id = mediaplane::join_viewer(&app, &plane, tx, Some(monitor));
         tracing::info!("browser viewer {id} connected (monitor {monitor})");
+        // Every store change wakes the reader, so a clone switch releases what this socket
+        // holds in the old clone at once, not at its next message.
+        let (_, mut changes) = app.store.subscribe();
         let mut held = Held::default();
+        let mut deadline = tokio::time::Instant::now() + READ_TIMEOUT;
         loop {
             let next = rt.block_on(async {
                 tokio::select! {
-                    m = tokio::time::timeout(READ_TIMEOUT, stream.next()) => m.ok().flatten(),
-                    _ = &mut gone_rx => None,
+                    m = tokio::time::timeout_at(deadline, stream.next()) => Some(m.ok().flatten()),
+                    _ = &mut gone_rx => Some(None),
+                    _ = changes.recv() => None,
                 }
             });
+            let Some(next) = next else {
+                held.follow(&app, app.store.selected());
+                continue;
+            };
+            deadline = tokio::time::Instant::now() + READ_TIMEOUT;
             let msg = match next {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<FromBrowser>(&text) {
                     Ok(msg) => msg,
@@ -106,39 +117,41 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => continue,
             };
-            held.track(&msg);
+            if let FromBrowser::Input(input) = &msg {
+                held.follow(&app, app.store.selected());
+                held.track(input);
+            }
             mediaplane::handle_viewer_msg(&app, &plane, id, msg);
         }
         // A window that closes with a key down (Ctrl+W: Chrome sends Ctrl's press, then
         // closes) never sends the release, so send it here.
-        for msg in held.releases() {
-            mediaplane::handle_viewer_msg(&app, &plane, id, msg);
-        }
+        held.follow(&app, None);
         mediaplane::leave_viewer(&app, &plane, id);
         tracing::info!("browser viewer {id} left");
         // Dropping `stream` here and `sink` in the writer closes the socket.
     });
 }
 
-/// The keys and buttons this socket holds down in the clone, so they can be released when it
-/// ends.
+/// The keys and buttons this socket holds down in the clone that got them, so they can be
+/// released in that clone when the selection moves to another one or the socket ends.
 #[derive(Default)]
 struct Held {
+    clone: Option<String>,
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
 }
 
 impl Held {
-    fn track(&mut self, msg: &FromBrowser) {
+    fn track(&mut self, msg: &InputMsg) {
         match msg {
-            FromBrowser::Input(InputMsg::KeyCode { keycode, pressed }) => {
+            InputMsg::KeyCode { keycode, pressed } => {
                 if *pressed {
                     self.keys.insert(*keycode);
                 } else {
                     self.keys.remove(keycode);
                 }
             }
-            FromBrowser::Input(InputMsg::Button { button, pressed }) => {
+            InputMsg::Button { button, pressed } => {
                 if *pressed {
                     self.buttons.insert(*button);
                 } else {
@@ -149,16 +162,35 @@ impl Held {
         }
     }
 
-    fn releases(self) -> impl Iterator<Item = FromBrowser> {
-        let keys = self.keys.into_iter().map(|keycode| InputMsg::KeyCode {
-            keycode,
-            pressed: false,
-        });
-        let buttons = self.buttons.into_iter().map(|button| InputMsg::Button {
-            button,
-            pressed: false,
-        });
-        keys.chain(buttons).map(FromBrowser::Input)
+    /// Input now goes to `selected`: if that is another clone, release everything held in
+    /// the old one first.
+    fn follow(&mut self, app: &App, selected: Option<String>) {
+        if self.clone == selected {
+            return;
+        }
+        if let Some(old) = std::mem::replace(&mut self.clone, selected) {
+            for msg in self.releases() {
+                let _ = app.media.send_input(&old, msg);
+            }
+        }
+    }
+
+    /// Release messages for everything held; afterwards nothing is held.
+    fn releases(&mut self) -> Vec<InputMsg> {
+        let keys = std::mem::take(&mut self.keys)
+            .into_iter()
+            .map(|keycode| InputMsg::KeyCode {
+                keycode,
+                pressed: false,
+            });
+        let buttons =
+            std::mem::take(&mut self.buttons)
+                .into_iter()
+                .map(|button| InputMsg::Button {
+                    button,
+                    pressed: false,
+                });
+        keys.chain(buttons).collect()
     }
 }
 
@@ -246,9 +278,6 @@ pub(crate) async fn upload(
     Ok(Json(serde_json::json!({ "name": used })))
 }
 
-/// The clone user (`rmng`), who owns everything in a clone's home.
-const CLONE_UID: u32 = 1000;
-
 /// `name`, or the first of `stem (1).ext`, `stem (2).ext`… that does not exist.
 fn free_name(name: &str, exists: impl Fn(&str) -> bool) -> String {
     if !exists(name) {
@@ -273,8 +302,8 @@ mod tests {
     #[test]
     fn held_input_is_released() {
         let mut held = Held::default();
-        let key = |keycode, pressed| FromBrowser::Input(InputMsg::KeyCode { keycode, pressed });
-        let button = |button, pressed| FromBrowser::Input(InputMsg::Button { button, pressed });
+        let key = |keycode, pressed| InputMsg::KeyCode { keycode, pressed };
+        let button = |button, pressed| InputMsg::Button { button, pressed };
         for m in [
             key(29, true),
             key(30, true),
@@ -285,10 +314,8 @@ mod tests {
         ] {
             held.track(&m);
         }
-        assert_eq!(
-            held.releases().collect::<Vec<_>>(),
-            vec![key(29, false), button(0x110, false)]
-        );
+        assert_eq!(held.releases(), vec![key(29, false), button(0x110, false)]);
+        assert!(held.releases().is_empty());
     }
 
     #[test]

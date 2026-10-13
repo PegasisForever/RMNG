@@ -11,6 +11,7 @@
 // Relative imports only: Vite builds the worker without the app's path aliases.
 import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
+import { letterbox } from "./input";
 import {
   KIND_VIDEO,
   VIDEO_HEADER_LEN,
@@ -37,6 +38,8 @@ let url = "";
 let monitor = 0;
 let ctx: OffscreenCanvasRenderingContext2D;
 let ws: WebSocket | null = null;
+/** The last frame drawn, kept to draw again when the canvas changes size. */
+let last: VideoFrame | null = null;
 
 let decoder: VideoDecoder | null = null;
 /** The codec the decoder is configured for; "" until a keyframe with an SPS arrives. */
@@ -136,14 +139,24 @@ function onFrame(frame: VideoFrame) {
     decodeSum += performance.now() - start;
     decodeStart.delete(frame.timestamp);
   }
-  const canvas = ctx.canvas;
-  if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-    canvas.width = frame.displayWidth;
-    canvas.height = frame.displayHeight;
+  // A new monitor size leaves parts of the old picture in the bars.
+  if (last?.displayWidth !== frame.displayWidth || last.displayHeight !== frame.displayHeight) {
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   }
-  ctx.drawImage(frame, 0, 0);
-  frame.close();
+  last?.close();
+  last = frame;
+  draw();
   frames++;
+}
+
+/** Draw the last frame scaled to fit, at the canvas's device pixels: when the canvas has the
+ *  monitor's size, each monitor pixel is one screen pixel. */
+function draw() {
+  if (!last) return;
+  const w = last.displayWidth;
+  const h = last.displayHeight;
+  const { scale, offX, offY } = letterbox(ctx.canvas.width, ctx.canvas.height, w, h);
+  ctx.drawImage(last, offX, offY, w * scale, h * scale);
 }
 
 function connect() {
@@ -198,6 +211,13 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   }
   if (m.type === "binary") {
     if (ws?.readyState === WebSocket.OPEN) ws.send(m.buf);
+    return;
+  }
+  if (m.type === "resize") {
+    // Setting the size clears the canvas.
+    ctx.canvas.width = m.width;
+    ctx.canvas.height = m.height;
+    draw();
     return;
   }
   ({ url, monitor } = m);

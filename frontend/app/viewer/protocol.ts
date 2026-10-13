@@ -87,11 +87,13 @@ export function codecFromAnnexB(au: Uint8Array): string | null {
 
 /** Page → worker: first the canvas to draw on and the socket to read (`init`, once), then a
  *  message to send on the socket (`send`, or `binary` for a transferred binary message such as
- *  `encodeClipboardData`; both dropped while the socket is closed). */
+ *  `encodeClipboardData`; both dropped while the socket is closed), or the canvas's new size
+ *  in device pixels (`resize`). */
 export type WorkerIn =
   | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number }
   | { type: "send"; msg: FromBrowser }
-  | { type: "binary"; buf: ArrayBuffer };
+  | { type: "binary"; buf: ArrayBuffer }
+  | { type: "resize"; width: number; height: number };
 
 export interface ViewerStats {
   /** Frames drawn in the last second. */

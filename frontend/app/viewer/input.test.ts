@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
 
-import { AutoLock, ENGAGE_MS, RELEASE_MS, shapeToRgba, toMonitor, wheelMessages } from "./input";
+import {
+  AutoLock,
+  ENGAGE_MS,
+  RELEASE_MS,
+  letterbox,
+  routeDrag,
+  shapeToRgba,
+  toMonitor,
+  wheelMessages,
+} from "./input";
 import { CODE_TO_EVDEV } from "./keycodes";
 
 test("no two codes share an evdev code", () => {
@@ -9,22 +18,46 @@ test("no two codes share an evdev code", () => {
 });
 
 test("page points map through the letterbox to monitor pixels", () => {
-  // A 1920×1080 monitor in a 1000×1000 box: scale 1000/1920, bars above and below.
+  // A 2000×1000 monitor in a 1000×1000 CSS box of the same device pixels: scale 1/2, bars
+  // of 250 above and below.
   const rect = { left: 10, top: 20, width: 1000, height: 1000 };
-  const s = 1000 / 1920;
-  const barY = (1000 - 1080 * s) / 2;
-  const corner = toMonitor(10, 20 + barY, rect, 1920, 1080);
-  expect(corner.x).toBeCloseTo(0);
-  expect(corner.y).toBeCloseTo(0);
-  const mid = toMonitor(510, 520, rect, 1920, 1080);
-  expect(mid.x).toBeCloseTo(960);
-  expect(mid.y).toBeCloseTo(540);
-  // Points in the bars clamp to the monitor's edge.
-  expect(toMonitor(10, 20, rect, 1920, 1080).y).toBe(0);
-  expect(toMonitor(2000, 2000, rect, 1920, 1080)).toEqual({ x: 1920, y: 1080 });
-  // Bars at the sides for a tall box; same answer at any device pixel ratio (CSS pixels in).
-  const p = toMonitor(150, 50, { left: 0, top: 0, width: 300, height: 100 }, 200, 100);
+  const box = { w: 1000, h: 1000 };
+  expect(letterbox(1000, 1000, 2000, 1000)).toEqual({ scale: 0.5, offX: 0, offY: 250 });
+  expect(toMonitor(10, 270, rect, box, 2000, 1000)).toEqual({ x: 0, y: 0 });
+  expect(toMonitor(510, 520, rect, box, 2000, 1000)).toEqual({ x: 1000, y: 500 });
+  // Points in the bars fall outside the monitor (not clamped).
+  expect(toMonitor(10, 20, rect, box, 2000, 1000).y).toBe(-500);
+  // Bars at the sides for a tall box.
+  const p = toMonitor(150, 50, { left: 0, top: 0, width: 300, height: 100 }, { w: 300, h: 100 }, 200, 100);
   expect(p).toEqual({ x: 100, y: 50 });
+});
+
+test("at device pixel ratio 1.5, a canvas of the monitor's device size maps 1:1", () => {
+  // 1920×1080 device pixels in a 1280×720 CSS box: scale 1, no bars.
+  expect(letterbox(1920, 1080, 1920, 1080)).toEqual({ scale: 1, offX: 0, offY: 0 });
+  const rect = { left: 0, top: 0, width: 1280, height: 720 };
+  expect(toMonitor(640, 360, rect, { w: 1920, h: 1080 }, 1920, 1080)).toEqual({ x: 960, y: 540 });
+  // One device pixel too wide: the bar is a whole pixel, so the picture stays on the pixel
+  // grid.
+  expect(letterbox(1921, 1080, 1920, 1080)).toEqual({ scale: 1, offX: 1, offY: 0 });
+});
+
+test("a drag past the window edge routes to the neighbouring monitor", () => {
+  const row = [
+    { id: 0, x: 0, y: 0, width: 1920, height: 1080, primary: true },
+    { id: 1, x: 1920, y: 0, width: 1920, height: 1080, primary: false },
+  ];
+  expect(routeDrag(row, 0, 10, 20)).toEqual({ id: 0, x: 10, y: 20 });
+  expect(routeDrag(row, 0, 1920, 500)).toEqual({ id: 1, x: 0, y: 500 });
+  expect(routeDrag(row, 1, -1, 300)).toEqual({ id: 0, x: 1919, y: 300 });
+  // Past the outer edge, or above: pinned to the origin's edge.
+  expect(routeDrag(row, 1, 2500, -40)).toEqual({ id: 1, x: 1919, y: 0 });
+  // An offset neighbour is entered only where it overlaps.
+  const offset = [row[0], { ...row[1], y: 600 }];
+  expect(routeDrag(offset, 0, 1930, 700)).toEqual({ id: 1, x: 10, y: 100 });
+  expect(routeDrag(offset, 0, 1930, 100)).toEqual({ id: 0, x: 1919, y: 100 });
+  // An origin not in the layout routes nowhere.
+  expect(routeDrag(row, 7, 0, 0)).toBeNull();
 });
 
 test("the cursor sprite is premultiplied BGRA, and comes out straight RGBA", () => {

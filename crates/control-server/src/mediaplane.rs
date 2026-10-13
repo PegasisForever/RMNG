@@ -176,9 +176,11 @@ pub struct MediaHandle {
     latest: Mutex<HashMap<String, HashMap<u32, LatestFrame>>>,
     /// Rich/lazy clipboard broker state.
     clip: Mutex<ClipState>,
-    /// Most-recent cursor *with a shape* per clone — replayed to a viewer that
-    /// connects mid-session (shapes are otherwise only sent on change).
-    cursor: Mutex<HashMap<String, CursorMeta>>,
+    /// clone id → (monitor_id → most-recent cursor *with a shape* on that monitor) — replayed
+    /// to a viewer that connects mid-session (shapes are otherwise only sent on change). Per
+    /// monitor: each monitor's capture stream reports its own cursor, and a window shows only
+    /// its own monitor's.
+    cursor: Mutex<HashMap<String, HashMap<u32, CursorMeta>>>,
     /// Each clone's reported monitor layout — replayed to a connecting viewer so it
     /// can route cross-window drags against the real positions.
     layout: Mutex<HashMap<String, Vec<MonitorPlacement>>>,
@@ -1054,7 +1056,7 @@ fn prime_viewer_metadata(
         }
     }
     // Last cursor shape + current clipboard offer, targeted to this viewer.
-    if let Some(c) = handle.cursor.lock().unwrap().get(&sel).cloned() {
+    for c in cached_cursors(handle, &sel) {
         if let Some(b) = frame_json(T_CURSOR, &c) {
             let _ = tx.try_send(b.into());
         }
@@ -1064,6 +1066,15 @@ fn prime_viewer_metadata(
             let _ = tx.try_send(b.into());
         }
     }
+}
+
+/// The selected clone's last cursor with a shape, one per monitor.
+fn cached_cursors(handle: &MediaHandle, sel: &str) -> Vec<CursorMeta> {
+    let cursor = handle.cursor.lock().unwrap();
+    cursor
+        .get(sel)
+        .map(|m| m.values().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Prime a freshly-connected viewer's video: force a shared keyframe and re-encode
@@ -1214,7 +1225,7 @@ fn reprime_all(
     if !is_headless(&app.store.get(), &sel) {
         broadcast_json(viewers, T_VIEWSPEC, &desktop_view_spec(&app.config()));
     }
-    if let Some(c) = handle.cursor.lock().unwrap().get(&sel).cloned() {
+    for c in cached_cursors(handle, &sel) {
         broadcast_json(viewers, T_CURSOR, &c);
     }
     let frames = dup_latest_frames(handle, &sel);
@@ -1350,7 +1361,13 @@ fn serve_clone(
                 if let Some(id) = clone_id.clone() {
                     // Remember the last cursor *with a shape* to replay on viewer connect.
                     if c.shape.is_some() {
-                        handle.cursor.lock().unwrap().insert(id.clone(), c.clone());
+                        handle
+                            .cursor
+                            .lock()
+                            .unwrap()
+                            .entry(id.clone())
+                            .or_default()
+                            .insert(c.monitor_id, c.clone());
                     }
                     // Only the selected clone's cursor reaches the viewers.
                     if app.store.selected().as_deref() == Some(id.as_str()) {
