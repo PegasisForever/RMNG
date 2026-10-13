@@ -230,19 +230,19 @@ export default function Viewer() {
           {note.text}
         </p>
       ) : null}
-      {/* Always shown outside fullscreen; in fullscreen, only while the pointer is on it. It
-          never takes focus, so keys keep going to the clone. */}
-      <button
-        type="button"
-        tabIndex={-1}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={toggleFullscreen}
-        className={`absolute left-1 top-1 rounded bg-black/60 px-2 py-0.5 text-xs text-slate-200 transition-opacity hover:opacity-100 ${
-          fullscreen ? "opacity-0" : ""
-        }`}
-      >
-        {fullscreen ? "Exit fullscreen" : "Fullscreen"}
-      </button>
+      {/* Only outside fullscreen: the operator leaves fullscreen with the window's own controls.
+          It never takes focus, so keys keep going to the clone. */}
+      {fullscreen ? null : (
+        <button
+          type="button"
+          tabIndex={-1}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={toggleFullscreen}
+          className="absolute left-1 top-1 rounded bg-black/60 px-2 py-0.5 text-xs text-slate-200"
+        >
+          Fullscreen
+        </button>
+      )}
     </main>
   );
 }
