@@ -224,9 +224,9 @@ That is about 8–10 weeks of work for one engineer, or less with work done in p
 
 ## Implementation rounds
 
-Work happens on the local branch `web-viewer` in the worktree `/home/rmng/RMNG-web-viewer`. Each round is one
-worker agent, then one reviewer agent. The orchestrator commits the worker's result locally, and the reviewer's
-findings go into the next worker's task. Nothing is pushed or published.
+Work happens on `main` in `/home/rmng/RMNG`. Each round is one worker agent, then one reviewer agent. The
+orchestrator commits the worker's result, and the reviewer's findings go into the next worker's task. Nothing is
+pushed or published.
 
 The order is horizontal: round 1 builds every layer thinly, so the whole path lines up. Later rounds add features
 on top of it. Port 9001 and the native viewers stay until round 7, so we can compare both viewers.
