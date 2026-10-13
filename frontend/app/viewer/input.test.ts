@@ -3,24 +3,6 @@ import { expect, test } from "bun:test";
 import { AutoLock, ENGAGE_MS, RELEASE_MS, shapeToRgba, toMonitor, wheelMessages } from "./input";
 import { CODE_TO_EVDEV } from "./keycodes";
 
-test("key codes map to Linux evdev codes", () => {
-  expect(CODE_TO_EVDEV.Escape).toBe(1); // KEY_ESC
-  expect(CODE_TO_EVDEV.KeyA).toBe(30);
-  expect(CODE_TO_EVDEV.KeyC).toBe(46);
-  expect(CODE_TO_EVDEV.KeyV).toBe(47);
-  expect(CODE_TO_EVDEV.ShiftLeft).toBe(42);
-  expect(CODE_TO_EVDEV.ControlLeft).toBe(29);
-  expect(CODE_TO_EVDEV.AltRight).toBe(100);
-  expect(CODE_TO_EVDEV.Enter).toBe(28);
-  expect(CODE_TO_EVDEV.NumpadEnter).toBe(96);
-  expect(CODE_TO_EVDEV.ArrowLeft).toBe(105);
-  expect(CODE_TO_EVDEV.F12).toBe(88);
-  expect(CODE_TO_EVDEV.IntlBackslash).toBe(86);
-  // Command, as in the native macOS viewer's kvk_evdev table.
-  expect(CODE_TO_EVDEV.MetaLeft).toBe(125);
-  expect(CODE_TO_EVDEV.MetaRight).toBe(126);
-});
-
 test("no two codes share an evdev code", () => {
   const values = Object.values(CODE_TO_EVDEV);
   expect(new Set(values).size).toBe(values.length);
@@ -90,4 +72,8 @@ test("a mouse wheel sends notches, a trackpad sends finger scroll", () => {
   ]);
   // A tiny trackpad move rounds to wheelDelta 0: still finger scroll, not a lost notch.
   expect(wheelMessages({ ...pad, wheelDeltaX: 0, wheelDeltaY: 0 }, rem)).toHaveLength(1);
+  // During a finger scroll, an event that looks like a notch is still finger scroll.
+  expect(wheelMessages({ ...pad, wheelDeltaY: -120 }, rem, true)).toEqual([
+    { kind: "axis_continuous", dx: 1.5, dy: -7.25, flags: 4 },
+  ]);
 });

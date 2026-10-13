@@ -138,7 +138,7 @@ Each row that depends on one of these answers names its question ID.
 | I6 | Keyboard layout detection | No | — | — | Not needed with Linux keycodes. | No |
 | I7 | Absolute pointer and buttons (with back and forward). Map page pixels to monitor pixels, with device pixel ratio and letterbox. | Yes | S | R |  | Yes |
 | I8 | Scroll: wheel steps and smooth trackpad scroll (`axis_continuous`) | Yes | S | R |  | Yes |
-| I9 | Combine pointer moves, use `pointerrawupdate` | Yes | S | R |  | Yes |
+| I9 | Combine pointer moves, use `pointerrawupdate` | Yes | S | R | Built with `pointermove`, not `pointerrawupdate`: Chrome already sends at most one `pointermove` per frame, so moves need no other merging. | Yes |
 | I10 | Pointer lock with raw (unaccelerated) motion, sent as `pointer_relative` | Yes | S | R |  | Yes |
 | I11 | Lock the pointer automatically when the remote cursor is hidden for 180 ms (`auto_lock.rs`) | Yes | M | K | Chrome lets a focused page lock the pointer without a click, except after the user leaves the lock with Esc: then the next lock needs a click. Check this in the prototype. | Yes |
 | I12 | Shortcuts: Ctrl+Alt+G locks the pointer, Ctrl+Alt+P releases it | Yes | S | K |  | Yes |
@@ -241,3 +241,4 @@ on top of it. Port 9001 and the native viewers stay until round 7, so we can com
 | 6 | **Native-viewer features**: terminal, port-forward command dialog, frame-rate test tool. | N1–N3 |
 | 7 | **The switch**: delete the native viewers, ports 9001 and 9005, stored forward rules, 4:4:4, and update the docs. | X1–X5 |
 | 8 | **Final end-to-end check on CT 101** and fixes. | — |
+| 9 | **Clean-up, fanned out.** Several read-only agents each search one area (control-server media plane, wire types, clone-daemon, frontend, CLI and scripts, Dockerfile and docs) for logic that only existed for the native viewers or port 9001 and can now be simplified or removed. Workers then apply the agreed cuts by area, and one reviewer checks the result. | — |

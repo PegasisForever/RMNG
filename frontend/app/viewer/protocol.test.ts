@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { codecFromAnnexB, parseVideoHeader } from "./protocol";
+import { codecFromAnnexB, encodeClipboardData, parseClipboardData, parseVideoHeader } from "./protocol";
 
 test("the video header reads the bytes the server writes", () => {
   // The same bytes as `wire::browser::tests::video_header_layout`.
@@ -27,4 +27,20 @@ test("the codec string comes from the SPS, after the access unit delimiter", () 
 test("a frame without an SPS has no codec string", () => {
   expect(codecFromAnnexB(new Uint8Array([0, 0, 0, 1, 0x41, 0x9a, 0, 0, 1, 0x67, 66, 0, 40]))).toBeNull();
   expect(codecFromAnnexB(new Uint8Array([]))).toBeNull();
+});
+
+test("clipboard data matches the server's binary layout, both ways", () => {
+  // The same bytes as `wire::browser::tests::clipboard_data_layout`.
+  const bytes = new Uint8Array([
+    1, 0, 1, 2, 3, 4, 5, 6, 7, 0, 9, ...new TextEncoder().encode("text/html<b>"),
+  ]);
+  const d = parseClipboardData(bytes.buffer);
+  expect(d.serial).toBe(0x0001020304050607);
+  expect(d.mimeType).toBe("text/html");
+  expect(new TextDecoder().decode(d.bytes)).toBe("<b>");
+  expect(new Uint8Array(encodeClipboardData(d))).toEqual(bytes);
+  const empty = parseClipboardData(
+    encodeClipboardData({ serial: 7, mimeType: "image/png", bytes: new Uint8Array(0) }),
+  );
+  expect(empty).toEqual({ serial: 7, mimeType: "image/png", bytes: new Uint8Array(0) });
 });

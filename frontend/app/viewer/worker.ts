@@ -12,6 +12,7 @@
 import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
 import {
+  KIND_VIDEO,
   VIDEO_HEADER_LEN,
   type ViewerStats,
   type WorkerIn,
@@ -21,7 +22,7 @@ import {
 } from "./protocol";
 
 const scope = self as unknown as Worker;
-const post = (m: WorkerOut) => scope.postMessage(m);
+const post = (m: WorkerOut, transfer: Transferable[] = []) => scope.postMessage(m, transfer);
 
 /** Wait this long after the socket closes before connecting again. */
 const RECONNECT_MS = 1000;
@@ -156,8 +157,10 @@ function connect() {
   ws.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
     if (typeof e.data === "string") {
       post({ type: "message", msg: JSON.parse(e.data) as ToBrowser });
-    } else {
+    } else if (new Uint8Array(e.data, 0, 1)[0] === KIND_VIDEO) {
       onVideo(e.data);
+    } else {
+      post({ type: "binary", buf: e.data }, [e.data]);
     }
   };
   ws.onclose = () => {
@@ -191,6 +194,10 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   const m = e.data;
   if (m.type === "send") {
     send(m.msg);
+    return;
+  }
+  if (m.type === "binary") {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(m.buf);
     return;
   }
   ({ url, monitor } = m);

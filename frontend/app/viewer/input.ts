@@ -72,12 +72,6 @@ export function shapeToRgba(shape: CursorShape): Uint8ClampedArray<ArrayBuffer> 
   return out;
 }
 
-/** An empty or fully transparent sprite hides the cursor, as the explicit `hidden` does (an
- *  older daemon sends the hide as such a sprite). */
-function invisible(shape: CursorShape) {
-  return shape.width === 0 || shape.height === 0 || !/[^A]/.test(shape.rgba.replace(/=+$/, ""));
-}
-
 /** The automatic pointer-lock policy, ported from `viewer-core/src/auto_lock.rs` (times in ms):
  *  engage after the remote cursor stays hidden ENGAGE_MS, release after it stays visible
  *  RELEASE_MS. The chords override it until the policy agrees with the override again. */
@@ -125,12 +119,16 @@ export class AutoLock {
 /** One wheel event → input messages. A mouse wheel (Chrome reports `wheelDelta` in multiples
  *  of 120 per notch) becomes `axis` notches with the fraction carried in `rem`, like the
  *  native viewers' wheel path; anything finer (a trackpad) becomes smooth finger scroll in
- *  CSS pixels. Browser and Mutter agree on the direction: positive is down and right. */
+ *  CSS pixels. `fingers`: a finger scroll is still running, so this event belongs to it even
+ *  if its delta happens to look like a notch. Browser and Mutter agree on the direction:
+ *  positive is down and right. */
 export function wheelMessages(
   e: { deltaMode: number; deltaX: number; deltaY: number; wheelDeltaX: number; wheelDeltaY: number },
   rem: { x: number; y: number },
+  fingers = false,
 ): InputMsg[] {
   const notched =
+    !fingers &&
     (e.wheelDeltaX !== 0 || e.wheelDeltaY !== 0) &&
     e.wheelDeltaX % 120 === 0 &&
     e.wheelDeltaY % 120 === 0;
@@ -167,6 +165,9 @@ export interface InputOptions {
   monitor: number;
   send(msg: InputMsg): void;
   onLockChange(locked: boolean): void;
+  /** A key press or click: the user activation Chrome wants for some calls (a clipboard
+   *  write it refused before). */
+  onGesture(): void;
 }
 
 export interface Input {
@@ -206,7 +207,7 @@ export function attachInput(o: InputOptions): Input {
   const now = () => performance.now();
 
   /** Release every key and button the clone holds from this window. While the socket is down
-   *  nothing is released (the message would be dropped); the reconnect releases them. */
+   *  there is nothing to release: the server released them when the socket closed. */
   function releaseAll() {
     if (!connected) return;
     for (const k of keys) send({ kind: "key_code", keycode: k, pressed: false });
@@ -283,10 +284,12 @@ export function attachInput(o: InputOptions): Input {
   }
 
   function onKeyDown(e: KeyboardEvent) {
+    o.onGesture();
     // Local chords, not forwarded. Their Ctrl and Alt already went to the clone, so release
     // them (and everything else held) first, as the native viewer does.
     if (e.ctrlKey && e.altKey && (e.code === "KeyG" || e.code === "KeyP")) {
       e.preventDefault();
+      if (e.repeat) return;
       releaseAll();
       if (e.code === "KeyG") {
         toggleLock();
@@ -305,7 +308,10 @@ export function attachInput(o: InputOptions): Input {
     if (k === undefined) return;
     e.preventDefault();
     // The clone runs its own key repeat, so the browser's repeats are not sent.
-    if (e.repeat || !connected || keys.has(k)) return;
+    if (e.repeat || !connected) return;
+    // Held already: on macOS no keyup comes for a key released while Command is down, so a
+    // second Cmd+C is a second press of a C the clone still holds. Release it first.
+    if (keys.has(k)) send({ kind: "key_code", keycode: k, pressed: false });
     keys.add(k);
     send({ kind: "key_code", keycode: k, pressed: true });
   }
@@ -339,6 +345,7 @@ export function attachInput(o: InputOptions): Input {
   // one as a move, not as a press.
   function onMouseDown(e: MouseEvent) {
     e.preventDefault(); // no middle-button autoscroll, no text selection
+    o.onGesture();
     const b = BUTTONS[e.button];
     // A click is the gesture Chrome wants after the user left the lock with Esc.
     if (needGesture) {
@@ -361,16 +368,15 @@ export function attachInput(o: InputOptions): Input {
     e.preventDefault(); // no page scroll, no Ctrl+wheel zoom
     if (!connected) return;
     const w = e as WheelEvent & { wheelDeltaX: number; wheelDeltaY: number };
-    const msgs = wheelMessages(w, rem);
+    const msgs = wheelMessages(w, rem, scrollEnd !== undefined);
     for (const m of msgs) send(m);
     if (msgs[0]?.kind === "axis_continuous") {
       // Fingers lifted (no more events): finish the gesture so the clone's kinetic scroll ends.
       clearTimeout(scrollEnd);
-      scrollEnd = setTimeout(
-        () =>
-          send({ kind: "axis_continuous", dx: 0, dy: 0, flags: AXIS_FINISH | AXIS_SOURCE_FINGER }),
-        SCROLL_END_MS,
-      );
+      scrollEnd = setTimeout(() => {
+        scrollEnd = undefined;
+        send({ kind: "axis_continuous", dx: 0, dy: 0, flags: AXIS_FINISH | AXIS_SOURCE_FINGER });
+      }, SCROLL_END_MS);
     }
   }
 
@@ -379,7 +385,12 @@ export function attachInput(o: InputOptions): Input {
   const onVisibility = () => {
     if (document.visibilityState === "hidden") releaseAll();
   };
-  const onLockChange = () => o.onLockChange(locked());
+  const onLockChange = () => {
+    // The lock ended while the page has focus and the policy still wants it: the user pressed
+    // Esc. Treat it as Ctrl+Alt+P, or the next click would lock again.
+    if (!locked() && document.hasFocus() && auto.want(now())) auto.forceRelease();
+    o.onLockChange(locked());
+  };
   // Keyboard Lock only works in fullscreen, so take it on entry and give it back on exit.
   const onFullscreen = () => {
     if (document.fullscreenElement) void keyboard()?.lock();
@@ -416,12 +427,10 @@ export function attachInput(o: InputOptions): Input {
         hidden = true;
         auto.onRemoteCursor(true, t);
       } else if (c.shape) {
-        hidden = invisible(c.shape);
-        auto.onRemoteCursor(hidden, t);
-        if (!hidden) {
-          shape = c.shape;
-          built = null;
-        }
+        hidden = false;
+        auto.onRemoteCursor(false, t);
+        shape = c.shape;
+        built = null;
       }
       if (c.warp) {
         warpUntil = t + WARP_SUPPRESS_MS;
@@ -431,9 +440,12 @@ export function attachInput(o: InputOptions): Input {
       tick();
     },
     setConnected(c) {
-      // Keys released while the socket was down never reached the clone: release them now.
       connected = c;
-      if (c) releaseAll();
+      // The server releases what a socket held when it closes; start the next one clean.
+      if (!c) {
+        keys.clear();
+        buttons.clear();
+      }
     },
     toggleLock,
     detach() {

@@ -1,16 +1,39 @@
 // The browser viewer: one window per monitor, `/viewer?monitor=<id>`, opened from the
 // dashboard. The worker (`~/viewer/worker.ts`) does the socket, the decode and the drawing;
-// this page holds the canvas, the input (`~/viewer/input.ts`), the cursor, the toolbar and
-// the stats overlay, and is where server messages arrive.
-import { useEffect, useRef, useState } from "react";
+// this page holds the canvas, the input (`~/viewer/input.ts`), the clipboard
+// (`~/viewer/clipboard.ts`), the cursor, the toolbar, the stats overlay and file drop, and is
+// where server messages arrive.
+import { type DragEvent, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
+import { attachClipboard } from "~/viewer/clipboard";
 import { type Input, attachInput, toggleFullscreen } from "~/viewer/input";
-import type { ViewerStats, WorkerIn, WorkerOut } from "~/viewer/protocol";
+import {
+  type ViewerStats,
+  type WorkerIn,
+  type WorkerOut,
+  encodeClipboardData,
+  parseClipboardData,
+} from "~/viewer/protocol";
 
 export function meta() {
   return [{ title: "RMNG viewer" }];
+}
+
+/** Upload one dropped file into the selected clone's home; resolves to the name it got there. */
+function uploadFile(file: File, onProgress: (fraction: number) => void): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest(); // fetch() reports no upload progress
+    xhr.open("POST", `/api/viewer/upload?name=${encodeURIComponent(file.name)}`);
+    xhr.upload.onprogress = (e) => onProgress(e.lengthComputable ? e.loaded / e.total : 0);
+    xhr.onload = () =>
+      xhr.status === 200
+        ? resolve((JSON.parse(xhr.responseText) as { name: string }).name)
+        : reject(new Error(xhr.responseText || `HTTP ${xhr.status}`));
+    xhr.onerror = () => reject(new Error("network error"));
+    xhr.send(file);
+  });
 }
 
 export default function Viewer() {
@@ -26,6 +49,8 @@ export default function Viewer() {
   const [showStats, setShowStats] = useState(false);
   const [locked, setLocked] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  /** The file-drop note: progress, then the result for a few seconds. */
+  const [note, setNote] = useState<{ text: string; error?: boolean } | null>(null);
 
   useEffect(() => {
     document.title = `RMNG monitor ${monitor}`;
@@ -47,12 +72,20 @@ export default function Viewer() {
       type: "module",
     });
     const post = (m: WorkerIn, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
+    const clip = attachClipboard({
+      send: (msg) => post({ type: "send", msg: { t: "clipboard", ...msg } }),
+      sendData: (d) => {
+        const buf = encodeClipboardData(d);
+        post({ type: "binary", buf }, [buf]);
+      },
+    });
     const inp = attachInput({
       canvas,
       overlay: overlay.current,
       monitor,
       send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
       onLockChange: setLocked,
+      onGesture: () => clip.onGesture(),
     });
     input.current = inp;
 
@@ -67,8 +100,10 @@ export default function Viewer() {
         case "cursor":
           inp.onCursor(msg);
           break;
-        case "mode":
         case "clipboard":
+          clip.onMessage(msg);
+          break;
+        case "mode":
         case "term_data":
           break;
       }
@@ -76,9 +111,11 @@ export default function Viewer() {
     worker.onmessage = (e: MessageEvent<WorkerOut>) => {
       const m = e.data;
       if (m.type === "message") onServerMessage(m.msg);
+      else if (m.type === "binary") clip.onData(parseClipboardData(m.buf));
       else if (m.type === "connected") {
         setConnected(m.connected);
         inp.setConnected(m.connected);
+        clip.setConnected(m.connected);
       } else setStats(m.stats);
     };
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -93,6 +130,7 @@ export default function Viewer() {
     );
     return () => {
       inp.detach();
+      clip.detach();
       input.current = null;
       worker.terminate();
       canvas.remove();
@@ -114,6 +152,30 @@ export default function Viewer() {
     );
   }
 
+  // Files dropped on the window go to the selected clone's home, one after another.
+  const onDragOver = (e: DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onDrop = async (e: DragEvent) => {
+    e.preventDefault();
+    const done: string[] = [];
+    for (const f of [...e.dataTransfer.files]) {
+      try {
+        const name = await uploadFile(f, (p) =>
+          setNote({ text: `Uploading ${f.name} to ~/ … ${Math.round(p * 100)}%` }),
+        );
+        done.push(name);
+      } catch (err) {
+        setNote({ text: `Upload of ${f.name} failed: ${(err as Error).message}`, error: true });
+        return;
+      }
+    }
+    setNote({ text: `Uploaded to ~/: ${done.join(", ")}` });
+    setTimeout(() => setNote(null), 5000);
+  };
+
   // Toolbar buttons never take focus, so Space and Enter keep going to the clone.
   const tool = (label: string, on: boolean, act: () => void) => (
     <button
@@ -128,7 +190,7 @@ export default function Viewer() {
   );
 
   return (
-    <main className="fixed inset-0 select-none bg-black">
+    <main className="fixed inset-0 select-none bg-black" onDragOver={onDragOver} onDrop={onDrop}>
       <div ref={box} className="h-full w-full" />
       <img
         ref={overlay}
@@ -148,6 +210,15 @@ decode  ${stats.decodeMs.toFixed(1)} ms
 delay   ${stats.delayMs.toFixed(1)} ms
 decoder ${stats.decoder}`}
         </pre>
+      ) : null}
+      {note ? (
+        <p
+          className={`pointer-events-none absolute bottom-1 left-1 rounded bg-black/70 px-2 py-0.5 text-xs ${
+            note.error ? "text-red-300" : "text-slate-200"
+          }`}
+        >
+          {note.text}
+        </p>
       ) : null}
       {/* Bottom right, faint: the clone's top bar has its own menus at the top. In fullscreen
           invisible until the pointer is on it. */}

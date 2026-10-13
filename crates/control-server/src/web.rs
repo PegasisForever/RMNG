@@ -53,6 +53,12 @@ pub fn router(app: App) -> Router {
         .route("/api/activate", post(activate))
         // The browser viewer: one WebSocket per viewer window (see `crate::webviewer`).
         .route("/api/viewer", get(viewer_ws))
+        // A file dropped on a viewer window, into the selected clone's home. Streamed, so the
+        // 64MB cap below does not apply.
+        .route(
+            "/api/viewer/upload",
+            post(crate::webviewer::upload).layer(DefaultBodyLimit::disable()),
+        )
         .route("/api/board", put(board_put))
         .route("/api/tickets/order", put(ticket_order_put))
         // Which clones the operator has silenced. A browser-notification filter, stored here so
@@ -287,7 +293,12 @@ async fn viewer_ws(
     Query(q): Query<ViewerQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| async move { crate::webviewer::serve(app, q.monitor, socket) })
+    // Clipboard bytes arrive as one binary message: allow the 32 MiB clipboard limit in one
+    // frame (the default frame limit is 16 MiB, and Chrome does not fragment).
+    let cap = wire::socket::chunk::MAX_MESSAGE_BYTES;
+    ws.max_message_size(cap)
+        .max_frame_size(cap)
+        .on_upgrade(move |socket| async move { crate::webviewer::serve(app, q.monitor, socket) })
 }
 
 #[derive(Deserialize)]
