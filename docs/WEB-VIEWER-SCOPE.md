@@ -188,7 +188,7 @@ Each row that depends on one of these answers names its question ID.
 | O3 | Apps panel (install and start apps) | No | — | — |  | No |
 | O4 | Sharing links: view-only, collaborator, players 2–4 | No | — | — |  | No |
 | O5 | Selkies dashboards (sidebar, settings, translations) | No | — | — | We use the RMNG React frontend. | No |
-| O6 | Viewer toolbar in the RMNG frontend: fullscreen, pointer lock, stats, open monitor windows | No | M | R | Removed after round 9: F11 and Ctrl+Alt+G/P do the same; the dashboard opens the windows. | No |
+| O6 | Viewer toolbar in the RMNG frontend: fullscreen, pointer lock, stats, open monitor windows | No | M | R | Removed after round 9: F11 and Ctrl+Alt+G/P do the same; the dashboard opens the windows. A Fullscreen button came back at the bottom right, because macOS takes F11; in fullscreen it shows only on hover. | No |
 
 ## N. Native viewer features that Selkies does not have
 

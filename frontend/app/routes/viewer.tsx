@@ -13,7 +13,7 @@ import type { ToBrowser } from "~/lib/wire/ToBrowser";
 import type { ViewContent } from "~/lib/wire/ViewContent";
 import type { ViewMonitor } from "~/lib/wire/ViewMonitor";
 import { attachClipboard } from "~/viewer/clipboard";
-import { type Input, attachInput } from "~/viewer/input";
+import { type Input, attachInput, toggleFullscreen } from "~/viewer/input";
 import {
   type WorkerIn,
   type WorkerOut,
@@ -60,10 +60,14 @@ export default function Viewer() {
   const [connected, setConnected] = useState(false);
   /** The file-drop note: progress, then the result for a few seconds. */
   const [note, setNote] = useState<{ text: string; error?: boolean } | null>(null);
+  const [fullscreen, setFullscreen] = useState(false);
 
   useEffect(() => {
     document.title = `RMNG monitor ${monitor}`;
     setSecure(window.isSecureContext);
+    const onFs = () => setFullscreen(document.fullscreenElement !== null);
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
   }, [monitor]);
 
   useEffect(() => {
@@ -226,6 +230,19 @@ export default function Viewer() {
           {note.text}
         </p>
       ) : null}
+      {/* Always shown outside fullscreen; in fullscreen, only while the pointer is on it. It
+          never takes focus, so keys keep going to the clone. */}
+      <button
+        type="button"
+        tabIndex={-1}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={toggleFullscreen}
+        className={`absolute bottom-1 right-1 rounded bg-black/60 px-2 py-0.5 text-xs text-slate-200 transition-opacity hover:opacity-100 ${
+          fullscreen ? "opacity-0" : ""
+        }`}
+      >
+        {fullscreen ? "Exit fullscreen" : "Fullscreen"}
+      </button>
     </main>
   );
 }

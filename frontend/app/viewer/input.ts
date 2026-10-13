@@ -180,8 +180,9 @@ export function wheelMessages(
   return out;
 }
 
-/** Fullscreen on or off, on the screen the window is on. */
-function toggleFullscreen() {
+/** Fullscreen on or off, on the screen the window is on. The page's own fullscreen hides
+ *  Chrome's address bar, which macOS fullscreen (the green button) keeps. */
+export function toggleFullscreen() {
   if (document.fullscreenElement) void document.exitFullscreen();
   else void document.documentElement.requestFullscreen();
 }
