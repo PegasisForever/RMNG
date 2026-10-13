@@ -42,7 +42,11 @@ use crate::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, InputMsg, M
 /// Version 3 carries [`ToHolder::SyncInput`], which a running holder cannot answer and which a
 /// click needs before it presses. Without the restart the daemon would wait on an
 /// acknowledgement that never comes and fall back to guessing, which is the bug being fixed.
-pub const PROTO_VERSION: u32 = 3;
+///
+/// Version 4 carries the clipboard read timeout: a running holder kept its one-at-a-time read
+/// gate held forever after one stuck transfer, so every later clipboard read from that clone
+/// hung until the holder restarted.
+pub const PROTO_VERSION: u32 = 4;
 
 /// Where the holder binds and the daemon connects.
 ///
