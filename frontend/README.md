@@ -51,7 +51,9 @@ from the Rust backend.
 - Build with Vite/Bun to a static bundle (`frontend/build` or similar).
 - The Rust control-server serves the bundle + `/uploads` on port 9000; no Bun runtime in
   production.
-- Dev: Vite dev server proxying `/api` + `/events` to the Rust backend.
+- Dev: `bun run dev` starts the Vite dev server on port 9000 with no proxy, so the API and
+  the viewer do not work there. To test them, run `bun run build`, then
+  `cargo run -p control-server`, which serves `frontend/build/client`.
 
 ## Backend contract (preserved by the Rust port)
 

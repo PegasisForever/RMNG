@@ -16,7 +16,7 @@ The control server derives clone lifecycle from Docker liveness, the agents' tra
 | Module | Role |
 |---|---|
 | `mutter.rs` | Mutter `RemoteDesktop`, `ScreenCast`, and `DisplayConfig` D-Bus setup |
-| `capture.rs` / `capture_pw.rs` | GStreamer and raw-PipeWire dmabuf capture, including cursor metadata |
+| `capture_pw.rs` | raw-PipeWire dmabuf capture, including cursor metadata |
 | `transport.rs` | `SOCK_SEQPACKET` media transport with `SCM_RIGHTS` file descriptors |
 | `mcp.rs` | local desktop JSON-RPC MCP on `:9004` |
 | `windows.rs` | gnome-shell `Eval` window-management tools |
@@ -28,11 +28,11 @@ The control server derives clone lifecycle from Docker liveness, the agents' tra
 
 ## Runtime modes
 
-`--session-holder` runs the holder. Otherwise, with `RMNG_SOCKET` set, the daemon captures, ships frames, relays input, and serves the local MCP; without it, it runs its capture frames-per-second self-test on a session of its own. `RMNG_MONITORS` provides the boot monitor layout in `WxH+X+Y[*]` form, used only when the holder has no remembered layout in `~/.rmng/monitors`; the control server pushes the active layout once the daemon connects.
+`--session-holder` runs the holder. Otherwise the daemon captures, ships frames, relays input, and serves the local MCP. It needs `RMNG_SOCKET` (the media socket path) and exits with an error without it. `RMNG_MONITORS` provides the boot monitor layout in `WxH+X+Y[*]` form, used only when the holder has no remembered layout in `~/.rmng/monitors`; the control server pushes the active layout once the daemon connects.
 
 ## Capture and socket model
 
-The selected clone keeps captured frames available for the human viewer and desktop MCP screenshots. The daemon emits only dmabufs; the control server/media crate encodes H.264 for viewers and images for tool responses. The wire schema is documented in [docs/PROTOCOL.md](../../docs/PROTOCOL.md#clone-socket-protocol-clone-daemon--control-server).
+The daemon captures only while the control server asks for it (`Capture{active}`, sent while a viewer watches the clone), and wakes capture briefly on its own for a desktop MCP screenshot. It ships dmabufs to the control server, which encodes H.264 for viewers. Screenshots are encoded to JPEG inside the clone, through the `media` crate. The wire schema is documented in [docs/PROTOCOL.md](../../docs/PROTOCOL.md#clone-socket-protocol-clone-daemon--control-server).
 
 ## Dependencies
 

@@ -81,10 +81,8 @@ type Patch = {
   assistant: { url: string; serverUrl: string };
 };
 
-const patch = (
-  draft: ReturnType<typeof settingsDraftFrom>,
-  setupComplete = true,
-) => settingsPatch(draft, setupComplete) as Patch;
+const patch = (draft: ReturnType<typeof settingsDraftFrom>) =>
+  settingsPatch(draft) as Patch;
 
 // --- seeding the form ---------------------------------------------------------------------
 
@@ -133,7 +131,7 @@ test("the docker patch names only the fields the panel still edits", () => {
   // Hostname prefix + sizing. The subnet, socket, and images are hardcoded on the server.
   const draft = settingsDraftFrom(config());
 
-  expect(Object.keys(patch(draft, true).docker).sort()).toEqual([
+  expect(Object.keys(patch(draft).docker).sort()).toEqual([
     "cloneCpus",
     "cloneMemoryMb",
     "hostnamePrefix",

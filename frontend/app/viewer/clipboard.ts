@@ -23,12 +23,12 @@ import type { ClipboardOffer } from "../lib/wire/ClipboardOffer";
 import type { ClipboardBytes } from "./protocol";
 
 /** The types Chrome's clipboard can write, and so the only ones worth reading. */
-export type LocalType = "image/png" | "text/html" | "text/plain";
+type LocalType = "image/png" | "text/html" | "text/plain";
 const LOCAL_TYPES: LocalType[] = ["image/png", "text/html", "text/plain"];
 
 /** Most bytes sent per type: what still fits the 32 MiB clipboard limit once it is base64 on
  *  the server's hop to the clone. A larger copy is answered with no bytes (the paste fails). */
-export const MAX_BYTES = 23 * 1024 * 1024;
+const MAX_BYTES = 23 * 1024 * 1024;
 
 const SEEN_KEY = "rmng-viewer-clipboard-seen";
 const PENDING_KEY = "rmng-viewer-clipboard-pending";
@@ -38,7 +38,7 @@ const PENDING_KEY = "rmng-viewer-clipboard-pending";
 type Pending = ClipboardOffer & { own?: boolean };
 
 /** The clone's names for plain text. */
-export const isTextMime = (m: string) =>
+const isTextMime = (m: string) =>
   m.startsWith("text/plain") || m === "UTF8_STRING" || m === "TEXT";
 
 /** The MIME types to offer the clone for local content of these Chrome types: plain text under
@@ -93,14 +93,14 @@ async function digest(blobs: Map<LocalType, Blob>) {
   return Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export interface ClipboardOptions {
+interface ClipboardOptions {
   /** An offer or a request, as JSON. */
   send(msg: ClipboardMsg): void;
   /** Bytes for a request, as a binary message. */
   sendData(d: ClipboardBytes): void;
 }
 
-export interface ViewerClipboard {
+interface ViewerClipboard {
   /** An offer or a request from the server. */
   onMessage(msg: ClipboardMsg): void;
   /** Bytes for a request this window made. */

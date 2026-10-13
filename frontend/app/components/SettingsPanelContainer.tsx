@@ -34,9 +34,7 @@ export interface SettingsPanelContainerProps {
   /** Read the current redacted config (each preset's Linear key comes back verbatim). */
   getConfig: () => Promise<AppConfigRedacted>;
   /** Persist a partial config patch; returns the merged config. */
-  putConfig: (
-    patch: unknown,
-  ) => Promise<ConfigPutResponse & { networkWarning?: string }>;
+  putConfig: (patch: unknown) => Promise<ConfigPutResponse>;
   /** Validate a setting (e.g. `"judge"` — puts one real question to the picked backend). */
   /** `value` and `model` test unsaved fields the operator has just typed. */
   testConfig: (
@@ -53,7 +51,7 @@ export interface SettingsPanelContainerProps {
    *  Note the server restarts itself mid-update, so the op stream *will* cut out; the
    *  reconnected stream may or may not still carry it. */
   operations: Operation[];
-  /** Restart the control-server container in place (applies changed startup settings). */
+  /** Restart the control-server container in place. */
   restartServer: () => Promise<{ ok: boolean }>;
   /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
    *  control-server harvests the tokens off a clone that's already signed in. Takes the
@@ -97,9 +95,6 @@ export function SettingsPanelContainer({
   // Which category the rail is on. Resets to the top every time the panel opens, which is the
   // right default: the panel is closed by the operator, and the next open is a new errand.
   const [category, setCategory] = useState<SettingsCategory>("board");
-  // The loaded config, kept alongside the form for the one thing the form does not carry:
-  // whether first-run setup has finished, which decides both the subnet field and the patch.
-  const [config, setConfig] = useState<AppConfigRedacted | null>(null);
   const [draft, setDraft] = useState<SettingsDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -129,7 +124,6 @@ export function SettingsPanelContainer({
   const { acctOrder, setAcctOrder } = useAccountOrder();
 
   function load(c: AppConfigRedacted) {
-    setConfig(c);
     setDraft(settingsDraftFrom(c));
   }
 
@@ -214,9 +208,7 @@ export function SettingsPanelContainer({
     setError(null);
     setSaved(false);
     try {
-      const res = await putConfig(
-        settingsPatch(draft, !!config?.setupComplete),
-      );
+      const res = await putConfig(settingsPatch(draft));
       load(res.config); // re-seed from the server's redacted view; clears write-only inputs
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);

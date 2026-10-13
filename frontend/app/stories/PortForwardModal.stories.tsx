@@ -6,9 +6,6 @@ import type { Clone } from "~/lib/types";
 const clone: Clone = {
   id: "pega-abc",
   host: "pega-abc",
-  port: 3389,
-  username: "",
-  password: "",
   managed: true,
 };
 

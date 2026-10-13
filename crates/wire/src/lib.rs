@@ -2,8 +2,8 @@
 //! boundary in rmng.
 //!
 //! - [`control`] — `ControlState` and friends, broadcast over `/events` (port 9000)
-//!   and persisted to `state.json`. JSON shape is **byte-compatible** with the
-//!   current `control-server/app/lib/types.ts` so the React frontend is unchanged.
+//!   and persisted to `state.json`. Its TypeScript bindings are generated into
+//!   `frontend/app/lib/wire/`.
 //! - [`config`] — `AppConfig` (+ a redacted view) edited via the Settings UI.
 //! - [`socket`] — the clone-daemon ⇄ control-server unix-socket protocol.
 //! - [`holder`] — the clone-daemon ⇄ session-holder protocol, inside one clone.

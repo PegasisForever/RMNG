@@ -4,11 +4,10 @@
 // those and hands the results down.
 //
 // The form is one editable model (`SettingsDraft`) plus a single `onDraftChange`, rather than
-// forty value/onChange pairs. What is NOT in the draft is everything the server decides:
-// whether first-run setup has finished, what the last save said about needing a restart, and
-// the control-server's own version.
+// forty value/onChange pairs. What is NOT in the draft is what the server decides: the
+// control-server's own version and whether an update is available.
 //
-// This file owns what is inside the panel: the heading, the two banners, the rail, and the
+// This file owns what is inside the panel: the heading, the error banner, the rail, and the
 // footer. The panel itself — backdrop, box, Escape, exit frames — is `ModalShell`. Which
 // sections make up a category is `SettingsPanes`, and the rail's list is `SettingsNav`.
 

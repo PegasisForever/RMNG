@@ -12,9 +12,8 @@
 // this test bin re-declares the modules it needs as a path-included sub-tree.
 #[path = "../capture_pw.rs"]
 mod capture_pw;
-// This diagnostic bin exercises a subset of `mutter` (METADATA cursor mode only);
-// `CURSOR_MODE_EMBEDDED`, `Session.conn`, and `VirtualMonitor.monitor_id` are all live
-// in the production daemon, just unused here.
+// This diagnostic bin exercises a subset of `mutter`; `Session.conn` and
+// `VirtualMonitor.monitor_id` are live in the production daemon, just unused here.
 #[path = "../mutter.rs"]
 #[allow(dead_code)]
 mod mutter;
@@ -40,8 +39,7 @@ async fn main() -> Result<()> {
     pipewire::init();
 
     tracing::info!("capture-pw-test: setting up Mutter session (cursor-mode METADATA)");
-    let session = mutter::setup_with_cursor_mode(&[(1920, 1080)], mutter::CURSOR_MODE_METADATA)
-        .await?;
+    let session = mutter::setup(&[(1920, 1080)]).await?;
     let mon = session
         .monitors
         .first()
@@ -139,7 +137,7 @@ async fn main() -> Result<()> {
 }
 
 /// Oscillate the pointer so the damage-driven capture emits frames and Mutter
-/// emits cursor metadata (copied from `main.rs::nudge_cursor`).
+/// emits cursor metadata.
 fn nudge_cursor(session: &mutter::Session) {
     for m in &session.monitors {
         let rd = session.rd.clone();

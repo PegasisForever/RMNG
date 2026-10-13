@@ -11,17 +11,15 @@ process boundary in `RMNG`:
 4. **MCP DTOs** for the clone-local desktop-automation tool schemas.
 
 Control-plane types derive `serde::{Serialize, Deserialize}` and `ts-rs::TS` so the
-**frontend's TypeScript types are generated** from this crate (eliminating the
-hand-synced `control-server/app/lib/types.ts` drift that exists today). The browser
+**frontend's TypeScript types are generated** from this crate into
+`frontend/app/lib/wire/`, so they cannot drift from the Rust types. The browser
 viewer's messages (`ToBrowser`, `FromBrowser` and the types they carry) are exported too.
 The other transport types (socket, holder) are serde-only.
 
 ## Responsibilities
 
-- Define `ControlState` and its members as the full superset of the current Rust
-  `../../shared/src/lib.rs` (`ControlState`, `HostEntry`, `MonitorSpec`) and the current
-  TS `../../control-server/app/lib/types.ts` extras (`Clone` server-only fields,
-  `Operation`, `ClaudeUsage`, `Chat`/`ChatMessage`, `templates`).
+- Define `ControlState` and its members (`RmngClone`, `Operation`, `ClaudeUsage`,
+  `MonitorSpec`, the board and group types) and `Chat`/`ChatMessage`.
 - Define the **socket** protocol (`FrameMsg`, `InputMsg`, `Ack`, monitor descriptors).
 - Define the **browser viewer** protocol (`VideoHeader`, the clipboard binary layout,
   `ToBrowser`: view spec/cursor/clipboard/terminal data; `FromBrowser`:
@@ -30,23 +28,24 @@ The other transport types (socket, holder) are serde-only.
   operator requests to that clone-local surface.
 - Emit `.ts` bindings consumed by `frontend`.
 
-## Key types (to define)
+## Key types
 
 ```text
-ControlState { selected: Option<String>, monitors: Vec<MonitorSpec>,
-               hosts: Vec<RmngClone>, operations: Vec<Operation>,
-               templates: Vec<String>, claude_accounts: Vec<ClaudeUsage>,
-               codex_accounts: Vec<CodexUsage> }
-RmngClone { id, host, port, username, password, domain?, gdm_username?, gdm_password?,
-       container?, source?, claude_account_email?, linear_*?, display_name?,
-       monitor_state?, unread?,
-       codex_account_email?, codex_group?, codex_selection? }
+ControlState { selected: Option<String>, active_layout, layout_preset_names,
+               hosts: Vec<RmngClone>, board_columns, ticket_order, muted_clones,
+               operations: Vec<Operation>, groups, claude_accounts: Vec<ClaudeUsage>,
+               codex_reset_marks, clone_tokens }
+RmngClone { id, host, managed, archived, source?, claude_account_email?,
+       claude_group?, claude_selection?, codex_account_email?, codex_group?,
+       codex_selection?, group?, linear_*?, preset_name?, display_name?,
+       monitor_state?, unread?, headless, parent?, dataset?, base_tag?,
+       daemon_connected, ... }
 Operation { id, kind: Clone|Delete|Archive|Unarchive|Pull|Prebuild|Update,
             target, source?, status, step, pct,
             message, log: Vec<String>, container?, started_at, finished_at? }
 ClaudeUsage { id, email, provider, active, assignable?, error?, stale?,
               last_updated, five_hour?, seven_day?, spend? }
-MonitorSpec { width, height }
+MonitorSpec { width, height, x, y, primary }
 
 # configuration (edited via the Settings UI, not hand-edited files)
 AppConfig { docker{hostname_prefix, clone_cpus, clone_memory_mb, homes_parent},
@@ -84,8 +83,8 @@ CursorMeta { monitor_id, x, y, hotspot, shape?: {w, h, rgba} }  # cursor-mode ME
 InputMsg { monitor_id, kind: PointerMove|Button|Axis|Key, ... }
 # Key = X11 keysym + pressed; Button = evdev index; PointerMove = absolute per-monitor.
 Ack { monitor_id, seq }
-Subscribe { stream: bool }   # server tells the daemon to start/stop the continuous feed
-FrameRequest { }             # server asks for one frame on demand (screenshot path)
+SetMonitors { monitors: [MonitorSpec] }  # apply a layout live
+Capture { active: bool }     # server tells the daemon to start/stop capture
 # clipboard (rich + lazy): daemon ⇄ server, broker = control-server
 ClipboardOffer  { serial, mime_types: [String] }      # "selection changed; these types"
 ClipboardRequest{ serial, mime_type }                  # "give me bytes for this type"
@@ -114,10 +113,8 @@ Internal socket and browser viewer types may use snake_case.
 
 - Serialize `ControlState` so the frontend keeps parsing it unchanged
   (unknown-field-tolerant; only the **server** publisher changes). This is the one wire
-  contract we deliberately keep across the cutover; the Rust types themselves are written
+  contract we deliberately keep; the Rust types themselves are written
   fresh (see [Clean-room](../../docs/DEVELOPMENT.md#clean-room)).
-- During cutover the old `../../shared` crate still backs the legacy client until it is
-  retired; `wire` does not depend on it.
 
 ## Dependencies
 
@@ -126,8 +123,7 @@ payloads are carried as byte slices; `wire` defines headers/descriptors, not cod
 
 ## Tests
 
-- Round-trip JSON for every control-plane type; golden-file the `ControlState` JSON shape
-  against a capture from the current Bun server.
+- Round-trip JSON for every control-plane type.
 - Round-trip the binary socket and browser viewer headers (`VideoHeader`, clipboard data).
 - `ts-rs` export produces TS that type-checks in `frontend`.
 

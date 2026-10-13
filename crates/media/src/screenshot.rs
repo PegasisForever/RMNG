@@ -94,10 +94,7 @@ pub fn screenshot_jpeg(
         // 16-aligned (real stride ≠ width·4), and importing the dmabuf with a fabricated
         // width·4 stride reads the frame skewed / rejects the import outright, so the
         // screenshot fails. Mirrors the encoder's VideoMeta fix (`Encoder::push`).
-        let vfmt = match fourcc_str(fourcc).as_str() {
-            "AB24" | "XB24" => gstreamer_video::VideoFormat::Rgba,
-            _ => gstreamer_video::VideoFormat::Bgra, // AR24/XR24 (ARGB/xRGB) and default
-        };
+        let vfmt = crate::encode::FRAME_FORMAT;
         let (offsets, strides) = meta_layout(w, planes);
         let _ = gstreamer_video::VideoMeta::add_full(
             b,
@@ -137,7 +134,6 @@ pub fn screenshot_jpeg(
 /// a JPEG records the matrix, so both ends have to agree by construction).
 pub fn screenshot_jpeg_shm(
     fd: OwnedFd,
-    fourcc: u32,
     w: u32,
     h: u32,
     planes: &[wire::socket::PlaneLayout],
@@ -157,7 +153,7 @@ pub fn screenshot_jpeg_shm(
     let appsink =
         pipeline.by_name("out").context("appsink")?.downcast::<AppSink>().map_err(|_| anyhow!("not appsink"))?;
 
-    let vfmt = crate::encode::video_format_for(fourcc);
+    let vfmt = crate::encode::FRAME_FORMAT;
     appsrc.set_caps(Some(
         &gst::Caps::builder("video/x-raw")
             .field("format", vfmt.to_str().as_str())

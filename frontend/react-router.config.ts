@@ -1,7 +1,7 @@
 import type { Config } from "@react-router/dev/config";
 
 export default {
-  // Server-side rendering: the dashboard loader returns the current state on
-  // first paint; the client then patches it live over SSE.
+  // No server-side rendering: the build is a static single-page app that the
+  // control-server serves. The dashboard gets its state over SSE.
   ssr: false,
 } satisfies Config;

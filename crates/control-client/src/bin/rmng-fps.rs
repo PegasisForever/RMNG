@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     let host = if host.contains(':') {
         host
     } else {
-        format!("{host}:9000")
+        format!("{host}:{}", wire::PORT_WEB)
     };
     let monitor: u32 = args
         .next()

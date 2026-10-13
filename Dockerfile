@@ -69,7 +69,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # and must not have these binaries (see docs/PROXMOX-LXC.md §1c).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+      gstreamer1.0-plugins-base gstreamer1.0-plugins-bad \
       libva2 libva-drm2 va-driver-all libdrm2 \
       ca-certificates samba openssh-server zfsutils-linux \
  && rm -rf /var/lib/apt/lists/*

@@ -103,11 +103,10 @@ The wizard walks three things:
    reachable, **control-server container** detected (info; absence = dev mode), **clone media
    socket mount** present (`/srv/rmng-sock`), **GPU render node** `/dev/dri/renderD128`
    present. Required rows must pass to proceed.
-2. **Server settings** — the one-time `docker.subnet` (IPv4 CIDR, validated `/16`–`/24`,
-   default `10.99.0.0/24`), `docker.hostnamePrefix` (e.g. `pega-`), monitor layout, listen
-   ports, and per-clone limits (`docker.cloneCpus`, `docker.cloneMemoryMb`).
-3. **Finish** — latches `setupComplete: true`, which is where the lazy `rmng` bridge network
-   is first materialized (`.1` gateway, `.2` control-server, `.10+` clone pool).
+2. **Server settings** — the clone hostname prefix (`docker.hostnamePrefix`, e.g. `pega-`),
+   the monitor layout, and the per-clone limits (`docker.cloneCpus`, `docker.cloneMemoryMb`).
+3. **Finish** — sets `setupComplete: true` and creates the `rmng` bridge network. Docker
+   gives each container its address on that network.
 
 Afterward, use **Settings** to create presets (Linear key + labels + env vars), Claude and Codex
 settings and account pools, and monitor layouts. Accounts themselves are imported from
@@ -390,7 +389,7 @@ Four consequences worth knowing:
 
 Every clone runs a real `sshd` on `:22` (internal `rmng` network only — never host-published).
 The control-server runs a locked-down, jump-only bastion `sshd` on host port **2222**
-(`listen.bastion`, see [PROTOCOL.md](PROTOCOL.md)), reusing the existing `rmng` account, that
+(the constant `wire::PORT_BASTION`), reusing the existing `rmng` account, that
 forwards only to live clones' `:22`. There is no separate SSH login/account model to manage —
 one public key list, installed on both the bastion and every clone.
 
@@ -512,7 +511,7 @@ feeding one runtime stage:
 | Stage | Produces |
 | --- | --- |
 | `bun-build` | the frontend (`frontend/build/client`) |
-| `rust-build` | `clone-daemon` + `control-server` (`cargo build --release`) |
+| `rust-build` | `clone-daemon` + `control-server` + the `rmng` CLI (`cargo build --release`) |
 | `runtime` | `ubuntu:26.04` + GStreamer/VA runtime + the payloads below |
 
 - **Rebuilds are cached and stage-independent** — the stages share no dependencies, so a
@@ -558,7 +557,7 @@ Chrome and decodes with WebCodecs, so any machine with Chrome can show it.
 | --- | --- | --- |
 | **viewer** (`frontend/app/viewer/*`, `routes/viewer.tsx`) | `cd frontend && bun test && bun run build`, then serve the build from a control-server (`cargo run -p control-server` reads `frontend/build/client`) | open `/viewer?monitor=0` in Chrome over HTTPS (or `localhost`); the stats overlay shows frame rate and delay |
 | frame rate, no browser | `cargo run -p control-client --bin rmng-fps -- <host>[:port] [monitor]` | frames, keyframes and megabits per second for one monitor of the *selected clone*, read from the `/api/viewer` WebSocket without decoding |
-| **frontend** | `cd frontend && bun run dev` | Vite dev server + HMR; proxies `/api` + `/events` to a running backend |
+| **frontend** | `cd frontend && bun run dev` | Vite dev server + HMR for the pages only. It has no proxy, so the API and the viewer do not work there; to test them, `bun run build` and `cargo run -p control-server` |
 | **`wire`** types / DTOs | `cargo test -p wire` | compiles + regenerates the frontend's ts-rs types |
 | pure logic in **any** crate | `cargo build -p <crate>` · `cargo test -p <crate>` | the whole workspace compiles locally, so the compiler + unit tests are a local loop |
 
@@ -573,8 +572,8 @@ Two options for exercising the full clone/capture/encode path against a local Do
   checkout on the GPU host. It runs in **dev mode** — no self-container, so it uses the `rmng`
   bridge **gateway `.1`** as its control IP and talks to the local daemon at
   `/var/run/docker.sock`. For clone provisioning to work, stage the payloads into
-  `crates/control-server/embedded-bin/` (gitignored) and either `bun run build` the frontend
-  (so `frontend/build/client` resolves) or run `bun run dev`. `config.json` + `data/` are
+  `crates/control-server/embedded-bin/` (gitignored) and `bun run build` the frontend
+  (so `frontend/build/client` resolves). `config.json` + `data/` are
   CWD-relative. The expected hashes are pinned once at server start (see the dev caveat in
   [Upgrades](#upgrades)) — restart the dev server after restaging `embedded-bin/`.
 
@@ -646,7 +645,8 @@ These are baked into the code/scripts now; listed so they aren't re-discovered.
 
 1. **`gstreamer1.0-va` is not a package** on 24.04/26.04 — the `va` elements
    (`vah264enc`/`vapostproc`) live in **`gstreamer1.0-plugins-bad`**; `gstreamer1.0-vaapi` is
-   the unrelated legacy plugin. The runtime image installs `-bad` (+ `-good` for `pngenc`).
+   the unrelated legacy plugin. The runtime image installs `-bad`. Screenshots are JPEG,
+   made in the clone, so the server needs no PNG encoder.
 2. **The DRM modifier is pinned** to the W6800 tiled modifier validated on 26.04's mesa → use
    the 26.04 base (proper PipeWire modifier negotiation is a tracked follow-up). On 24.04 the
    capture path fails with `no more input formats`.

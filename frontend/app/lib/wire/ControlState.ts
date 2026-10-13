@@ -5,7 +5,6 @@ import type { Clone } from "./Clone";
 import type { CloneGroup } from "./CloneGroup";
 import type { CloneTokens } from "./CloneTokens";
 import type { CodexResetMark } from "./CodexResetMark";
-import type { MonitorSpec } from "./MonitorSpec";
 import type { Operation } from "./Operation";
 
 /**
@@ -16,7 +15,7 @@ export type ControlState = {
  * Id of the clone that should be displayed. May be absent or point at a clone
  * not in the list; consumers must tolerate both.
  */
-selected: string | null, monitors: Array<MonitorSpec>, 
+selected: string | null, 
 /**
  * Name of the active layout preset (mirrored from config so the sidebar switcher
  * updates live over `/events`). Empty when no presets exist.

@@ -148,7 +148,7 @@ export const LongTitleAndDescription: Story = {
     clone: makeCloneWorking({
       linearTicket: "WE-1042",
       displayName:
-        "Investigate and fix the intermittent WebRTC reconnection storm when a clone's headless GNOME session restarts under sustained 4:4:4 encode load",
+        "Investigate and fix the intermittent WebRTC reconnection storm when a clone's headless GNOME session restarts under sustained encode load",
     }),
     stats: stats[cloneWorking.id],
   },

@@ -1641,13 +1641,13 @@ async fn config_get(State(app): State<App>) -> Json<AppConfigRedacted> {
     Json(app.config().redacted())
 }
 
-/// `PUT /api/config` — merge a partial update, persist (0600), apply live. The
-/// response reports whether the change touched a restart-required setting so the UI
-/// can prompt for a restart.
+/// `PUT /api/config` — merge a partial update, persist (0600), apply live. The response
+/// carries the merged config and, when finishing setup could not ensure the `rmng`
+/// network, a warning to show.
 async fn config_put(
     State(app): State<App>,
     Json(incoming): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<ConfigPutResponse>, (StatusCode, String)> {
     let old = app.config();
     let touches_groups = incoming.get("groups").is_some();
     let merged = config::merge_update(&old, incoming)
@@ -1754,15 +1754,10 @@ async fn config_put(
             crate::mediaplane::apply_active_layout(&app, &id);
         }
     }
-    let resp = ConfigPutResponse {
+    Ok(Json(ConfigPutResponse {
         config: merged.redacted(),
-    };
-    let mut body = serde_json::to_value(&resp)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if let (Some(obj), Some(w)) = (body.as_object_mut(), network_warning) {
-        obj.insert("networkWarning".into(), json!(w));
-    }
-    Ok(Json(body))
+        network_warning,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -3203,35 +3198,6 @@ PLAIN=plainvalue
 
         // A body with no XML at all still names the status rather than saying nothing.
         assert!(relay_failure(500, "").contains("500"));
-    }
-
-    /// One multipart body, in the shape the browser's `FormData` produces. reqwest is built
-    /// without its `multipart` feature here, and hand-rolling it also pins the exact field
-    /// names the frontend sends.
-    fn multipart(text: &[(&str, &str)], file: Option<(&str, &[u8])>) -> (String, Vec<u8>) {
-        let boundary = "----rmngtestboundary";
-        let mut body: Vec<u8> = Vec::new();
-        for (name, value) in text {
-            body.extend_from_slice(
-                format!(
-                    "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
-                )
-                .as_bytes(),
-            );
-        }
-        if let Some((filename, bytes)) = file {
-            body.extend_from_slice(
-                format!(
-                    "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
-                     filename=\"{filename}\"\r\nContent-Type: image/png\r\n\r\n"
-                )
-                .as_bytes(),
-            );
-            body.extend_from_slice(bytes);
-            body.extend_from_slice(b"\r\n");
-        }
-        body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-        (format!("multipart/form-data; boundary={boundary}"), body)
     }
 
     /// The bytes and every header reach the target unchanged. A real PUT goes to Google, so

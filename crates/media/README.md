@@ -2,7 +2,7 @@
 
 The media plane library used by [control-server](../control-server/README.md). It turns
 raw GPU frames shipped by the clones into **H.264 for the browser viewer** and
-**still images for the desktop MCP** (ports 3/4), and routes input back. This is the
+**still images for the desktop MCP**, and routes input back. This is the
 novel, performance-critical part of `RMNG`. The control-server sends the H.264 to the
 browser over a WebSocket on port 9000, where Chrome decodes it with WebCodecs (no WebRTC).
 
@@ -21,14 +21,13 @@ clone-daemon ──dmabuf────┤                                        
 
 1. **Ingest** — listen on a host unix socket (bind-mounted into each clone). A clone's
    `clone-daemon` streams, per monitor, a `FrameMsg` (fourcc, modifier, w/h, per-plane
-   stride/offset, cursor) + dmabuf fd(s) via `SCM_RIGHTS`. The **selected** clone streams
-   continuously; others deliver a single frame on `FrameRequest` (screenshot path).
+   stride/offset, cursor) + dmabuf fd(s) via `SCM_RIGHTS`. The server turns a clone's
+   capture on (`Capture{active}`) only while a viewer watches it.
    - **Back-pressure / sync (the #1 risk)**: the daemon holds the PipeWire buffer until
      this side sends `Ack{monitor, seq}`. Use a deeper ScreenCast pool and explicit-sync
      fences (wait on the render fence before import) to avoid tearing as Mutter recycles
      buffers.
-2. **Encode (viewer)** — import each dmabuf into a VA-API surface (reuse the DRM→VAAPI
-   device-chain pattern in `../../core/src/rdp/hwdecode.rs`), VPP → NV12, H.264
+2. **Encode (viewer)** — import each dmabuf into a VA-API surface, VPP → NV12, H.264
    low-latency (no B-frames, small/zero GOP, CQP/CBR as tuned in Phase 0),
    **force-IDR on demand**. One encoder per monitor of the selected clone. Emit Annex-B
    access units tagged `{monitor_id, idr}` for the browser viewer protocol (`wire::browser`).
@@ -40,7 +39,7 @@ clone-daemon ──dmabuf────┤                                        
      make `vapostproc` convert the samples; the browser viewer supplies the missing sRGB
      transfer in its decoder config.
 3. **Encode (screenshot)** — import an on-demand dmabuf → VA download/VPP → JPEG for
-   the MCP `Screenshot` tool. Infrequent and request-driven; proven by PoC R3 (cross-
+   the MCP `Screenshot` tool. The clone-daemon calls this inside the clone. Infrequent and request-driven; proven by PoC R3 (cross-
    container dmabuf → JPEG). Optional fallback: have the daemon ship RGB for screenshots if
    GPU readback latency disappoints.
    - **Colour**: convert to `colorimetry=1:4:0:0` (full range, BT.601) before `jpegenc`, the
@@ -66,10 +65,9 @@ clone-daemon ──dmabuf────┤                                        
 
 ## Dependencies
 
-`ffmpeg-sys-the-third` / `ffmpeg-next` (VA-API H.264 encode) — or `cros-libva` for finer
-dmabuf-import / force-IDR control; `image` (PNG/JPEG for screenshots); `tokio` (sockets +
-tasks); `nix`/`sendfd` (SCM_RIGHTS fd passing); `wire`. No WebRTC/SRTP/DTLS dependency,
-which also removes the crypto-provider clash the old plan worried about.
+GStreamer (`gstreamer`, `-app`, `-base`, `-video`, `-allocators`: VA-API H.264 and JPEG
+encode), `tokio` (sockets + tasks), `nix`/`libc` (SCM_RIGHTS fd passing), `wire`. No
+WebRTC dependency.
 
 ## Tests
 

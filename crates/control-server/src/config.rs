@@ -518,11 +518,9 @@ fn validate_layout_presets(presets: &mut [wire::LayoutPreset]) -> Result<()> {
     Ok(())
 }
 
-/// Guard the effect-category invariants on a merged config. Once first-run setup has
-/// completed (`base.setup_complete`), the **one-time** field (the Docker subnet, baked into
-/// the rmng bridge at setup) can't change, and the `setupComplete` latch can't be undone. Blank-string
-/// "unchanged" fields are already collapsed by `deep_merge`, so these compare final
-/// values — a client re-sending the current value is a no-op, not an error.
+/// Guard the invariants on a merged config: once first-run setup has completed
+/// (`base.setup_complete`), the `setupComplete` latch can't be undone. A client re-sending
+/// the current value is a no-op, not an error.
 fn enforce_categories(base: &AppConfig, merged: &AppConfig) -> Result<()> {
     if base.setup_complete && !merged.setup_complete {
         bail!(

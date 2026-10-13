@@ -9,11 +9,11 @@ import type { ToBrowser } from "../lib/wire/ToBrowser";
 
 /** Byte 0 of a binary message. */
 export const KIND_VIDEO = 0;
-export const KIND_CLIPBOARD_DATA = 1;
+const KIND_CLIPBOARD_DATA = 1;
 
 export const VIDEO_HEADER_LEN = 18;
 
-export interface VideoHeader {
+interface VideoHeader {
   monitorId: number;
   /** Frame number from the monitor's encoder. */
   seq: number;

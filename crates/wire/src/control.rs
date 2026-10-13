@@ -1,19 +1,12 @@
 //! Control-plane state — broadcast over `/events` and persisted to `state.json`.
 //!
-//! The JSON shape is a **byte-for-byte superset** of the current
-//! `control-server/app/lib/types.ts` so the React frontend (and, during cutover,
-//! the legacy Rust client) keep parsing it unchanged. Note the `Clone` type mixes casing:
-//! the fields inherited from the legacy control server stay snake_case
-//! (`gdm_username`) while the server-only extras are camelCase (`claudeAccountEmail`).
+//! The TypeScript bindings in `frontend/app/lib/wire/` are generated from these types, and
+//! the `rmng` CLI parses the same JSON.
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::config::CloneGroup;
-
-fn default_rdp_port() -> u16 {
-    3389
-}
 
 /// One monitor in the global desired layout: size, position (top-left in the unified
 /// desktop, pixels) and whether it's primary. `x`/`y`/`primary` default for back-compat
@@ -129,33 +122,6 @@ pub struct RmngClone {
     /// Endpoint hostname/IP for unmanaged rows. Display-only on managed clones (it
     /// records the container name == `id`; dials resolve via Docker DNS / inspect).
     pub host: String,
-    /// Port (defaults to 3389 for the legacy RDP path).
-    #[serde(default = "default_rdp_port")]
-    pub port: u16,
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub password: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub domain: Option<String>,
-    // The two GDM fields keep snake_case JSON (legacy field names). ts-rs
-    // can't parse the combined serde attr, so pin the TS name explicitly too.
-    #[serde(
-        default,
-        rename = "gdm_username",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[ts(rename = "gdm_username")]
-    pub gdm_username: Option<String>,
-    #[serde(
-        default,
-        rename = "gdm_password",
-        skip_serializing_if = "Option::is_none"
-    )]
-    #[ts(rename = "gdm_password")]
-    pub gdm_password: Option<String>,
-
-    // --- server-only extras (camelCase) ---
     /// True for a managed clone: a Docker container whose *name equals this clone's id*
     /// backs it (every Docker call addresses it by that name — no stored container id).
     /// False is a plain unmanaged row (legacy/hand-added, deletable in the UI). Old
@@ -516,8 +482,6 @@ pub struct ControlState {
     /// not in the list; consumers must tolerate both.
     #[serde(default)]
     pub selected: Option<String>,
-    #[serde(default)]
-    pub monitors: Vec<MonitorSpec>,
     /// Name of the active layout preset (mirrored from config so the sidebar switcher
     /// updates live over `/events`). Empty when no presets exist.
     #[serde(default)]
@@ -584,14 +548,6 @@ pub struct ControlState {
     /// The JSON shape is identical either way, so no consumer can tell the difference.
     #[serde(default)]
     pub clone_tokens: std::collections::BTreeMap<String, CloneTokens>,
-}
-
-impl ControlState {
-    /// The currently selected clone, if it exists in the list.
-    pub fn selected_clone(&self) -> Option<&RmngClone> {
-        let sel = self.selected.as_deref()?;
-        self.hosts.iter().find(|h| h.id == sel)
-    }
 }
 
 // --- per-clone chat (stored at data/chats/<id>.json, not in ControlState) ---
@@ -765,22 +721,28 @@ mod tests {
 
     #[test]
     fn parses_legacy_shared_example() {
-        // The exact shape the legacy `ControlState` test used.
+        // An old `state.json`: clones carry the retired RDP keys (`port`, `username`,
+        // `password`, `domain`, `gdm_*`) and the state the retired top-level `monitors`.
+        // Serde drops them all, and the next save leaves them out.
         let json = r#"{
             "selected": "host-a",
+            "monitors": [{ "width": 1920, "height": 1080 }],
             "hosts": [
                 { "id": "host-a", "host": "10.0.0.5", "username": "user", "password": "pw" },
-                { "id": "host-b", "host": "10.0.0.6", "port": 3390, "username": "user", "password": "pw" }
+                { "id": "host-b", "host": "10.0.0.6", "port": 3390, "username": "user", "password": "pw",
+                  "domain": "d", "gdm_username": "g", "gdm_password": "gp" }
             ]
         }"#;
         let state: ControlState = serde_json::from_str(json).unwrap();
         assert_eq!(state.hosts.len(), 2);
         assert_eq!(state.selected.as_deref(), Some("host-a"));
-        assert_eq!(state.selected_clone().unwrap().host, "10.0.0.5");
-        assert_eq!(state.hosts[0].port, 3389); // default
-        assert_eq!(state.hosts[1].port, 3390);
+        assert_eq!(state.hosts[0].host, "10.0.0.5");
         assert!(state.operations.is_empty());
         assert!(state.claude_accounts.is_empty());
+        let saved = serde_json::to_string(&state).unwrap();
+        for key in ["\"port\"", "\"username\"", "\"password\"", "\"domain\"", "gdm_", "\"monitors\""] {
+            assert!(!saved.contains(key), "{key} came back: {saved}");
+        }
     }
 
     #[test]
@@ -801,18 +763,6 @@ mod tests {
         assert_eq!(state.hosts.len(), 2);
         assert!(!state.hosts[0].managed);
         assert!(!state.hosts[1].managed);
-    }
-
-    #[test]
-    fn ts_binding_keeps_gdm_snake_case() {
-        // Guards the ts-rs quirk: the gdm_* fields must stay snake_case in the
-        // generated TS so the frontend reads the same keys the server emits.
-        let d = <RmngClone as ts_rs::TS>::decl();
-        assert!(d.contains("gdm_username"), "binding lost gdm_username: {d}");
-        assert!(
-            !d.contains("gdmUsername"),
-            "binding camelCased gdm_username: {d}"
-        );
     }
 
     #[test]
@@ -889,7 +839,6 @@ mod tests {
         let h = RmngClone {
             id: "h".into(),
             host: "1.2.3.4".into(),
-            port: 3389,
             claude_account_email: Some("a@b.c".into()),
             codex_account_email: Some("z@openai.com".into()),
             codex_group: Some("team".into()),
@@ -926,13 +875,6 @@ mod tests {
     fn controlstate_roundtrip_camelcase() {
         let st = ControlState {
             selected: Some("h".into()),
-            monitors: vec![MonitorSpec {
-                width: 1920,
-                height: 1080,
-                x: 0,
-                y: 0,
-                primary: true,
-            }],
             claude_accounts: vec![ClaudeUsage {
                 id: "a@b|org".into(),
                 email: "a@b".into(),

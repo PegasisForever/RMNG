@@ -12,10 +12,6 @@ id: string,
  */
 host: string, 
 /**
- * Port (defaults to 3389 for the legacy RDP path).
- */
-port: number, username: string, password: string, domain: string | null, gdm_username: string | null, gdm_password: string | null, 
-/**
  * True for a managed clone: a Docker container whose *name equals this clone's id*
  * backs it (every Docker call addresses it by that name — no stored container id).
  * False is a plain unmanaged row (legacy/hand-added, deletable in the UI). Old

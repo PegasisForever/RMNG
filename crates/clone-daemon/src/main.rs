@@ -1,15 +1,12 @@
 //! `clone-daemon` (Phase 3) — the thin in-clone capture + input pipe.
 //!
-//! Three run modes:
+//! Two run modes:
 //!   - `--session-holder` → **holder**: own the clone's Mutter sessions, virtual monitors,
 //!     input injection and clipboard, and hold them across daemon restarts (see [`holder`]).
 //!   - `RMNG_SOCKET=<path>` → **shipping**: connect to control-server's media
 //!     socket, ship each monitor's dmabuf (FrameMsg + fds via SCM_RIGHTS), and
 //!     relay incoming input to the holder.
-//!   - otherwise → **capture self-test**: log fourcc/modifier/size + fps (cursor
-//!     nudge generates damage on the static headless desktop).
 
-mod capture;
 mod capture_pw;
 mod clipboard;
 mod holder;
@@ -24,7 +21,7 @@ mod windows;
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -33,7 +30,6 @@ use wire::socket::{
     CursorMeta, CursorShape, DaemonMsg, FrameMsg, MonitorPlacement, PlaneLayout, ServerMsg,
 };
 
-use crate::mutter::Session;
 use crate::session::Holder;
 
 /// One configured monitor: size, position (unified-desktop px) + primary flag.
@@ -131,59 +127,23 @@ async fn main() -> Result<()> {
 
     let monitors = parse_monitors(std::env::var("RMNG_MONITORS").ok());
     let sizes: Vec<(u32, u32)> = monitors.iter().map(|m| (m.w, m.h)).collect();
-    let socket = std::env::var("RMNG_SOCKET").ok();
-    let holder_mode = std::env::args().any(|a| a == "--session-holder");
-
-    // Client-drawn cursor is the default for shipping: capture in cursor-mode
-    // METADATA (cursor out-of-band via SPA_META_Cursor, read by the raw-PW path)
-    // so the viewer draws it locally. RMNG_EMBEDDED_CURSOR=1 forces the
-    // GStreamer/embedded-cursor path (cursor composited into the frame). The
-    // standalone capture self-test always uses embedded (GStreamer).
-    //
-    // `!holder_mode` on that last clause is load-bearing. The holder has no `RMNG_SOCKET`
-    // either, its unit carrying only `WAYLAND_DISPLAY`, so reading a missing socket as "this
-    // is the self-test" made every session it built composite the cursor into the frame. The
-    // viewer then showed a painted-on pointer next to the real one and had no shape to apply
-    // to its own. Set `RMNG_EMBEDDED_CURSOR` on BOTH units to force embedding: the holder
-    // picks the session's cursor mode and the daemon picks the matching capture path.
-    let embedded =
-        std::env::var("RMNG_EMBEDDED_CURSOR").is_ok() || (socket.is_none() && !holder_mode);
-    let cursor_mode = if embedded {
-        mutter::CURSOR_MODE_EMBEDDED
-    } else {
-        mutter::CURSOR_MODE_METADATA
-    };
     // The holder never touches GStreamer (Mutter session + zbus/gdbus only): skip the
     // ~200ms-warm/~1s-cold init so boot reaches the session build sooner.
-    if holder_mode {
+    if std::env::args().any(|a| a == "--session-holder") {
         tracing::info!(?sizes, "clone-daemon: session-holder mode");
-        return holder::run(monitors, cursor_mode).await;
+        return holder::run(monitors).await;
     }
-    match socket {
-        Some(path) => {
-            // Connect to the media socket FIRST (retrying while it's unavailable), THEN
-            // reach the holder — so a down/restarting control-server costs nothing but this
-            // cheap retry loop. On a later disconnect we exit and systemd restarts us back
-            // into it.
-            let t0 = std::time::Instant::now();
-            let transport = connect_retry(&path).await;
-            tracing::info!("daemon boot: media socket took {:?}", t0.elapsed());
-            let holder = Holder::connect().await?;
-            tracing::info!("daemon boot: holder connect took {:?} total", t0.elapsed());
-            run_shipping(holder, transport, &path, embedded).await
-        }
-        None => {
-            // Self-test captures through the embedded GStreamer path: init stays.
-            gstreamer::init().context("gstreamer init")?;
-            tracing::info!(?sizes, embedded, "clone-daemon: setting up Mutter session");
-            let session = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
-            tracing::info!(
-                "session ready: {} virtual monitor(s)",
-                session.monitors.len()
-            );
-            run_capture_test(session).await
-        }
-    }
+    let path = std::env::var("RMNG_SOCKET")
+        .context("RMNG_SOCKET is not set (run with it, or with --session-holder)")?;
+    // Connect to the media socket FIRST (retrying while it's unavailable), THEN reach the
+    // holder — so a down/restarting control-server costs nothing but this cheap retry loop.
+    // On a later disconnect we exit and systemd restarts us back into it.
+    let t0 = std::time::Instant::now();
+    let transport = connect_retry(&path).await;
+    tracing::info!("daemon boot: media socket took {:?}", t0.elapsed());
+    let holder = Holder::connect().await?;
+    tracing::info!("daemon boot: holder connect took {:?} total", t0.elapsed());
+    run_shipping(holder, transport, &path).await
 }
 
 /// Connect to the media socket, retrying every second until it's reachable (the
@@ -217,7 +177,6 @@ async fn run_shipping(
     holder: Holder,
     transport: Arc<transport::Transport>,
     socket_path: &str,
-    embedded: bool,
 ) -> Result<()> {
     let holder = Arc::new(holder);
     let clone_id = std::env::var("RMNG_CLONE_ID")
@@ -238,10 +197,7 @@ async fn run_shipping(
     tracing::info!("connected to media socket {socket_path} as clone '{clone_id}'");
     // After the Hello send, not before it: no capture can start before the server
     // sees this Hello and asks for it — sequential message processing guarantees that.
-    // Unconditional: the MCP `screenshot` tool encodes via `media` (GStreamer) on every
-    // clone, while only the embedded-cursor capture path uses GStreamer. Gating init on
-    // `embedded` saved ~190ms on raw-PW clones but left screenshots panicking with
-    // "GStreamer has not been initialized".
+    // The MCP `screenshot` tool encodes via `media` (GStreamer).
     gstreamer::init().context("gstreamer init")?;
 
     // Latest captured dmabuf per monitor, refreshed by the capture callbacks below; the
@@ -285,7 +241,7 @@ async fn run_shipping(
                         holder.send(ToHolder::SetLayout { monitors })
                     }
                     Ok(ServerMsg::Capture { active }) => capture_ctl.set_wanted(active),
-                    Ok(_) => {} // Subscribe/FrameRequest — not used by the daemon
+                    Ok(ServerMsg::Unknown) => {} // a newer server's message
                     Err(e) => {
                         // The control-server went away (e.g. it restarted). Exit so systemd
                         // restarts us and we reconnect — capture and shipping are useless
@@ -338,10 +294,7 @@ async fn run_shipping(
         });
     }
 
-    tracing::info!(
-        "shipping from the session holder ({}) …",
-        if embedded { "embedded cursor" } else { "client cursor / raw-PW" }
-    );
+    tracing::info!("shipping from the session holder …");
 
     // Control loop. Two things drive it: the holder announcing a generation of monitors, and
     // capture going on or off. Each generation gets its own capture set, and the previous one
@@ -377,14 +330,9 @@ async fn run_shipping(
                 }
                 let run = wanted || wake_until.is_some();
                 if run && capture.is_empty() && !monitors.is_empty() {
-                    match start_captures(&monitors, embedded, &transport, &latest, &in_flight) {
-                        Ok(started) => {
-                            capture = started;
-                            capture_ctl.set_running(true);
-                            tracing::info!("capture resumed on {} monitor(s)", capture.len());
-                        }
-                        Err(e) => tracing::error!("capture failed to resume: {e:#}"),
-                    }
+                    capture = start_captures(&monitors, &transport, &latest, &in_flight);
+                    capture_ctl.set_running(true);
+                    tracing::info!("capture resumed on {} monitor(s)", capture.len());
                 } else if !run && !capture.is_empty() {
                     stop_all(&mut capture, &in_flight);
                     capture_ctl.set_running(false);
@@ -448,13 +396,7 @@ async fn run_shipping(
         // its Ack dropped, and that monitor frozen after one frame.
         let mut new_capture = HashMap::new();
         if wanted || wake_until.is_some() {
-            match start_captures(&monitors, embedded, &transport, &latest, &in_flight) {
-                Ok(started) => new_capture = started,
-                Err(e) => {
-                    tracing::error!("capture failed to start for generation {announced}: {e:#}");
-                    continue;
-                }
-            }
+            new_capture = start_captures(&monitors, &transport, &latest, &in_flight);
         } else {
             // Not capturing this generation, so no monitor has a gate. Clearing them keeps a
             // stale Ack from clearing a gate that a later resume will hand to a new thread.
@@ -474,7 +416,7 @@ async fn run_shipping(
         // swap waits on this before it drops the old session, and a clone nobody is watching
         // still has to finish a layout change.
         holder.send(ToHolder::CaptureReady { generation: announced });
-        // Report the applied layout so the viewer routes cross-window drags against it.
+        // Report the monitor set, so the server drops the encoders of monitors that are gone.
         let layout: Vec<MonitorPlacement> = monitors.iter().map(|m| m.placement()).collect();
         transport.send(&DaemonMsg::Layout { monitors: layout }, &[])?;
         tracing::info!(
@@ -499,38 +441,29 @@ async fn sleep_until_opt(deadline: Option<tokio::time::Instant>) {
     }
 }
 
-/// Start capture for every monitor and publish their 1-deep gates. On failure nothing is
-/// left running: a half-started set would ship some monitors and freeze others.
+/// Start capture for every monitor and publish their 1-deep gates.
 fn start_captures(
     monitors: &[HolderMonitor],
-    embedded: bool,
     transport: &Arc<transport::Transport>,
     latest: &mcp::LatestFrames,
     in_flight: &Arc<std::sync::Mutex<HashMap<u32, Arc<AtomicBool>>>>,
-) -> Result<HashMap<u32, CaptureHandle>> {
+) -> HashMap<u32, CaptureHandle> {
     let mut started: HashMap<u32, CaptureHandle> = HashMap::new();
     let mut gates: HashMap<u32, Arc<AtomicBool>> = HashMap::new();
     for mon in monitors {
         let gate = Arc::new(AtomicBool::new(false));
         gates.insert(mon.monitor_id, gate.clone());
-        match spawn_capture_for(mon, embedded, transport.clone(), latest.clone(), gate) {
-            Ok(h) => {
-                started.insert(mon.monitor_id, h);
-            }
-            Err(e) => {
-                for (_, h) in started.drain() {
-                    stop_capture(h);
-                }
-                return Err(e);
-            }
-        }
+        started.insert(
+            mon.monitor_id,
+            spawn_pw_monitor(mon, transport.clone(), gate, latest.clone()),
+        );
     }
     let mut live = in_flight.lock().unwrap();
     for (_, f) in live.drain() {
         f.store(true, Ordering::Relaxed); // close old gates → old capture stops shipping
     }
     *live = gates;
-    Ok(started)
+    started
 }
 
 /// Stop every running capture and drop the gates with them.
@@ -544,84 +477,23 @@ fn stop_all(
     in_flight.lock().unwrap().clear();
 }
 
-/// A running capture for one monitor, in whichever backend `embedded` selects. Held so it
-/// stays alive; `stop_capture` tears it down on a session swap or when the server says
-/// nobody is watching this clone.
-enum CaptureHandle {
-    /// Embedded-cursor path: the GStreamer pipeline (drop / set-NULL to stop).
-    Gst(gstreamer::Pipeline),
-    /// Raw-PipeWire path: the capture thread's shipping stop flag, plus the channel that
-    /// ends its mainloop and so disconnects from the node.
-    Pw(Arc<AtomicBool>, pipewire::channel::Sender<()>),
+/// A running capture for one monitor. Held so it stays alive; `stop_capture` tears it down
+/// on a session swap or when the server says nobody is watching this clone.
+struct CaptureHandle {
+    /// The capture thread's shipping stop flag.
+    stop: Arc<AtomicBool>,
+    /// Ends the capture thread's mainloop, and so disconnects from the node.
+    quit: pipewire::channel::Sender<()>,
 }
 
 /// Tear down one capture, all the way to disconnecting from the node.
 ///
-/// Both halves matter for the Pw arm. The flag stops frames reaching the socket at once,
-/// and the channel ends the mainloop so the stream disconnects — a consumer that stays
-/// connected keeps Mutter painting the monitor whether or not we read the frames.
+/// Both halves matter. The flag stops frames reaching the socket at once, and the channel
+/// ends the mainloop so the stream disconnects — a consumer that stays connected keeps
+/// Mutter painting the monitor whether or not we read the frames.
 fn stop_capture(h: CaptureHandle) {
-    use gstreamer::prelude::ElementExt;
-    match h {
-        CaptureHandle::Gst(p) => {
-            let _ = p.set_state(gstreamer::State::Null);
-        }
-        CaptureHandle::Pw(flag, quit) => {
-            flag.store(true, Ordering::Relaxed);
-            let _ = quit.send(());
-        }
-    }
-}
-
-/// Spawn the capture for one monitor on the backend `embedded` selects, gated by `gate`
-/// (1-deep ack flow control). Used at startup and by `reconfigure` for the new session.
-fn spawn_capture_for(
-    mon: &HolderMonitor,
-    embedded: bool,
-    transport: Arc<transport::Transport>,
-    latest: mcp::LatestFrames,
-    gate: Arc<AtomicBool>,
-) -> Result<CaptureHandle> {
-    if embedded {
-        let (mid, (mw, mh)) = (mon.monitor_id, (mon.width, mon.height));
-        let seq = Arc::new(AtomicU64::new(0));
-        let p = capture::start_capture(mon.node_id, move |frame| {
-            if gate.swap(true, Ordering::Relaxed) {
-                return;
-            }
-            let n = seq.fetch_add(1, Ordering::Relaxed);
-            ship_frame(
-                &transport,
-                mid,
-                mw,
-                mh,
-                n,
-                frame.fourcc,
-                frame.modifier,
-                frame.width,
-                frame.height,
-                &frame.planes,
-                &frame.fds,
-                // The GStreamer backend pins DMABuf caps, so its frames are never shm.
-                false,
-            );
-            store_latest(
-                &latest,
-                mid,
-                frame.fourcc,
-                frame.modifier,
-                frame.width.min(mw),
-                frame.height.min(mh),
-                &frame.planes,
-                &frame.fds,
-                false,
-            );
-        })?;
-        Ok(CaptureHandle::Gst(p))
-    } else {
-        let (stop, quit) = spawn_pw_monitor(mon, transport, gate, latest);
-        Ok(CaptureHandle::Pw(stop, quit))
-    }
+    h.stop.store(true, Ordering::Relaxed);
+    let _ = h.quit.send(());
 }
 
 /// Ship one captured frame as `DaemonMsg::Frame` + its fds (SCM_RIGHTS). `shm` marks the
@@ -704,15 +576,14 @@ fn store_latest(
 /// Spawn the raw-PipeWire capture for one monitor on its own thread (the pw
 /// mainloop is blocking + `!Send`). Ships frames (ack-gated) + cursor metadata.
 ///
-/// Returns the shipping stop flag plus a channel that ends the mainloop. The flag stops
-/// frames reaching the socket; only the channel disconnects from the node, which is what
-/// makes Mutter stop painting.
+/// The returned handle's flag stops frames reaching the socket; only its channel
+/// disconnects from the node, which is what makes Mutter stop painting.
 fn spawn_pw_monitor(
     mon: &HolderMonitor,
     transport: Arc<transport::Transport>,
     gate: Arc<AtomicBool>,
     latest: mcp::LatestFrames,
-) -> (Arc<AtomicBool>, pipewire::channel::Sender<()>) {
+) -> CaptureHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let (quit_tx, quit_rx) = pipewire::channel::channel::<()>();
@@ -778,7 +649,7 @@ fn spawn_pw_monitor(
                             height,
                             hotspot_x,
                             hotspot_y,
-                            rgba, // BGRA8888 premultiplied (SPA cursor); the viewer uses that memory format
+                            rgba, // BGRA8888, premultiplied alpha (the SPA cursor bitmap)
                         });
                 // Passive capture echo (the user's own / app cursor); not a warp.
                 let hidden = c.hidden == Some(true);
@@ -799,45 +670,8 @@ fn spawn_pw_monitor(
             }
         })
         .expect("spawn pw-capture thread");
-    (stop, quit_tx)
-}
-
-/// Standalone capture self-test: log first frame + fps, nudge cursor for damage.
-async fn run_capture_test(session: Session) -> Result<()> {
-    let mut pipelines = Vec::new();
-    let mut counters: Vec<(u32, Arc<AtomicU64>)> = Vec::new();
-    for mon in &session.monitors {
-        let counter = Arc::new(AtomicU64::new(0));
-        let first = Arc::new(AtomicBool::new(true));
-        let (c, f, mid) = (counter.clone(), first.clone(), mon.monitor_id);
-        let pipeline = capture::start_capture(mon.node_id, move |frame| {
-            c.fetch_add(1, Ordering::Relaxed);
-            if f.swap(false, Ordering::Relaxed) {
-                tracing::info!(
-                    "monitor {} first frame: fourcc={:#010x} modifier={:#018x} {}x{} planes={:?} fds={}",
-                    mid,
-                    frame.fourcc,
-                    frame.modifier,
-                    frame.width,
-                    frame.height,
-                    frame.planes,
-                    frame.fds.len()
-                );
-            }
-        })?;
-        pipelines.push(pipeline);
-        counters.push((mon.monitor_id, counter));
+    CaptureHandle {
+        stop,
+        quit: quit_tx,
     }
-    holder::nudge_cursor(&session);
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            for (id, c) in &counters {
-                tracing::info!("monitor {id} capture fps: {}", c.swap(0, Ordering::Relaxed));
-            }
-        }
-    });
-    tracing::info!("capturing (Ctrl-C to stop) …");
-    futures::future::pending::<()>().await;
-    Ok(())
 }

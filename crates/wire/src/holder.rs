@@ -72,15 +72,10 @@ pub struct HolderMonitor {
 }
 
 impl HolderMonitor {
-    /// The placement to report to the control-server, which the viewer routes drags against.
+    /// The entry to report to the control-server in [`crate::socket::DaemonMsg::Layout`].
     pub fn placement(&self) -> MonitorPlacement {
         MonitorPlacement {
             id: self.monitor_id,
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-            primary: self.primary,
         }
     }
 }

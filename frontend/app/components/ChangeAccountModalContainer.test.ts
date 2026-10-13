@@ -6,9 +6,6 @@ import type { Clone } from "~/lib/types";
 const clone = (overrides: Partial<Clone> = {}): Clone => ({
   id: "h1",
   host: "h1",
-  port: 3389,
-  username: "rmng",
-  password: "rmng",
   managed: true,
   ...overrides,
 });

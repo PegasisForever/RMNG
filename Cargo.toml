@@ -30,7 +30,6 @@ serde_json = "1"
 ts-rs = { version = "10", features = ["no-serde-warnings"] }
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
-thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
@@ -38,7 +37,6 @@ futures = "0.3"
 # async / server
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
-tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
 notify = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

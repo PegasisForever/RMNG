@@ -90,7 +90,6 @@ export function BoardPane({
       {boardColumns ? (
         <Section
           title="Board columns"
-          effect="immediate"
           hint="The dashboard board's columns, left to right. Drag to reorder. Tick archive to make a column stop and keep the clones dropped into it, and start them again when they are dragged out. A clone in no column shows up in the first one."
         >
           <BoardColumnsEditor
@@ -117,7 +116,6 @@ export function LayoutPane({ draft, onDraftChange }: LayoutPaneProps) {
     <>
       <Section
         title="Layout presets"
-        effect="immediate"
         hint="Named monitor arrangements. Switch the active preset from the sidebar. Running clones reconfigure live without closing apps."
       >
         <SettingsLayoutPresets
@@ -141,7 +139,6 @@ export function PresetsPane({
       {/* The chat panel's assistant: where it is, and where it finds this server. */}
       <Section
         title="Assistant"
-        effect="immediate"
         hint="The chat panel talks to an outside assistant: a pi-web server. Each clone gets one chat there, started by its first message. The assistant controls the clone with the rmng CLI, so it needs this server's address as it can reach it (not a Tailscale name it cannot resolve)."
       >
         <Field label="Assistant URL (pi-web)">
@@ -170,7 +167,6 @@ export function PresetsPane({
           (CLAUDE.md / AGENTS.md). Kept in sync into existing clones by the reconciler. */}
       <Section
         title="Global agent prompt (all presets)"
-        effect="immediate"
         hint="General engineering guidance written to every agent's native rules file inside the clone (Claude CLAUDE.md, Codex AGENTS.md, pi AGENTS.md, a Cursor rule). Applies to all presets; edits sync into existing clones. Keep the desktop/Cursor ticket procedure OUT of this: that belongs in the assistant playbook below (the inner Cursor Claude Code reads this file and would recurse)."
       >
         <textarea
@@ -186,7 +182,6 @@ export function PresetsPane({
           assistant chat. */}
       <Section
         title="Assistant playbook (all presets)"
-        effect="immediate"
         hint="Your ticket procedure for the assistant: what to do with a ticket, and app quirks. How to drive a desktop is the assistant's own knowledge, so leave it out. Sent, with the preset's append, in the first message of each new assistant chat. Not given to Claude/Codex. A chat that already started keeps what it was sent."
       >
         <textarea
@@ -200,7 +195,6 @@ export function PresetsPane({
 
       <Section
         title="Presets"
-        effect="immediate"
         hint="A preset = Linear API key + the ticket-id prefixes (Linear team keys, e.g. DEV) that auto-select it + env vars, written to the clone's session env at creation. The key is also injected as LINEAR_API_KEY (auths the clone's `linear` MCP). Cloning from a ticket auto-picks by the ticket's team prefix (DEV-196 → DEV); other clones require an explicit pick."
       >
         <SettingsPresetList
@@ -235,7 +229,7 @@ export function LlmPane({
       {/* One pool list for both providers: members may mix Claude and Codex accounts.
           Each side rotates within its own members (Claude: 80% 5h or 95% 7d exhausts;
           Codex: 95% weekly), keeping its account otherwise to preserve prompt cache. */}
-      <Section title="Groups" effect="immediate">
+      <Section title="Groups">
         <SettingsGroupsEditor
           groups={draft.groups}
           accounts={[...rows.claude, ...rows.codex]}
@@ -324,7 +318,6 @@ export function ServerPane({
           port itself is fixed at startup and shown for reference. */}
       <Section
         title="SSH Access"
-        effect="immediate"
         hint="Paste public keys to allow `ssh -J rmng@<host>:<port> rmng@<clone>` (or the per-clone Copy SSH command button). Installed on the bastion and every clone; propagates to running clones within ~10s (or immediately on save)."
       >
         <SettingsSshSection

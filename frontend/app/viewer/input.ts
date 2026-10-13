@@ -62,6 +62,11 @@ export function toMonitor(
   };
 }
 
+/** `v` held to the pixels of an axis `size` pixels long: 0 to `size - 1`. */
+function clampPixel(v: number, size: number): number {
+  return Math.min(Math.max(v, 0), Math.max(size - 1, 0));
+}
+
 /** A drag at unclamped `origin`-monitor coords → the monitor it is over and the coords there.
  *  The point is lifted into desktop coords through the
  *  layout; dead space (a gap, or outside the desktop) pins it to the origin's edge. Null when
@@ -81,8 +86,7 @@ export function routeDrag(
       return { id: m.id, x: ux - m.x, y: uy - m.y };
     }
   }
-  const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), Math.max(max - 1, 0));
-  return { id: origin, x: clamp(mx, o.width), y: clamp(my, o.height) };
+  return { id: origin, x: clampPixel(mx, o.width), y: clampPixel(my, o.height) };
 }
 
 /** The cursor sprite as straight RGBA. The daemon sends SPA cursor bytes, which are BGRA
@@ -190,7 +194,7 @@ export function requestFullscreen() {
 const keyboard = () =>
   (navigator as Navigator & { keyboard?: { lock(): Promise<void>; unlock(): void } }).keyboard;
 
-export interface InputOptions {
+interface InputOptions {
   /** The placeholder canvas: the event target, the CSS cursor host and the pointer lock target. */
   canvas: HTMLCanvasElement;
   /** The drawn cursor (fixed position, no pointer events). */
@@ -396,8 +400,7 @@ export function attachInput(o: InputOptions): Input {
       return;
     }
     // `w` is the next monitor's first pixel (`routeDrag`), so the last one here is `w - 1`.
-    const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), max - 1);
-    send({ kind: "pointer_move", monitor_id: monitor, x: clamp(p.x, size.w), y: clamp(p.y, size.h) });
+    send({ kind: "pointer_move", monitor_id: monitor, x: clampPixel(p.x, size.w), y: clampPixel(p.y, size.h) });
   }
 
   // Buttons use mouse events: a pointer event reports a second button pressed during a first

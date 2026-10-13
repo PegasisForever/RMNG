@@ -112,7 +112,6 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 | Field | Type | Notes |
 | --- | --- | --- |
 | `selected` | `string?` | clone id shown in the viewer |
-| `monitors` | `MonitorSpec[]` | legacy field, kept for JSON back-compat; no longer populated (always `[]`) — use `activeLayout` + the config's `layoutPresets` |
 | `activeLayout` | `string` | name of the active layout preset, mirrored from config so the board rail's switcher updates over SSE |
 | `layoutPresetNames` | `string[]` | names of all layout presets, in config order — drives the board rail's preset buttons |
 | `hosts` | `Clone[]` | all registered clones (managed + unmanaged) |
@@ -130,14 +129,15 @@ existed has none, which means Claude. `ClaudeUsage` carries no tokens, only `ema
 [Accounts](#accounts-claude--codex)), the `fiveHour`/`sevenDay` windows, Claude's model-scoped
 `fable` window, `spend`, and Codex's `resetCredits`.
 
-`Clone` carries connection info (`id`, `host`, `port`, `username`, …), the `managed` flag
+`Clone` carries its `id` and `host`, the `managed` flag
 (true = a Docker container named after the clone id backs it; false = a plain unmanaged
 row), `archived` (a retained, intentionally stopped managed clone), the `source` image
 reference, the six account-binding fields (`claudeAccountEmail`/`claudeGroup`/`claudeSelection`
 and the Codex twins — see [Accounts](#accounts-claude--codex)), Linear metadata (`linearWorkspace`,
 `linearTicket`, `linearBranch`, …), the server-owned `monitorState` (`working`/`idle`/`offline`),
-and the `unread` transition marker. An old `state.json` whose clones still carry a `forwards`
-list loads; the field is ignored and dropped on the next save.
+and the `unread` transition marker. An old `state.json` that still carries retired keys
+(a clone's `forwards`, `port`, `username`, `password`, `domain` or `gdm_*`, or the top-level
+`monitors`) loads; those keys are ignored and dropped on the next save.
 `Operation` carries `id`, `kind` (clone/delete/archive/unarchive/pull/commit/update — a persisted
 legacy `"bootstrap"` op still loads, aliased onto `pull`), `target`, `source`, `status`, `step`,
 `pct`, a rolling `log`, and timestamps.

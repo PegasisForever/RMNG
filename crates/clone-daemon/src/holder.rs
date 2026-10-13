@@ -91,7 +91,7 @@ fn remember_layout(cfg: &[MonitorCfg]) {
 }
 
 /// Run the holder until the process is killed.
-pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
+pub async fn run(boot: Vec<MonitorCfg>) -> Result<()> {
     // Bind before building the session: a second holder must fail here rather than after it
     // has created a duplicate set of monitors on the desktop.
     let path = wire::holder::socket_path();
@@ -113,7 +113,7 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
         // exiting here costs a 2s systemd RestartSec and the daemon waits out the same cliff.
         let mut attempt = 0u32;
         loop {
-            match build_session(&cfg, cursor_mode).await {
+            match build_session(&cfg).await {
                 Ok(s) => break s,
                 Err(e) if attempt < 200 => {
                     attempt += 1;
@@ -243,7 +243,7 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
                             continue;
                         }
                         match swap(
-                            &mut session, &active, &mut generation, &desired, cursor_mode,
+                            &mut session, &active, &mut generation, &desired,
                             &out, &mut ready_rx, &closed_tx,
                         ).await {
                             Ok(()) => {
@@ -276,7 +276,7 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
                 // forever, stranding capture until the next layout change or restart.
                 for attempt in 1..=15u32 {
                     match swap(
-                        &mut session, &active, &mut generation, &cfg.clone(), cursor_mode,
+                        &mut session, &active, &mut generation, &cfg.clone(),
                         &out, &mut ready_rx, &closed_tx,
                     ).await {
                         Ok(()) => break,
@@ -300,16 +300,13 @@ pub async fn run(boot: Vec<MonitorCfg>, cursor_mode: u32) -> Result<()> {
 }
 
 /// Build a session for `cfg` and log what came up.
-async fn build_session(cfg: &[MonitorCfg], cursor_mode: u32) -> Result<Session> {
+async fn build_session(cfg: &[MonitorCfg]) -> Result<Session> {
     let sizes: Vec<(u32, u32)> = cfg.iter().map(|m| (m.w, m.h)).collect();
-    let session = mutter::setup_with_cursor_mode(&sizes, cursor_mode).await?;
+    let session = mutter::setup(&sizes).await?;
     if let Err(e) = session.rd.enable_clipboard(HashMap::new()).await {
         tracing::warn!("EnableClipboard failed (clipboard sync off): {e}");
     }
     tracing::info!("session ready: {} virtual monitor(s)", session.monitors.len());
-    if std::env::var_os("RMNG_NUDGE").is_some() {
-        nudge_cursor(&session);
-    }
     Ok(session)
 }
 
@@ -439,20 +436,18 @@ async fn inject_loop(
 /// set, let the daemon start capture on it, re-point input and clipboard at it, THEN stop
 /// the old session. Because the new outputs exist alongside the old until that stop,
 /// gnome-shell never sees zero monitors and windows keep their positions.
-#[allow(clippy::too_many_arguments)]
 async fn swap(
     session: &mut Session,
     active: &ActiveSession,
     generation: &mut u64,
     desired: &[MonitorCfg],
-    cursor_mode: u32,
     out: &Out,
     ready: &mut tokio::sync::mpsc::UnboundedReceiver<u64>,
     closed: &UnboundedSender<u64>,
 ) -> Result<()> {
     // 1. Build the NEW full session — its outputs appear ALONGSIDE the old.
     //    monitor_id == slot index.
-    let new = build_session(desired, cursor_mode).await?;
+    let new = build_session(desired).await?;
 
     // 2. Point input, clipboard and the MCP at the new session BEFORE dropping the old.
     //    Setting `conn` here makes this handle the sole long-lived owner of the old conn.
@@ -503,25 +498,6 @@ async fn swap(
     let _ = out.send(FromHolder::SwapDone { generation: new_gen });
     *session = new;
     Ok(())
-}
-
-/// Oscillate the pointer so the damage-driven capture emits frames (`RMNG_NUDGE=1`, for
-/// testing without a viewer). Never on in production: it would fight the operator's pointer.
-pub(crate) fn nudge_cursor(session: &Session) {
-    for m in &session.monitors {
-        let rd = session.rd.clone();
-        let stream = m.stream_path.clone();
-        let (w, h) = (m.width as f64, m.height as f64);
-        tokio::spawn(async move {
-            let mut t = 0u32;
-            loop {
-                t = t.wrapping_add(1);
-                let x = w / 2.0 + if t % 2 == 0 { 20.0 } else { -20.0 };
-                let _ = rd.notify_pointer_motion_absolute(&stream, x, h / 2.0).await;
-                tokio::time::sleep(Duration::from_millis(16)).await;
-            }
-        });
-    }
 }
 
 // --- monitor layout (Mutter DisplayConfig) ---------------------------------

@@ -224,6 +224,9 @@ That is about 8–10 weeks of work for one engineer, or less with work done in p
 
 ## Implementation rounds
 
+**Status: rounds 1–9 are done.** The browser viewer is the only viewer. The native viewers, ports 9001 and 9005,
+the server-side port forwarding and 4:4:4 encode are removed.
+
 Work happens on `main` in `/home/rmng/RMNG`. Each round is one worker agent, then one reviewer agent. The
 orchestrator commits the worker's result, and the reviewer's findings go into the next worker's task. Nothing is
 pushed or published.

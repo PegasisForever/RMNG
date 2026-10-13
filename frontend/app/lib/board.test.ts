@@ -17,9 +17,6 @@ import type { Clone } from "./types";
 const clone = (id: string, archived = false): Clone => ({
   id,
   host: "10.99.0.1",
-  port: 3389,
-  username: "pega",
-  password: "",
   managed: true,
   archived,
 });

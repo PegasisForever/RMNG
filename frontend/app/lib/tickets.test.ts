@@ -36,9 +36,6 @@ function clone(id: string, linearTicket?: string, archived = false): Clone {
   return {
     id,
     host: "10.0.0.1",
-    port: 3389,
-    username: "pega",
-    password: "",
     managed: true,
     ...(linearTicket ? { linearTicket } : {}),
     ...(archived ? { archived } : {}),

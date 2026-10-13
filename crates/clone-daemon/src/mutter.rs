@@ -12,13 +12,10 @@ use futures::StreamExt;
 use zbus::proxy;
 use zbus::zvariant::{OwnedObjectPath, Value};
 
-/// cursor-mode: 0 hidden, 1 embedded (composited into the frame), 2 metadata.
-/// v1 uses EMBEDDED (PoC-validated); local-cursor METADATA is a later refinement.
-pub const CURSOR_MODE_EMBEDDED: u32 = 1;
-/// cursor-mode METADATA: the cursor is delivered out-of-band as `SPA_META_Cursor`
-/// (position + shape bitmap) on the PipeWire buffers, NOT composited into the frame.
-/// Required by the raw-PipeWire capture (`capture_pw`) which draws the cursor
-/// client-side. GStreamer's `pipewiresrc` can't surface this metadata.
+/// cursor-mode METADATA (Mutter's values: 0 hidden, 1 embedded, 2 metadata): the cursor is
+/// delivered out-of-band as `SPA_META_Cursor` (position + shape bitmap) on the PipeWire
+/// buffers, NOT composited into the frame. The raw-PipeWire capture (`capture_pw`) reads it
+/// and the browser viewer draws the cursor.
 pub const CURSOR_MODE_METADATA: u32 = 2;
 
 #[proxy(
@@ -169,11 +166,9 @@ fn build_modes(w: u32, h: u32) -> Vec<HashMap<String, Value<'static>>> {
 }
 
 /// Create the RemoteDesktop + ScreenCast sessions, RecordVirtual one monitor per
-/// requested size, start them, and resolve each stream's PipeWire node id, with an
-/// explicit `cursor-mode` (see `CURSOR_MODE_*`). Pass `CURSOR_MODE_METADATA` to receive
-/// the cursor out-of-band via `SPA_META_Cursor` on the PipeWire buffers (the raw-PW
-/// client-cursor path); `CURSOR_MODE_EMBEDDED` composites it into the frame instead.
-pub async fn setup_with_cursor_mode(sizes: &[(u32, u32)], cursor_mode: u32) -> Result<Session> {
+/// requested size (cursor in [`CURSOR_MODE_METADATA`]), start them, and resolve each
+/// stream's PipeWire node id.
+pub async fn setup(sizes: &[(u32, u32)]) -> Result<Session> {
     let t0 = std::time::Instant::now();
     let conn = zbus::Connection::session().await.context("session bus")?;
 
@@ -198,7 +193,7 @@ pub async fn setup_with_cursor_mode(sizes: &[(u32, u32)], cursor_mode: u32) -> R
     let mut pending = Vec::new();
     for (i, (w, h)) in sizes.iter().enumerate() {
         let mut props: HashMap<&str, Value<'_>> = HashMap::new();
-        props.insert("cursor-mode", Value::from(cursor_mode));
+        props.insert("cursor-mode", Value::from(CURSOR_MODE_METADATA));
         props.insert("is-platform", Value::from(true));
         props.insert("modes", Value::new(build_modes(*w, *h)));
         let stream_path = sc_session.record_virtual(props).await.context("RecordVirtual")?;

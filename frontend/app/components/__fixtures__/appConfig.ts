@@ -72,7 +72,7 @@ export function makeSettingsDraft(
 /** The first-run wizard's form, seeded from the config above through the same function the
  *  wizard's container uses.
  *
- *  Freshly built, monitors and ports included: the Server step replaces what it is given, but
+ *  Freshly built, monitors included: the Server step replaces what it is given, but
  *  every story that drags a monitor would otherwise be dragging the next story's too. */
 export function makeSetupDraft(
   overrides: Partial<SetupDraft> = {},

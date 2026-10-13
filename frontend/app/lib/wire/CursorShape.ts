@@ -2,6 +2,7 @@
 
 export type CursorShape = { width: number, height: number, hotspot_x: number, hotspot_y: number, 
 /**
- * Raw RGBA8888, `width * height * 4` bytes.
+ * BGRA8888 with premultiplied alpha (the PipeWire cursor bitmap as Mutter sends it),
+ * `width * height * 4` bytes. The field keeps its old name.
  */
 rgba: string, };

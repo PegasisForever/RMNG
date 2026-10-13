@@ -324,9 +324,6 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     let row = RmngClone {
         id: id.clone(),
         host: id.clone(),
-        port: 3389,
-        username: "rmng".into(),
-        password: "rmng".into(),
         managed: true,
         source: Some(image_ref.clone()),
         dataset: Some(dataset),

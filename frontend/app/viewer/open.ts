@@ -2,7 +2,7 @@ import { getConfig } from "~/lib/api";
 
 /** One screen from Chrome's Window Management API (`getScreenDetails`); not in TypeScript's
  *  DOM types. Coordinates are CSS pixels in the multi-screen space. */
-export interface ScreenInfo {
+interface ScreenInfo {
   left: number;
   top: number;
   availLeft: number;
@@ -28,7 +28,7 @@ export function matchScreens<S extends ScreenInfo>(monitors: Placed[], screens: 
 
 /** The screens, or null when Chrome has no Window Management API or the operator refused it.
  *  The first call asks for the "window management" permission. */
-export async function screens(): Promise<ScreenInfo[] | null> {
+async function screens(): Promise<ScreenInfo[] | null> {
   const w = window as Window & { getScreenDetails?: () => Promise<{ screens: ScreenInfo[] }> };
   try {
     return (await w.getScreenDetails?.())?.screens ?? null;

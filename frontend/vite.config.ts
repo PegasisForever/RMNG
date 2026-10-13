@@ -5,8 +5,7 @@ import tsconfigPaths from "vite-tsconfig-paths";
 
 export default defineConfig({
   plugins: [tailwindcss(), reactRouter(), tsconfigPaths()],
-  // Match the legacy control-server port so existing clients keep working
-  // (they just swap ws:// for http://…/events). `host: true` exposes it on the
-  // LAN/tailnet during `bun run dev`.
+  // `bun run dev` serves the pages only: there is no proxy to the control-server, so the
+  // API and the viewer do not work here. `host: true` exposes it on the LAN/tailnet.
   server: { port: 9000, host: true },
 });

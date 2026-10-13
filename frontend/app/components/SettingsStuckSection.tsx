@@ -18,7 +18,7 @@ export function SettingsStuckSection({
   testMessage: string | null;
 }) {
   return (
-    <Section title="Stuck detection" effect="immediate">
+    <Section title="Stuck detection">
       <Field label="Provider">
         <DropdownSelect
           rows={[

@@ -7,7 +7,6 @@ mod account;
 mod agentlog;
 mod app;
 mod assets;
-mod boot;
 mod buildinfra;
 mod cgroup;
 mod chat;
@@ -234,84 +233,78 @@ async fn main() -> Result<()> {
     // GStreamer init MUST finish before smb/ssh (and any other child
     // spawners). Those supervisors otherwise inherit gst-plugin-scanner pipes and
     // hang media init forever — the clone socket never binds.
-    let app_for_bg = app.clone();
-    let app_for_media = app.clone();
-    boot::run_late_boot(
-        mediaplane::init,
-        move || {
-            // Boot order is LOAD-BEARING, so this is one sequential task rather than
-            // separate spawns: overlays, then the fleet.
-            //
-            // Clone containers carry `restart: no`, so nothing runs a clone until this
-            // task says so. That is the whole point — with the daemon's `unless-stopped`
-            // the clones came up before the server and bound their home mountpoint while
-            // it was still empty, and a private bind never sees the overlay that lands a
-            // moment later.
-            tokio::spawn({
-                let app = app_for_bg.clone();
-                async move {
-                    // 1. Home overlays do not survive a CT reboot (mounts, unlike
-                    //    containers). Nothing may start a clone before its home is back.
-                    home_overlay::remount_all(app.clone()).await;
-                    // 2. The fleet: every managed, non-archived clone.
-                    jobs::boot_start_fleet(&app).await;
-                    // 3. Home datasets no clone owns: fork parents deleted before their
-                    //    forks, homes a busy mount kept, leftovers of older builds. After
-                    //    this, only a delete makes an orphan, and the delete sweeps it.
-                    home_gc::boot(&app).await;
-                    // 4. Only now: the daemon no longer revives a crashed clone, so we do.
-                    jobs::crash_recovery(app).await;
-                }
-            });
-            // Background loops: the per-clone agent-state monitor poller, the one-shot
-            // clone-home sync (links data/hosts/<id> → the clone's dataset dir, archived
-            // included, so every home is browsable in one place; runs once here, the
-            // create job links eagerly and the delete job unlinks), the smbd supervisor that serves that
-            // same directory as the `clones` SMB share (port 445), so the homes are browsable over
-            // `smb://<host>/clones` too.
-            tokio::spawn(monitor::run(app_for_bg.clone()));
-            tokio::spawn(clone_reconcile::run(app_for_bg.clone()));
-            tokio::spawn(homes::sync_all(app_for_bg.clone()));
-            // Reads each clone's agent session logs through the symlinks `homes` maintains —
-            // hence spawned after it. Supplies per-clone token totals and the activity signal
-            // for agents RMNG did not launch (a human running `claude` over SSH).
-            tokio::spawn(agentlog::run_scanner(app_for_bg.clone()));
-            // Reads the same transcripts through the same symlinks, for a different reason:
-            // it keeps a distilled, greppable copy under data/ledger so a clone's work history
-            // outlives the clone. Its directory listing is also the registry of names already
-            // used, which is what stops a new clone inheriting a retired one's history.
-            tokio::spawn(ledger::run(app_for_bg.clone()));
-            // The shared pool: one dir at <homes>/.shared (daemon-visible, unlike
-            // anything under data/), bound into every clone at /shared (~/shared)
-            // from first boot (see CreateSpec::shared_dir) and served as the
-            // `shared` SMB share. Ensured here once; the bind needs no upkeep. A pool
-            // failure aborts startup: booting clones without it silently breaks the
-            // read-write-both-sides design (Docker would invent a root-owned dir).
-            if let Err(e) = shared::ensure_pool() {
-                tracing::error!(target: "shared", "ensuring the shared pool: {e:#} — aborting startup");
-                std::process::exit(1);
-            }
-            tokio::spawn(buildinfra::run(app_for_bg.clone()));
-            // Scheduled chat delivery: fires operator-queued messages once their time passes.
-            // Disk-backed, so anything that came due during a restart goes out on the first tick.
-            tokio::spawn(chat::run_scheduler(app_for_bg.clone()));
-            tokio::spawn(smb::run(app_for_bg.clone()));
-            tokio::spawn(ssh::run(app_for_bg.clone()));
-            // Claude + Codex account subsystems. Each provider runs a usage poller (which
-            // also refreshes tokens and fans any rotation out to the clones running that
-            // account) and a rotator (which re-balances group-bound clones off an exhausted
-            // account). Together they are the only thing that writes a clone's credential
-            // files — the reconciler deliberately has no token logic.
-            tokio::spawn(claude::run_poller(app_for_bg.clone()));
-            tokio::spawn(claude::run_rotator(app_for_bg.clone()));
-            tokio::spawn(codex::run_poller(app_for_bg.clone()));
-            tokio::spawn(codex::run_rotator(app_for_bg.clone()));
-        },
-        move |media_init| {
-            // Media plane: ingest clone dmabufs, VA-API encode, feed the browser viewers.
-            mediaplane::spawn(app_for_media, media_init);
-        },
-    );
+    let media_ok = mediaplane::init();
+    // Boot order is LOAD-BEARING, so this is one sequential task rather than
+    // separate spawns: overlays, then the fleet.
+    //
+    // Clone containers carry `restart: no`, so nothing runs a clone until this
+    // task says so. That is the whole point — with the daemon's `unless-stopped`
+    // the clones came up before the server and bound their home mountpoint while
+    // it was still empty, and a private bind never sees the overlay that lands a
+    // moment later.
+    tokio::spawn({
+        let app = app.clone();
+        async move {
+            // 1. Home overlays do not survive a CT reboot (mounts, unlike
+            //    containers). Nothing may start a clone before its home is back.
+            home_overlay::remount_all(app.clone()).await;
+            // 2. The fleet: every managed, non-archived clone.
+            jobs::boot_start_fleet(&app).await;
+            // 3. Home datasets no clone owns: fork parents deleted before their
+            //    forks, homes a busy mount kept, leftovers of older builds. After
+            //    this, only a delete makes an orphan, and the delete sweeps it.
+            home_gc::boot(&app).await;
+            // 4. Only now: the daemon no longer revives a crashed clone, so we do.
+            jobs::crash_recovery(app).await;
+        }
+    });
+    // Background loops: the per-clone agent-state monitor poller, the one-shot
+    // clone-home sync (links data/hosts/<id> → the clone's dataset dir, archived
+    // included, so every home is browsable in one place; runs once here, the
+    // create job links eagerly and the delete job unlinks), the smbd supervisor that serves that
+    // same directory as the `clones` SMB share (port 445), so the homes are browsable over
+    // `smb://<host>/clones` too.
+    tokio::spawn(monitor::run(app.clone()));
+    tokio::spawn(clone_reconcile::run(app.clone()));
+    tokio::spawn(homes::sync_all(app.clone()));
+    // Reads each clone's agent session logs through the symlinks `homes` maintains —
+    // hence spawned after it. Supplies per-clone token totals and the activity signal
+    // for agents RMNG did not launch (a human running `claude` over SSH).
+    tokio::spawn(agentlog::run_scanner(app.clone()));
+    // Reads the same transcripts through the same symlinks, for a different reason:
+    // it keeps a distilled, greppable copy under data/ledger so a clone's work history
+    // outlives the clone. Its directory listing is also the registry of names already
+    // used, which is what stops a new clone inheriting a retired one's history.
+    tokio::spawn(ledger::run(app.clone()));
+    // The shared pool: one dir at <homes>/.shared (daemon-visible, unlike
+    // anything under data/), bound into every clone at /shared (~/shared)
+    // from first boot (see CreateSpec::shared_dir) and served as the
+    // `shared` SMB share. Ensured here once; the bind needs no upkeep. A pool
+    // failure aborts startup: booting clones without it silently breaks the
+    // read-write-both-sides design (Docker would invent a root-owned dir).
+    if let Err(e) = shared::ensure_pool() {
+        tracing::error!(target: "shared", "ensuring the shared pool: {e:#} — aborting startup");
+        std::process::exit(1);
+    }
+    tokio::spawn(buildinfra::run(app.clone()));
+    // Scheduled chat delivery: fires operator-queued messages once their time passes.
+    // Disk-backed, so anything that came due during a restart goes out on the first tick.
+    tokio::spawn(chat::run_scheduler(app.clone()));
+    tokio::spawn(smb::run(app.clone()));
+    tokio::spawn(ssh::run(app.clone()));
+    // Claude + Codex account subsystems. Each provider runs a usage poller (which
+    // also refreshes tokens and fans any rotation out to the clones running that
+    // account) and a rotator (which re-balances group-bound clones off an exhausted
+    // account). Together they are the only thing that writes a clone's credential
+    // files — the reconciler deliberately has no token logic.
+    tokio::spawn(claude::run_poller(app.clone()));
+    tokio::spawn(claude::run_rotator(app.clone()));
+    tokio::spawn(codex::run_poller(app.clone()));
+    tokio::spawn(codex::run_rotator(app.clone()));
+    // Media plane: ingest clone dmabufs, VA-API encode, feed the browser viewers.
+    if media_ok {
+        mediaplane::spawn(app.clone());
+    }
 
     web::serve(app).await
 }

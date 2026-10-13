@@ -156,7 +156,7 @@ impl Encoder {
             // (width 1440 → a 256-byte-aligned pitch, not 1440·4), so the meta carries the
             // daemon-reported one. Without it `vapostproc` assumes width·4 and imports the
             // frame with the wrong stride (skewed video or a failed import).
-            let vfmt = video_format_for(fourcc);
+            let vfmt = FRAME_FORMAT;
             let (offsets, strides) = meta_layout(w, planes);
             let _ = gstreamer_video::VideoMeta::add_full(
                 b,
@@ -188,7 +188,7 @@ impl Encoder {
         h: u32,
         planes: &[wire::socket::PlaneLayout],
     ) -> Result<()> {
-        let vfmt = video_format_for(fourcc);
+        let vfmt = FRAME_FORMAT;
         {
             let mut cur = self.cur.lock().unwrap();
             if *cur != Some((fourcc, 0, w, h, true)) {
@@ -224,14 +224,10 @@ impl Drop for Encoder {
     }
 }
 
-/// The GStreamer pixel format for a DRM fourcc. Used for the `VideoMeta` on an imported
-/// dmabuf and for the caps of a system-memory frame alike.
-pub(crate) fn video_format_for(fourcc: u32) -> gstreamer_video::VideoFormat {
-    match fourcc_str(fourcc).as_str() {
-        "AB24" | "XB24" => gstreamer_video::VideoFormat::Rgba,
-        _ => gstreamer_video::VideoFormat::Bgra, // AR24/XR24 (ARGB/xRGB) and default
-    }
-}
+/// The GStreamer pixel format of every captured frame: the clone-daemon captures BGRA
+/// (DRM AR24) only. Used for the `VideoMeta` on an imported dmabuf and for the caps of a
+/// system-memory frame alike.
+pub(crate) const FRAME_FORMAT: gstreamer_video::VideoFormat = gstreamer_video::VideoFormat::Bgra;
 
 /// Wrap a memfd of raw pixels as a one-memory `GstBuffer` carrying the real plane layout.
 /// `fd` is consumed: the `GstMemory` owns it and closes it when the buffer is released.

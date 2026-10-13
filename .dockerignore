@@ -15,7 +15,7 @@ node_modules/
 **/node_modules/
 frontend/build/
 
-# Dev payload staging dir (plain clone-daemon / rmng-cli / gnome-shell.deb for
+# Dev payload staging dir (plain clone-daemon / rmng-cli for
 # `cargo run` — assets.rs's dev fallback). The image build never consumes it (payloads
 # are built in-stage), and staged binaries would add ~117MB to the context via COPY . .
 crates/control-server/embedded-bin/
@@ -29,7 +29,6 @@ crates/control-server/embedded-bin/
 # `rmng-cli` skill, so it MUST be in context.
 docs/
 !docs/CLI.md
-.superpowers/
 .claude/
 
 # Repo-root scripts. Host-only convenience wrappers (publish-server.sh,

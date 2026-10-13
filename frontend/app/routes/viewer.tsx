@@ -108,7 +108,7 @@ export default function Viewer() {
     });
     input.current = inp;
 
-    // Every server message other than video arrives here. Later rounds act on the rest.
+    // Every server message other than video arrives here.
     const onServerMessage = (msg: ToBrowser) => {
       switch (msg.t) {
         case "view_spec":

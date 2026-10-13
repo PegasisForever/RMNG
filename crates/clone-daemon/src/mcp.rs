@@ -584,7 +584,7 @@ fn screenshot_jpeg(st: &McpState, m: &Mon, vw: u32, vh: u32) -> Result<Vec<u8>, 
     // A shm frame comes from a clone with no render node, so `vapostproc` (VA-API) does not
     // exist there at all: encode on the CPU instead.
     if shm {
-        return media::screenshot_jpeg_shm(fd, fourcc, w, h, &planes, vw, vh).map_err(|e| e.to_string());
+        return media::screenshot_jpeg_shm(fd, w, h, &planes, vw, vh).map_err(|e| e.to_string());
     }
     media::screenshot_jpeg(fd, fourcc, modifier, w, h, &planes, vw, vh).map_err(|e| e.to_string())
 }

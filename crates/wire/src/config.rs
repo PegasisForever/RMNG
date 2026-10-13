@@ -630,6 +630,11 @@ pub struct AppConfigRedacted {
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ConfigPutResponse {
     pub config: AppConfigRedacted,
+    /// Set when the save finished setup but the `rmng` network could not be ensured. The
+    /// config is saved all the same; the network is ensured again on the first clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub network_warning: Option<String>,
 }
 
 /// One row of the setup wizard's environment preflight (`GET /api/setup/env`): a named

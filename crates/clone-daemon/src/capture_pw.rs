@@ -1,12 +1,11 @@
 //! Raw-PipeWire screen capture for Mutter ScreenCast nodes.
 //!
-//! Unlike the GStreamer path in `capture.rs`, this connects to the PipeWire node
-//! directly (crate `pipewire`/`libspa`) so it can read the **`SPA_META_Cursor`**
-//! buffer metadata that `pipewiresrc` doesn't surface: the cursor position and,
-//! when it changes, the cursor shape bitmap. That's the whole reason this module
-//! exists — the client draws the cursor locally instead of having Mutter
-//! composite it into the frame, so the stream must be created in cursor-mode
-//! METADATA (see `mutter::CURSOR_MODE_METADATA`).
+//! This connects to the PipeWire node directly (crate `pipewire`/`libspa`), not through
+//! GStreamer's `pipewiresrc`, so it can read the **`SPA_META_Cursor`** buffer metadata that
+//! `pipewiresrc` doesn't surface: the cursor position and, when it changes, the cursor shape
+//! bitmap. The browser viewer draws the cursor instead of having Mutter composite it into
+//! the frame, so the stream is created in cursor-mode METADATA (see
+//! `mutter::CURSOR_MODE_METADATA`).
 //!
 //! Frames are negotiated as **DMABUF** with the explicit DRM modifier the W6800
 //! offers (so the encoder can import them zero-copy), falling back to plain

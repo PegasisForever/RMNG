@@ -12,9 +12,6 @@ export function makeClone(overrides: Partial<Clone> = {}): Clone {
   return {
     id: "pega-clone-1",
     host: "10.99.0.10",
-    port: 3389,
-    username: "pega",
-    password: "",
     monitorState: "idle",
     ...overrides,
   };
@@ -90,7 +87,6 @@ export function makeCloneUnmanaged(overrides: Partial<Clone> = {}): Clone {
   return makeClone({
     id: "legacy-desktop",
     host: "192.168.1.50",
-    username: "admin",
     monitorState: "idle",
     ...overrides,
   });

@@ -23,7 +23,7 @@ use media::{Conn, Encoder, Listener};
 use wire::browser::{FromBrowser, ToBrowser, ViewContent, ViewMonitor, ViewSpec, VideoHeader};
 use wire::socket::{
     Ack, ClipboardData, ClipboardMsg, ClipboardOffer, ClipboardRequest, CursorMeta, DaemonMsg,
-    InputMsg, MonitorPlacement, ServerMsg,
+    InputMsg, ServerMsg,
 };
 
 use crate::app::App;
@@ -130,7 +130,6 @@ struct ClipState {
 }
 
 struct LatestFrame {
-    monitor_id: u32,
     fd: OwnedFd,
     fourcc: u32,
     modifier: u64,
@@ -140,6 +139,31 @@ struct LatestFrame {
     planes: Vec<wire::socket::PlaneLayout>,
     /// `fd` is a memfd of system memory, not a dmabuf: this clone has no GPU.
     shm: bool,
+}
+
+impl LatestFrame {
+    /// A copy with its own dup of the fd, so the cache keeps its own.
+    fn dup(&self) -> Option<LatestFrame> {
+        Some(LatestFrame {
+            fd: dup_owned(&self.fd)?,
+            planes: self.planes.clone(),
+            ..*self
+        })
+    }
+
+    /// Encode this frame (consumes the fd).
+    fn push_to(self, enc: &Encoder) -> Result<(), String> {
+        enc.push(
+            self.fd,
+            self.fourcc,
+            self.modifier,
+            self.width,
+            self.height,
+            &self.planes,
+            self.shm,
+        )
+        .map_err(|e| e.to_string())
+    }
 }
 
 /// Per-viewer clipboard source id. Distinct per connection so the lazy broker can
@@ -185,9 +209,6 @@ pub struct MediaHandle {
     /// monitor: each monitor's capture stream reports its own cursor, and a window shows only
     /// its own monitor's.
     cursor: Mutex<HashMap<String, HashMap<u32, CursorMeta>>>,
-    /// Each clone's reported monitor layout — replayed to a connecting viewer so it
-    /// can route cross-window drags against the real positions.
-    layout: Mutex<HashMap<String, Vec<MonitorPlacement>>>,
     /// What we last told each clone about whether anyone is watching it, so a selection
     /// change sends one message to the two clones it concerns instead of to the fleet.
     capture_gate: Mutex<HashMap<String, bool>>,
@@ -345,38 +366,23 @@ impl MediaHandle {
 /// encoder pipeline fresh — mid-stream VA-encoder resolution renegotiation is unreliable.
 type Encoders = Arc<Mutex<HashMap<u32, (Arc<Encoder>, u32, u32)>>>;
 
-/// Proof that [`init`] completed. Opaque so callers must go through [`init`]
-/// rather than inventing an “enabled” boolean.
-pub struct MediaInit {
-    enabled: bool,
-}
-
-impl MediaInit {
-    #[cfg(test)]
-    pub(crate) fn enabled_for_test(&self) -> bool {
-        self.enabled
-    }
-}
-
 /// Initialize GStreamer once. Must run **before** any
 /// background task that can spawn a child process — inherited scanner pipes
 /// otherwise hang init forever (ports never bind).
 ///
-/// Failure is non-fatal: returns a disabled token so the web API still boots.
-pub fn init() -> MediaInit {
+/// Failure is non-fatal: it returns false (call no [`spawn`]) so the web API still boots.
+pub fn init() -> bool {
     match gstreamer::init() {
-        Ok(()) => MediaInit { enabled: true },
+        Ok(()) => true,
         Err(e) => {
             tracing::error!("media init failed; no video for the viewer: {e}");
-            MediaInit { enabled: false }
+            false
         }
     }
 }
 
-pub fn spawn(app: App, init: MediaInit) {
-    if !init.enabled {
-        return;
-    }
+/// Start the media plane. Call only after [`init`] returned true.
+pub fn spawn(app: App) {
     // `spawn` is called from the async `main`, so a tokio runtime exists here; capture its
     // handle for the terminal plane's async docker calls.
     let rt_handle = tokio::runtime::Handle::current();
@@ -908,60 +914,22 @@ fn prime_viewer_video(
     monitor: u32,
 ) {
     let Some(sel) = selected else { return };
-    // Re-encode the monitor's latest frame (broadcasts via the shared encoder).
-    let frames = dup_latest_frames(handle, &sel);
-    for (mid, fd, fourcc, modifier, w, h, planes, shm) in frames {
-        if mid != monitor {
-            continue;
-        }
-        if let Some(enc) = encoder_for(encoders, viewers, mid, w, h) {
-            enc.force_idr();
-            if let Err(e) = enc.push(fd, fourcc, modifier, w, h, &planes, shm) {
-                tracing::warn!("prime re-encode failed: {e}");
-            }
+    // Re-encode the monitor's latest frame (broadcasts via the shared encoder). The `latest`
+    // lock is released at the end of this statement, before any encode.
+    let frame = handle
+        .latest
+        .lock()
+        .unwrap()
+        .get(&sel)
+        .and_then(|m| m.get(&monitor))
+        .and_then(LatestFrame::dup);
+    let Some(f) = frame else { return };
+    if let Some(enc) = encoder_for(encoders, viewers, monitor, f.width, f.height) {
+        enc.force_idr();
+        if let Err(e) = f.push_to(&enc) {
+            tracing::warn!("prime re-encode failed: {e}");
         }
     }
-}
-
-/// Duplicate the selected clone's cached latest frame per monitor (fd dup'd so the cache
-/// keeps its own) for re-encoding:
-/// (monitor_id, fd, fourcc, modifier, w, h, planes, shm).
-#[allow(clippy::type_complexity)]
-fn dup_latest_frames(
-    handle: &MediaHandle,
-    sel: &str,
-) -> Vec<(
-    u32,
-    OwnedFd,
-    u32,
-    u64,
-    u32,
-    u32,
-    Vec<wire::socket::PlaneLayout>,
-    bool,
-)> {
-    let latest = handle.latest.lock().unwrap();
-    latest
-        .get(sel)
-        .map(|m| {
-            m.values()
-                .filter_map(|f| {
-                    dup_owned(&f.fd).map(|fd| {
-                        (
-                            f.monitor_id,
-                            fd,
-                            f.fourcc,
-                            f.modifier,
-                            f.width,
-                            f.height,
-                            f.planes.clone(),
-                            f.shm,
-                        )
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// Take `sel` as the selection everyone is being shown, and report whether it changed.
@@ -1032,10 +1000,17 @@ fn reprime_all(
     for c in cached_cursors(handle, &sel) {
         broadcast(viewers, &ToBrowser::Cursor(c));
     }
-    let frames = dup_latest_frames(handle, &sel);
-    for (mid, fd, fourcc, modifier, w, h, planes, shm) in frames {
-        if let Some(enc) = encoder_for(encoders, viewers, mid, w, h) {
-            enc.push(fd, fourcc, modifier, w, h, &planes, shm).ok();
+    // Copy the frames out first: the `latest` lock is never held across an encode.
+    let frames: Vec<(u32, LatestFrame)> = handle
+        .latest
+        .lock()
+        .unwrap()
+        .get(&sel)
+        .map(|m| m.iter().filter_map(|(mid, f)| Some((*mid, f.dup()?))).collect())
+        .unwrap_or_default();
+    for (mid, f) in frames {
+        if let Some(enc) = encoder_for(encoders, viewers, mid, f.width, f.height) {
+            f.push_to(&enc).ok();
         }
     }
 }
@@ -1090,7 +1065,6 @@ fn serve_clone(
                             .insert(
                                 f.monitor_id,
                                 LatestFrame {
-                                    monitor_id: f.monitor_id,
                                     fd: dup,
                                     fourcc: f.fourcc,
                                     modifier: f.modifier,
@@ -1177,7 +1151,6 @@ fn serve_clone(
             }
             Ok((DaemonMsg::Layout { monitors: l }, _)) => {
                 if let Some(id) = clone_id.clone() {
-                    handle.layout.lock().unwrap().insert(id.clone(), l.clone());
                     if app.store.selected().as_deref() == Some(id.as_str()) {
                         // Drop encoders for monitors that no longer exist on the selected
                         // clone (added/resized ones are (re)built lazily by encoder_for on
@@ -1237,8 +1210,9 @@ fn serve_clone(
 /// `latest` is removed while the `conns` lock is still held: a new session can only prime
 /// `latest[id]` after its `Hello` inserted into `conns` (which needs this lock), so no
 /// fresh frame can appear between the identity check and either removal. No other site
-/// nests these two locks (verified: [`prime_viewer_video`] holds `latest` in a scoped
-/// block that never touches `conns`), so the conns→latest order cannot invert.
+/// nests these two locks (the frame path, [`prime_viewer_video`] and [`reprime_all`] take
+/// `latest` alone and release it before they encode), so the conns→latest order cannot
+/// invert.
 fn teardown_if_current(
     conns: &Mutex<HashMap<String, Arc<Conn>>>,
     latest: &Mutex<HashMap<String, HashMap<u32, LatestFrame>>>,

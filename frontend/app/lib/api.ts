@@ -232,9 +232,7 @@ export const getConfig = () =>
  *  patch flips `setupComplete` (wizard finish), the server also ensures the `rmng`
  *  network; a non-fatal failure rides along as `networkWarning`. */
 export const putConfig = (patch: unknown) =>
- putJson("/api/config", patch) as Promise<
-  ConfigPutResponse & { networkWarning?: string }
- >;
+ putJson("/api/config", patch) as Promise<ConfigPutResponse>;
 /** Validate a setting (e.g. `"docker"`, which re-runs the Docker self-setup probe). `value` and
  *  `model` carry what the operator has typed but not saved, so a test reports on the fields
  *  they are looking at. */

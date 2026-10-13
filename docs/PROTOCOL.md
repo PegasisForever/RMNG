@@ -148,11 +148,10 @@ a daemon older than it reads as "the holder was already running" and is left alo
 | `hello` | `{clone_id, fresh_session}` | register the clone; `fresh_session` asks for the active layout |
 | `frame` | `FrameMsg` | one captured monitor frame; dmabuf fds attached via SCM_RIGHTS |
 | `cursor` | `CursorMeta` | cursor position (+shape on change, +`warp` if MCP-driven) |
-| `layout` | `{monitors: MonitorPlacement[]}` | the actual applied monitor layout |
+| `layout` | `{monitors: MonitorPlacement[]}` | the monitors the clone has after it applies a layout (`{id}` each); the server drops the encoders of monitors that are gone |
 | `clipboard_offer` / `clipboard_request` / `clipboard_data` | resp. types | clipboard bridge |
 
-`ServerMsg` (server → daemon), serde tag `t`: `subscribe {stream:bool}` (start/stop the
-continuous feed), `frame_request {monitor_id}` (one-shot, screenshot path), `ack
+`ServerMsg` (server → daemon), serde tag `t`: `ack
 {monitor_id, seq}` (flow control — the daemon waits for the ack before the next frame),
 `input(InputMsg)`, the three `clipboard_*` messages, and `set_monitors {monitors:
 MonitorSpec[]}` — apply a layout **live**: the daemon does a make-before-break session swap
@@ -224,8 +223,8 @@ whole transfer, from `SelectionRead` to the end of the fd read.
 
 Two processes inside each headed clone. `rmng-session-holder.service` owns the Mutter
 RemoteDesktop and ScreenCast sessions, the virtual monitors, `ApplyMonitorsConfig`, input
-injection and the clipboard bridge. `rmng-clone-daemon.service` owns capture, encode,
-shipping, and the MCP on `:9004`. Both are the same binary, the holder started with
+injection and the clipboard bridge. `rmng-clone-daemon.service` owns capture, shipping,
+screenshots, and the MCP on `:9004`. Video encode runs on the control-server. Both are the same binary, the holder started with
 `--session-holder`. Source: [holder.rs](../crates/wire/src/holder.rs).
 
 **Why they are split.** Mutter destroys a RemoteDesktop session when the D-Bus connection
@@ -391,21 +390,28 @@ from `docker.clone_cpus` / `docker.clone_memory_mb`, applied at clone create —
 
 ## Environment variables
 
-**control-server:** reads **no `RMNG_*` env vars** — all config is `./config.json` in the
-working directory (the Docker image sets `WORKDIR /data`, the `rmng-data` volume). Ports,
-the clone socket and the Docker daemon socket are constants in `wire::config`. Only `RUST_LOG`
-(`info,tower_http=warn,clip=debug`) is read (a logging default baked into the image, not a
-setting).
+**control-server:** all config is `./config.json` in the working directory (the Docker
+image sets `WORKDIR /data`, the `rmng-data` volume). Ports, the clone socket and the Docker
+daemon socket are constants in `wire::config`. It reads these env vars, none of which is a
+setting:
 
-**clone-daemon:** `RMNG_SOCKET` (media socket; **absent → capture self-test mode**),
+- `RUST_LOG` — log filter; default `info,tower_http=warn,clip=debug`, also set in the image.
+- `RMNG_ENC_LATENCY` — when set, the encoder logs the time from frame push to encoded frame.
+  For measurement only.
+- `RMNG_CODEX_ACCOUNTS_FILE` — the path of the Codex account store, in place of
+  `codex-accounts.json` in the data directory. A test uses it.
+
+The ignored test `gpt_answers_the_real_question` also reads `RMNG_CODEX_AUTH` (the path of a
+Codex `auth.json`); the server does not.
+
+**clone-daemon:** `RMNG_SOCKET` (media socket; required unless `--session-holder`),
 `RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (boot-default layout CSV, below —
 corrected to the config's active layout preset by the server's `SetMonitors` on a new clone's
 first registration, and thereafter whenever the clone is the selected one),
 `RMNG_DAEMON_MCP_PORT` (`9004`), `RMNG_DESKTOP_HEIGHT` (`1080`; height of the MCP's virtual
 coordinate/screenshot space — `0` serves everything at native res; see [MCP.md](MCP.md)),
-`RMNG_EMBEDDED_CURSOR` (composite cursor into frames
-instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NUDGE`
-(oscillate cursor to force damage — test only), `RUST_LOG`.
+`RMNG_HOLDER_SOCKET` (holder socket path; default
+`$XDG_RUNTIME_DIR/rmng-session-holder.sock`), `RUST_LOG`.
 
 ---
 
@@ -413,10 +419,10 @@ instead of METADATA), `RMNG_DRM_FORMAT` (override DRM fourcc:modifier), `RMNG_NU
 
 Source: [clone-daemon/src/main.rs](../crates/clone-daemon/src/main.rs).
 
-**Shipping mode (default, no argument):** if `RMNG_SOCKET` is set, connect to the media
-socket, connect to the session holder, capture the monitors it holds, ship dmabuf frames +
-cursor, relay input to the holder, and serve the daemon MCP on `:9004`. With no socket it
-runs a capture-fps self-test on a session of its own.
+**Shipping mode (default, no argument):** connect to the media socket named by
+`RMNG_SOCKET`, connect to the session holder, capture the monitors it holds, ship dmabuf
+frames + cursor, relay input to the holder, and serve the daemon MCP on `:9004`. Without
+`RMNG_SOCKET` it exits with an error.
 
 **`--session-holder`:** run as the session holder instead. It RecordVirtuals the boot layout,
 holds it open across the daemon's restarts, and injects input and clipboard on the daemon's

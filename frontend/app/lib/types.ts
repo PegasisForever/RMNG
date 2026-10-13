@@ -8,25 +8,11 @@ import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { OperationKind } from "~/lib/wire/OperationKind";
 
-export interface MonitorSpec {
- width: number;
- height: number;
-}
-
 export interface Clone {
  /** Stable id; equals the Docker container name for a managed clone. */
  id: string;
- /** RDP server hostname or IP. */
+ /** The container name (== `id`) for a managed clone; display-only. */
  host: string;
- /** RDP server port (defaults to 3389). */
- port: number;
- username: string;
- password: string;
- domain?: string;
- gdm_username?: string;
- gdm_password?: string;
-
- // --- server-only extras (ignored by the Rust client) ---
  /**
   * True for a managed clone: a Docker container whose *name equals this clone's
   * id* backs it (no container id is stored anywhere). False/absent is a plain
@@ -178,7 +164,6 @@ export interface ClaudeUsage {
 
 export interface ControlState {
  selected: string | null;
- monitors: MonitorSpec[];
  hosts: Clone[];
  operations: Operation[];
  /** Per-account usage view (no tokens). Despite the name it carries BOTH providers' rows,
@@ -211,7 +196,6 @@ export interface ControlState {
 export function emptyState(): ControlState {
  return {
   selected: null,
-  monitors: [],
   hosts: [],
   operations: [],
   claudeAccounts: [],

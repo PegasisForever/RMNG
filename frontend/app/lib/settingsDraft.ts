@@ -229,15 +229,8 @@ function savedGroups(groups: GroupDraft[]): GroupDraft[] {
     });
 }
 
-/**
- * What a save sends. (`setupComplete` is kept as a parameter because the wizard shares the
- * save path; no field in the patch is gated on it anymore — the one-time subnet is
- * hardcoded.)
- */
-export function settingsPatch(
-  draft: SettingsDraft,
-  _setupComplete: boolean,
-): Record<string, unknown> {
+/** What a save sends. */
+export function settingsPatch(draft: SettingsDraft): Record<string, unknown> {
   const groups = savedGroups(draft.groups);
   // A preset always names a pool default: a blank (only reachable from a hand-edited
   // form) falls back to the first pool. `"none"` (any group) is a real choice, not blank.

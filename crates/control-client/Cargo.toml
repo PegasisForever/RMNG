@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Typed reqwest + SSE client for the control-server port-2 web API (rmng CLI + integration tests)."
+description = "Typed reqwest + SSE client for the control-server web API on port 9000 (rmng CLI + integration tests)."
 
 [dependencies]
 wire.workspace = true

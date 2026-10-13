@@ -125,6 +125,12 @@ Two traps here.
    `serverUrl` (this server as the assistant reaches it, here `http://10.0.0.178:9000`).
    Without them `POST /api/chat/:id` answers `409` and says which address is missing.
 
+## Watch a clone in the viewer
+
+To test the viewer on CT 101, open the dashboard over HTTPS (`tailscale serve`), or start
+Chrome with `--unsafely-treat-insecure-origin-as-secure=http://10.0.0.178:9000`. On plain
+HTTP the viewer shows a warning instead of video.
+
 ## Drive a real turn
 
 The chat panel talks to an outside assistant, not to anything inside the clone. Send

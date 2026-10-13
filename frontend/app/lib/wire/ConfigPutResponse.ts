@@ -4,4 +4,9 @@ import type { AppConfigRedacted } from "./AppConfigRedacted";
 /**
  * Response body for `PUT /api/config`: the redacted config after the merge.
  */
-export type ConfigPutResponse = { config: AppConfigRedacted, };
+export type ConfigPutResponse = { config: AppConfigRedacted, 
+/**
+ * Set when the save finished setup but the `rmng` network could not be ensured. The
+ * config is saved all the same; the network is ensured again on the first clone.
+ */
+networkWarning?: string, };

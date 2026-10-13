@@ -51,7 +51,7 @@ use wire::{EnvCheckRow, ExecResult, SetupEnv, UpdateStatus};
 // --- Constants ------------------------------------------------------------------------
 
 /// The user-defined bridge every clone (and the control-server) attaches to. Created
-/// lazily at wizard finish + before each clone; its subnet is one-time config.
+/// lazily at wizard finish + before each clone, on the fixed [`wire::DOCKER_SUBNET`].
 pub const NETWORK: &str = "rmng";
 /// The control-server's DNS alias on the [`NETWORK`] bridge. Clones use this name for the
 /// baked `RMNG_CONTROL_URL`, so the operator's container name doesn't matter and recreating
@@ -1836,9 +1836,9 @@ impl DockerCtl {
     }
 
     /// Restart our own container in place (the programmatic twin of `docker restart rmng`) —
-    /// the daemon stops+starts the same container, which re-reads config.json on boot. Used
-    /// to apply restart-required settings. The `--restart unless-stopped` policy is a backstop
-    /// if the daemon's restart is interrupted. Uses the systemd stop timeout.
+    /// the daemon stops+starts the same container. Used by `POST /api/server/restart`. The
+    /// `--restart unless-stopped` policy is a backstop if the daemon's restart is
+    /// interrupted. Uses the systemd stop timeout.
     pub async fn restart_self(&self, self_id: &str) -> Result<()> {
         let opts = bollard::query_parameters::RestartContainerOptionsBuilder::new()
             .t(STOP_TIMEOUT_SECS)

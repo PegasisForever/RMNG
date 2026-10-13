@@ -75,23 +75,19 @@ pub struct CursorShape {
     pub height: u32,
     pub hotspot_x: u32,
     pub hotspot_y: u32,
-    /// Raw RGBA8888, `width * height * 4` bytes.
+    /// BGRA8888 with premultiplied alpha (the PipeWire cursor bitmap as Mutter sends it),
+    /// `width * height * 4` bytes. The field keeps its old name.
     #[serde(with = "serde_bytes_b64")]
     #[ts(type = "string")]
     pub rgba: Vec<u8>,
 }
 
-/// One monitor's **actual** placement in the unified desktop (pixels), reported by the
-/// daemon (after it applies the configured layout) → server → viewer. The viewer routes
-/// cross-window drags against this real layout instead of assuming left-to-right.
+/// One monitor the clone actually has, reported by the daemon after it applies the
+/// configured layout. The server drops the encoders of monitors that are gone. An older
+/// daemon also sends the monitor's position and size; serde ignores those fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MonitorPlacement {
     pub id: u32,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-    pub primary: bool,
 }
 
 /// An input event to inject into a clone via Mutter RemoteDesktop.
@@ -131,18 +127,6 @@ pub mod axis_flags {
 pub struct Ack {
     pub monitor_id: u32,
     pub seq: u64,
-}
-
-/// Server → daemon: start/stop the continuous per-monitor feed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Subscribe {
-    pub stream: bool,
-}
-
-/// Server → daemon: deliver one frame on demand (screenshot path).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FrameRequest {
-    pub monitor_id: u32,
 }
 
 /// Clipboard (rich + lazy). The broker fans `Offer`s out and serves bytes on
@@ -237,8 +221,6 @@ pub enum ClipboardMsg {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ServerMsg {
-    Subscribe(Subscribe),
-    FrameRequest(FrameRequest),
     Ack(Ack),
     Input(InputMsg),
     /// Apply a new monitor layout live (no session restart, apps stay open). The daemon

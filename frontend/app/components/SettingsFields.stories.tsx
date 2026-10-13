@@ -2,7 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import { fn } from "storybook/test";
 
-import { EffectBadge, Field, Secret, Section, settingsInput } from "./SettingsFields";
+import { Field, Secret, Section, settingsInput } from "./SettingsFields";
 
 const meta = {
   title: "Settings/Components/SettingsFields",
@@ -44,23 +44,4 @@ export const SecretBeingTyped: Story = {
       </div>
     );
   },
-};
-
-/** The two effect badges, on the section header where the panel puts them. `immediate`
- *  applies on save; `one-time` was baked in at first-run setup and cannot change at all. */
-export const Effects: Story = {
-  render: () => (
-    <div className="w-[36rem] space-y-2 p-4">
-      <Section title="Layout presets" effect="immediate" hint="Applies the moment you save.">
-        <Field label="Preset name">
-          <input className={settingsInput} defaultValue="Dual 1440p" />
-        </Field>
-      </Section>
-      <Section title="Clone network subnet" effect="one-time" hint="Baked in at first-run setup.">
-        <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-          Read-only from here on <EffectBadge effect="one-time" />
-        </div>
-      </Section>
-    </div>
-  ),
 };

@@ -326,7 +326,6 @@ mod tests {
             s.hosts.push(RmngClone {
                 id: "h1".into(),
                 host: "1.2.3.4".into(),
-                port: 3389,
                 ..Default::default()
             });
             s.selected = Some("h1".into());
