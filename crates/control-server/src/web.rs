@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, DefaultBodyLimit, Multipart, Path as AxPath, State},
+    extract::{
+        ConnectInfo, DefaultBodyLimit, Multipart, Path as AxPath, Query, State,
+        ws::WebSocketUpgrade,
+    },
     http::{HeaderMap, StatusCode, header},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
@@ -48,6 +51,8 @@ pub fn router(app: App) -> Router {
         .route("/api/state", get(state_get))
         .route("/api/stats", get(stats_get))
         .route("/api/activate", post(activate))
+        // The browser viewer: one WebSocket per viewer window (see `crate::webviewer`).
+        .route("/api/viewer", get(viewer_ws))
         .route("/api/board", put(board_put))
         .route("/api/tickets/order", put(ticket_order_put))
         // Which clones the operator has silenced. A browser-notification filter, stored here so
@@ -270,6 +275,19 @@ async fn state_get(State(app): State<App>) -> Json<ControlState> {
 async fn stats_get(State(app): State<App>) -> Response {
     let (snapshot, _rx) = app.stats.subscribe();
     ([(header::CONTENT_TYPE, "application/json")], snapshot).into_response()
+}
+
+#[derive(Deserialize)]
+struct ViewerQuery {
+    monitor: u32,
+}
+
+async fn viewer_ws(
+    State(app): State<App>,
+    Query(q): Query<ViewerQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    ws.on_upgrade(move |socket| async move { crate::webviewer::serve(app, q.monitor, socket) })
 }
 
 #[derive(Deserialize)]

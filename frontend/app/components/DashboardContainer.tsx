@@ -103,6 +103,7 @@ import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { LxcStats } from "~/lib/wire/LxcStats";
+import { openViewerWindows } from "~/viewer/open";
 
 // BlockNote + the chat panel are browser-only; load them lazily and render only
 // after mount so they never participate in SSR.
@@ -764,6 +765,7 @@ export function DashboardContainer({
           presetNames: state.layoutPresetNames ?? [],
           activeLayout: state.activeLayout ?? "",
           onActivateLayout: (name) => run(activateLayout(name)),
+          onOpenViewer: () => run(openViewerWindows()),
           onOpenSettings: () => setSettingsOpen(true),
           onReplaceAccount: (account) => openImport(account),
           onRefresh: () => {

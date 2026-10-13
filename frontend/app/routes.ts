@@ -1,6 +1,10 @@
-import { type RouteConfig, index } from "@react-router/dev/routes";
+import { type RouteConfig, index, route } from "@react-router/dev/routes";
 
-// SPA mode: only the dashboard is a client route. Everything else — `/events`
-// (SSE), `/api/*`, `/uploads/*`, the MCP ports — is served by the Rust
-// control-server same-origin; the client `fetch`es / `EventSource`s them directly.
-export default [index("routes/_index.tsx")] satisfies RouteConfig;
+// SPA mode: the dashboard and the browser viewer (one window per monitor) are the
+// client routes. Everything else — `/events` (SSE), `/api/*`, `/uploads/*`, the MCP
+// ports — is served by the Rust control-server same-origin; the client `fetch`es /
+// `EventSource`s / opens WebSockets to them directly.
+export default [
+  index("routes/_index.tsx"),
+  route("viewer", "routes/viewer.tsx"),
+] satisfies RouteConfig;

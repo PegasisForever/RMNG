@@ -3,7 +3,7 @@
 // are running. Creating a clone belongs to a column, so that button lives there.
 //
 // It is the first thing in the strip and scrolls with the columns.
-import { Settings } from "lucide-react";
+import { MonitorPlay, Settings } from "lucide-react";
 import { useId } from "react";
 
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
@@ -63,6 +63,8 @@ export interface BoardRailProps {
     /** The active preset name. */
     activeLayout: string;
     onActivateLayout: (name: string) => void;
+    /** Open the browser viewer: one window per monitor of the active layout. */
+    onOpenViewer: () => void;
     onOpenSettings: () => void;
     /** Import an account from a clone that is already signed in. */
 
@@ -83,6 +85,7 @@ export function BoardRail({
     presetNames,
     activeLayout,
     onActivateLayout,
+    onOpenViewer,
     onOpenSettings,
     onReplaceAccount,
     onRefresh,
@@ -105,15 +108,26 @@ export function BoardRail({
                     >
                         RMNG Control
                     </h2>
-                    <button
-                        type="button"
-                        onClick={onOpenSettings}
-                        title="Settings"
-                        aria-label="Settings"
-                        className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
-                    >
-                        <Settings className="size-4" />
-                    </button>
+                    <div className="flex items-center">
+                        <button
+                            type="button"
+                            onClick={onOpenViewer}
+                            title="Open viewer windows"
+                            aria-label="Open viewer windows"
+                            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                        >
+                            <MonitorPlay className="size-4" />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={onOpenSettings}
+                            title="Settings"
+                            aria-label="Settings"
+                            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+                        >
+                            <Settings className="size-4" />
+                        </button>
+                    </div>
                 </div>
 
                 {presetNames.length > 0 ? (

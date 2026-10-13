@@ -10,6 +10,8 @@
 //!   monitor**, framed `[u32be monitor_id][u32be len][AnnexB]`. Viewer input
 //!   (`[u32be len][JSON InputMsg]`) is relayed to that clone.
 //! - Selection switch / viewer connect → force a fresh IDR on every encoder.
+//! - The browser viewer (`crate::webviewer`, a WebSocket on the web port) joins the same
+//!   viewer set through [`Plane`]; only its wire format differs.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -17,12 +19,13 @@ use std::net::{TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::broadcast::error::RecvError;
 
 use media::{Conn, Encoder, Listener};
 use wire::ChromaMode;
+use wire::browser::{FromBrowser, VideoHeader};
 use wire::socket::{
     Ack, ClipboardData, ClipboardMsg, ClipboardOffer, ClipboardRequest, CursorMeta, DaemonMsg,
     InputMsg, MonitorPlacement, ServerMsg,
@@ -36,7 +39,22 @@ use crate::app::App;
 /// viewer's socket never blocks the encode or metadata threads.
 pub(crate) struct ViewerConn {
     id: u64,
-    tx: SyncSender<Arc<[u8]>>,
+    tx: SyncSender<Queued>,
+}
+
+/// One message in a viewer's queue: its port-1 framing, and for video the header the browser
+/// viewer sends in front of the access unit (port 1 has no use for it). The writer of each kind
+/// of viewer turns this into its own wire format.
+#[derive(Clone)]
+pub(crate) struct Queued {
+    pub(crate) buf: Arc<[u8]>,
+    pub(crate) video: Option<VideoHeader>,
+}
+
+impl From<Arc<[u8]>> for Queued {
+    fn from(buf: Arc<[u8]>) -> Self {
+        Queued { buf, video: None }
+    }
 }
 
 /// The live set of viewers, keyed by id. Held under a short-lived lock only to
@@ -46,7 +64,7 @@ pub(crate) type Viewers = Arc<Mutex<HashMap<u64, ViewerConn>>>;
 /// Bounded per-viewer queue depth. `try_send` overflow disconnects the viewer (it
 /// reconnects + re-primes). Bounds worst-case queued memory at CAP × max-AU per slow
 /// viewer; tune here if joins on very bursty desktops need more slack.
-const VIEWER_CHAN_CAP: usize = 128;
+pub(crate) const VIEWER_CHAN_CAP: usize = 128;
 
 /// Monotonic per-process viewer id.
 fn next_viewer_id() -> u64 {
@@ -58,11 +76,11 @@ fn next_viewer_id() -> u64 {
 /// (too slow) or disconnected (writer already gone) is removed from the registry;
 /// dropping its stored `tx` lets its writer thread's channel disconnect, which tears
 /// the viewer down. Never blocks: `try_send` is non-blocking.
-fn broadcast_bytes(viewers: &Viewers, buf: &Arc<[u8]>) {
+fn broadcast_bytes(viewers: &Viewers, msg: &Queued) {
     let mut guard = viewers.lock().unwrap();
     let mut dead: Vec<u64> = Vec::new();
     for v in guard.values() {
-        if v.tx.try_send(buf.clone()).is_err() {
+        if v.tx.try_send(msg.clone()).is_err() {
             dead.push(v.id);
         }
     }
@@ -80,7 +98,7 @@ fn broadcast_bytes(viewers: &Viewers, buf: &Arc<[u8]>) {
 fn send_bytes_to(viewers: &Viewers, id: u64, buf: Arc<[u8]>) {
     let mut guard = viewers.lock().unwrap();
     if let Some(v) = guard.get(&id) {
-        if v.tx.try_send(buf).is_err() {
+        if v.tx.try_send(buf.into()).is_err() {
             guard.remove(&id);
         }
     }
@@ -160,6 +178,20 @@ pub struct MediaHandle {
     /// What we last told each clone about whether anyone is watching it, so a selection
     /// change sends one message to the two clones it concerns instead of to the fleet.
     capture_gate: Mutex<HashMap<String, bool>>,
+    /// Set once by [`spawn`]; the browser viewer's WebSocket joins through it. Unset when
+    /// media init failed, and then there is no video to watch.
+    pub(crate) plane: OnceLock<Arc<Plane>>,
+}
+
+/// What a viewer joins: the viewer set, the encoders and the terminal plane. Port 1 and the
+/// browser WebSocket share it, so both kinds of viewer get the same broadcast, priming and
+/// teardown.
+pub(crate) struct Plane {
+    viewers: Viewers,
+    encoders: Encoders,
+    termplane: Arc<crate::termplane::TermPlane>,
+    chroma: ChromaMode,
+    forward_port: u16,
 }
 
 /// The clone whose desktop is on screen right now, or `None` when nobody is looking.
@@ -361,16 +393,19 @@ pub fn spawn(app: App, init: MediaInit) {
         rt_handle.clone(),
     ));
 
+    let plane = Arc::new(Plane {
+        viewers: viewers.clone(),
+        encoders: encoders.clone(),
+        termplane: termplane.clone(),
+        chroma,
+        forward_port,
+    });
+    let _ = handle.plane.set(plane.clone());
+
     // Port 1 TCP: viewers + their input. Each viewer gets a bounded channel + a writer
     // thread; producers only `try_send`, so a slow viewer never blocks the encoders.
     {
-        let (viewers, handle, app, encoders, termplane) = (
-            viewers.clone(),
-            handle.clone(),
-            app.clone(),
-            encoders.clone(),
-            termplane.clone(),
-        );
+        let (app, plane) = (app.clone(), plane.clone());
         std::thread::spawn(move || match TcpListener::bind(("0.0.0.0", video_port)) {
             Ok(l) => {
                 tracing::info!("port 1 (video) listening on 0.0.0.0:{video_port}");
@@ -392,57 +427,26 @@ pub fn spawn(app: App, init: MediaInit) {
                             continue;
                         }
                     };
-                    let id = next_viewer_id();
                     app.forwards.viewer_joined();
 
                     // Writer thread: drain the channel to the socket; shut down on any
                     // exit (write error OR channel disconnect) to wake the reader.
-                    let (tx, rx) = std::sync::mpsc::sync_channel::<Arc<[u8]>>(VIEWER_CHAN_CAP);
+                    let (tx, rx) = std::sync::mpsc::sync_channel::<Queued>(VIEWER_CHAN_CAP);
                     let mut write_half = stream;
                     std::thread::spawn(move || {
-                        while let Ok(buf) = rx.recv() {
-                            if write_half.write_all(&buf).is_err() {
+                        while let Ok(q) = rx.recv() {
+                            if write_half.write_all(&q.buf).is_err() {
                                 break;
                             }
                         }
                         let _ = write_half.shutdown(std::net::Shutdown::Both);
                     });
 
-                    let state = app.store.get();
-                    let cfg = app.config();
-                    let selected = app.store.selected();
-                    // Queue mode + metadata straight into this viewer's channel (mode is first).
-                    prime_viewer_metadata(
-                        &handle,
-                        &tx,
-                        selected.clone(),
-                        chroma,
-                        &state,
-                        &cfg,
-                        forward_port,
-                    );
-                    // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
-                    // (independent of encode latency); mode already leads its channel.
-                    viewers.lock().unwrap().insert(id, ViewerConn { id, tx });
-                    // Somebody is watching now, so the selected clone has to start painting
-                    // again. Before the re-encode below, so its first fresh frame is close
-                    // behind the primed one.
-                    update_capture_gates(&handle, &app, &viewers);
-                    prime_viewer_video(&handle, &encoders, &viewers, selected, chroma);
-                    // If the selected clone is headless, activate its tmux view and prime this
-                    // viewer with the current session list.
-                    termplane.on_viewers_changed();
+                    let id = join_viewer(&app, &plane, tx);
 
                     // Reader thread owns teardown.
-                    let (handle, app, viewers, termplane) = (
-                        handle.clone(),
-                        app.clone(),
-                        viewers.clone(),
-                        termplane.clone(),
-                    );
-                    std::thread::spawn(move || {
-                        read_viewer_input(read_half, handle, app, viewers, termplane, id)
-                    });
+                    let (app, plane) = (app.clone(), plane.clone());
+                    std::thread::spawn(move || read_viewer_input(read_half, app, plane, id));
                 }
             }
             Err(e) => tracing::error!("port 1 bind {video_port} failed: {e}"),
@@ -577,16 +581,16 @@ pub fn spawn(app: App, init: MediaInit) {
 
 /// Port-1 frame types (1-byte tag prefix). 0 = video, 1 = clipboard, 2 = cursor,
 /// 3 = view spec, 4 = mode (chroma handshake, sent once at connect before any video).
-const T_VIDEO: u8 = 0;
-const T_CLIPBOARD: u8 = 1;
-const T_CURSOR: u8 = 2;
+pub(crate) const T_VIDEO: u8 = 0;
+pub(crate) const T_CLIPBOARD: u8 = 1;
+pub(crate) const T_CURSOR: u8 = 2;
 /// Server→viewer tag 3: the authoritative [`wire::viewer::ViewSpec`] — the viewer's entire
 /// window set + each window's content (Desktop video / Terminal tabs). Sent on connect and
 /// every selection/layout change; replaces the old daemon-reported monitor layout.
 pub(crate) const T_VIEWSPEC: u8 = 3;
-const T_MODE: u8 = 4;
+pub(crate) const T_MODE: u8 = 4;
 /// Server→viewer tag 5: the desired forward set (`[5][u32be len][JSON ForwardsMsg]`).
-const T_FORWARDS: u8 = 5;
+pub(crate) const T_FORWARDS: u8 = 5;
 /// Server→viewer tag 7: raw terminal output bytes for one session
 /// (`[7][u32be len][JSON TermData]`). The session list rides in the tag-3 `ViewSpec`.
 pub(crate) const T_TERM_DATA: u8 = 7;
@@ -635,7 +639,7 @@ fn broadcast_forwards(viewers: &Viewers, state: &wire::ControlState, forward_por
 
 /// Pre-frame one H.264 AU: `[0u8][u32be monitor_id][u32be len][AnnexB]`. Built once
 /// and cloned (refcount) into each viewer's channel.
-fn frame_video(monitor_id: u32, au: &[u8]) -> Arc<[u8]> {
+pub(crate) fn frame_video(monitor_id: u32, au: &[u8]) -> Arc<[u8]> {
     let mut framed = Vec::with_capacity(9 + au.len());
     framed.push(T_VIDEO);
     framed.extend_from_slice(&monitor_id.to_be_bytes());
@@ -646,7 +650,7 @@ fn frame_video(monitor_id: u32, au: &[u8]) -> Arc<[u8]> {
 
 /// Pre-frame a tagged JSON message: `[tag][u32be len][json]`. `None` if serialization
 /// fails (never for our types).
-fn frame_json<T: serde::Serialize>(tag: u8, msg: &T) -> Option<Arc<[u8]>> {
+pub(crate) fn frame_json<T: serde::Serialize>(tag: u8, msg: &T) -> Option<Arc<[u8]>> {
     let json = serde_json::to_vec(msg).ok()?;
     let mut framed = Vec::with_capacity(5 + json.len());
     framed.push(tag);
@@ -655,15 +659,28 @@ fn frame_json<T: serde::Serialize>(tag: u8, msg: &T) -> Option<Arc<[u8]>> {
     Some(Arc::from(framed))
 }
 
-/// Fan one AU out to every viewer.
-fn broadcast_video(viewers: &Viewers, monitor_id: u32, au: &[u8]) {
-    broadcast_bytes(viewers, &frame_video(monitor_id, au));
+/// Fan one AU out to every viewer, stamped with the browser viewer's header.
+fn broadcast_video(viewers: &Viewers, monitor_id: u32, au: &[u8], key: bool, seq: u32) {
+    let server_us = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64;
+    let msg = Queued {
+        buf: frame_video(monitor_id, au),
+        video: Some(VideoHeader {
+            monitor_id,
+            seq,
+            key,
+            server_us,
+        }),
+    };
+    broadcast_bytes(viewers, &msg);
 }
 
 /// Fan one tagged JSON message out to every viewer.
 pub(crate) fn broadcast_json<T: serde::Serialize>(viewers: &Viewers, tag: u8, msg: &T) {
     if let Some(buf) = frame_json(tag, msg) {
-        broadcast_bytes(viewers, &buf);
+        broadcast_bytes(viewers, &buf.into());
     }
 }
 
@@ -830,8 +847,10 @@ fn encoder_for(
     // clone's reader thread — one slow encoder init froze the entire fleet's media sockets.
     let built = {
         let viewers = viewers.clone();
-        match Encoder::new(chroma, move |au, _idr| {
-            broadcast_video(&viewers, monitor_id, &au)
+        let mut seq = 0u32;
+        match Encoder::new(chroma, move |au, idr| {
+            seq = seq.wrapping_add(1);
+            broadcast_video(&viewers, monitor_id, &au, idr, seq)
         }) {
             Ok(e) => Arc::new(e),
             Err(err) => {
@@ -993,7 +1012,7 @@ fn is_headless(state: &wire::ControlState, sel: &str) -> bool {
 /// broadcasts the `Terminal` spec via `on_viewers_changed` right after this viewer registers.
 fn prime_viewer_metadata(
     handle: &MediaHandle,
-    tx: &SyncSender<Arc<[u8]>>,
+    tx: &SyncSender<Queued>,
     selected: Option<String>,
     chroma: ChromaMode,
     state: &wire::ControlState,
@@ -1002,11 +1021,11 @@ fn prime_viewer_metadata(
 ) {
     // Mode FIRST so the viewer picks its decode path before any AU.
     if let Some(b) = frame_json(T_MODE, &ModeMsg { chroma }) {
-        let _ = tx.try_send(b);
+        let _ = tx.try_send(b.into());
     }
     // Forward set so it opens its listeners.
     if let Some(b) = frame_json(T_FORWARDS, &build_forwards_msg(state, forward_port)) {
-        let _ = tx.try_send(b);
+        let _ = tx.try_send(b.into());
     }
     let Some(sel) = selected else {
         // Nothing selected: clear the viewer's window set (it shows only its keep-alive window).
@@ -1017,25 +1036,25 @@ fn prime_viewer_metadata(
                 content: wire::viewer::ViewContent::Desktop,
             },
         ) {
-            let _ = tx.try_send(b);
+            let _ = tx.try_send(b.into());
         }
         return;
     };
     // Headed clone → send the Desktop view spec now (headless is left to termplane).
     if !is_headless(state, &sel) {
         if let Some(b) = frame_json(T_VIEWSPEC, &desktop_view_spec(cfg)) {
-            let _ = tx.try_send(b);
+            let _ = tx.try_send(b.into());
         }
     }
     // Last cursor shape + current clipboard offer, targeted to this viewer.
     if let Some(c) = handle.cursor.lock().unwrap().get(&sel).cloned() {
         if let Some(b) = frame_json(T_CURSOR, &c) {
-            let _ = tx.try_send(b);
+            let _ = tx.try_send(b.into());
         }
     }
     if let Some((offer, _)) = handle.clip.lock().unwrap().offer.clone() {
         if let Some(b) = frame_json(T_CLIPBOARD, &ClipboardMsg::Offer(offer)) {
-            let _ = tx.try_send(b);
+            let _ = tx.try_send(b.into());
         }
     }
 }
@@ -1048,17 +1067,22 @@ fn prime_viewer_metadata(
 /// viewer's own first keyframe would depend on beating the encode (ms) against the
 /// registry insert (µs), a latent race. (`force_idr` only forces the *next* pushed
 /// frame to be a keyframe; it does not retroactively mark frames already encoded.)
+/// `only` limits it to one monitor.
 fn prime_viewer_video(
     handle: &MediaHandle,
     encoders: &Encoders,
     viewers: &Viewers,
     selected: Option<String>,
     chroma: ChromaMode,
+    only: Option<u32>,
 ) {
     let Some(sel) = selected else { return };
     // Video: re-encode each monitor's latest frame (broadcasts via the shared encoder).
     let frames = dup_latest_frames(handle, &sel);
     for (mid, fd, fourcc, modifier, w, h, planes, shm) in frames {
+        if only.is_some_and(|m| m != mid) {
+            continue;
+        }
         if let Some(enc) = encoder_for(encoders, viewers, mid, w, h, chroma) {
             enc.force_idr();
             if let Err(e) = enc.push(fd, fourcc, modifier, w, h, &planes, shm) {
@@ -1408,18 +1432,98 @@ fn teardown_if_current(
     }
 }
 
+/// Add a viewer whose writer drains `tx`, and prime it: metadata first, then a fresh keyframe
+/// of every monitor. Returns its id. Blocks while an encoder is built, so call it from a thread.
+pub(crate) fn join_viewer(app: &App, plane: &Plane, tx: SyncSender<Queued>) -> u64 {
+    let handle = &app.media;
+    let id = next_viewer_id();
+    let state = app.store.get();
+    let cfg = app.config();
+    let selected = app.store.selected();
+    // Queue mode + metadata straight into this viewer's channel (mode is first).
+    prime_viewer_metadata(
+        handle,
+        &tx,
+        selected.clone(),
+        plane.chroma,
+        &state,
+        &cfg,
+        plane.forward_port,
+    );
+    // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
+    // (independent of encode latency); mode already leads its channel.
+    plane
+        .viewers
+        .lock()
+        .unwrap()
+        .insert(id, ViewerConn { id, tx });
+    // Somebody is watching now, so the selected clone has to start painting
+    // again. Before the re-encode below, so its first fresh frame is close
+    // behind the primed one.
+    update_capture_gates(handle, app, &plane.viewers);
+    prime_viewer_video(
+        handle,
+        &plane.encoders,
+        &plane.viewers,
+        selected,
+        plane.chroma,
+        None,
+    );
+    // If the selected clone is headless, activate its tmux view and prime this
+    // viewer with the current session list.
+    plane.termplane.on_viewers_changed();
+    id
+}
+
+/// Remove a viewer: drop it from the registry (stops fan-out, disconnects its writer), forget
+/// its clipboard state, and let the terminal view and capture follow the new audience.
+pub(crate) fn leave_viewer(app: &App, plane: &Plane, id: u64) {
+    remove_viewer(&plane.viewers, id);
+    clip_forget_source(&app.media.clip, &viewer_src(id));
+    // A departing viewer may leave the headless terminal view with no audience → deactivate.
+    plane.termplane.on_viewers_changed();
+    // The last viewer leaving means no clone needs to paint at all.
+    update_capture_gates(&app.media, app, &plane.viewers);
+}
+
+/// Act on one message from viewer `id`, whichever kind of viewer sent it.
+pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrowser) {
+    let handle = &app.media;
+    let viewers = &plane.viewers;
+    match msg {
+        FromBrowser::Input(input) => {
+            if let Some(clone) = app.store.selected() {
+                let _ = handle.send_input(&clone, input);
+            }
+        }
+        FromBrowser::Clipboard(msg) => {
+            let src = viewer_src(id);
+            match msg {
+                ClipboardMsg::Offer(o) => broker_offer(handle, viewers, o, &src),
+                ClipboardMsg::Request(r) => broker_request(handle, viewers, r, &src),
+                ClipboardMsg::Data(d) => broker_data(handle, viewers, d),
+            }
+        }
+        FromBrowser::TermInput(msg) => plane.termplane.input(msg.session, msg.data),
+        FromBrowser::TermResize(msg) => plane.termplane.resize(msg.cols, msg.rows),
+        FromBrowser::TermNewSession => plane.termplane.new_session(),
+        // Re-encode the monitor's last frame as a keyframe, as a join does: on a still
+        // desktop no new frame may come for a long time.
+        FromBrowser::RequestKeyframe(r) => prime_viewer_video(
+            handle,
+            &plane.encoders,
+            viewers,
+            app.store.selected(),
+            plane.chroma,
+            Some(r.monitor_id),
+        ),
+    }
+}
+
 /// Viewer → server: `[u8 type][u32be len][JSON]`. type 0 = InputMsg (to the selected
 /// clone), type 1 = ClipboardData (broker fans it out), type 2 = ForwardStatusMsg.
 /// This thread is the SOLE owner of the viewer's teardown.
-fn read_viewer_input(
-    mut sock: TcpStream,
-    handle: Arc<MediaHandle>,
-    app: App,
-    viewers: Viewers,
-    termplane: Arc<crate::termplane::TermPlane>,
-    id: u64,
-) {
-    let src = viewer_src(id);
+fn read_viewer_input(mut sock: TcpStream, app: App, plane: Arc<Plane>, id: u64) {
     let mut tag = [0u8; 1];
     let mut hdr = [0u8; 4];
     while sock.read_exact(&mut tag).is_ok() {
@@ -1450,55 +1554,27 @@ fn read_viewer_input(
         if sock.read_exact(&mut body).is_err() {
             break;
         }
-        match tag[0] {
-            T_VIDEO => {
-                let Ok(input) = serde_json::from_slice::<InputMsg>(&body) else {
-                    continue;
-                };
-                let Some(clone) = app.store.selected() else {
-                    continue;
-                };
-                let _ = handle.send_input(&clone, input);
-            }
-            T_CLIPBOARD => {
-                if let Ok(msg) = serde_json::from_slice::<ClipboardMsg>(&body) {
-                    match msg {
-                        ClipboardMsg::Offer(o) => broker_offer(&handle, &viewers, o, &src),
-                        ClipboardMsg::Request(r) => broker_request(&handle, &viewers, r, &src),
-                        ClipboardMsg::Data(d) => broker_data(&handle, &viewers, d),
-                    }
-                }
-            }
+        let msg = match tag[0] {
+            T_VIDEO => serde_json::from_slice(&body).map(FromBrowser::Input),
+            T_CLIPBOARD => serde_json::from_slice(&body).map(FromBrowser::Clipboard),
             T_FORWARD_STATUS => {
                 if let Ok(msg) = serde_json::from_slice::<wire::forward::ForwardStatusMsg>(&body) {
                     app.forwards.report(msg);
                 }
+                continue;
             }
-            T_TERM_INPUT => {
-                if let Ok(msg) = serde_json::from_slice::<wire::viewer::TermInput>(&body) {
-                    termplane.input(msg.session, msg.data);
-                }
-            }
-            T_TERM_RESIZE => {
-                if let Ok(msg) = serde_json::from_slice::<wire::viewer::TermResize>(&body) {
-                    termplane.resize(msg.cols, msg.rows);
-                }
-            }
-            T_TERM_NEW_SESSION => {
-                termplane.new_session();
-            }
+            T_TERM_INPUT => serde_json::from_slice(&body).map(FromBrowser::TermInput),
+            T_TERM_RESIZE => serde_json::from_slice(&body).map(FromBrowser::TermResize),
+            T_TERM_NEW_SESSION => Ok(FromBrowser::TermNewSession),
             _ => break,
+        };
+        if let Ok(msg) = msg {
+            handle_viewer_msg(&app, &plane, id, msg);
         }
     }
-    // Sole teardown: drop from the registry (stops fan-out, disconnects the writer),
-    // forget this viewer's clipboard state, and release its forward ref-count.
-    remove_viewer(&viewers, id);
-    clip_forget_source(&handle.clip, &src);
+    // Sole teardown, plus this viewer's forward ref-count.
     app.forwards.viewer_left();
-    // A departing viewer may leave the headless terminal view with no audience → deactivate.
-    termplane.on_viewers_changed();
-    // The last viewer leaving means no clone needs to paint at all.
-    update_capture_gates(&handle, &app, &viewers);
+    leave_viewer(&app, &plane, id);
 }
 
 /// Read the data-plane header: `[u32be len][JSON ForwardHeader]` (len capped at 64 KiB).
@@ -1725,7 +1801,7 @@ mod tests {
         assert_eq!(capture_msg(&client_b), Some(false));
 
         // A viewer arrives on 'a': only 'a' starts, and 'b' hears nothing new.
-        let (tx, _rx) = std::sync::mpsc::sync_channel::<Arc<[u8]>>(4);
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Queued>(4);
         viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx });
         update_capture_gates(&app.media, &app, &viewers);
         assert_eq!(capture_msg(&client_a), Some(true));
@@ -1763,7 +1839,7 @@ mod tests {
             viewers.clone(),
             tokio::runtime::Handle::current(),
         );
-        let (tx, _rx) = std::sync::mpsc::sync_channel::<Arc<[u8]>>(64);
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Queued>(64);
         viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx });
 
         let adopt = |sel: Option<String>| {
@@ -2042,10 +2118,10 @@ mod tests {
         use std::sync::mpsc::sync_channel;
 
         // Viewer A: capacity 4, actively has room. Viewer B: capacity 1, pre-filled → full.
-        let (tx_a, rx_a) = sync_channel::<Arc<[u8]>>(4);
-        let (tx_b, _rx_b) = sync_channel::<Arc<[u8]>>(1);
+        let (tx_a, rx_a) = sync_channel::<Queued>(4);
+        let (tx_b, _rx_b) = sync_channel::<Queued>(1);
         let filler: Arc<[u8]> = Arc::from(vec![0u8; 1]);
-        tx_b.try_send(filler).unwrap(); // B is now full (nobody drains _rx_b)
+        tx_b.try_send(filler.into()).unwrap(); // B is now full (nobody drains _rx_b)
 
         let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
         viewers
@@ -2058,10 +2134,10 @@ mod tests {
             .insert(2, ViewerConn { id: 2, tx: tx_b });
 
         let msg: Arc<[u8]> = Arc::from(vec![7u8, 8, 9]);
-        broadcast_bytes(&viewers, &msg);
+        broadcast_bytes(&viewers, &msg.into());
 
         // A received the message and stayed; B was full and got removed.
-        assert_eq!(&*rx_a.recv().unwrap(), &[7u8, 8, 9]);
+        assert_eq!(&*rx_a.recv().unwrap().buf, &[7u8, 8, 9]);
         assert!(
             viewers.lock().unwrap().contains_key(&1),
             "fast viewer was wrongly dropped"

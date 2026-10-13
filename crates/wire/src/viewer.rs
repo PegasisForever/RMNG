@@ -7,6 +7,7 @@
 //! [`VideoAu`]).
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 pub use crate::config::ChromaMode;
 pub use crate::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, CursorMeta, CursorShape};
@@ -16,7 +17,8 @@ pub use crate::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, CursorM
 /// path — `Yuv420` decodes the `W×H` stream directly; `Yuv444` inserts the AVC444
 /// reconstruction filter for the double-height `W×2H` stream. Global + fixed at the
 /// server's launch, so it never changes within a connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ModeMsg {
     pub chroma: ChromaMode,
 }
@@ -71,7 +73,8 @@ pub enum ViewerInput {
 }
 
 /// Viewer → server: force an IDR (reconnect / seek).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct RequestKeyframe {
     pub monitor_id: u32,
 }
@@ -87,7 +90,8 @@ pub struct RequestKeyframe {
 /// is always the "main" window (close button + Settings). Geometry is unified-desktop px,
 /// taken from the server's **configured** layout (fleet-wide, always known — not the daemon's
 /// live report), so the window set is identical across every clone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ViewMonitor {
     pub id: u32,
     pub x: i32,
@@ -98,8 +102,9 @@ pub struct ViewMonitor {
 }
 
 /// What the windows in a [`ViewSpec`] show.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "mode", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum ViewContent {
     /// Headed clone: every window shows its monitor's H.264 desktop stream. (The video surface is
     /// clone-agnostic — switching between headed clones reuses the same decode windows — so no
@@ -118,7 +123,8 @@ pub enum ViewContent {
 
 /// Server → viewer (port-1 tag 3): the complete view for the selected clone. `monitors` is
 /// empty when nothing is selected — the viewer then shows only its keep-alive window.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ViewSpec {
     pub monitors: Vec<ViewMonitor>,
     pub content: ViewContent,
@@ -132,23 +138,28 @@ pub struct ViewSpec {
 
 /// Server → viewer (port-1 tag 7): a chunk of raw terminal output for `session` (the bytes a
 /// tmux client would write to its terminal — already VT/ANSI-encoded).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct TermData {
     pub session: String,
     #[serde(with = "crate::socket::serde_bytes_b64")]
+    #[ts(type = "string")]
     pub data: Vec<u8>,
 }
 
 /// Viewer → server: keystrokes / pasted bytes for `session` (fed to the tmux client's stdin).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct TermInput {
     pub session: String,
     #[serde(with = "crate::socket::serde_bytes_b64")]
+    #[ts(type = "string")]
     pub data: Vec<u8>,
 }
 
 /// Viewer → server: the terminal tab for `session` was resized (characters).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct TermResize {
     pub cols: u16,
     pub rows: u16,

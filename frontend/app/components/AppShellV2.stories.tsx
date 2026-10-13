@@ -207,6 +207,7 @@ function makeRail() {
     presetNames: ["Default", "Focus"],
     activeLayout: "Default",
     onActivateLayout: fn(),
+    onOpenViewer: fn(),
     onOpenSettings: toSettings,
     onImportAccount: toImportAccount,
     onReplaceAccount: toImportAccount,

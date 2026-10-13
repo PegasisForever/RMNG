@@ -8,6 +8,7 @@
 //! - [`socket`] — the clone-daemon ⇄ control-server unix-socket protocol.
 //! - [`holder`] — the clone-daemon ⇄ session-holder protocol, inside one clone.
 //! - [`viewer`] — the native viewer ⇄ control-server protocol (port 1).
+//! - [`browser`] — the browser viewer ⇄ control-server protocol (a WebSocket on the web port).
 //! - [`mcp`] — desktop-tool DTOs + the `/api/hosts/:id/mcp` proxy request.
 //! - [`exec`] — the `rmng exec` request/result (`/api/hosts/:id/exec`).
 //! - [`ledger`] — the distilled transcript record and the two `/api/ledger/*` answers.
@@ -15,10 +16,12 @@
 //!
 //! Control-plane + config types derive `ts-rs::TS` and export TypeScript bindings
 //! (see the `export_bindings_*` tests ts-rs generates). Transport types
-//! (socket/viewer/mcp) are serde-only.
+//! (socket/viewer/mcp) are serde-only, except the ones the browser viewer's
+//! [`browser`] messages carry.
 
 pub mod avc444;
 pub mod board;
+pub mod browser;
 pub mod config;
 pub mod control;
 pub mod exec;

@@ -46,6 +46,7 @@ mod termplane;
 mod transcript;
 mod update;
 mod web;
+mod webviewer;
 mod zfs;
 
 use std::sync::Arc;

@@ -7,6 +7,7 @@
 //! data triple, brokered centrally by control-server.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// A captured monitor frame descriptor. The dmabuf fd(s) are passed via SCM_RIGHTS
 /// in the same datagram, in plane order.
@@ -39,23 +40,27 @@ pub struct PlaneLayout {
 
 /// Cursor metadata (cursor-mode METADATA — never composited into the frame).
 /// `shape` is sent only when it changes; position updates carry `shape: None`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct CursorMeta {
     pub monitor_id: u32,
     pub x: i32,
     pub y: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub shape: Option<CursorShape>,
     /// True when this update is a server-initiated **warp** (an MCP-injected pointer
     /// move) rather than the passive echo of the user's own motion. The viewer snaps
     /// the drawn cursor to it and briefly suppresses local pointer-motion sends.
     #[serde(default, skip_serializing_if = "is_false")]
+    #[ts(as = "Option<bool>", optional)]
     pub warp: bool,
     /// True when the clone hid its cursor (empty or fully-transparent sprite). A
     /// sustained hidden cursor is a pointer grab (a game): the viewer's auto
     /// pointer-lock keys on this. Only hide transitions carry it; a `shape`-bearing
     /// update marks the cursor visible again, and position-only updates say nothing.
     #[serde(default, skip_serializing_if = "is_false")]
+    #[ts(as = "Option<bool>", optional)]
     pub hidden: bool,
 }
 
@@ -63,7 +68,8 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct CursorShape {
     pub width: u32,
     pub height: u32,
@@ -71,6 +77,7 @@ pub struct CursorShape {
     pub hotspot_y: u32,
     /// Raw RGBA8888, `width * height * 4` bytes.
     #[serde(with = "serde_bytes_b64")]
+    #[ts(type = "string")]
     pub rgba: Vec<u8>,
 }
 
@@ -88,8 +95,9 @@ pub struct MonitorPlacement {
 }
 
 /// An input event to inject into a clone via Mutter RemoteDesktop.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum InputMsg {
     /// Absolute pointer position within a monitor.
     PointerMove { monitor_id: u32, x: f64, y: f64 },
@@ -139,23 +147,30 @@ pub struct FrameRequest {
 
 /// Clipboard (rich + lazy). The broker fans `Offer`s out and serves bytes on
 /// `Request`. Used on both the socket and the viewer protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ClipboardOffer {
+    #[ts(type = "number")]
     pub serial: u64,
     pub mime_types: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ClipboardRequest {
+    #[ts(type = "number")]
     pub serial: u64,
     pub mime_type: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ClipboardData {
+    #[ts(type = "number")]
     pub serial: u64,
     pub mime_type: String,
     #[serde(with = "serde_bytes_b64")]
+    #[ts(type = "string")]
     pub bytes: Vec<u8>,
 }
 
@@ -208,8 +223,9 @@ pub enum DaemonMsg {
 
 /// Clipboard message on the **viewer** protocol (port-1 tag 1), both directions.
 /// Rich + lazy: `Offer` advertises types, `Request` fetches one, `Data` delivers it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "k", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum ClipboardMsg {
     Offer(ClipboardOffer),
     Request(ClipboardRequest),
