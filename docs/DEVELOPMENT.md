@@ -50,8 +50,8 @@ running server's payloads; there's no manual redeploy step.
 | [crates/control-server](../crates/control-server/README.md) | bin | the server: media plane, web API/SSE, passive token accounting, Docker lifecycle, the browser viewer's WebSocket, the SMB shares, and clone payloads |
 | [crates/media](../crates/media/README.md) | lib | dmabuf ingest → VA-API H.264 per monitor + dmabuf→JPEG screenshots + the clone-socket transport |
 | [crates/clone-daemon](../crates/clone-daemon/README.md) | bin | the thin in-clone pipe: RecordVirtual capture, RemoteDesktop input injection, clipboard bridge, and desktop MCP (:9004) |
-| [crates/control-client](../crates/control-client/README.md) | lib | typed reqwest+SSE client for the port-2 web API (`/api/state`, `/events`, clone/delete/image/account wrappers); used by the `rmng` CLI and integration tests; also builds `rmng-fps`, the viewer frame-rate test tool |
-| [crates/cli](../crates/cli/README.md) | bin | the `rmng` fleet CLI: clones/images/accounts/operations over the port-2 web API; injected into every clone as `/usr/local/bin/rmng` |
+| [crates/control-client](../crates/control-client/README.md) | lib | typed reqwest+SSE client for the web API (port 9000) (`/api/state`, `/events`, clone/delete/image/account wrappers); used by the `rmng` CLI and integration tests; also builds `rmng-fps`, the viewer frame-rate test tool |
+| [crates/cli](../crates/cli/README.md) | bin | the `rmng` fleet CLI: clones/images/accounts/operations over the web API (port 9000); injected into every clone as `/usr/local/bin/rmng` |
 | [frontend](../frontend/README.md) | web app | React Router 7 management UI and the browser viewer (`/viewer`), ts-rs types from `wire`, served by the control-server |
 | [template/gnome-patch](../template/gnome-patch/README.md) | tooling | builds the patched gnome-shell `.deb` (hide screen-share indicator + enable `Eval` for window-mgmt); built + installed by `template/Dockerfile`'s `gnome-build` stage into the published clone template — not a control-server payload |
 

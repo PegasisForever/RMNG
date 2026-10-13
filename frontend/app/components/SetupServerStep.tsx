@@ -1,6 +1,5 @@
 // Step 2 of the first-run wizard: the fleet's server-side defaults. Clone naming, the
-// per-clone resource limits, and the monitor arrangement every clone boots with. (Ports and directories used to be editable here; they are
-// hardcoded now, so this step edits everything the wizard still owns.)
+// per-clone resource limits, and the monitor arrangement every clone boots with.
 //
 // It takes the wizard's whole model plus one updater, the same pair `SetupWizardView` holds
 // and `SetupReviewStep` reads, rather than a value/setter couple per field.

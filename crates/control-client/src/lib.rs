@@ -1,4 +1,4 @@
-//! Typed HTTP + SSE client for the control-server port-2 web API, shared by the
+//! Typed HTTP + SSE client for the control-server web API (port 9000), shared by the
 //! `rmng` fleet CLI and integration tests. Response shapes are the [`wire`] types
 //! verbatim — this crate adds transport + error surfacing, never its own schema.
 
@@ -193,7 +193,7 @@ impl Client {
 
     /// The `/events` SSE stream, filtered to the default (unnamed) frames = full
     /// [`ControlState`] snapshots: one on connect, then one per change. Named events
-    /// (`stats`, `forwards`) and keep-alive comments are skipped.
+    /// (`stats`, `lxcStats`, `version`, `ping`) and keep-alive comments are skipped.
     pub async fn events(&self) -> Result<impl Stream<Item = Result<ControlState>> + Unpin> {
         let resp = self
             .http

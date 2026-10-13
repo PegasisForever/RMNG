@@ -154,7 +154,8 @@ impl Encoder {
             b.append_memory(mem);
             // Attach the real plane layout, as the screenshot path does. The GPU pads pitches
             // (width 1440 → a 256-byte-aligned pitch, not 1440·4), so the meta carries the
-            // daemon-reported one. `vapostproc` derives the layout itself.
+            // daemon-reported one. Without it `vapostproc` assumes width·4 and imports the
+            // frame with the wrong stride (skewed video or a failed import).
             let vfmt = video_format_for(fourcc);
             let (offsets, strides) = meta_layout(w, planes);
             let _ = gstreamer_video::VideoMeta::add_full(

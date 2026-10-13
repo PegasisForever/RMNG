@@ -10,20 +10,16 @@ export const settingsInput =
   "w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-sm focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100";
 
 /** When a changed setting takes effect. */
-export type SettingEffect = "immediate" | "restart" | "one-time";
+export type SettingEffect = "immediate" | "one-time";
 
 /** When a changed setting takes effect. Placed on section headers / fields to set
- *  expectations: `immediate` applies on save, `restart` needs a control-server
- *  restart, `one-time` is baked in at
- *  first-run setup and can't change afterwards (subnet; dataDir/cloneSocket are
- *  fixed by the container image). */
+ *  expectations: `immediate` applies on save, `one-time` is baked in at first-run setup
+ *  and can't change afterwards (the clone subnet). */
 export function EffectBadge({ effect }: { effect: SettingEffect }) {
   const style =
     effect === "immediate"
       ? "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400"
-      : effect === "restart"
-        ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400"
-        : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400";
+      : "bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400";
   return (
     <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${style}`}>{effect}</span>
   );

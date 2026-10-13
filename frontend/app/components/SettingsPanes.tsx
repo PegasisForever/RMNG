@@ -278,8 +278,8 @@ export function LlmPane({
   );
 }
 
-/** Server: the control-server itself. Its own version, the settings it reads at startup, and
- *  the keys it installs on every clone. Most of this needs a restart to take. */
+/** Server: the control-server itself. Its own version, the Docker settings for new clones,
+ *  and the keys it installs on every clone. */
 export function ServerPane({
   draft,
   onDraftChange,
@@ -291,16 +291,9 @@ export function ServerPane({
   onUpdateServer,
   onRestartServer,
 }: ServerPaneProps) {
-  // Whether the ports-and-directories block is expanded. Ephemeral: it is not part of the
-  // form, nothing outside this pane reads it, and it resets every time the pane is left.
-
   return (
     <>
-      <Section
-        title="Control-server"
-        effect="restart"
-        hint="Update to the latest published image, or restart to apply changed startup settings."
-      >
+      <Section title="Control-server" hint="Update to the latest published image, or restart the server.">
         <SettingsServerSection
           status={serverStatus}
           message={serverMessage}

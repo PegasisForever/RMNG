@@ -972,9 +972,9 @@ value; a non-empty string replaces it; `presets` rows merge by name (blank `line
 the stored one); `groups` is replaced **wholesale** (the pool editor always
 posts the full list, so an omitted pool is a deletion and `[]` normalizes to one empty
 `Default` pool). A save whose patch touches `groups` deletes imported accounts the new list
-leaves unclaimed (an account in zero groups is removed; the save fails 400 if a clone pins it). `docker.subnet` is validated as an IPv4 `/16`–`/24` CIDR. One-time fields
-(`dataDir`, `cloneSocket`, `docker.subnet`) are locked once `setupComplete` latches (which
-itself is a one-way latch).
+leaves unclaimed (an account in zero groups is removed; the save fails 400 if a clone pins it).
+`setupComplete` is a one-way latch. The data directory, the clone socket and the `rmng`
+subnet are constants in `wire::config`, not config fields.
 
 An edit that changes `effectiveMonitors()`, whether it moves the active preset's geometry or
 names a different `activeLayout`, pushes `ServerMsg::SetMonitors` to the selected clone, the
@@ -1119,7 +1119,5 @@ for an idle assistant and starts a turn of its own.
 
 Serves the installed React build from disk; unknown paths fall back to `index.html` for
 client-side routing. The bundle is resolved at startup: `/usr/local/share/rmng/static` in the
-image, else the repo dev build (`frontend/build/client`). A non-empty `staticDir` config field
-(Settings → Advanced; restart-required) overrides that with any disk path (frontend
-hot-reload during dev). If no frontend resolves anywhere, the route returns a 404 hint and the
-API stays up.
+image, else the repo dev build (`frontend/build/client`). There is no override. If no frontend
+resolves anywhere, the route returns a 404 hint and the API stays up.

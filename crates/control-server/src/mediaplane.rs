@@ -95,7 +95,7 @@ fn broadcast_queued(viewers: &Viewers, msg: &Queued) {
     for id in dead {
         // NB: if this viewer's writer thread is blocked in a send (not a full channel —
         // that's what got it removed here), dropping `tx` doesn't wake it. The writer's send
-        // timeout ends it (`webviewer::SEND_TIMEOUT`).
+        // timeout ends it (the send timeout in `webviewer`).
         guard.remove(&id);
     }
 }
@@ -358,13 +358,13 @@ impl MediaInit {
     }
 }
 
-/// Initialize GStreamer (and related media env) once. Must run **before** any
+/// Initialize GStreamer once. Must run **before** any
 /// background task that can spawn a child process — inherited scanner pipes
 /// otherwise hang init forever (ports never bind).
 ///
 /// Failure is non-fatal: returns a disabled token so the web API still boots.
 pub fn init() -> MediaInit {
-    match media::init() {
+    match gstreamer::init() {
         Ok(()) => MediaInit { enabled: true },
         Err(e) => {
             tracing::error!("media init failed; no video for the viewer: {e}");
@@ -893,7 +893,8 @@ fn cached_cursors(handle: &MediaHandle, sel: &str) -> Vec<CursorMeta> {
 }
 
 /// Prime a viewer's video: force a shared keyframe and re-encode the selected clone's last
-/// frame of `monitor` so it paints at once even on a static, damage-driven desktop. The re-encode BROADCASTS via the shared encoder (existing
+/// frame of `monitor` so it paints at once even on a static, damage-driven desktop. The
+/// re-encode BROADCASTS via the shared encoder (existing
 /// viewers get one redundant keyframe per join — negligible), so the caller must
 /// register the new viewer in `viewers` before calling this — otherwise the new
 /// viewer's own first keyframe would depend on beating the encode (ms) against the

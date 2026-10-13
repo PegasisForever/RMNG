@@ -46,9 +46,8 @@ export const SecretBeingTyped: Story = {
   },
 };
 
-/** The three effect badges, on the section header where the panel puts them. `immediate`
- *  applies on save; `restart` needs the control-server restarted; `one-time` was baked in at
- *  first-run setup and cannot change at all. */
+/** The two effect badges, on the section header where the panel puts them. `immediate`
+ *  applies on save; `one-time` was baked in at first-run setup and cannot change at all. */
 export const Effects: Story = {
   render: () => (
     <div className="w-[36rem] space-y-2 p-4">
@@ -56,11 +55,6 @@ export const Effects: Story = {
         <Field label="Preset name">
           <input className={settingsInput} defaultValue="Dual 1440p" />
         </Field>
-      </Section>
-      <Section title="Video" effect="restart" hint="Needs the control-server restarted." >
-        <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-          Ports and the encoder are wired once at startup <EffectBadge effect="restart" />
-        </div>
       </Section>
       <Section title="Clone network subnet" effect="one-time" hint="Baked in at first-run setup.">
         <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">

@@ -24,8 +24,13 @@ server, with no manual redeploy step (see [Upgrades](#upgrades)).
   **2222** (SSH bastion, jump into clones) free.
 - **Chrome** on the machine you view clones from. The viewer (`/viewer` on port 9000) needs
   HTTPS, because WebCodecs and the async clipboard work only on HTTPS pages (or `localhost`).
-  Put HTTPS in front of port 9000 yourself, for example with `tailscale serve`. Without HTTPS
-  the dashboard works and the viewer shows a warning instead of video.
+  Open the dashboard itself over HTTPS, because the viewer windows use the dashboard's
+  address. With Tailscale: on the machine that publishes port 9000, run
+  `tailscale serve --bg 9000` (the tailnet must have HTTPS certificates enabled), then open
+  `https://<machine>.<tailnet>.ts.net/`. If Tailscale runs on a different machine, run
+  `tailscale serve --bg http://<ip>:9000` there. Use the `ts.net` name, not an IP: the
+  certificate is for the name, so `https://<ip>/` fails. Without HTTPS the dashboard works
+  and the viewer shows a warning instead of video.
 
 ## 1. Get the image
 
@@ -105,9 +110,9 @@ The wizard walks three things:
    is first materialized (`.1` gateway, `.2` control-server, `.10+` clone pool).
 
 Afterward, use **Settings** to create presets (Linear key + labels + env vars), Claude and Codex
-settings and account pools, monitor defaults, and the ports. Accounts themselves are imported from
-signing in to the provider, not entered here. Secrets are write-only and redacted on read. The one-time fields
-(`dataDir`, `cloneSocket`, `docker.subnet`) lock once the wizard latches. See
+settings and account pools, and monitor layouts. Accounts themselves are imported from
+signing in to the provider, not entered here. Secrets are write-only and redacted on read. Ports,
+the data directory, the clone socket and the `rmng` subnet are fixed constants. See
 [SCRIPTS.md](SCRIPTS.md) for the build and developer scripts and [API.md](API.md) for every
 endpoint.
 
@@ -523,7 +528,7 @@ payloads under `/usr/local/share/rmng/`:
 ```
 /usr/local/share/rmng/clone-daemon      # hot-swapped into running clones (see Upgrades)
 /usr/local/share/rmng/rmng-cli          # installed into each clone as /usr/local/bin/rmng
-/usr/local/share/rmng/static/           # the frontend, served on port 2
+/usr/local/share/rmng/static/           # the frontend, served on port 9000
 ```
 
 The patched gnome-shell `.deb` is **not** shipped here any more — its only consumer was the

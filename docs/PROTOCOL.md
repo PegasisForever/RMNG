@@ -16,7 +16,7 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 | web | `9000` | — (`wire::PORT_WEB`) | control-server web | browser (dashboard + viewer) / `rmng` CLI / control-client | HTTP + SSE + WebSocket (`/api/viewer`) |
 | bastion | `2222` | — (`wire::PORT_BASTION`) | control-server ssh.rs | operator ssh client (jump) | OpenSSH; pubkey-only; forwards to `clone:22` |
 | daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agents in the clone + `rmng desktop` proxy (via web API) | HTTP JSON-RPC |
-| clone socket | `/srv/rmng-sock/clones.sock` | `cloneSocket` config (server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
+| clone socket | `/srv/rmng-sock/clones.sock` | — (`wire::CLONE_SOCKET`, server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
 | holder socket | `$XDG_RUNTIME_DIR/rmng-session-holder.sock` | `RMNG_HOLDER_SOCKET` | session holder (in clone) | clone-daemon | unix `SOCK_SEQPACKET` |
 
 ---
@@ -127,9 +127,9 @@ keyframes and megabits arrived. It does not decode.
 
 A unix `SOCK_SEQPACKET` socket (one JSON message per datagram). dmabuf file descriptors ride
 out-of-band via `SCM_RIGHTS` in the same datagram, in plane order — never in the JSON. The
-daemon connects to `RMNG_SOCKET`; the server listens on the `cloneSocket` config path
-(default `/srv/rmng-sock/clones.sock`, one-time — set in the setup wizard, baked into every
-clone's `RMNG_SOCKET` at bootstrap; a pre-latch edit is restart-required). The socket lives in
+daemon connects to `RMNG_SOCKET`; the server listens on `wire::CLONE_SOCKET`
+(`/srv/rmng-sock/clones.sock`, a constant, written into every clone's `RMNG_SOCKET` at
+bootstrap). The socket lives in
 the shared **`rmng-sock` named volume**, mounted at the same path `/srv/rmng-sock` into the
 control-server **and** every clone (a named volume, not a bind, so siblings can share it);
 `chmod 0777` so cross-uid clones connect.
@@ -298,31 +298,28 @@ Ports, the data directory, the clone socket and the Docker socket are constants 
 | `setup_complete` | bool | `false` | latched `true` by the first-run setup wizard; gates the frontend to the wizard until then |
 | `layout_presets` | `LayoutPreset[]` | `[]` | named monitor-layout presets (`{name, monitors: MonitorSpec[]}`); the operator switches the active one from the sidebar (`POST /api/layout/activate`) |
 | `active_layout` | string | `""` | name of the active layout preset; drives `effective_monitors()` (see below) |
-| `docker` | `DockerConfig` | see below | daemon socket + `rmng`-network subnet + hostname prefix + per-clone limits |
+| `docker` | `DockerConfig` | see below | hostname prefix + per-clone limits + ZFS parent dataset for clone homes |
 | `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (the key is a credential, and `GET /api/config` vends it to the clients) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
 | `groups` | `CloneGroup[]` | `[]` | the single named account-pool list (Claude + Codex members mixed); a clone binds at most one pool, each rotator side only sees its own provider members (not secret) |
-| `agent_playbook` | string | shipped default | the person's ticket procedure and app quirks for the assistant (how to drive a desktop is the assistant's own knowledge), sent with the preset's append in the `[From RMNG]` header of each new assistant chat's first message (see [API.md](API.md#per-clone-assistant-chat)); nothing is written into the clone. Seeded from [agent-playbook.md](../crates/wire/src/agent-playbook.md); editable in Settings; **non-secret** (passes through the redacted view); applies to the next new chat (**not restart-required**) |
-| `judge` | `JudgeConfig` | `gpt-5.6-luna` | working-vs-stuck detection: `codexModel` (default `gpt-5.6-luna`) and `codexEmail` (`null` = the first imported Codex account). No credential of its own: the calls run on that account's ChatGPT plan, using the token the server already holds to run its clones. Nothing secret, so the whole struct passes through the redacted view. No Codex account imported ⇒ no clone is ever reported `working` (see [monitorState](API.md#monitorstate)). Settings → Agents; **not restart-required** |
-| `assistant` | `AssistantConfig` | `{url: "", serverUrl: ""}` | the chat panel's assistant: `url` is the pi-web origin, `serverUrl` this server's web API origin as the assistant reaches it (written into each new chat's first message for `rmng --server`). Empty `url` ⇒ the chat panel refuses to send; empty `serverUrl` ⇒ it refuses to start a new chat. Plain addresses, so the struct passes through the redacted view. Settings → Presets → Assistant; **not restart-required** |
+| `agent_playbook` | string | shipped default | the person's ticket procedure and app quirks for the assistant (how to drive a desktop is the assistant's own knowledge), sent with the preset's append in the `[From RMNG]` header of each new assistant chat's first message (see [API.md](API.md#per-clone-assistant-chat)); nothing is written into the clone. Seeded from [agent-playbook.md](../crates/wire/src/agent-playbook.md); editable in Settings; **non-secret** (passes through the redacted view); applies to the next new chat |
+| `judge` | `JudgeConfig` | `gpt-5.6-luna` | working-vs-stuck detection: `codexModel` (default `gpt-5.6-luna`) and `codexEmail` (`null` = the first imported Codex account). No credential of its own: the calls run on that account's ChatGPT plan, using the token the server already holds to run its clones. Nothing secret, so the whole struct passes through the redacted view. No Codex account imported ⇒ no clone is ever reported `working` (see [monitorState](API.md#monitorstate)). Settings → Agents |
+| `assistant` | `AssistantConfig` | `{url: "", serverUrl: ""}` | the chat panel's assistant: `url` is the pi-web origin, `serverUrl` this server's web API origin as the assistant reaches it (written into each new chat's first message for `rmng --server`). Empty `url` ⇒ the chat panel refuses to send; empty `serverUrl` ⇒ it refuses to start a new chat. Plain addresses, so the struct passes through the redacted view. Settings → Presets → Assistant |
 
-- **`DockerConfig`** (no secret — the local daemon is reached over a unix socket, so the
-  whole struct passes through the redacted view): `socket`
-  (`"/var/run/docker.sock"` — the daemon the control-server drives, **restart-required**;
-  the bollard client is built at startup), `subnet` (`"10.99.0.0/24"` — the CIDR for the
-  user-defined `rmng` bridge; addressing is Docker DNS — clones resolve by container name,
-  the control-server by its `rmng-control` alias — with clone IPs left to Docker IPAM;
-  validated `/16`–`/24` at merge; **one-time**, baked into the network at first-run setup), `hostname_prefix` (`"pega-"`, editable in Settings → prepended to derived
-  clone hostnames; carried from the retired `proxmox.hostname_prefix` on migration),
-  `clone_cpus` (`16` — whole cores → `nano_cpus`) and `clone_memory_mb` (`32768` — MiB, +8 GiB
-  swap), both editable per-clone limits. (`template_reference` is a retired gen-1 field: still
-  stored for compatibility, but nothing reads it — gen-2 builds clone images from each
-  preset's Dockerfile on demand.)
+- **`DockerConfig`** (no secret, so the whole struct passes through the redacted view):
+  `hostname_prefix` (`"pega-"`, editable in Settings → prepended to derived clone hostnames;
+  carried from the retired `proxmox.hostname_prefix` on migration), `clone_cpus` (`16` —
+  whole cores → `nano_cpus`) and `clone_memory_mb` (`32768` — MiB, +8 GiB swap), both
+  editable per-clone limits, and `homes_parent` (the parent ZFS dataset of the clone homes).
+  The Docker socket is the constant `wire::DOCKER_SOCKET` (`/var/run/docker.sock`) and the
+  `rmng` bridge subnet is the constant `wire::DOCKER_SUBNET` (`10.99.0.0/24`; addressing is
+  Docker DNS — clones resolve by container name, the control-server by its `rmng-control`
+  alias). Retired keys in an old file (`socket`, `subnet`, `templateReference`, …) are
+  ignored on load.
 - **First-run setup wizard**: a fresh deploy ships `config.json` with `"setupComplete":
   false`, so the web UI shows the wizard (environment checklist → server settings + monitors
   → finish) instead of the dashboard; finishing latches
-  `setupComplete: true` (a one-way latch) and materializes the lazy `rmng` network, after
-  which the one-time fields (`data_dir`, `clone_socket`, `docker.subnet`) are locked. There is
+  `setupComplete: true` (a one-way latch) and materializes the lazy `rmng` network. There is
   **no grandfather rule**: an old `config.json` re-runs the wizard (new machine, no network /
   template pulled yet). A legacy `proxmox` block is scrubbed on load, carrying `hostnamePrefix` into
   `docker.hostname_prefix`; old `state.json` clones load as plain unmanaged rows
@@ -452,7 +449,6 @@ browser types derive `ts_rs::TS` and export to `frontend/app/lib/wire/`.
 
 **`media`** ([lib.rs](../crates/media/src/lib.rs)) — the GPU + socket plane:
 
-- `init() -> Result<()>` — init GStreamer once.
 - `Encoder::new(on_au: FnMut(Vec<u8>, bool))` / `.push(fd, fourcc, modifier, w, h)` /
   `.force_idr()` — one VA-API H.264 encoder per monitor (`vapostproc ! vah264enc ! h264parse`,
   Annex-B AUs to the callback).

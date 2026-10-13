@@ -3,7 +3,7 @@
 The shared type crate — the single source of truth for everything that crosses a
 process boundary in `RMNG`:
 
-1. **Control state** broadcast over `/events` (port 2) and persisted to `state.json`.
+1. **Control state** broadcast over `/events` (port 9000) and persisted to `state.json`.
 2. The **clone-daemon ⇄ control-server unix-socket protocol** (dmabuf frame
    descriptors, input events, acks).
 3. The **browser viewer protocol** (`browser`, a WebSocket on port 9000): binary H.264 +

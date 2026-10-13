@@ -2,7 +2,7 @@
 //!
 //! GStreamer plugin scanning opens private pipes. Any child spawned while that
 //! scan is in flight (smbd / sshd) can inherit a write end and prevent
-//! EOF, hanging `media::init` forever and leaving port 9000 unbound.
+//! EOF, hanging `mediaplane::init` forever and leaving port 9000 unbound.
 //! This helper encodes the required order: finish media init, then spawn
 //! background supervisors, then start media listeners.
 

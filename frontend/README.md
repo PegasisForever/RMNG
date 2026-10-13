@@ -1,6 +1,6 @@
 # frontend
 
-The web app — the **management UI** (port 2). It is the existing React Router 7 dashboard
+The web app — the **management UI** (port 9000). It is the existing React Router 7 dashboard
 (`../../control-server/app`) kept and extended with a Settings page, built to a static
 bundle and **served by the Rust control-server**.
 
@@ -49,7 +49,7 @@ from the Rust backend.
 ## Build & serve
 
 - Build with Vite/Bun to a static bundle (`frontend/build` or similar).
-- The Rust control-server serves the bundle + `/uploads` on port 2; no Bun runtime in
+- The Rust control-server serves the bundle + `/uploads` on port 9000; no Bun runtime in
   production.
 - Dev: Vite dev server proxying `/api` + `/events` to the Rust backend.
 

@@ -32,7 +32,7 @@ use crate::mediaplane::{self, Queued};
 use crate::shared::CLONE_UID;
 
 /// A send that makes no progress for this long closes the socket (the browser stopped reading).
-pub(crate) const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// The writer pings this often, so a browser that has gone away is noticed: Chrome answers
 /// every ping with a pong, which the reader counts as traffic.
 const PING_EVERY: Duration = Duration::from_secs(5);

@@ -1,6 +1,6 @@
 # control-client
 
-The typed HTTP + SSE client for the control-server's **port-2 web API**, shared by the
+The typed HTTP + SSE client for the control-server's **web API (port 9000)**, shared by the
 [`rmng` fleet CLI](../cli/README.md) and integration tests. Response shapes are the
 [`wire`](../wire/README.md) types verbatim — this crate adds transport + error surfacing,
 never its own schema.

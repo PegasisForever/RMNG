@@ -33,7 +33,7 @@ export interface SettingsPanelContainerProps {
   //     renderable in isolation — e.g. Storybook — with mocked data) ---
   /** Read the current redacted config (each preset's Linear key comes back verbatim). */
   getConfig: () => Promise<AppConfigRedacted>;
-  /** Persist a partial config patch; returns the merged config + a restart-required flag. */
+  /** Persist a partial config patch; returns the merged config. */
   putConfig: (
     patch: unknown,
   ) => Promise<ConfigPutResponse & { networkWarning?: string }>;

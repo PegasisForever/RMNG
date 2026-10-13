@@ -1,6 +1,5 @@
-//! Port 2 — the web API + SSE + static frontend. Phase 1 + the Phase-2 clone/
-//! delete surface; the rest (Linear/Claude/chat/config/…) lands as those modules
-//! are ported.
+//! The web API (port 9000): JSON routes, SSE, the static frontend and the viewer
+//! WebSocket.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -147,7 +146,7 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
     let router = router(app);
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("port 2 (web API + SSE + static) on http://{addr}");
+    tracing::info!("web API + SSE + static + viewer on http://{addr}");
     // `with_connect_info` is what puts the peer address in reach of a handler, and
     // [`caller_clone`] needs it: a clone's address on the rmng bridge is the one thing about
     // the caller that Docker assigns and nothing inside the clone can restate.
@@ -159,20 +158,19 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `GET /events` — four multiplexed streams on one connection:
+/// `GET /events` — five multiplexed streams on one connection:
 ///   - the persisted `ControlState` as the default (unnamed) event → the client's
 ///     `onmessage`: full snapshot on connect, then one frame per change;
 ///   - the volatile per-clone CPU/RAM map as a named `stats` event → the client's
 ///     `addEventListener("stats")`: latest snapshot on connect, then one per poll tick;
 ///   - CT-wide CPU/RAM/disk as a named `lxcStats` event;
-///   - safe per-clone newly-processed token totals as a named `tokens` event.
+///   - the server's build id as a named `version` event, once per connection;
+///   - a named `ping` event every 15s (an observable heartbeat the client's reconnect
+///     watchdog measures).
 ///
-/// Stats, LXC stats, and tokens ride separate SSE-only buses
-/// ([`crate::monitor::StatsBus`], [`crate::monitor::LxcStatsBus`],
-/// [`crate::tokens::TokenBus`]) so they never enter `ControlState` / `state.json`
-/// (which persists on every mutation). Plus a named `ping` event every 15s (an
-/// observable heartbeat the client's reconnect watchdog measures) and a 20s low-level
-/// keep-alive comment.
+/// Stats and LXC stats ride separate SSE-only buses ([`crate::monitor::StatsBus`],
+/// [`crate::monitor::LxcStatsBus`]) so they never enter `ControlState` / `state.json`
+/// (which persists on every mutation). Plus a 20s low-level keep-alive comment.
 async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (snapshot, rx) = app.store.subscribe();
     let state_initial = futures::stream::once(async move { Ok(Event::default().data(snapshot)) });

@@ -1,7 +1,7 @@
 //! `wire` — the single source of truth for every type that crosses a process
 //! boundary in rmng.
 //!
-//! - [`control`] — `ControlState` and friends, broadcast over `/events` (port 2)
+//! - [`control`] — `ControlState` and friends, broadcast over `/events` (port 9000)
 //!   and persisted to `state.json`. JSON shape is **byte-compatible** with the
 //!   current `control-server/app/lib/types.ts` so the React frontend is unchanged.
 //! - [`config`] — `AppConfig` (+ a redacted view) edited via the Settings UI.

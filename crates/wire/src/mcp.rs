@@ -113,12 +113,12 @@ mod tests {
 
     #[test]
     fn click_flattens_target() {
-        // port-4 form: clone selector flattened alongside the args.
+        // Proxy form: clone selector flattened alongside the args.
         let json = r#"{"clone":"c-1","x":10,"y":20,"button":"right"}"#;
         let a: ClickArgs = serde_json::from_str(json).unwrap();
         assert_eq!(a.target.clone.as_deref(), Some("c-1"));
         assert_eq!(a.button, MouseButton::Right);
-        // port-3 form: no clone.
+        // Clone-local form: no clone.
         let a2: ClickArgs = serde_json::from_str(r#"{"x":1,"y":2}"#).unwrap();
         assert!(a2.target.clone.is_none());
         assert_eq!(a2.button, MouseButton::Left);

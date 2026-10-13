@@ -11,9 +11,9 @@ browser over a WebSocket on port 9000, where Chrome decodes it with WebCodecs (n
 ```
                          ┌─ continuous (selected clone) → VA-API H.264/monitor ─┐
 clone-daemon ──dmabuf────┤                                                       ├─▶ :9000 /api/viewer
- (SCM_RIGHTS, per mon)   └─ on demand  (any clone)      → VA-API → JPEG ─────────┴─▶ ports 3/4 (screenshot)
+ (SCM_RIGHTS, per mon)   └─ on demand  (any clone)      → VA-API → JPEG ─────────┴─▶ MCP screenshot
         ▲                                                                            │
-        └────────── input (InputMsg) ◀── route from viewer / port-3 agent / port-4 ─┘
+        └────────── input (InputMsg) ◀── route from viewer / MCP actions ────────────┘
                      → clone-daemon socket → Mutter RemoteDesktop
 ```
 
@@ -50,7 +50,7 @@ clone-daemon ──dmabuf────┤                                        
    stream to the browser windows of that monitor, one WebSocket per window; it honors
    `RequestKeyframe` (→ force IDR) and a fresh-connect IDR.
 5. **Input routing** — a single per-clone input sink: viewer `InputMsg` (selected
-   clone), port-3 agent actions (that clone), and port-4 actions (named clone) all funnel
+   clone) and MCP actions (`rmng desktop`, the `/api/hosts/:id/mcp` proxy) all funnel
    to the target clone's daemon socket. **Coalesce pointer motion** (latest-wins, flush
    ~120 Hz; buttons/keys flush the pending move first) — Phase-0 R8's dominant "latency"
    was injecting every motion event synchronously.

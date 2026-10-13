@@ -7,8 +7,8 @@
 `desktop <clone> <verb>` (computer use); `rmng guide` prints the full guide. `clone create`
 has one kind for each tab of the dashboard's "New clone" dialog: `ticket`, `new-ticket`,
 `no-ticket`, `template`. The two ticket kinds call `api.linear.app` themselves
-([linear.rs](src/linear.rs)), as the dashboard does. All over the **port-2 web
-API** via [control-client](../control-client/README.md).
+([linear.rs](src/linear.rs)), as the dashboard does. All over the **web API
+(port 9000)** via [control-client](../control-client/README.md).
 
 - **Build:** `cargo build -p rmng-cli` (package `rmng-cli`, binary `rmng`).
 - **Server resolution:** `--server` flag > `$RMNG_CONTROL_URL` > `http://localhost:9000`. The
