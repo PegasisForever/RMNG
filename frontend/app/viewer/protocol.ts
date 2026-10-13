@@ -61,9 +61,9 @@ export interface ViewerStats {
   /** Mean (arrival − server time) in the last second, minus its minimum over the last 10 s, ms.
    *  The two clocks differ by an unknown offset; subtracting the minimum removes it. */
   delayMs: number;
-  /** Chrome does not say which decoder runs. "hardware" means Chrome supports a hardware
-   *  decoder for this stream and the viewer did not fall back to software. */
-  decoder: "hardware" | "software" | "unknown";
+  /** Chrome does not say which decoder runs. "default" is Chrome's own choice; "software"
+   *  means the viewer asked for the software decoder after repeated decoder errors. */
+  decoder: "default" | "software";
 }
 
 /** Worker → page. */

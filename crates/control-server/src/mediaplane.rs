@@ -40,6 +40,8 @@ use crate::app::App;
 pub(crate) struct ViewerConn {
     id: u64,
     tx: SyncSender<Queued>,
+    /// The one monitor whose video this viewer gets (a browser window); `None` = all (port 1).
+    monitor: Option<u32>,
 }
 
 /// One message in a viewer's queue: its port-1 framing, and for video the header the browser
@@ -72,14 +74,19 @@ fn next_viewer_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Fan one pre-framed message out to every viewer. A viewer whose channel is full
-/// (too slow) or disconnected (writer already gone) is removed from the registry;
-/// dropping its stored `tx` lets its writer thread's channel disconnect, which tears
-/// the viewer down. Never blocks: `try_send` is non-blocking.
+/// Fan one pre-framed message out to every viewer (video only to the viewers of its
+/// monitor). A viewer whose channel is full (too slow) or disconnected (writer already
+/// gone) is removed from the registry; dropping its stored `tx` lets its writer thread's
+/// channel disconnect, which tears the viewer down. Never blocks: `try_send` is non-blocking.
 fn broadcast_bytes(viewers: &Viewers, msg: &Queued) {
     let mut guard = viewers.lock().unwrap();
     let mut dead: Vec<u64> = Vec::new();
     for v in guard.values() {
+        if let (Some(m), Some(h)) = (v.monitor, msg.video) {
+            if h.monitor_id != m {
+                continue;
+            }
+        }
         if v.tx.try_send(msg.clone()).is_err() {
             dead.push(v.id);
         }
@@ -442,7 +449,7 @@ pub fn spawn(app: App, init: MediaInit) {
                         let _ = write_half.shutdown(std::net::Shutdown::Both);
                     });
 
-                    let id = join_viewer(&app, &plane, tx);
+                    let id = join_viewer(&app, &plane, tx, None);
 
                     // Reader thread owns teardown.
                     let (app, plane) = (app.clone(), plane.clone());
@@ -1433,8 +1440,14 @@ fn teardown_if_current(
 }
 
 /// Add a viewer whose writer drains `tx`, and prime it: metadata first, then a fresh keyframe
-/// of every monitor. Returns its id. Blocks while an encoder is built, so call it from a thread.
-pub(crate) fn join_viewer(app: &App, plane: &Plane, tx: SyncSender<Queued>) -> u64 {
+/// of every monitor. `monitor` limits its video to one monitor. Returns its id. Blocks while an
+/// encoder is built, so call it from a thread.
+pub(crate) fn join_viewer(
+    app: &App,
+    plane: &Plane,
+    tx: SyncSender<Queued>,
+    monitor: Option<u32>,
+) -> u64 {
     let handle = &app.media;
     let id = next_viewer_id();
     let state = app.store.get();
@@ -1456,7 +1469,7 @@ pub(crate) fn join_viewer(app: &App, plane: &Plane, tx: SyncSender<Queued>) -> u
         .viewers
         .lock()
         .unwrap()
-        .insert(id, ViewerConn { id, tx });
+        .insert(id, ViewerConn { id, tx, monitor });
     // Somebody is watching now, so the selected clone has to start painting
     // again. Before the re-encode below, so its first fresh frame is close
     // behind the primed one.
@@ -1802,7 +1815,14 @@ mod tests {
 
         // A viewer arrives on 'a': only 'a' starts, and 'b' hears nothing new.
         let (tx, _rx) = std::sync::mpsc::sync_channel::<Queued>(4);
-        viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx });
+        viewers.lock().unwrap().insert(
+            1,
+            ViewerConn {
+                id: 1,
+                tx,
+                monitor: None,
+            },
+        );
         update_capture_gates(&app.media, &app, &viewers);
         assert_eq!(capture_msg(&client_a), Some(true));
         assert_eq!(
@@ -1840,7 +1860,14 @@ mod tests {
             tokio::runtime::Handle::current(),
         );
         let (tx, _rx) = std::sync::mpsc::sync_channel::<Queued>(64);
-        viewers.lock().unwrap().insert(1, ViewerConn { id: 1, tx });
+        viewers.lock().unwrap().insert(
+            1,
+            ViewerConn {
+                id: 1,
+                tx,
+                monitor: None,
+            },
+        );
 
         let adopt = |sel: Option<String>| {
             adopt_selection(
@@ -2124,14 +2151,22 @@ mod tests {
         tx_b.try_send(filler.into()).unwrap(); // B is now full (nobody drains _rx_b)
 
         let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
-        viewers
-            .lock()
-            .unwrap()
-            .insert(1, ViewerConn { id: 1, tx: tx_a });
-        viewers
-            .lock()
-            .unwrap()
-            .insert(2, ViewerConn { id: 2, tx: tx_b });
+        viewers.lock().unwrap().insert(
+            1,
+            ViewerConn {
+                id: 1,
+                tx: tx_a,
+                monitor: None,
+            },
+        );
+        viewers.lock().unwrap().insert(
+            2,
+            ViewerConn {
+                id: 2,
+                tx: tx_b,
+                monitor: None,
+            },
+        );
 
         let msg: Arc<[u8]> = Arc::from(vec![7u8, 8, 9]);
         broadcast_bytes(&viewers, &msg.into());
@@ -2146,6 +2181,29 @@ mod tests {
             !viewers.lock().unwrap().contains_key(&2),
             "full viewer was not dropped"
         );
+    }
+
+    /// A browser window's queue gets only its own monitor's video, so the other monitors'
+    /// frames do not fill it; everything else still reaches it.
+    #[test]
+    fn broadcast_video_reaches_only_its_monitors_viewer() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Queued>(4);
+        let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
+        viewers.lock().unwrap().insert(
+            1,
+            ViewerConn {
+                id: 1,
+                tx,
+                monitor: Some(1),
+            },
+        );
+        broadcast_video(&viewers, 0, &[0, 0, 0, 1, 0x65], true, 1);
+        broadcast_video(&viewers, 1, &[0, 0, 0, 1, 0x65], true, 2);
+        let mode: Arc<[u8]> = Arc::from(vec![T_MODE, 0, 0, 0, 0]);
+        broadcast_bytes(&viewers, &mode.into());
+        assert_eq!(rx.try_recv().unwrap().video.unwrap().monitor_id, 1);
+        assert_eq!(rx.try_recv().unwrap().buf[0], T_MODE);
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

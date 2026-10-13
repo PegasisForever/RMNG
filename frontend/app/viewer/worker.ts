@@ -25,8 +25,10 @@ const post = (m: WorkerOut) => scope.postMessage(m);
 
 /** Wait this long after the socket closes before connecting again. */
 const RECONNECT_MS = 1000;
-/** After this many decoder errors, ask Chrome for its software decoder. */
+/** After this many decoder errors in a row, ask Chrome for its software decoder. */
 const SOFTWARE_AFTER_ERRORS = 3;
+/** More chunks than this waiting in the decoder: drop until the next keyframe to catch up. */
+const DECODE_BACKLOG_MAX = 8;
 
 let url = "";
 let monitor = 0;
@@ -38,8 +40,9 @@ let decoder: VideoDecoder | null = null;
 let codec = "";
 /** Drop frames until a keyframe: at start, after a reconnect and after a decoder error. */
 let waitKey = true;
+/** Decoder errors since the last decoded frame. */
 let errors = 0;
-let decoderKind: ViewerStats["decoder"] = "unknown";
+let decoderKind: ViewerStats["decoder"] = "default";
 
 // Stats for the current second.
 let frames = 0;
@@ -80,25 +83,15 @@ function configure(c: string) {
   const config: VideoDecoderConfig = {
     codec: c,
     optimizeForLatency: true,
-    // The 4:2:0 encoder writes BT.709 limited range. Chrome ignores the stream's own colour
-    // data, so say it here.
-    colorSpace: { primaries: "bt709", transfer: "bt709", matrix: "bt709", fullRange: false },
+    // The 4:2:0 encoder writes BT.709 matrix, limited range, and leaves the desktop's sRGB
+    // transfer as it is; the stream carries no colour data. A BT.709 transfer here would make
+    // dark areas grey (the native viewer's `VIDEO_COLORIMETRY` has the same fix).
+    colorSpace: { primaries: "bt709", transfer: "iec61966-2-1", matrix: "bt709", fullRange: false },
     hardwareAcceleration: software ? "prefer-software" : "no-preference",
   };
   decoder!.configure(config);
   codec = c;
-  decoderKind = "unknown";
-  if (software) {
-    decoderKind = "software";
-  } else {
-    // With "no-preference" Chrome takes a hardware decoder whenever it has one.
-    void VideoDecoder.isConfigSupported({ ...config, hardwareAcceleration: "prefer-hardware" }).then(
-      (r) => {
-        if (codec === c) decoderKind = r.supported ? "hardware" : "software";
-      },
-      () => {},
-    );
-  }
+  decoderKind = software ? "software" : "default";
 }
 
 function onVideo(buf: ArrayBuffer) {
@@ -115,6 +108,10 @@ function onVideo(buf: ArrayBuffer) {
     if (c && c !== codec) configure(c);
   }
   if (!codec) return; // a keyframe without an SPS before any with one: wait for the next
+  if (decoder!.decodeQueueSize > DECODE_BACKLOG_MAX) {
+    waitKey = true;
+    return;
+  }
   waitKey = false;
   decodeStart.set(h.serverUs, performance.now());
   decoder!.decode(
@@ -136,15 +133,16 @@ function onFrame(frame: VideoFrame) {
   ctx.drawImage(frame, 0, 0);
   frame.close();
   frames++;
+  errors = 0;
 }
 
 function connect() {
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
+    // No keyframe request: joining primes every monitor with a fresh keyframe.
     post({ type: "connected", connected: true });
     waitKey = true;
-    requestKeyframe();
   };
   ws.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
     if (typeof e.data === "string") {

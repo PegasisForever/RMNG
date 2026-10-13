@@ -5,8 +5,9 @@
 //! its 128-message queue fills (the browser then reconnects and is primed again). Only the
 //! wire format differs, so this file is the translation and the two per-socket threads.
 //!
-//! - Writer thread: drains the queue, keeps video for this socket's monitor only, and turns the
-//!   port-1 framing into a binary video message or a JSON [`ToBrowser`] text message.
+//! - Writer thread: drains the queue (the media plane queues only this socket's monitor's
+//!   video) and turns the port-1 framing into a binary video message or a JSON [`ToBrowser`]
+//!   text message.
 //! - Reader thread: parses [`FromBrowser`] and hands it to the media plane's handler. It owns
 //!   the teardown, as on port 1.
 
@@ -52,7 +53,7 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
                     Message::Ping(Vec::new())
                 } else {
                     match rx.recv_timeout(PING_EVERY.saturating_sub(last_ping.elapsed())) {
-                        Ok(q) => match browser_message(&q, monitor) {
+                        Ok(q) => match browser_message(&q) {
                             Some(m) => m,
                             None => continue,
                         },
@@ -70,7 +71,7 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
             drop(gone_tx);
         });
 
-        let id = mediaplane::join_viewer(&app, &plane, tx);
+        let id = mediaplane::join_viewer(&app, &plane, tx, Some(monitor));
         tracing::info!("browser viewer {id} connected (monitor {monitor})");
         loop {
             let next = rt.block_on(async {
@@ -94,16 +95,12 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
     });
 }
 
-/// Turn one queued port-1 message into this socket's message, or `None` when it does not go
-/// to this socket: video for another monitor, and the forward set (a browser cannot open local
-/// ports).
-fn browser_message(q: &Queued, monitor: u32) -> Option<Message> {
+/// Turn one queued port-1 message into this socket's message, or `None` for the forward set
+/// (a browser cannot open local ports).
+fn browser_message(q: &Queued) -> Option<Message> {
     let buf = &q.buf;
     if buf[0] == T_VIDEO {
         let header = q.video?;
-        if header.monitor_id != monitor {
-            return None;
-        }
         let au = &buf[9..];
         let mut out = Vec::with_capacity(wire::browser::VIDEO_HEADER_LEN + au.len());
         out.extend_from_slice(&header.encode());
@@ -141,15 +138,11 @@ mod tests {
             buf: mediaplane::frame_video(1, &[0, 0, 0, 1, 0x65]),
             video: Some(header),
         };
-        let Some(Message::Binary(b)) = browser_message(&video, 1) else {
-            panic!("video for this monitor is a binary message");
+        let Some(Message::Binary(b)) = browser_message(&video) else {
+            panic!("video is a binary message");
         };
         assert_eq!(&b[..18], &header.encode());
         assert_eq!(&b[18..], &[0, 0, 0, 1, 0x65]);
-        assert!(
-            browser_message(&video, 0).is_none(),
-            "another monitor's video"
-        );
 
         let mode = mediaplane::frame_json(
             T_MODE,
@@ -158,7 +151,7 @@ mod tests {
             },
         )
         .unwrap();
-        let Some(Message::Text(t)) = browser_message(&mode.into(), 0) else {
+        let Some(Message::Text(t)) = browser_message(&mode.into()) else {
             panic!("mode is a text message");
         };
         assert_eq!(
@@ -170,6 +163,6 @@ mod tests {
 
         let forwards =
             mediaplane::frame_json(mediaplane::T_FORWARDS, &serde_json::json!({})).unwrap();
-        assert!(browser_message(&forwards.into(), 0).is_none());
+        assert!(browser_message(&forwards.into()).is_none());
     }
 }
