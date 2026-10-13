@@ -237,7 +237,7 @@ export default function Viewer() {
         tabIndex={-1}
         onMouseDown={(e) => e.preventDefault()}
         onClick={toggleFullscreen}
-        className={`absolute bottom-1 right-1 rounded bg-black/60 px-2 py-0.5 text-xs text-slate-200 transition-opacity hover:opacity-100 ${
+        className={`absolute left-1 top-1 rounded bg-black/60 px-2 py-0.5 text-xs text-slate-200 transition-opacity hover:opacity-100 ${
           fullscreen ? "opacity-0" : ""
         }`}
       >
