@@ -46,7 +46,6 @@ import {
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
-import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 
 /** A column as drawn. Ids are column ids. */
 type Lane = { id: string; cloneIds: string[] };
@@ -63,8 +62,6 @@ export interface BoardProps {
   stats: Record<string, ContainerStats>;
   /** All-time per-clone token totals from `ControlState.cloneTokens`. */
   cloneTokens?: Record<string, CloneTokens>;
-  /** Live per-clone forward-runtime map (the `forwards` SSE event). */
-  forwards?: Record<string, ForwardRuntime[]>;
   /** All operations; a card with a running one is frozen in place. */
   operations: Operation[];
   /** The clone drawn as selected, which is not always the clone the fleet is pointed at.
@@ -212,7 +209,6 @@ export function Board({
   cloneTickets = {},
   stats,
   cloneTokens = {},
-  forwards = {},
   operations,
   selectedId,
   sshPublicHost,
@@ -302,7 +298,6 @@ export function Board({
     ticket: cloneTickets[clone.id],
     stats: stats[clone.id],
     tokens: cloneTokens[clone.id],
-    forwardRuntime: forwards[clone.id],
     op: opFor(clone.id),
     selected: selectedId === clone.id,
     sshPublicHost,

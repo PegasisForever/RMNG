@@ -44,6 +44,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 
 - Zero-copy full-chroma 4:4:4 hardware H.264 pipeline end to end (even on hardware that only supports 4:2:0!)
 - Native hardware-accelerated viewer on Linux (GTK/VA-API) and macOS (AppKit/Metal/VideoToolbox)
+- Browser viewer in Chrome, one window per monitor. Each window goes fullscreen on its screen without a click only when the dashboard address is in Chrome's `AutomaticFullscreenAllowedForUrls` policy.
 - 60fps on local network
 - Multi-monitor
 - Instant swap between clones

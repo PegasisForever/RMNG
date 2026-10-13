@@ -179,19 +179,14 @@ export function wheelMessages(
   return out;
 }
 
-/** Fullscreen on or off. `screen` (a `ScreenDetailed` from the Window Management API) puts the
- *  window on that screen; without it Chrome uses the screen the window is on. */
-export function toggleFullscreen(screen?: object) {
+/** Fullscreen on or off, on the screen the window is on. */
+export function toggleFullscreen() {
   if (document.fullscreenElement) void document.exitFullscreen();
-  else void requestFullscreen(screen);
+  else void requestFullscreen();
 }
 
-/** Chrome treats a request that names a screen as a move to another screen, which always needs
- *  a click, even for a site its AutomaticFullscreenAllowedForUrls policy lists. So the screen
- *  is named only when there is one. */
-export function requestFullscreen(screen?: object) {
-  const el = document.documentElement;
-  return screen ? el.requestFullscreen({ screen } as FullscreenOptions) : el.requestFullscreen();
+export function requestFullscreen() {
+  return document.documentElement.requestFullscreen();
 }
 
 /** Chrome's Keyboard Lock API; not in TypeScript's DOM types. */
@@ -334,7 +329,11 @@ export function attachInput(o: InputOptions): Input {
     return { key, tooBig };
   }
 
+  /** A key typed into the page's own terminal (xterm.js reads keys from a textarea). */
+  const forPage = (e: KeyboardEvent) => e.target instanceof HTMLTextAreaElement;
+
   function onKeyDown(e: KeyboardEvent) {
+    if (forPage(e)) return;
     o.onGesture();
     // Local chords, not forwarded. Their Ctrl and Alt already went to the clone, so release
     // them (and everything else held) first, as the native viewer does.
@@ -368,6 +367,7 @@ export function attachInput(o: InputOptions): Input {
   }
 
   function onKeyUp(e: KeyboardEvent) {
+    if (forPage(e)) return;
     const k = CODE_TO_EVDEV[e.code];
     if (k === undefined) return;
     e.preventDefault();
@@ -390,18 +390,16 @@ export function attachInput(o: InputOptions): Input {
     if (!size || !box) return;
     const p = toMonitor(e.clientX, e.clientY, canvas.getBoundingClientRect(), box, size.w, size.h);
     if (buttons.size) {
-      // A drag: the pointer capture keeps the moves coming here past the window's edge, so a
-      // drag that leaves the window goes on in the neighbouring monitor.
+      // A drag: Chrome keeps sending the moves to the window the button was pressed in, also
+      // past its edge, so a drag that leaves the window goes on in the neighbouring monitor.
       const r = routeDrag(layout, monitor, p.x, p.y);
       if (r) send({ kind: "pointer_move", monitor_id: r.id, x: r.x, y: r.y });
       return;
     }
-    const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), max);
+    // `w` is the next monitor's first pixel (`routeDrag`), so the last one here is `w - 1`.
+    const clamp = (v: number, max: number) => Math.min(Math.max(v, 0), max - 1);
     send({ kind: "pointer_move", monitor_id: monitor, x: clamp(p.x, size.w), y: clamp(p.y, size.h) });
   }
-
-  // Moves past the window's edge during a drag keep coming to this window.
-  const onPointerDown = (e: PointerEvent) => canvas.setPointerCapture(e.pointerId);
 
   // Buttons use mouse events: a pointer event reports a second button pressed during a first
   // one as a move, not as a press.
@@ -476,7 +474,6 @@ export function attachInput(o: InputOptions): Input {
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("pointerlockchange", onLockChange);
   document.addEventListener("fullscreenchange", onFullscreen);
-  canvas.addEventListener("pointerdown", onPointerDown);
   const timer = setInterval(tick, 50);
   const resize = new ResizeObserver(([entry]) => {
     const d = entry.devicePixelContentBoxSize[0];
@@ -523,7 +520,6 @@ export function attachInput(o: InputOptions): Input {
     detach() {
       clearInterval(timer);
       resize.disconnect();
-      canvas.removeEventListener("pointerdown", onPointerDown);
       clearTimeout(scrollEnd);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);

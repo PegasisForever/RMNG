@@ -21,6 +21,8 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@react-router/node": "^7.7.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "isbot": "^5.1.0",
     "lucide-react": "^1.23.0",
     "react": "^19.1.0",

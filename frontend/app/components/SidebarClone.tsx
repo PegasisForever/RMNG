@@ -2,7 +2,6 @@ import type { DraggableSyntheticListeners } from "@dnd-kit/core";
 import {
   Archive,
   ArchiveRestore,
-  ArrowRight,
   Bell,
   BellOff,
   ChevronDown,
@@ -31,9 +30,6 @@ import type { CloneTicket } from "~/lib/tickets";
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
-import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
-import type { ForwardState } from "~/lib/wire/ForwardState";
-import type { PortForward } from "~/lib/wire/PortForward";
 import { workspaceBadge } from "~/lib/workspace";
 
 // The control server owns this compact lifecycle indicator: blue = recent token activity,
@@ -206,46 +202,6 @@ function AccountTag({
   );
 }
 
-// Status dot per forward state (+ a muted "disabled" for rules toggled off), shown in
-// the compact per-clone forwards chips.
-const FORWARD_DOT: Record<ForwardState | "disabled", string> = {
-  listening: "bg-emerald-500",
-  error: "bg-red-500",
-  offline: "bg-slate-400 dark:bg-slate-500",
-  disabled: "bg-slate-300 dark:bg-slate-600",
-};
-
-/** A compact wrapping row of this clone's port forwards — one `remote→local` chip per
- *  rule with a status-colored dot, live state merged from the `forwards` SSE event by
- *  rule id. A disabled rule renders muted; hover shows the full mapping + state/error. */
-function ForwardChips({ forwards, runtime }: { forwards: PortForward[]; runtime: ForwardRuntime[] }) {
-  const rtById = new Map(runtime.map((r) => [r.id, r]));
-  return (
-    <div className="mt-1 flex flex-wrap gap-1">
-      {forwards.map((f) => {
-        const rt = rtById.get(f.id);
-        const state: ForwardState | "disabled" = !f.enabled ? "disabled" : rt?.state ?? "offline";
-        const conns = rt && rt.activeConns > 0 ? ` · ${rt.activeConns} conn` : "";
-        const err = rt?.error ? ` · ${rt.error}` : "";
-        return (
-          <span
-            key={f.id}
-            title={`${f.remotePort} → 127.0.0.1:${f.localPort} · ${state}${conns}${err}`}
-            className={`inline-flex items-center gap-1 rounded bg-slate-100 px-1 py-0.5 font-mono text-[9px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400 ${
-              f.enabled ? "" : "opacity-60"
-            }`}
-          >
-            <span className={`size-1.5 shrink-0 rounded-full ${FORWARD_DOT[state]}`} />
-            {f.remotePort}
-            <ArrowRight className="size-2.5 shrink-0 text-slate-500 dark:text-slate-400" />
-            {f.localPort}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
 export interface SidebarCloneProps {
   clone: Clone;
   /** This clone's Linear ticket as Linear has it now. Absent ⇒ the card draws the title and
@@ -270,7 +226,7 @@ export interface SidebarCloneProps {
   onChangeAccount: () => void;
   /** Rebase this clone onto a preset's image (dataset + id kept). */
   onRebase: () => void;
-  /** Open the port-forward editor for this clone. */
+  /** Open the port-forward command dialog for this clone. */
   onPortForward: () => void;
   /** Gracefully stop a managed clone while retaining it. */
   onArchive: () => void;
@@ -292,9 +248,6 @@ export interface SidebarCloneProps {
   /** Flip this clone's own mute. Absent ⇒ no menu item, which is what a story that does not
    *  care about muting gets. */
   onToggleMute?: () => void;
-  /** Live runtime status for this clone's forwards (from the `forwards` SSE event),
-   *  merged into the compact forwards chips by rule id. */
-  forwardRuntime?: ForwardRuntime[];
   /** The `-J` jump target for the copied command, already resolved: this page's own
    *  address (no override exists anymore). The container reads the page's address, so a
    *  card never has to. */
@@ -473,7 +426,6 @@ export function SidebarClone({
   muted = false,
   mutedByParent = false,
   onToggleMute,
-  forwardRuntime,
   sshPublicHost,
   isChild = false,
   childCount = 0,
@@ -709,11 +661,6 @@ export function SidebarClone({
             ) : null}
             {title}
           </p>
-        ) : null}
-
-        {/* Compact list of this clone's port forwards (remote→local, live status dot). */}
-        {!busy && clone.forwards && clone.forwards.length > 0 ? (
-          <ForwardChips forwards={clone.forwards} runtime={forwardRuntime ?? []} />
         ) : null}
 
         {/* Expand/collapse this clone's sub clones — pinned to the bottom of the card. Stops

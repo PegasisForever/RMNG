@@ -11,7 +11,6 @@ import { type ControlState, emptyState } from "~/lib/types";
 import { useIsMobile } from "~/lib/useIsMobile";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
-import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 
 import type { Route } from "./+types/_index";
@@ -49,9 +48,6 @@ function useLiveState(initial: ControlState) {
   const [state, setState] = useState(initial);
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
   const [lxcStats, setLxcStats] = useState<LxcStats | null>(null);
-  const [forwards, setForwards] = useState<Record<string, ForwardRuntime[]>>(
-    {},
-  );
   useEffect(() => {
     let es: EventSource | null = null;
     let lastActivity = Date.now();
@@ -89,14 +85,6 @@ function useLiveState(initial: ControlState) {
         lastActivity = Date.now();
         try {
           setLxcStats(JSON.parse((e as MessageEvent).data));
-        } catch {
-          // ignore malformed frame
-        }
-      });
-      es.addEventListener("forwards", (e) => {
-        lastActivity = Date.now();
-        try {
-          setForwards(JSON.parse((e as MessageEvent).data));
         } catch {
           // ignore malformed frame
         }
@@ -170,13 +158,13 @@ function useLiveState(initial: ControlState) {
       es?.close();
     };
   }, []);
-  return { state, stats, lxcStats, forwards };
+  return { state, stats, lxcStats };
 }
 
 export default function Home({ loaderData }: Route.ComponentProps) {
   // The live SSE state powers both the wizard (template-provision progress) and the
   // dashboard, so it lives here at the gate. `stats` is the volatile per-clone usage map.
-  const { state, stats, lxcStats, forwards } = useLiveState(loaderData);
+  const { state, stats, lxcStats } = useLiveState(loaderData);
   // Phone or desktop, decided once here in JavaScript. The two shells share this state and
   // the config gate above, and nothing else — see `useIsMobile`.
   const mobile = useIsMobile();
@@ -225,7 +213,6 @@ export default function Home({ loaderData }: Route.ComponentProps) {
       state={state}
       stats={stats}
       lxcStats={lxcStats}
-      forwards={forwards}
       sshPublicHost=""
       groups={state.groups}
       presets={cfg.presets}

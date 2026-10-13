@@ -7,3 +7,16 @@ export const BASTION_PORT = 2222;
 export function buildSshCommand(publicHost: string, bastionPort: number, cloneId: string): string {
   return `ssh -J rmng@${publicHost}:${bastionPort} -o StrictHostKeyChecking=accept-new rmng@${cloneId}`;
 }
+
+/** The port-forward one-liner (the same jump as `buildSshCommand`): while it runs,
+ *  `localhost:<localPort>` on the machine that runs it reaches `<clonePort>` inside the clone.
+ *  `-N`: no remote shell, only the forward. */
+export function buildForwardCommand(
+  publicHost: string,
+  bastionPort: number,
+  cloneId: string,
+  localPort: number,
+  clonePort: number,
+): string {
+  return `ssh -J rmng@${publicHost}:${bastionPort} -N -L ${localPort}:localhost:${clonePort} -o StrictHostKeyChecking=accept-new rmng@${cloneId}`;
+}

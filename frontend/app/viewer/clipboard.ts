@@ -195,6 +195,9 @@ export function attachClipboard(o: ClipboardOptions): ViewerClipboard {
         const p = pending();
         if (p?.own && p.serial === msg.serial) return; // a sibling window's copy
         setPending({ serial: msg.serial, mime_types: msg.mime_types });
+        // A new copy, even with the serial of the last one: serials restart per clone and when
+        // the clone's clipboard holder restarts.
+        fetching = null;
         run(fetchPending);
       } else if (msg.k === "request") {
         void serve(msg.serial, msg.mime_type);

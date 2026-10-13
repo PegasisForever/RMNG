@@ -16,3 +16,5 @@ base64 = "0.22"
 futures.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tokio.workspace = true
+# `rmng-fps`: the frame-rate test tool (a browser-viewer WebSocket client). Same version axum uses.
+tokio-tungstenite = "0.24"

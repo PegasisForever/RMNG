@@ -41,7 +41,7 @@ export async function screens(): Promise<ScreenInfo[] | null> {
  *  active layout preset (the same preset the server picks: the active one, else the first).
  *  With the window-management permission each window opens on its own screen, covering it,
  *  and asks for fullscreen there (`fullscreen=1`). A window that is open already stays as it
- *  is. Chrome lets one click open one pop-up, so with more than one monitor the operator
+ *  is, also on its old screen when the layout changed. Chrome lets one click open one pop-up, so with more than one monitor the operator
  *  allows pop-ups for this site once. */
 export async function openViewerWindows(monitors?: Placed[]) {
   if (!monitors) {

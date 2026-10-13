@@ -154,28 +154,6 @@ export const LongTitleAndDescription: Story = {
   },
 };
 
-/** Compact port-forward chips under the clone metadata — one `remote→local` chip per rule
- *  with a live status dot, covering every state: listening (with active-conn count),
- *  error, offline (no runtime yet), and a muted rule toggled off. */
-export const WithForwards: Story = {
-  args: {
-    clone: makeCloneWorking({
-      forwards: [
-        { id: "f8080", remotePort: 3000, localPort: 8080, enabled: true, label: null },
-        { id: "f9000", remotePort: 9000, localPort: 9000, enabled: true, label: null },
-        { id: "f5433", remotePort: 5432, localPort: 5433, enabled: true, label: null },
-        { id: "f7000", remotePort: 7000, localPort: 7000, enabled: false, label: null },
-      ],
-    }),
-    stats: stats[cloneWorking.id],
-    forwardRuntime: [
-      { id: "f8080", state: "listening", error: null, activeConns: 2 },
-      { id: "f9000", state: "error", error: "connection refused", activeConns: 0 },
-      // f5433 has no runtime entry → offline; f7000 is disabled → muted.
-    ],
-  },
-};
-
 /** Silenced by the operator. The bell sits where the status dot does, because a mute you can
  *  only see by opening the menu is how a clone ends up ignored for a week. Its menu item reads
  *  "Unmute notifications". */

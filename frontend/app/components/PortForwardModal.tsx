@@ -1,186 +1,93 @@
-// Configure a clone's local port forwards (remote clone port → 127.0.0.1:<local> on the
-// machine running the native viewer). Live status (listening / error / offline) is merged
-// from the `forwards` SSE event by rule id.
+// Port forwarding for a clone: the operator types a local port and a clone port and copies an
+// `ssh` command (through the bastion) that forwards one to the other while it runs. RMNG stores
+// nothing; the command is the whole feature.
 import { useState } from "react";
 
 import { ModalShell } from "~/components/ModalShell";
 import type { Clone } from "~/lib/types";
-import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
+import { BASTION_PORT, buildForwardCommand } from "~/lib/ssh";
 
-type Row = {
-  id?: string;
-  remotePort: string;
-  localPort: string;
-  enabled: boolean;
-};
-
-function toRows(clone: Clone): Row[] {
-  return (clone.forwards ?? []).map((f) => ({
-    id: f.id,
-    remotePort: String(f.remotePort),
-    localPort: String(f.localPort),
-    enabled: f.enabled,
-  }));
-}
-
-function statusFor(
-  runtime: ForwardRuntime[],
-  id?: string,
-): ForwardRuntime | undefined {
-  return id ? runtime.find((r) => r.id === id) : undefined;
+/** A TCP port typed in a box, or null when it is not one. */
+function port(s: string): number | null {
+  const n = Number(s);
+  return /^\d+$/.test(s.trim()) && n >= 1 && n <= 65535 ? n : null;
 }
 
 export function PortForwardModal({
   clone,
-  runtime,
-  busy,
-  error,
+  sshPublicHost,
   onClose,
-  onSubmit,
+  onCopy,
 }: {
   clone: Clone;
-  runtime: ForwardRuntime[];
-  busy: boolean;
-  error: string | null;
+  /** The `-J` jump host: this page's own address. */
+  sshPublicHost: string;
   /** The dialog is finished: unmount it. The exit frames have already played. */
   onClose: () => void;
-  /** Save the rules. Resolving closes the dialog; rejecting leaves it up, on the message the
-   *  page put in `error`. */
-  onSubmit: (
-    forwards: Array<{
-      id?: string;
-      remotePort: number;
-      localPort: number;
-      enabled: boolean;
-      label?: string;
-    }>,
-  ) => Promise<unknown>;
+  /** Put the command on the clipboard; resolves to whether it landed. */
+  onCopy: (command: string) => Promise<boolean>;
 }) {
-  const [rows, setRows] = useState<Row[]>(() => toRows(clone));
+  const [clonePort, setClonePort] = useState("");
+  const [localPort, setLocalPort] = useState("");
+  const [copied, setCopied] = useState<boolean | null>(null);
+  const remote = port(clonePort);
+  // The local port is the clone port unless the operator typed another.
+  const local = localPort.trim() ? port(localPort) : remote;
+  const command =
+    remote !== null && local !== null
+      ? buildForwardCommand(sshPublicHost, BASTION_PORT, clone.id, local, remote)
+      : null;
 
-  const update = (i: number, patch: Partial<Row>) =>
-    setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-  const remove = (i: number) => setRows((rs) => rs.filter((_, j) => j !== i));
-  const add = () =>
-    setRows((rs) => [...rs, { remotePort: "", localPort: "", enabled: true }]);
-
-  // A save that lands closes the dialog, so the exit frames run on the way out; one that
-  // fails leaves it standing with the page's message, so the rules can be fixed as typed.
-  const submit = (close: () => void) => {
-    const forwards = rows.map((r) => ({
-      id: r.id,
-      remotePort: Number(r.remotePort),
-      localPort: Number(r.localPort),
-      enabled: r.enabled,
-    }));
-    onSubmit(forwards).then(
-      () => close(),
-      () => {},
-    );
-  };
-
-  // All errors surfaced at the top: the save/validation error (if any) plus every rule
-  // whose live runtime state is "error", labelled by its port mapping so it's traceable
-  // now that the per-row status column is gone.
-  const runtimeErrors = rows.flatMap((r) => {
-    const rt = statusFor(runtime, r.id);
-    return rt?.state === "error"
-      ? [
-          {
-            id: r.id!,
-            text: `${r.remotePort || "?"}→${r.localPort || "?"}: ${rt.error ?? "failed"}`,
-          },
-        ]
-      : [];
-  });
-
+  const box =
+    "min-w-0 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100";
   return (
     <ModalShell size="md" onExited={onClose}>
       {(close) => (
         <>
           <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-            Port forwards ·{" "}
+            Port forward ·{" "}
             <span className="text-emerald-700 dark:text-emerald-400">
               {clone.displayName ?? clone.id}
             </span>
           </h3>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            Expose a port inside this clone at{" "}
-            <code>127.0.0.1:&lt;local&gt;</code> on the machine running the
-            viewer.
+            Run the command on your machine. While it runs, <code>localhost:&lt;local&gt;</code>{" "}
+            there reaches the port inside this clone.
           </p>
 
-          {error || runtimeErrors.length > 0 ? (
-            <div className="mt-3 space-y-1">
-              {error ? (
-                <p className="text-xs text-red-600 dark:text-red-400">
-                  {error}
-                </p>
-              ) : null}
-              {runtimeErrors.map((e) => (
-                <p
-                  key={e.id}
-                  className="text-xs text-red-600 dark:text-red-400"
-                >
-                  {e.text}
-                </p>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="mt-4 space-y-2">
-            <div className="grid grid-cols-[1fr_1fr_2rem_2rem] gap-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">
-              <span>Remote</span>
-              <span>Local</span>
-              <span className="text-center">On</span>
-              <span></span>
-            </div>
-            {rows.map((r, i) => (
-              <div
-                key={i}
-                className="grid grid-cols-[1fr_1fr_2rem_2rem] items-center gap-2"
-              >
-                <input
-                  inputMode="numeric"
-                  value={r.remotePort}
-                  onChange={(e) =>
-                    update(i, { remotePort: e.target.value, id: undefined })
-                  }
-                  placeholder="3000"
-                  className="min-w-0 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
-                />
-                <input
-                  inputMode="numeric"
-                  value={r.localPort}
-                  onChange={(e) =>
-                    update(i, { localPort: e.target.value, id: undefined })
-                  }
-                  placeholder="8080"
-                  className="min-w-0 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
-                />
-                <input
-                  type="checkbox"
-                  checked={r.enabled}
-                  onChange={(e) => update(i, { enabled: e.target.checked })}
-                  className="size-4 justify-self-center"
-                />
-                <button
-                  type="button"
-                  onClick={() => remove(i)}
-                  className="cursor-pointer justify-self-center rounded px-1.5 py-1 text-xs text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950/40"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-            <button
-              type="button"
-              onClick={add}
-              className="cursor-pointer text-xs text-emerald-700 hover:underline dark:text-emerald-400"
-            >
-              + Add forward
-            </button>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <label className="flex flex-col gap-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+              Clone port
+              <input
+                autoFocus
+                inputMode="numeric"
+                value={clonePort}
+                onChange={(e) => {
+                  setClonePort(e.target.value);
+                  setCopied(null);
+                }}
+                placeholder="3000"
+                className={box}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+              Local port
+              <input
+                inputMode="numeric"
+                value={localPort}
+                onChange={(e) => {
+                  setLocalPort(e.target.value);
+                  setCopied(null);
+                }}
+                placeholder={remote !== null ? String(remote) : "same as clone port"}
+                className={box}
+              />
+            </label>
           </div>
+
+          <pre className="mt-3 min-h-[3.5rem] whitespace-pre-wrap break-all rounded-md bg-slate-100 px-2 py-1.5 font-mono text-xs text-slate-700 select-all dark:bg-slate-800 dark:text-slate-200">
+            {command ?? "Type a port from 1 to 65535."}
+          </pre>
 
           <div className="mt-5 flex justify-end gap-2">
             <button
@@ -188,15 +95,15 @@ export function PortForwardModal({
               onClick={() => close()}
               className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
             >
-              Cancel
+              Close
             </button>
             <button
               type="button"
-              disabled={busy}
-              onClick={() => submit(close)}
+              disabled={!command}
+              onClick={() => command && void onCopy(command).then(setCopied)}
               className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
             >
-              {busy ? "Saving…" : "Save"}
+              {copied === true ? "Copied!" : copied === false ? "Copy failed — copy manually" : "Copy command"}
             </button>
           </div>
         </>

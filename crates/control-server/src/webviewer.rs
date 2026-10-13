@@ -84,23 +84,18 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
 
         let id = mediaplane::join_viewer(&app, &plane, tx, Some(monitor));
         tracing::info!("browser viewer {id} connected (monitor {monitor})");
-        // Every store change wakes the reader, so a clone switch releases what this socket
-        // holds in the old clone at once, not at its next message.
-        let (_, mut changes) = app.store.subscribe();
+        // Input follows the selection: what this socket holds in the old clone is released at
+        // its next input message (a dashboard switch blurs the window, which releases all) and
+        // at close.
         let mut held = Held::default();
         let mut deadline = tokio::time::Instant::now() + READ_TIMEOUT;
         loop {
             let next = rt.block_on(async {
                 tokio::select! {
-                    m = tokio::time::timeout_at(deadline, stream.next()) => Some(m.ok().flatten()),
-                    _ = &mut gone_rx => Some(None),
-                    _ = changes.recv() => None,
+                    m = tokio::time::timeout_at(deadline, stream.next()) => m.ok().flatten(),
+                    _ = &mut gone_rx => None,
                 }
             });
-            let Some(next) = next else {
-                held.follow(&app, app.store.selected());
-                continue;
-            };
             deadline = tokio::time::Instant::now() + READ_TIMEOUT;
             let msg = match next {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<FromBrowser>(&text) {

@@ -2,15 +2,19 @@
 // dashboard. The worker (`~/viewer/worker.ts`) does the socket, the decode and the drawing;
 // this page holds the canvas, the input (`~/viewer/input.ts`), the clipboard
 // (`~/viewer/clipboard.ts`), the cursor, the toolbar, the stats overlay and file drop, and is
-// where server messages arrive.
-import { type DragEvent, useEffect, useRef, useState } from "react";
+// where server messages arrive. For a clone with no desktop, monitor 0's window shows its
+// terminal (`~/viewer/terminal.tsx`) over the canvas.
+import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
+import type { FromBrowser } from "~/lib/wire/FromBrowser";
+import type { TermData } from "~/lib/wire/TermData";
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
+import type { ViewContent } from "~/lib/wire/ViewContent";
 import type { ViewMonitor } from "~/lib/wire/ViewMonitor";
 import { attachClipboard } from "~/viewer/clipboard";
 import { type Input, attachInput, requestFullscreen, toggleFullscreen } from "~/viewer/input";
-import { matchScreens, openViewerWindows, screens } from "~/viewer/open";
+import { openViewerWindows } from "~/viewer/open";
 import {
   type ViewerStats,
   type WorkerIn,
@@ -18,6 +22,7 @@ import {
   encodeClipboardData,
   parseClipboardData,
 } from "~/viewer/protocol";
+import { TermView } from "~/viewer/terminal";
 
 export function meta() {
   return [{ title: "RMNG viewer" }];
@@ -46,10 +51,14 @@ export default function Viewer() {
   const box = useRef<HTMLDivElement>(null);
   const overlay = useRef<HTMLImageElement>(null);
   const input = useRef<Input | null>(null);
-  /** The screen this window's monitor goes on (Window Management API), once looked up. */
-  const screen = useRef<object | undefined>(undefined);
   /** The view spec's monitors; null until the first view spec. */
   const [layout, setLayout] = useState<ViewMonitor[] | null>(null);
+  /** What the view spec says the windows show: video, or a terminal. */
+  const [content, setContent] = useState<ViewContent | null>(null);
+  /** Sends a message on the socket (through the worker); a no-op until the worker runs. */
+  const sendRef = useRef<(msg: FromBrowser) => void>(() => {});
+  const send = useCallback((msg: FromBrowser) => sendRef.current(msg), []);
+  const termSink = useRef<((d: TermData) => void) | null>(null);
   // Null until the effect has looked: the page has no `window` while it is built.
   const [secure, setSecure] = useState<boolean | null>(null);
   const [connected, setConnected] = useState(false);
@@ -80,6 +89,7 @@ export default function Viewer() {
       type: "module",
     });
     const post = (m: WorkerIn, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
+    sendRef.current = (msg) => post({ type: "send", msg });
     const clip = attachClipboard({
       send: (msg) => post({ type: "send", msg: { t: "clipboard", ...msg } }),
       sendData: (d) => {
@@ -102,8 +112,10 @@ export default function Viewer() {
     const onServerMessage = (msg: ToBrowser) => {
       switch (msg.t) {
         case "view_spec":
-          inp.setLayout(msg.monitors);
+          // No pointer moves go to a clone that shows a terminal.
+          inp.setLayout(msg.content.mode === "desktop" ? msg.monitors : []);
           setLayout(msg.monitors);
+          setContent(msg.content);
           break;
         case "cursor":
           inp.onCursor(msg);
@@ -111,8 +123,10 @@ export default function Viewer() {
         case "clipboard":
           clip.onMessage(msg);
           break;
-        case "mode":
         case "term_data":
+          termSink.current?.(msg);
+          break;
+        case "mode":
           break;
       }
     };
@@ -140,25 +154,18 @@ export default function Viewer() {
       inp.detach();
       clip.detach();
       input.current = null;
+      sendRef.current = () => {};
       worker.terminate();
       canvas.remove();
     };
   }, [secure, monitor]);
 
-  // A placed window looks up its screen and asks for fullscreen. Chrome allows that without a
-  // click only for sites in its AutomaticFullscreenAllowedForUrls policy, and then only on the
-  // screen the window is on (where `openViewerWindows` put it). Otherwise the toolbar's
-  // Fullscreen button does it with one click, on the window's own screen.
-  const hasLayout = layout !== null;
+  // `openViewerWindows` put a placed window on its screen; fullscreen uses the window's own
+  // screen. Chrome allows it without a click only for sites in its
+  // AutomaticFullscreenAllowedForUrls policy; otherwise the toolbar's Fullscreen button does it.
   useEffect(() => {
-    if (!placed || !hasLayout) return;
-    void screens().then((all) => {
-      screen.current = matchScreens(layout ?? [], all ?? []).get(monitor);
-      if (screen.current && !document.fullscreenElement) requestFullscreen().catch(() => {});
-    });
-    // Once per window, on the first view spec.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [placed, hasLayout, monitor]);
+    if (placed) requestFullscreen().catch(() => {});
+  }, [placed]);
 
   if (secure === false) {
     return (
@@ -221,7 +228,19 @@ export default function Viewer() {
         hidden
         className="pointer-events-none fixed left-0 top-0 max-w-none"
       />
-      {layout && !layout.some((m) => m.id === monitor) ? (
+      {/* Over the canvas, so the last video picture does not show through. A new clone remounts
+          the terminal, so its tabs start empty. */}
+      {content?.mode === "terminal" ? (
+        monitor === 0 ? (
+          <div className="absolute inset-0">
+            <TermView key={content.clone} sessions={content.sessions} send={send} sink={termSink} />
+          </div>
+        ) : (
+          <p className="absolute inset-0 flex items-center justify-center bg-black text-sm text-slate-400">
+            This clone has no desktop. Its terminal is in the monitor 0 window.
+          </p>
+        )
+      ) : layout && !layout.some((m) => m.id === monitor) ? (
         <p className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-slate-400">
           {layout.length
             ? `Monitor ${monitor} is not in the current layout. Close this window.`
@@ -249,15 +268,15 @@ decoder ${stats.decoder}`}
           {note.text}
         </p>
       ) : null}
-      {/* Bottom right, faint: the clone's top bar has its own menus at the top. In fullscreen
-          invisible until the pointer is on it. */}
+      {/* Bottom right, faint: the clone's top bar has its own menus at the top. In fullscreen,
+          and over a terminal (tmux's status line), invisible until the pointer is on it. */}
       <div
         className={`absolute bottom-1 right-1 flex gap-0.5 rounded bg-black/60 text-xs text-slate-300 transition-opacity hover:opacity-100 ${
-          fullscreen ? "opacity-0" : "opacity-40"
+          fullscreen || content?.mode === "terminal" ? "opacity-0" : "opacity-40"
         }`}
       >
         {tool(fullscreen ? "Exit fullscreen" : "Fullscreen", fullscreen, () =>
-          toggleFullscreen(screen.current),
+          toggleFullscreen(),
         )}
         {/* Opens the windows of monitors that have none, e.g. after the layout grew. */}
         {tool("Windows", false, () => void openViewerWindows(layout ?? undefined))}

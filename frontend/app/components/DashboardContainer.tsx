@@ -57,7 +57,6 @@ import {
   getUpdateStatus,
   putBoardColumns,
   putConfig,
-  putForwards,
   putMutedClones,
   putTicketOrder,
   rebaseClone,
@@ -99,7 +98,6 @@ import { toggleMuted } from "~/lib/mute";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
-import type { ForwardRuntime } from "~/lib/wire/ForwardRuntime";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { LxcStats } from "~/lib/wire/LxcStats";
@@ -125,7 +123,6 @@ export function DashboardContainer({
   state,
   stats,
   lxcStats,
-  forwards,
   sshPublicHost,
   groups,
   presets,
@@ -133,7 +130,6 @@ export function DashboardContainer({
   state: ControlState;
   stats: Record<string, ContainerStats>;
   lxcStats: LxcStats | null;
-  forwards: Record<string, ForwardRuntime[]>;
   /** Threaded down to each card's copied SSH command; empty ⇒ falls back to
    *  `window.location.hostname`. (Always empty now — no override exists anymore.) */
   sshPublicHost: string;
@@ -191,8 +187,6 @@ export function DashboardContainer({
   // One modal serves both: a replacement IS a sign-in, it just knows what it takes over.
   const [replacing, setReplacing] = useState<ClaudeUsage | null>(null);
   const [forwardClone, setForwardClone] = useState<Clone | null>(null);
-  const [forwarding, setForwarding] = useState(false);
-  const [forwardError, setForwardError] = useState<string | null>(null);
 
   // Which half of the side panel gets the height.
   const [sideFocus, setSideFocus] = useState<SideFocus>("notes");
@@ -778,7 +772,6 @@ export function DashboardContainer({
           cloneTickets: liveCloneTickets,
           stats,
           cloneTokens: state.cloneTokens,
-          forwards,
           operations: state.operations,
           // A ticket takes the highlight while it is open, and the clone stays activated
           // underneath, so the viewer keeps its stream. An archived clone takes the highlight
@@ -813,10 +806,7 @@ export function DashboardContainer({
           },
           onChangeAccountClone: (clone) => setChangeClone(clone),
           onRebaseClone: (clone) => setRebaseCloneTarget(clone),
-          onPortForwardClone: (clone) => {
-            setForwardError(null);
-            setForwardClone(clone);
-          },
+          onPortForwardClone: (clone) => setForwardClone(clone),
           onArchiveClone: (clone) => archiveDrop(clone, true),
           onUnarchiveClone: (clone) => archiveDrop(clone, false),
           onCopySshCommand: copyText,
@@ -1051,26 +1041,10 @@ export function DashboardContainer({
 
       {forwardClone ? (
         <PortForwardModal
-          clone={
-            state.hosts.find((h) => h.id === forwardClone.id) ?? forwardClone
-          }
-          runtime={forwards[forwardClone.id] ?? []}
-          busy={forwarding}
-          error={forwardError}
+          clone={forwardClone}
+          sshPublicHost={sshPublicHost || window.location.hostname}
           onClose={() => setForwardClone(null)}
-          // The dialog closes itself on a save that lands, so a failed one has to stay
-          // failed: the message goes in its banner AND the promise is re-thrown, which is
-          // what keeps the dialog standing on the rules as typed.
-          onSubmit={(list) => {
-            setForwarding(true);
-            setForwardError(null);
-            return putForwards(forwardClone.id, list)
-              .catch((e: Error) => {
-                setForwardError(e.message);
-                throw e;
-              })
-              .finally(() => setForwarding(false));
-          }}
+          onCopy={copyText}
         />
       ) : null}
     </>
