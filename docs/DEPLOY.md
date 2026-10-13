@@ -555,7 +555,7 @@ Chrome and decodes with WebCodecs, so any machine with Chrome can show it.
 
 | You changed | Build & run locally | See the result |
 | --- | --- | --- |
-| **viewer** (`frontend/app/viewer/*`, `routes/viewer.tsx`) | `cd frontend && bun test && bun run build`, then serve the build from a control-server (`cargo run -p control-server` reads `frontend/build/client`) | open `/viewer?monitor=0` in Chrome over HTTPS (or `localhost`); the stats overlay shows frame rate and delay |
+| **viewer** (`frontend/app/viewer/*`, `routes/viewer.tsx`) | `cd frontend && bun test && bun run build`, then serve the build from a control-server (`cargo run -p control-server` reads `frontend/build/client`) | open `/viewer?monitor=0` in Chrome over HTTPS (or `localhost`); `rmng-fps` shows the frame rate |
 | frame rate, no browser | `cargo run -p control-client --bin rmng-fps -- <host>[:port] [monitor]` | frames, keyframes and megabits per second for one monitor of the *selected clone*, read from the `/api/viewer` WebSocket without decoding |
 | **frontend** | `cd frontend && bun run dev` | Vite dev server + HMR for the pages only. It has no proxy, so the API and the viewer do not work there; to test them, `bun run build` and `cargo run -p control-server` |
 | **`wire`** types / DTOs | `cargo test -p wire` | compiles + regenerates the frontend's ts-rs types |

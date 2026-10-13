@@ -91,7 +91,7 @@ ClipboardRequest{ serial, mime_type }                  # "give me bytes for this
 ClipboardData   { serial, mime_type, bytes }           # the bytes (lazy fetch)
 
 # browser viewer protocol (WebSocket /api/viewer?monitor=<id> on port 9000)
-VideoHeader { monitor_id, seq, key, server_us }        # binary, 18 bytes + Annex-B AU
+VideoHeader { monitor_id, seq, key }                   # binary, 10 bytes + Annex-B AU
 encode_clipboard_data / decode_clipboard_data          # binary ClipboardData, both ways
 ToBrowser   (JSON, tag "t"): view_spec(ViewSpec) | cursor(CursorMeta)
             | clipboard(ClipboardMsg) | term_data(TermData)

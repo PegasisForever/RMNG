@@ -197,8 +197,6 @@ interface InputOptions {
   overlay: HTMLImageElement;
   monitor: number;
   send(msg: InputMsg): void;
-  /** Ctrl+Alt+S: show or hide the stats overlay. */
-  onToggleStats(): void;
   /** A key press or click: the user activation Chrome wants for some calls (a clipboard
    *  write it refused before). */
   onGesture(): void;
@@ -335,17 +333,15 @@ export function attachInput(o: InputOptions): Input {
     o.onGesture();
     // Local chords, not forwarded. Their Ctrl and Alt already went to the clone, so release
     // them (and everything else held) first.
-    if (e.ctrlKey && e.altKey && (e.code === "KeyG" || e.code === "KeyP" || e.code === "KeyS")) {
+    if (e.ctrlKey && e.altKey && (e.code === "KeyG" || e.code === "KeyP")) {
       e.preventDefault();
       if (e.repeat) return;
       releaseAll();
       if (e.code === "KeyG") {
         toggleLock();
-      } else if (e.code === "KeyP") {
+      } else {
         auto.forceRelease();
         if (locked()) document.exitPointerLock();
-      } else {
-        o.onToggleStats();
       }
       return;
     }

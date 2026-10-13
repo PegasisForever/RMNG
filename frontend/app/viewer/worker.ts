@@ -15,7 +15,6 @@ import { letterbox } from "./input";
 import {
   KIND_VIDEO,
   VIDEO_HEADER_LEN,
-  type ViewerStats,
   type WorkerIn,
   type WorkerOut,
   codecFromAnnexB,
@@ -53,17 +52,6 @@ let lastErrorAt = -Infinity;
  *  keyframe and then fails again would otherwise never get here. */
 let software = false;
 
-// Stats for the current second.
-let frames = 0;
-let decodeSum = 0;
-let delaySum = 0;
-let delayCount = 0;
-let delayMin = Infinity;
-/** Minimum delay of each of the last 10 seconds. */
-const delayMins: number[] = [];
-/** When `decode()` was called for each pending chunk, by chunk timestamp. */
-const decodeStart = new Map<number, number>();
-
 function send(msg: FromBrowser) {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
@@ -77,7 +65,6 @@ function resetDecoder() {
   decoder = new VideoDecoder({ output: onFrame, error: onDecoderError });
   codec = "";
   waitKey = true;
-  decodeStart.clear();
 }
 
 function onDecoderError(e: DOMException) {
@@ -107,11 +94,6 @@ function configure(c: string) {
 
 function onVideo(buf: ArrayBuffer) {
   const h = parseVideoHeader(buf);
-  const delay = performance.timeOrigin + performance.now() - h.serverUs / 1000;
-  delaySum += delay;
-  delayCount++;
-  delayMin = Math.min(delayMin, delay);
-
   if (waitKey && !h.key) return;
   const au = new Uint8Array(buf, VIDEO_HEADER_LEN);
   if (h.key) {
@@ -127,18 +109,12 @@ function onVideo(buf: ArrayBuffer) {
     return;
   }
   waitKey = false;
-  decodeStart.set(h.serverUs, performance.now());
   decoder!.decode(
-    new EncodedVideoChunk({ type: h.key ? "key" : "delta", timestamp: h.serverUs, data: au }),
+    new EncodedVideoChunk({ type: h.key ? "key" : "delta", timestamp: h.seq, data: au }),
   );
 }
 
 function onFrame(frame: VideoFrame) {
-  const start = decodeStart.get(frame.timestamp);
-  if (start !== undefined) {
-    decodeSum += performance.now() - start;
-    decodeStart.delete(frame.timestamp);
-  }
   // A new monitor size leaves parts of the old picture in the bars.
   if (last?.displayWidth !== frame.displayWidth || last.displayHeight !== frame.displayHeight) {
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -146,7 +122,6 @@ function onFrame(frame: VideoFrame) {
   last?.close();
   last = frame;
   draw();
-  frames++;
 }
 
 /** Draw the last frame scaled to fit, at the canvas's device pixels: when the canvas has the
@@ -183,26 +158,6 @@ function connect() {
   };
 }
 
-function reportStats() {
-  delayMins.push(delayMin);
-  if (delayMins.length > 10) delayMins.shift();
-  const floor = Math.min(...delayMins);
-  post({
-    type: "stats",
-    stats: {
-      fps: frames,
-      decodeMs: frames ? decodeSum / frames : 0,
-      delayMs: delayCount ? delaySum / delayCount - floor : 0,
-      decoder: software ? "software" : "default",
-    },
-  });
-  frames = 0;
-  decodeSum = 0;
-  delaySum = 0;
-  delayCount = 0;
-  delayMin = Infinity;
-}
-
 scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   const m = e.data;
   if (m.type === "send") {
@@ -224,5 +179,4 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   ctx = m.canvas.getContext("2d")!;
   resetDecoder();
   connect();
-  setInterval(reportStats, 1000);
 };

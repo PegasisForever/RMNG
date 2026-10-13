@@ -512,16 +512,7 @@ pub fn spawn(app: App) {
 
 /// The binary video message for one AU: [`VideoHeader`], then the Annex-B bytes.
 fn video_message(monitor_id: u32, au: &[u8], key: bool, seq: u32) -> Queued {
-    let server_us = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64;
-    let header = VideoHeader {
-        monitor_id,
-        seq,
-        key,
-        server_us,
-    };
+    let header = VideoHeader { monitor_id, seq, key };
     let mut bytes = Vec::with_capacity(wire::browser::VIDEO_HEADER_LEN + au.len());
     bytes.extend_from_slice(&header.encode());
     bytes.extend_from_slice(au);

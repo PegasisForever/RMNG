@@ -21,7 +21,7 @@ pub const KIND_VIDEO: u8 = 0;
 pub const KIND_CLIPBOARD_DATA: u8 = 1;
 
 /// Size of [`VideoHeader`] on the wire.
-pub const VIDEO_HEADER_LEN: usize = 18;
+pub const VIDEO_HEADER_LEN: usize = 10;
 
 /// The header in front of every video message. Big-endian:
 ///
@@ -31,13 +31,11 @@ pub const VIDEO_HEADER_LEN: usize = 18;
 /// | 1 | flags, bit 0 = keyframe |
 /// | 2..6 | monitor id (u32) |
 /// | 6..10 | frame sequence number per monitor encoder (u32, wraps) |
-/// | 10..18 | server time the encoder produced the frame, microseconds since the Unix epoch (u64) |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoHeader {
     pub monitor_id: u32,
     pub seq: u32,
     pub key: bool,
-    pub server_us: u64,
 }
 
 impl VideoHeader {
@@ -46,7 +44,6 @@ impl VideoHeader {
         b[1] = self.key as u8;
         b[2..6].copy_from_slice(&self.monitor_id.to_be_bytes());
         b[6..10].copy_from_slice(&self.seq.to_be_bytes());
-        b[10..18].copy_from_slice(&self.server_us.to_be_bytes());
         b
     }
 }
@@ -201,14 +198,8 @@ mod tests {
             monitor_id: 0x0102_0304,
             seq: 0x0506_0708,
             key: true,
-            server_us: 0x1112_1314_1516_1718,
         };
-        assert_eq!(
-            h.encode(),
-            [
-                0, 1, 1, 2, 3, 4, 5, 6, 7, 8, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18
-            ]
-        );
+        assert_eq!(h.encode(), [0, 1, 1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(VideoHeader { key: false, ..h }.encode()[1], 0);
     }
 

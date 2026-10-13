@@ -11,15 +11,13 @@ import type { ToBrowser } from "../lib/wire/ToBrowser";
 export const KIND_VIDEO = 0;
 const KIND_CLIPBOARD_DATA = 1;
 
-export const VIDEO_HEADER_LEN = 18;
+export const VIDEO_HEADER_LEN = 10;
 
 interface VideoHeader {
   monitorId: number;
   /** Frame number from the monitor's encoder. */
   seq: number;
   key: boolean;
-  /** When the server's encoder produced the frame, microseconds since the Unix epoch. */
-  serverUs: number;
 }
 
 /** Read the header in front of a video message (big-endian; layout in `wire::browser`). */
@@ -29,7 +27,6 @@ export function parseVideoHeader(buf: ArrayBuffer): VideoHeader {
     key: (v.getUint8(1) & 1) !== 0,
     monitorId: v.getUint32(2),
     seq: v.getUint32(6),
-    serverUs: Number(v.getBigUint64(10)),
   };
 }
 
@@ -95,23 +92,9 @@ export type WorkerIn =
   | { type: "binary"; buf: ArrayBuffer }
   | { type: "resize"; width: number; height: number };
 
-export interface ViewerStats {
-  /** Frames drawn in the last second. */
-  fps: number;
-  /** Mean time from `decode()` to the decoded frame, ms. */
-  decodeMs: number;
-  /** Mean (arrival − server time) in the last second, minus its minimum over the last 10 s, ms.
-   *  The two clocks differ by an unknown offset; subtracting the minimum removes it. */
-  delayMs: number;
-  /** Chrome does not say which decoder runs. "default" is Chrome's own choice; "software"
-   *  means the viewer asked for the software decoder after repeated decoder errors. */
-  decoder: "default" | "software";
-}
-
 /** Worker → page. */
 export type WorkerOut =
   | { type: "message"; msg: ToBrowser }
   /** A binary message that is not video (clipboard data), transferred. */
   | { type: "binary"; buf: ArrayBuffer }
-  | { type: "connected"; connected: boolean }
-  | { type: "stats"; stats: ViewerStats };
+  | { type: "connected"; connected: boolean };

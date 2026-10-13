@@ -32,7 +32,7 @@ socket carries the video of that one monitor and every control message. Source:
 
 **Binary messages.** Byte 0 is the kind.
 
-Video (kind `0`, server → browser): an 18-byte `VideoHeader`, then one Annex-B access unit.
+Video (kind `0`, server → browser): a 10-byte `VideoHeader`, then one Annex-B access unit.
 All numbers are big-endian.
 
 | Bytes | Field |
@@ -41,8 +41,7 @@ All numbers are big-endian.
 | `1` | flags, bit 0 = keyframe |
 | `2..6` | monitor id (u32) |
 | `6..10` | frame sequence number of the monitor's encoder (u32, wraps) |
-| `10..18` | server time the encoder produced the frame, µs since the Unix epoch (u64) |
-| `18..` | the H.264 access unit (Annex-B) |
+| `10..` | the H.264 access unit (Annex-B) |
 
 Clipboard data (kind `1`, both directions): one `ClipboardData` reply, so an image crosses
 as raw bytes, not as base64 in JSON (`encode_clipboard_data` / `decode_clipboard_data`).

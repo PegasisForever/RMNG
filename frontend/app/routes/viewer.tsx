@@ -1,7 +1,7 @@
 // The browser viewer: one window per monitor, `/viewer?monitor=<id>`, opened from the
 // dashboard. The worker (`~/viewer/worker.ts`) does the socket, the decode and the drawing;
 // this page holds the canvas, the input (`~/viewer/input.ts`), the clipboard
-// (`~/viewer/clipboard.ts`), the cursor, the stats overlay (Ctrl+Alt+S) and file drop, and is
+// (`~/viewer/clipboard.ts`), the cursor and file drop, and is
 // where server messages arrive. For a clone with no desktop, monitor 0's window shows its
 // terminal (`~/viewer/terminal.tsx`) over the canvas.
 import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
@@ -15,7 +15,6 @@ import type { ViewMonitor } from "~/lib/wire/ViewMonitor";
 import { attachClipboard } from "~/viewer/clipboard";
 import { type Input, attachInput } from "~/viewer/input";
 import {
-  type ViewerStats,
   type WorkerIn,
   type WorkerOut,
   encodeClipboardData,
@@ -59,8 +58,6 @@ export default function Viewer() {
   // Null until the effect has looked: the page has no `window` while it is built.
   const [secure, setSecure] = useState<boolean | null>(null);
   const [connected, setConnected] = useState(false);
-  const [stats, setStats] = useState<ViewerStats | null>(null);
-  const [showStats, setShowStats] = useState(false);
   /** The file-drop note: progress, then the result for a few seconds. */
   const [note, setNote] = useState<{ text: string; error?: boolean } | null>(null);
 
@@ -94,7 +91,6 @@ export default function Viewer() {
       overlay: overlay.current,
       monitor,
       send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
-      onToggleStats: () => setShowStats((v) => !v),
       onGesture: () => clip.onGesture(),
       onResize: (width, height) => post({ type: "resize", width, height }),
     });
@@ -124,11 +120,11 @@ export default function Viewer() {
       const m = e.data;
       if (m.type === "message") onServerMessage(m.msg);
       else if (m.type === "binary") clip.onData(parseClipboardData(m.buf));
-      else if (m.type === "connected") {
+      else {
         setConnected(m.connected);
         inp.setConnected(m.connected);
         clip.setConnected(m.connected);
-      } else setStats(m.stats);
+      }
     };
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
     post(
@@ -220,14 +216,6 @@ export default function Viewer() {
         <p className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-slate-400">
           Connecting…
         </p>
-      ) : null}
-      {showStats && stats ? (
-        <pre className="pointer-events-none absolute left-2 top-2 rounded bg-black/70 px-2 py-1 font-mono text-xs text-green-300">
-          {`fps     ${stats.fps}
-decode  ${stats.decodeMs.toFixed(1)} ms
-delay   ${stats.delayMs.toFixed(1)} ms
-decoder ${stats.decoder}`}
-        </pre>
       ) : null}
       {note ? (
         <p

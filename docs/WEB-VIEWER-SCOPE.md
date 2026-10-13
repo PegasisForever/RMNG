@@ -122,7 +122,7 @@ Each row that depends on one of these answers names its question ID.
 | C6 | Show 4:2:0 frames: decoded frame to `<video>` through `VideoTrackGenerator` (no copy), canvas as fallback | Yes | M | R |  | Yes |
 | C7 | Show packed 4:4:4 (AVC444): port the `glunpack.rs` shader to WebGL2 | No | L | R | Q4. See X4 for the code to delete. | No (Q4) |
 | C8 | Measure the screen refresh rate and match the stream frame rate to it | Later | S | P | Selkies `display-refresh.js`. | Later |
-| C9 | Stats view: frame rate, end-to-end delay, decode time, hardware or software decoder | Yes | M | R | Needed to compare the new viewer with the native viewer. | Yes |
+| C9 | Stats view: frame rate, end-to-end delay, decode time, hardware or software decoder | No | M | R | Removed after round 9 at the operator's request; `rmng-fps` measures the frame rate. | No |
 | C10 | "Poor connection" indicator | Later | S | R |  | Later |
 | C11 | Audio playback, microphone, webcam | No | — | — | Audio was removed in `59bb9cc`. | No |
 
@@ -188,7 +188,7 @@ Each row that depends on one of these answers names its question ID.
 | O3 | Apps panel (install and start apps) | No | — | — |  | No |
 | O4 | Sharing links: view-only, collaborator, players 2–4 | No | — | — |  | No |
 | O5 | Selkies dashboards (sidebar, settings, translations) | No | — | — | We use the RMNG React frontend. | No |
-| O6 | Viewer toolbar in the RMNG frontend: fullscreen, pointer lock, stats, open monitor windows | No | M | R | Removed after round 9: F11, Ctrl+Alt+G/P and Ctrl+Alt+S do the same; the dashboard opens the windows. | No |
+| O6 | Viewer toolbar in the RMNG frontend: fullscreen, pointer lock, stats, open monitor windows | No | M | R | Removed after round 9: F11 and Ctrl+Alt+G/P do the same; the dashboard opens the windows. | No |
 
 ## N. Native viewer features that Selkies does not have
 
