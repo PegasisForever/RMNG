@@ -19,8 +19,14 @@ test("a hover that changes nothing returns the very same array", () => {
   expect(arrange(before, "a", "a")).toBe(before);
   expect(arrange(before, "a", "nope")).toBe(before);
   expect(arrange(before, "nope", "b")).toBe(before);
-  // The column id is not a card id, so there is no index to move to.
-  expect(arrange(before, "a", "todo")).toBe(before);
+  // The last card over its own column's body is at the end already.
+  expect(arrange(before, "b", "todo")).toBe(before);
+});
+
+test("a card over its own column's body moves to the end of it", () => {
+  const after = arrange(lanes(), "a", "todo");
+
+  expect(after[0].cloneIds).toEqual(["b", "a"]);
 });
 
 test("a reorder within one lane moves the card and leaves the others alone", () => {

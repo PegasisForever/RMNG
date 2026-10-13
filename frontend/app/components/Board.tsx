@@ -15,6 +15,7 @@
 // collapsed until asked for, and carry no sortable id of their own — so a drag can never
 // separate a helper from the clone that spawned it, and moving the parent takes them along.
 import {
+  closestCenter,
   closestCorners,
   DndContext,
   DragOverlay,
@@ -130,9 +131,25 @@ export interface BoardProps {
  *  is actually inside settles it, and it answers with the card AND its column when both
  *  apply, so ordinary between-cards drops still land at the right index.
  *
+ *  When the pointer is inside a column but on none of its cards, it is either below the last
+ *  card, where the column itself is the answer (the end of the list), or in a gap between
+ *  cards or above the first, where the nearest card is: the column there would send the card
+ *  to the end and back on every gap the pointer crosses.
+ *
  *  The fallbacks cover the keyboard sensor, which has no pointer at all. */
 const collisionDetection: CollisionDetection = (args) => {
   const pointer = pointerWithin(args);
+  const at = args.pointerCoordinates;
+  const column = pointer.length === 1 ? args.droppableRects.get(pointer[0].id) : undefined;
+  if (at && column) {
+    const cards = args.droppableContainers.filter((c) => {
+      const r = args.droppableRects.get(c.id);
+      return c.data.current?.sortable && r && r.left >= column.left && r.right <= column.right;
+    });
+    const isCard = cards.some((c) => c.id === pointer[0].id);
+    const belowAll = cards.every((c) => args.droppableRects.get(c.id)!.bottom <= at.y);
+    if (!isCard && !belowAll) return closestCenter({ ...args, droppableContainers: cards });
+  }
   if (pointer.length > 0) return pointer;
   const intersecting = rectIntersection(args);
   return intersecting.length > 0 ? intersecting : closestCorners(args);
@@ -154,10 +171,12 @@ export function arrange(lanes: Lane[], activeId: string, overId: string): Lane[]
   const overIndex = to.cloneIds.indexOf(overId);
   if (from.id === to.id) {
     const fromIndex = from.cloneIds.indexOf(activeId);
-    if (overIndex < 0 || overIndex === fromIndex) return lanes;
+    // Over its own column rather than a card ⇒ the end of the list.
+    const toIndex = overIndex < 0 ? from.cloneIds.length - 1 : overIndex;
+    if (toIndex === fromIndex) return lanes;
     return lanes.map((lane) =>
       lane.id === from.id
-        ? { ...lane, cloneIds: arrayMove(lane.cloneIds, fromIndex, overIndex) }
+        ? { ...lane, cloneIds: arrayMove(lane.cloneIds, fromIndex, toIndex) }
         : lane,
     );
   }
