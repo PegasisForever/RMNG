@@ -55,6 +55,7 @@ export async function openViewerWindows(monitors?: Placed[]) {
     ];
   }
   const placed = matchScreens(monitors, (await screens()) ?? []);
+  let blocked = 0;
   for (const m of monitors) {
     const s = placed.get(m.id);
     const features = s
@@ -62,8 +63,17 @@ export async function openViewerWindows(monitors?: Placed[]) {
       : "popup";
     // An empty URL finds a window of this name that is open already without reloading it.
     const w = window.open("", `rmng-viewer-${m.id}`, features);
-    if (w && w.location.href === "about:blank") {
+    if (!w) blocked++;
+    else if (w.location.href === "about:blank") {
       w.location.replace(`/viewer?monitor=${m.id}${s ? "&fullscreen=1" : ""}`);
     }
+  }
+  // Chrome blocks every pop-up after the first one of a click, and says so only with a small
+  // icon in the address bar.
+  if (blocked > 0) {
+    alert(
+      `Chrome blocked ${blocked} viewer window(s). Click the blocked pop-up icon at the right ` +
+        `of the address bar, choose "Always allow pop-ups", then open the viewer again.`,
+    );
   }
 }
