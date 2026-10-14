@@ -22,8 +22,12 @@ const WARP_SUPPRESS_MS = 500;
 const AGENT_CURSOR_SHOW_MS = 1000;
 /** Chrome ignores a CSS cursor larger than this many CSS pixels; larger cursors use the overlay. */
 const CSS_CURSOR_MAX = 128;
-/** No smooth-scroll event for this long ends the scroll gesture (the browser has no end event). */
-const SCROLL_END_MS = 150;
+/** No smooth-scroll event for this long ends the scroll gesture (the browser has no end event).
+ *  Past the 150 ms GTK 4 takes a fling's speed over, so the clone adds no fling of its own to
+ *  the momentum the client already scrolled. */
+const SCROLL_END_MS = 200;
+/** Pixels Chrome reports for a line a macOS wheel turned (`isMacDetent`). */
+const MAC_WHEEL_LINE_PX = 40;
 
 /** Evdev buttons by `MouseEvent.button`: left, middle, right, back, forward. */
 const BUTTONS = [0x110, 0x112, 0x111, 0x113, 0x114];
@@ -149,16 +153,44 @@ export class AutoLock {
   }
 }
 
-/** One wheel event → input messages. A mouse wheel (Chrome reports `wheelDelta` in multiples
- *  of 120 per notch) becomes `axis` notches with the fraction carried in `rem`; anything finer (a trackpad) becomes smooth finger scroll in
- *  CSS pixels. `fingers`: a finger scroll is still running, so this event belongs to it even
- *  if its delta happens to look like a notch. Browser and Mutter agree on the direction:
- *  positive is down and right. */
+type WheelLike = {
+  deltaMode: number;
+  deltaX: number;
+  deltaY: number;
+  wheelDeltaX: number;
+  wheelDeltaY: number;
+  shiftKey?: boolean;
+};
+
+/** Whether a wheel event is one detent of a macOS mouse wheel (the rule Selkies uses). macOS
+ *  reports a wheel's turn in lines as 16.16 fixed point, scaled by how fast it spins, and Chrome
+ *  hands that over at 40 px a line: a detent is 4.0002 px, or 380.02 in a spin, never whole. A
+ *  trackpad scrolls in whole pixels. Under Shift macOS turns the wheel sideways and rounds it to
+ *  whole lines, a sideways multiple of 40 with nothing vertical. */
+function isMacDetent(e: WheelLike): boolean {
+  if (e.deltaMode !== 0) return e.deltaMode === 1;
+  if (!Number.isInteger(e.deltaX) || !Number.isInteger(e.deltaY)) return true;
+  return !!e.shiftKey && e.deltaY === 0 && e.deltaX !== 0 && e.deltaX % MAC_WHEEL_LINE_PX === 0;
+}
+
+/** One wheel event → input messages. A mouse wheel becomes `axis` notches: on a Mac one per
+ *  detent (`isMacDetent`), whatever distance macOS's acceleration gave it; elsewhere Chrome
+ *  reports `wheelDelta` in multiples of 120 per notch, with the fraction carried in `rem`.
+ *  Anything else (a trackpad) becomes smooth finger scroll in CSS pixels. `fingers`: a finger
+ *  scroll is still running, so this event belongs to it even if its delta looks like a notch.
+ *  Browser and Mutter agree on the direction: positive is down and right. */
 export function wheelMessages(
-  e: { deltaMode: number; deltaX: number; deltaY: number; wheelDeltaX: number; wheelDeltaY: number },
+  e: WheelLike,
   rem: { x: number; y: number },
   fingers = false,
+  mac = false,
 ): InputMsg[] {
+  if (mac && isMacDetent(e)) {
+    const out: InputMsg[] = [];
+    if (e.deltaY) out.push({ kind: "axis", axis: 0, step: Math.sign(e.deltaY) });
+    if (e.deltaX) out.push({ kind: "axis", axis: 1, step: Math.sign(e.deltaX) });
+    return out;
+  }
   const notched =
     !fingers &&
     (e.wheelDeltaX !== 0 || e.wheelDeltaY !== 0) &&
@@ -435,7 +467,7 @@ export function attachInput(o: InputOptions): Input {
     e.preventDefault(); // no page scroll, no Ctrl+wheel zoom
     if (!connected) return;
     const w = e as WheelEvent & { wheelDeltaX: number; wheelDeltaY: number };
-    const msgs = wheelMessages(w, rem, scrollEnd !== undefined);
+    const msgs = wheelMessages(w, rem, scrollEnd !== undefined, isMac);
     for (const m of msgs) send(m);
     if (msgs[0]?.kind === "axis_continuous") {
       // Fingers lifted (no more events): finish the gesture so the clone's kinetic scroll ends.

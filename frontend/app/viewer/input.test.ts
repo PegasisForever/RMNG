@@ -100,6 +100,24 @@ test("a manual release during a grab re-arms after the cursor shows", () => {
   expect(al.want(8000 + ENGAGE_MS)).toBe(true);
 });
 
+test("on a Mac, a wheel detent is one notch and a trackpad is finger scroll", () => {
+  const rem = { x: 0, y: 0 };
+  const detent = { deltaMode: 0, deltaX: 0, deltaY: 4.000244140625, wheelDeltaX: 0, wheelDeltaY: -12 };
+  expect(wheelMessages(detent, rem, false, true)).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  // A fast spin: one event, still one notch.
+  expect(wheelMessages({ ...detent, deltaY: -380.0232, wheelDeltaY: 1140 }, rem, false, true)).toEqual([
+    { kind: "axis", axis: 0, step: -1 },
+  ]);
+  // Shift turns the wheel sideways in whole lines.
+  const sideways = { deltaMode: 0, deltaX: 40, deltaY: 0, wheelDeltaX: -120, wheelDeltaY: 0, shiftKey: true };
+  expect(wheelMessages(sideways, rem, false, true)).toEqual([{ kind: "axis", axis: 1, step: 1 }]);
+  // A trackpad scrolls in whole pixels.
+  const pad = { deltaMode: 0, deltaX: 0, deltaY: 7, wheelDeltaX: 0, wheelDeltaY: -21 };
+  expect(wheelMessages(pad, rem, false, true)).toEqual([
+    { kind: "axis_continuous", dx: 0, dy: 7, flags: 4 },
+  ]);
+});
+
 test("a mouse wheel sends notches, a trackpad sends finger scroll", () => {
   const rem = { x: 0, y: 0 };
   const wheel = { deltaMode: 0, deltaX: 0, deltaY: 100, wheelDeltaX: 0, wheelDeltaY: -120 };
