@@ -100,9 +100,17 @@ export default function Viewer() {
     });
     input.current = inp;
 
+    /** The build this page belongs to, from the first connection's `version` message. */
+    let buildId: string | null = null;
     // Every server message other than video arrives here.
     const onServerMessage = (msg: ToBrowser) => {
       switch (msg.t) {
+        case "version":
+          // The server came back on a different build: this page's code may no longer match
+          // it, so reload, as the dashboard does.
+          if (buildId !== null && msg.build_id !== buildId) location.reload();
+          buildId = msg.build_id;
+          break;
         case "view_spec":
           // No pointer moves go to a clone that shows a terminal.
           inp.setLayout(msg.content.mode === "desktop" ? msg.monitors : []);

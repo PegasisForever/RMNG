@@ -88,6 +88,9 @@ pub fn decode_clipboard_data(b: &[u8]) -> Option<ClipboardData> {
 #[serde(tag = "t", rename_all = "snake_case")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum ToBrowser {
+    /// The server's build, first on every connection. A window that reconnects after an
+    /// update sees a different one and reloads, as the dashboard does on its `version` event.
+    Version { build_id: String },
     ViewSpec(ViewSpec),
     Cursor(CursorMeta),
     Clipboard(ClipboardMsg),
