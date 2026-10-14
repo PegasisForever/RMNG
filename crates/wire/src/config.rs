@@ -452,7 +452,7 @@ pub struct AssistantConfig {
 
 /// Full server config (with secrets). Loaded from `config.json`; serialized back
 /// atomically at 0600. Not exported to TS — the browser only sees the redacted view.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfig {
     /// Latched `true` by the first-run setup wizard once setup is complete; gates the
@@ -553,9 +553,9 @@ impl AppConfig {
     }
 
     /// The active preset's scroll mode and speed (percent); auto at 100 without presets.
-    pub fn effective_scroll(&self) -> (ScrollMode, u32) {
+    pub fn effective_scroll(&self) -> (ScrollMode, f64) {
         self.effective_preset()
-            .map_or((ScrollMode::Auto, 100), |p| (p.scroll_mode, p.scroll_speed))
+            .map_or((ScrollMode::Auto, 100.0), |p| (p.scroll_mode, p.scroll_speed))
     }
 
     /// The active preset's monitors. Falls back to the first preset, then to a dual
@@ -611,7 +611,7 @@ impl AppConfig {
 /// Nothing in it is withheld. Every credential the server holds is either a preset's Linear
 /// key, which the browser needs, or an account token that lives in its own store rather than
 /// in the config.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct AppConfigRedacted {
@@ -632,7 +632,7 @@ pub struct AppConfigRedacted {
 }
 
 /// Response body for `PUT /api/config`: the redacted config after the merge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct ConfigPutResponse {
@@ -921,7 +921,7 @@ mod tests {
             LayoutPreset {
                 name: "A".into(),
                 scroll_mode: Default::default(),
-                scroll_speed: 100,
+                scroll_speed: 100.0,
                 monitors: vec![MonitorSpec {
                     width: 1920,
                     height: 1080,
@@ -933,7 +933,7 @@ mod tests {
             LayoutPreset {
                 name: "B".into(),
                 scroll_mode: Default::default(),
-                scroll_speed: 100,
+                scroll_speed: 100.0,
                 monitors: vec![MonitorSpec {
                     width: 3840,
                     height: 2160,

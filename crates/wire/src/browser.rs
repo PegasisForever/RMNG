@@ -93,7 +93,7 @@ pub enum ToBrowser {
     Version { build_id: String },
     /// How to read wheel events: the active layout preset's scroll mode and speed (percent).
     /// Sent at connect and when either changes.
-    Scroll { mode: crate::control::ScrollMode, speed: u32 },
+    Scroll { mode: crate::control::ScrollMode, speed: f64 },
     ViewSpec(ViewSpec),
     Cursor(CursorMeta),
     Clipboard(ClipboardMsg),

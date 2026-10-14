@@ -157,6 +157,14 @@ test("the layout's mode forces one device, and its speed scales both", () => {
   // Speed 200% on a Mac detent: two steps.
   const detent = { deltaMode: 0, deltaX: 0, deltaY: 4.000244140625, wheelDeltaX: 0, wheelDeltaY: -12 };
   expect(wheelMessages(detent, rem, { os: "mac", scale: 2 })).toEqual([{ kind: "axis", axis: 0, step: 2 }]);
+  // Speed -100%: the same distance the other way.
+  expect(wheelMessages(notch, rem, { os: "linux", scale: -1 })).toEqual([{ kind: "axis", axis: 0, step: -1 }]);
+  expect(wheelMessages(pad, rem, { os: "linux", scale: -1 })).toEqual([
+    { kind: "axis_continuous", dx: -0, dy: -3.5, flags: 4 },
+  ]);
+  // Speed 150%: two notches make three steps.
+  expect(wheelMessages(notch, rem, { os: "linux", scale: 1.5 })).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  expect(wheelMessages(notch, rem, { os: "linux", scale: 1.5 })).toEqual([{ kind: "axis", axis: 0, step: 2 }]);
 });
 
 test("a mouse wheel sends notches, a trackpad sends finger scroll", () => {

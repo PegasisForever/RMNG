@@ -12,6 +12,7 @@ export type LayoutPreset = { name: string, monitors: Array<MonitorSpec>,
  */
 scrollMode: ScrollMode, 
 /**
- * Scroll distance in percent: 100 sends what the device reported.
+ * Scroll distance in percent: 100 sends what the device reported, a negative speed
+ * scrolls the other way.
  */
 scrollSpeed: number, };

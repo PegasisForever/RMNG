@@ -60,7 +60,7 @@ as raw bytes, not as base64 in JSON (`encode_clipboard_data` / `decode_clipboard
 
 | `t` | Body | Meaning |
 | --- | --- | --- |
-| `scroll` | `{mode, speed}` | The active layout preset's scroll mode (`auto`, `trackpad` or `mouse`) and speed in percent. Sent at connect and whenever either changes; the window applies it at once. |
+| `scroll` | `{mode, speed}` | The active layout preset's scroll mode (`auto`, `trackpad` or `mouse`) and speed in percent (a decimal; a negative speed scrolls the other way). Sent at connect and whenever either changes; the window applies it at once. |
 | `version` | `{build_id}` | The server's build, first on every connection. A window that reconnects and sees a different one reloads. |
 | `view_spec` | `ViewSpec {monitors: ViewMonitor[], content}` | The window set and what it shows. `content.mode` is `desktop`, or `terminal` with `clone` and `sessions` for a clone with no desktop. Sent at connect and on every selection or layout change. Empty `monitors` = nothing is selected. |
 | `cursor` | `CursorMeta` | The remote cursor (position, shape on change, `warp`). Each window uses the messages for its own `monitor_id`. |

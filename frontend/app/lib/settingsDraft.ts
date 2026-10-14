@@ -251,7 +251,7 @@ export function settingsPatch(draft: SettingsDraft): Record<string, unknown> {
         name: p.name.trim(),
         monitors: p.monitors.map(monitorPatch),
         scrollMode: p.scrollMode,
-        scrollSpeed: Math.round(p.scrollSpeed) || 100,
+        scrollSpeed: p.scrollSpeed || 100,
       })),
     docker: {
       hostnamePrefix: draft.hostnamePrefix,

@@ -26,7 +26,7 @@ pub struct MonitorSpec {
 
 /// A named monitor-layout preset: a full arrangement the operator can switch to.
 /// Distinct from clone-provisioning `Preset` (env/Linear) — this is display geometry only.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct LayoutPreset {
@@ -35,13 +35,14 @@ pub struct LayoutPreset {
     /// How the viewer reads wheel events while this layout is active.
     #[serde(default)]
     pub scroll_mode: ScrollMode,
-    /// Scroll distance in percent: 100 sends what the device reported.
+    /// Scroll distance in percent: 100 sends what the device reported, a negative speed
+    /// scrolls the other way.
     #[serde(default = "default_scroll_speed")]
-    pub scroll_speed: u32,
+    pub scroll_speed: f64,
 }
 
-fn default_scroll_speed() -> u32 {
-    100
+fn default_scroll_speed() -> f64 {
+    100.0
 }
 
 /// How the viewer reads wheel events: `Auto` tells a mouse wheel from a trackpad per event,

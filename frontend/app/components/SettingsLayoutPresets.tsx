@@ -5,6 +5,9 @@
 // The whole list is one prop and one `onChange`. Adding, renaming, dropping a preset and
 // editing its monitors are all a new array handed back, so this component holds no state and
 // a story can drive it with `useState`.
+import { useState } from "react";
+
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
 import { settingsInput } from "~/components/SettingsFields";
 import { newLayoutPreset, type LayoutPresetDraft } from "~/lib/settingsDraft";
@@ -48,29 +51,29 @@ export function SettingsLayoutPresets({
           />
           {/* Applied in every viewer window as soon as this layout is the active one. */}
           <div className="mt-2 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-            <label className="flex items-center gap-1">
-              Scroll
-              <select
-                className={settingsInput}
+            Scroll
+            <div className="w-56">
+              <DropdownSelect
+                rows={[
+                  { value: "auto", label: "Auto (detect per event)" },
+                  { value: "mouse", label: "Mouse wheel" },
+                  { value: "trackpad", label: "Trackpad" },
+                ]}
                 value={p.scrollMode}
-                onChange={(e) => replace(i, { scrollMode: e.target.value as ScrollMode })}
-              >
-                <option value="auto">Auto (mouse wheel or trackpad, per event)</option>
-                <option value="mouse">Mouse wheel</option>
-                <option value="trackpad">Trackpad</option>
-              </select>
-            </label>
+                onChange={(v) => replace(i, { scrollMode: v as ScrollMode })}
+                label="Scroll"
+                className={settingsInput}
+              />
+            </div>
+            {/* A negative speed scrolls the other way: -100 is the same distance, reversed. */}
             <label className="flex items-center gap-1">
               Speed
-              <input
-                type="number"
-                min={10}
-                max={1000}
-                step={10}
-                className={`${settingsInput} w-20`}
-                value={p.scrollSpeed}
-                onChange={(e) => replace(i, { scrollSpeed: Number(e.target.value) })}
-              />
+              <div className="w-24">
+                <SpeedInput
+                  value={p.scrollSpeed}
+                  onChange={(scrollSpeed) => replace(i, { scrollSpeed })}
+                />
+              </div>
               %
             </label>
           </div>
@@ -84,5 +87,32 @@ export function SettingsLayoutPresets({
         + Add layout preset
       </button>
     </div>
+  );
+}
+
+/** The scroll speed field. It keeps the typed text, so an unfinished number ("-", "1.") stays
+ *  in the field while the operator types; only a complete number goes to `onChange`. */
+function SpeedInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const [text, setText] = useState(String(value));
+  const [seen, setSeen] = useState(value);
+  // A new value from outside (the form loaded, a preset was removed) replaces the text.
+  if (value !== seen) {
+    setSeen(value);
+    setText(String(value));
+  }
+  return (
+    <input
+      inputMode="decimal"
+      className={settingsInput}
+      value={text}
+      onChange={(e) => {
+        setText(e.target.value);
+        const n = Number(e.target.value);
+        if (e.target.value.trim() !== "" && Number.isFinite(n)) {
+          setSeen(n);
+          onChange(n);
+        }
+      }}
+    />
   );
 }
