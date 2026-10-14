@@ -78,15 +78,17 @@ export function layoutPresetsPatch(
  const name = activeLayoutName(config);
  const monitors = draft.monitors.map(monitorPatch);
  const existing = config.layoutPresets;
+ // A preset this step creates scrolls as the viewer guesses, at full speed.
+ const scroll = { scrollMode: "auto" as const, scrollSpeed: 100 };
  if (!existing.length) {
-  return [{ name: name || "Default", monitors }];
+  return [{ name: name || "Default", monitors, ...scroll }];
  }
  const updated = existing.map((p) =>
   p.name === name ? { ...p, monitors } : p,
  );
  return existing.some((p) => p.name === name)
   ? updated
-  : [...updated, { name, monitors }];
+  : [...updated, { name, monitors, ...scroll }];
 }
 
 /**

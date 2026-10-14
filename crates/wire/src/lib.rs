@@ -37,7 +37,7 @@ pub use config::{
 };
 pub use control::{
     BoardColumn, Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
-    CloneRequest, CloneTokens, CodexResetMark, ContainerStats, ControlState, LayoutPreset,
+    CloneRequest, CloneTokens, CodexResetMark, ContainerStats, ControlState, LayoutPreset, ScrollMode,
     LinearMeta, LxcStats, MonitorSpec, MonitorState, Operation, OperationKind, OperationStatus,
     Provider, RmngClone, ScheduledMessage, UpdateStatus,
 };

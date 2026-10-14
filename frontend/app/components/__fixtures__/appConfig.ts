@@ -26,6 +26,8 @@ export function makeAppConfig(
           { width: 2560, height: 1440, x: 0, y: 0, primary: true },
           { width: 1920, height: 1080, x: 2560, y: 0, primary: false },
         ],
+        scrollMode: "auto",
+        scrollSpeed: 100,
       },
     ],
     activeLayout: "Default",

@@ -32,6 +32,28 @@ pub struct MonitorSpec {
 pub struct LayoutPreset {
     pub name: String,
     pub monitors: Vec<MonitorSpec>,
+    /// How the viewer reads wheel events while this layout is active.
+    #[serde(default)]
+    pub scroll_mode: ScrollMode,
+    /// Scroll distance in percent: 100 sends what the device reported.
+    #[serde(default = "default_scroll_speed")]
+    pub scroll_speed: u32,
+}
+
+fn default_scroll_speed() -> u32 {
+    100
+}
+
+/// How the viewer reads wheel events: `Auto` tells a mouse wheel from a trackpad per event,
+/// `Trackpad` and `Mouse` take every event as one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub enum ScrollMode {
+    #[default]
+    Auto,
+    Trackpad,
+    Mouse,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

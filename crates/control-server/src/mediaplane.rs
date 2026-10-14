@@ -430,6 +430,7 @@ pub fn spawn(app: App) {
             // ViewSpec even when the *selection* is unchanged (the window set follows the layout,
             // not the daemon's report). Seeded to the current layout so the first tick is quiet.
             let mut last_monitors = configured_monitors(&app.config());
+            let mut last_scroll = app.config().effective_scroll();
             loop {
                 match rx.blocking_recv() {
                     // Any state mutation (or a lag) → re-check selection + layout; act on a change.
@@ -439,6 +440,14 @@ pub fn spawn(app: App) {
                         let monitors = configured_monitors(&app.config());
                         let monitors_changed = monitors != last_monitors;
                         last_monitors = monitors;
+                        // The layout's scroll settings apply in every window as soon as they
+                        // change, whatever else did.
+                        let scroll = app.config().effective_scroll();
+                        if scroll != last_scroll {
+                            last_scroll = scroll;
+                            let (mode, speed) = scroll;
+                            broadcast(&viewers, &ToBrowser::Scroll { mode, speed });
+                        }
                         let sel_changed = adopt_selection(
                             &handle,
                             &encoders,

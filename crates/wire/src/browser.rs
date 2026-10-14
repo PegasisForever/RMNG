@@ -91,6 +91,9 @@ pub enum ToBrowser {
     /// The server's build, first on every connection. A window that reconnects after an
     /// update sees a different one and reloads, as the dashboard does on its `version` event.
     Version { build_id: String },
+    /// How to read wheel events: the active layout preset's scroll mode and speed (percent).
+    /// Sent at connect and when either changes.
+    Scroll { mode: crate::control::ScrollMode, speed: u32 },
     ViewSpec(ViewSpec),
     Cursor(CursorMeta),
     Clipboard(ClipboardMsg),

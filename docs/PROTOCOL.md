@@ -60,6 +60,7 @@ as raw bytes, not as base64 in JSON (`encode_clipboard_data` / `decode_clipboard
 
 | `t` | Body | Meaning |
 | --- | --- | --- |
+| `scroll` | `{mode, speed}` | The active layout preset's scroll mode (`auto`, `trackpad` or `mouse`) and speed in percent. Sent at connect and whenever either changes; the window applies it at once. |
 | `version` | `{build_id}` | The server's build, first on every connection. A window that reconnects and sees a different one reloads. |
 | `view_spec` | `ViewSpec {monitors: ViewMonitor[], content}` | The window set and what it shows. `content.mode` is `desktop`, or `terminal` with `clone` and `sessions` for a clone with no desktop. Sent at connect and on every selection or layout change. Empty `monitors` = nothing is selected. |
 | `cursor` | `CursorMeta` | The remote cursor (position, shape on change, `warp`). Each window uses the messages for its own `monitor_id`. |
@@ -297,7 +298,7 @@ Ports, the data directory, the clone socket and the Docker socket are constants 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `setup_complete` | bool | `false` | latched `true` by the first-run setup wizard; gates the frontend to the wizard until then |
-| `layout_presets` | `LayoutPreset[]` | `[]` | named monitor-layout presets (`{name, monitors: MonitorSpec[]}`); the operator switches the active one from the sidebar (`POST /api/layout/activate`) |
+| `layout_presets` | `LayoutPreset[]` | `[]` | named monitor-layout presets (`{name, monitors: MonitorSpec[], scrollMode, scrollSpeed}`); the operator switches the active one from the sidebar (`POST /api/layout/activate`) |
 | `active_layout` | string | `""` | name of the active layout preset; drives `effective_monitors()` (see below) |
 | `docker` | `DockerConfig` | see below | hostname prefix + per-clone limits + ZFS parent dataset for clone homes |
 | `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (the key is a credential, and `GET /api/config` vends it to the clients) |
@@ -377,7 +378,7 @@ Ports, the data directory, the clone socket and the Docker socket are constants 
   Claude equivalents. One clone can hold both a Claude and a Codex account simultaneously.
 
 - **`MonitorSpec`**: `width`, `height`, `x`, `y`, `primary`.
-- **`LayoutPreset`**: `name`, `monitors: MonitorSpec[]` — a full named arrangement the
+- **`LayoutPreset`**: `name`, `monitors: MonitorSpec[]`, `scrollMode` (`auto` guesses mouse wheel or trackpad per event, `trackpad` and `mouse` take every event as one; default `auto`), `scrollSpeed` (percent, 10–1000, default 100) — a full named arrangement the
   operator can switch to live. `AppConfig::effective_monitors()` returns the active preset's
   (`active_layout`) monitors, falling back to the first preset, then a built-in dual
   2560×1440 default when `layout_presets` is empty.

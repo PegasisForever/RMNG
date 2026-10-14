@@ -15,6 +15,7 @@
 // (Cosmetic account ordering used to be a third rule here; it moved to `accountOrder`,
 // alongside the store and the sort it belongs with.)
 
+import type { ScrollMode } from "~/lib/wire/ScrollMode";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { GroupMember } from "~/lib/wire/GroupMember";
 import type { JudgeProvider } from "~/lib/wire/JudgeProvider";
@@ -34,6 +35,10 @@ export interface MonitorDraft {
 export interface LayoutPresetDraft {
   name: string;
   monitors: MonitorDraft[];
+  /** How the viewer reads wheel events while this layout is active. */
+  scrollMode: ScrollMode;
+  /** Scroll distance in percent. */
+  scrollSpeed: number;
 }
 
 /** A named account pool: a name plus the member rows in its grid. One row per
@@ -93,6 +98,8 @@ export function newLayoutPreset(name = ""): LayoutPresetDraft {
   return {
     name,
     monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+    scrollMode: "auto",
+    scrollSpeed: 100,
   };
 }
 
@@ -147,6 +154,8 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       ? c.layoutPresets.map((p) => ({
           name: p.name,
           monitors: p.monitors.map((m) => ({ ...m })),
+          scrollMode: p.scrollMode,
+          scrollSpeed: p.scrollSpeed,
         }))
       : [newLayoutPreset("Default")],
     presets: c.presets.map((p) => ({
@@ -241,6 +250,8 @@ export function settingsPatch(draft: SettingsDraft): Record<string, unknown> {
       .map((p) => ({
         name: p.name.trim(),
         monitors: p.monitors.map(monitorPatch),
+        scrollMode: p.scrollMode,
+        scrollSpeed: Math.round(p.scrollSpeed) || 100,
       })),
     docker: {
       hostnamePrefix: draft.hostnamePrefix,

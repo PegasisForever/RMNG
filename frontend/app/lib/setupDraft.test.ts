@@ -19,6 +19,8 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       {
         name: "Default",
         monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }],
+        scrollMode: "auto",
+        scrollSpeed: 100,
       },
     ],
     activeLayout: "Default",
@@ -68,10 +70,14 @@ test("the seed follows activeLayout, not the first preset", () => {
       {
         name: "Default",
         monitors: [{ width: 1280, height: 720, x: 0, y: 0, primary: true }],
+        scrollMode: "auto",
+        scrollSpeed: 100,
       },
       {
         name: "Wide",
         monitors: [{ width: 3840, height: 2160, x: 0, y: 0, primary: true }],
+        scrollMode: "auto",
+        scrollSpeed: 100,
       },
     ],
   });
@@ -91,6 +97,8 @@ test("step 2 clamps the edited arrangement", () => {
   const draft = {
     ...setupDraftFrom(config()),
     monitors: [{ width: 0, height: 0, x: -5, y: -5, primary: true }],
+    scrollMode: "auto",
+    scrollSpeed: 100,
   };
   expect(layoutPresetsPatch(draft, config())[0].monitors).toEqual([
     { width: 1, height: 1, x: 0, y: 0, primary: true },
@@ -104,12 +112,16 @@ test("step 2 round-trips the presets the wizard never showed, untouched", () => 
       {
         name: "Default",
         monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }],
+        scrollMode: "auto",
+        scrollSpeed: 100,
       },
       // Junk a hand-edited config can hold. A full settings save would clamp and trim it;
       // the wizard has no business rewriting a preset it never drew.
       {
         name: "  Legacy  ",
         monitors: [{ width: 0, height: 0, x: -8, y: 0, primary: false }],
+        scrollMode: "auto",
+        scrollSpeed: 100,
       },
     ],
   });
@@ -132,6 +144,8 @@ test("an active layout the config does not name is appended, not swapped in", ()
       {
         name: "Other",
         monitors: [{ width: 1280, height: 720, x: 0, y: 0, primary: true }],
+        scrollMode: "auto",
+        scrollSpeed: 100,
       },
     ],
   });

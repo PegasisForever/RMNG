@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::control::{LayoutPreset, MonitorSpec, Provider};
+use crate::control::{LayoutPreset, MonitorSpec, Provider, ScrollMode};
 
 /// Hardcoded control-server ports and paths (formerly the Settings "Advanced" pane).
 /// Nothing here is user-serviceable: changing a port would desync the clones that bake
@@ -544,17 +544,24 @@ pub fn default_global_prompt() -> String {
 }
 
 impl AppConfig {
+    /// The active preset, else the first one; None when no presets exist.
+    pub fn effective_preset(&self) -> Option<&LayoutPreset> {
+        self.layout_presets
+            .iter()
+            .find(|p| p.name == self.active_layout)
+            .or(self.layout_presets.first())
+    }
+
+    /// The active preset's scroll mode and speed (percent); auto at 100 without presets.
+    pub fn effective_scroll(&self) -> (ScrollMode, u32) {
+        self.effective_preset()
+            .map_or((ScrollMode::Auto, 100), |p| (p.scroll_mode, p.scroll_speed))
+    }
+
     /// The active preset's monitors. Falls back to the first preset, then to a dual
     /// 2560×1440 side-by-side default (primary on the right) when no presets exist.
     pub fn effective_monitors(&self) -> Vec<MonitorSpec> {
-        if let Some(p) = self
-            .layout_presets
-            .iter()
-            .find(|p| p.name == self.active_layout)
-        {
-            return p.monitors.clone();
-        }
-        if let Some(p) = self.layout_presets.first() {
+        if let Some(p) = self.effective_preset() {
             return p.monitors.clone();
         }
         vec![
@@ -913,6 +920,8 @@ mod tests {
         c.layout_presets = vec![
             LayoutPreset {
                 name: "A".into(),
+                scroll_mode: Default::default(),
+                scroll_speed: 100,
                 monitors: vec![MonitorSpec {
                     width: 1920,
                     height: 1080,
@@ -923,6 +932,8 @@ mod tests {
             },
             LayoutPreset {
                 name: "B".into(),
+                scroll_mode: Default::default(),
+                scroll_speed: 100,
                 monitors: vec![MonitorSpec {
                     width: 3840,
                     height: 2160,

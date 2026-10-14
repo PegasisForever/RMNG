@@ -285,10 +285,14 @@ mod tests {
             wire::LayoutPreset {
                 name: "A".into(),
                 monitors: vec![ms(1920, 1080)],
+                scroll_mode: Default::default(),
+                scroll_speed: 100,
             },
             wire::LayoutPreset {
                 name: "B".into(),
                 monitors: vec![ms(3840, 2160)],
+                scroll_mode: Default::default(),
+                scroll_speed: 100,
             },
         ];
         base.active_layout = "B".into();
@@ -498,6 +502,7 @@ fn validate_layout_presets(presets: &mut [wire::LayoutPreset]) -> Result<()> {
         if p.monitors.is_empty() {
             bail!("layout preset {:?} must have at least one monitor", p.name);
         }
+        p.scroll_speed = p.scroll_speed.clamp(10, 1000);
         // Normalize to exactly one primary.
         let primaries = p.monitors.iter().filter(|m| m.primary).count();
         if primaries == 0 {

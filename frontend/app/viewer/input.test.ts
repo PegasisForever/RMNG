@@ -103,17 +103,17 @@ test("a manual release during a grab re-arms after the cursor shows", () => {
 test("on a Mac, a wheel detent is one notch and a trackpad is finger scroll", () => {
   const rem = { x: 0, y: 0 };
   const detent = { deltaMode: 0, deltaX: 0, deltaY: 4.000244140625, wheelDeltaX: 0, wheelDeltaY: -12 };
-  expect(wheelMessages(detent, rem, false, "mac")).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  expect(wheelMessages(detent, rem, { os: "mac" })).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
   // A fast spin: one event, still one notch.
-  expect(wheelMessages({ ...detent, deltaY: -380.0232, wheelDeltaY: 1140 }, rem, false, "mac")).toEqual([
+  expect(wheelMessages({ ...detent, deltaY: -380.0232, wheelDeltaY: 1140 }, rem, { os: "mac" })).toEqual([
     { kind: "axis", axis: 0, step: -1 },
   ]);
   // Shift turns the wheel sideways in whole lines.
   const sideways = { deltaMode: 0, deltaX: 40, deltaY: 0, wheelDeltaX: -120, wheelDeltaY: 0, shiftKey: true };
-  expect(wheelMessages(sideways, rem, false, "mac")).toEqual([{ kind: "axis", axis: 1, step: 1 }]);
+  expect(wheelMessages(sideways, rem, { os: "mac" })).toEqual([{ kind: "axis", axis: 1, step: 1 }]);
   // A trackpad scrolls in whole pixels.
   const pad = { deltaMode: 0, deltaX: 0, deltaY: 7, wheelDeltaX: 0, wheelDeltaY: -21 };
-  expect(wheelMessages(pad, rem, false, "mac")).toEqual([
+  expect(wheelMessages(pad, rem, { os: "mac" })).toEqual([
     { kind: "axis_continuous", dx: 0, dy: 7, flags: 4 },
   ]);
 });
@@ -122,20 +122,41 @@ test("on Linux, a wheel's whole deltas are notches and a touchpad's fractions fi
   const rem = { x: 0, y: 0 };
   // A high-resolution wheel: eight events of 15 make one notch.
   const hires = { deltaMode: 0, deltaX: 0, deltaY: 15, wheelDeltaX: 0, wheelDeltaY: -15 };
-  for (let i = 0; i < 7; i++) expect(wheelMessages(hires, rem, false, "linux")).toEqual([]);
-  expect(wheelMessages(hires, rem, false, "linux")).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  for (let i = 0; i < 7; i++) expect(wheelMessages(hires, rem, { os: "linux" })).toEqual([]);
+  expect(wheelMessages(hires, rem, { os: "linux" })).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
   // A plain notch at device pixel ratio 1.5: 120 / 1.5 = 80.
   const notch = { deltaMode: 0, deltaX: 0, deltaY: 80, wheelDeltaX: 0, wheelDeltaY: -120 };
-  expect(wheelMessages(notch, rem, false, "linux", 1.5)).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  expect(wheelMessages(notch, rem, { os: "linux", dpr: 1.5 })).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
   // Turning back starts from zero: a leftover fraction does not eat the first notch up.
-  wheelMessages({ ...hires, deltaY: 60, wheelDeltaY: -60 }, rem, false, "linux");
-  expect(wheelMessages({ ...notch, deltaY: -120, wheelDeltaY: 120 }, rem, false, "linux")).toEqual([
+  wheelMessages({ ...hires, deltaY: 60, wheelDeltaY: -60 }, rem, { os: "linux" });
+  expect(wheelMessages({ ...notch, deltaY: -120, wheelDeltaY: 120 }, rem, { os: "linux" })).toEqual([
     { kind: "axis", axis: 0, step: -1 },
   ]);
   const pad = { deltaMode: 0, deltaX: 0, deltaY: 3.92578125, wheelDeltaX: 0, wheelDeltaY: -4 };
-  expect(wheelMessages(pad, rem, false, "linux")).toEqual([
+  expect(wheelMessages(pad, rem, { os: "linux" })).toEqual([
     { kind: "axis_continuous", dx: 0, dy: 3.92578125, flags: 4 },
   ]);
+});
+
+test("the layout's mode forces one device, and its speed scales both", () => {
+  const rem = { x: 0, y: 0 };
+  const notch = { deltaMode: 0, deltaX: 0, deltaY: 120, wheelDeltaX: 0, wheelDeltaY: -120 };
+  const pad = { deltaMode: 0, deltaX: 0, deltaY: 3.5, wheelDeltaX: 0, wheelDeltaY: -4 };
+  expect(wheelMessages(notch, rem, { os: "linux", mode: "trackpad" })).toEqual([
+    { kind: "axis_continuous", dx: 0, dy: 120, flags: 4 },
+  ]);
+  expect(wheelMessages(pad, rem, { os: "linux", mode: "trackpad", scale: 2 })).toEqual([
+    { kind: "axis_continuous", dx: 0, dy: 7, flags: 4 },
+  ]);
+  // Mouse mode counts a trackpad's travel in notches: 30 of these are one.
+  for (let i = 0; i < 29; i++) expect(wheelMessages(pad, rem, { os: "linux", mode: "mouse" })).toEqual([]);
+  expect(wheelMessages(pad, rem, { os: "linux", mode: "mouse" })).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  // Speed 50%: two notches make one step.
+  expect(wheelMessages(notch, rem, { os: "linux", scale: 0.5 })).toEqual([]);
+  expect(wheelMessages(notch, rem, { os: "linux", scale: 0.5 })).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  // Speed 200% on a Mac detent: two steps.
+  const detent = { deltaMode: 0, deltaX: 0, deltaY: 4.000244140625, wheelDeltaX: 0, wheelDeltaY: -12 };
+  expect(wheelMessages(detent, rem, { os: "mac", scale: 2 })).toEqual([{ kind: "axis", axis: 0, step: 2 }]);
 });
 
 test("a mouse wheel sends notches, a trackpad sends finger scroll", () => {
@@ -155,7 +176,7 @@ test("a mouse wheel sends notches, a trackpad sends finger scroll", () => {
   // A tiny trackpad move rounds to wheelDelta 0: still finger scroll, not a lost notch.
   expect(wheelMessages({ ...pad, wheelDeltaX: 0, wheelDeltaY: 0 }, rem)).toHaveLength(1);
   // During a finger scroll, an event that looks like a notch is still finger scroll.
-  expect(wheelMessages({ ...pad, wheelDeltaY: -120 }, rem, true)).toEqual([
+  expect(wheelMessages({ ...pad, wheelDeltaY: -120 }, rem, { fingers: true })).toEqual([
     { kind: "axis_continuous", dx: 1.5, dy: -7.25, flags: 4 },
   ]);
 });

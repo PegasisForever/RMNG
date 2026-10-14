@@ -8,6 +8,7 @@
 import { MonitorsEditor, type Mon } from "~/components/MonitorsEditor";
 import { settingsInput } from "~/components/SettingsFields";
 import { newLayoutPreset, type LayoutPresetDraft } from "~/lib/settingsDraft";
+import type { ScrollMode } from "~/lib/wire/ScrollMode";
 
 export function SettingsLayoutPresets({
   presets,
@@ -45,6 +46,34 @@ export function SettingsLayoutPresets({
             monitors={p.monitors}
             onChange={(mons: Mon[]) => replace(i, { monitors: mons })}
           />
+          {/* Applied in every viewer window as soon as this layout is the active one. */}
+          <div className="mt-2 flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+            <label className="flex items-center gap-1">
+              Scroll
+              <select
+                className={settingsInput}
+                value={p.scrollMode}
+                onChange={(e) => replace(i, { scrollMode: e.target.value as ScrollMode })}
+              >
+                <option value="auto">Auto (mouse wheel or trackpad, per event)</option>
+                <option value="mouse">Mouse wheel</option>
+                <option value="trackpad">Trackpad</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1">
+              Speed
+              <input
+                type="number"
+                min={10}
+                max={1000}
+                step={10}
+                className={`${settingsInput} w-20`}
+                value={p.scrollSpeed}
+                onChange={(e) => replace(i, { scrollSpeed: Number(e.target.value) })}
+              />
+              %
+            </label>
+          </div>
         </div>
       ))}
       <button

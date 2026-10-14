@@ -6,6 +6,7 @@
 // What it sends: Linux evdev keycodes, evdev buttons, wheel notches
 // or smooth finger scroll, pointer lock with relative motion that engages by itself while the
 // clone hides its cursor, the Ctrl+Alt+G / Ctrl+Alt+P chords, and the agent-warp rules.
+import type { ScrollMode } from "../lib/wire/ScrollMode";
 import type { CursorMeta } from "../lib/wire/CursorMeta";
 import type { CursorShape } from "../lib/wire/CursorShape";
 import type { InputMsg } from "../lib/wire/InputMsg";
@@ -185,45 +186,52 @@ function isLinuxWheel(e: WheelLike, dpr: number): boolean {
   return whole(e.deltaX) && whole(e.deltaY);
 }
 
+/** How one window reads its wheel events (`wheelMessages`). */
+export interface WheelOptions {
+  /** A finger scroll is still running, so this event belongs to it even if it looks like a
+   *  wheel's. */
+  fingers?: boolean;
+  os?: "mac" | "linux" | "other";
+  dpr?: number;
+  /** The active layout's choice: guess per event, or take every event as one device. */
+  mode?: ScrollMode;
+  /** Scroll distance factor, from the layout's speed: 1 sends what the device reported. */
+  scale?: number;
+}
+
 /** One wheel event → input messages. A mouse wheel becomes `axis` notches: on a Mac one per
  *  detent (`isMacDetent`), whatever distance macOS's acceleration gave it; on Linux and
  *  elsewhere its `wheelDelta` over 120 (a high-resolution wheel reports parts of a notch), with
  *  the fraction carried in `rem`. Anything else (a trackpad) becomes smooth finger scroll in
- *  CSS pixels. `fingers`: a finger scroll is still running, so this event belongs to it even if
- *  it looks like a wheel's. Browser and Mutter agree on the direction: positive is down and
- *  right. */
-export function wheelMessages(
-  e: WheelLike,
-  rem: { x: number; y: number },
-  fingers = false,
-  os: "mac" | "linux" | "other" = "other",
-  dpr = 1,
-): InputMsg[] {
-  if (os === "mac" && isMacDetent(e)) {
-    const out: InputMsg[] = [];
-    if (e.deltaY) out.push({ kind: "axis", axis: 0, step: Math.sign(e.deltaY) });
-    if (e.deltaX) out.push({ kind: "axis", axis: 1, step: Math.sign(e.deltaX) });
-    return out;
-  }
-  const wheel =
+ *  CSS pixels. The layout's mode can take every event as one or the other, and its speed scales
+ *  both. Browser and Mutter agree on the direction: positive is down and right. */
+export function wheelMessages(e: WheelLike, rem: { x: number; y: number }, o: WheelOptions = {}): InputMsg[] {
+  const { fingers = false, os = "other", dpr = 1, mode = "auto", scale = 1 } = o;
+  const detent = os === "mac" && isMacDetent(e);
+  const looksLikeWheel =
     os === "linux"
       ? isLinuxWheel(e, dpr)
       : (e.wheelDeltaX !== 0 || e.wheelDeltaY !== 0) &&
         e.wheelDeltaX % 120 === 0 &&
         e.wheelDeltaY % 120 === 0;
-  if (e.deltaMode === 0 && (fingers || !wheel)) {
+  const wheel =
+    mode === "mouse" ||
+    (mode === "auto" && (detent || e.deltaMode !== 0 || (!fingers && looksLikeWheel)));
+  if (!wheel) {
     if (!e.deltaX && !e.deltaY) return [];
-    return [{ kind: "axis_continuous", dx: e.deltaX, dy: e.deltaY, flags: AXIS_SOURCE_FINGER }];
+    const flags = AXIS_SOURCE_FINGER;
+    return [{ kind: "axis_continuous", dx: e.deltaX * scale, dy: e.deltaY * scale, flags }];
   }
-  const nx = -e.wheelDeltaX / 120;
-  const ny = -e.wheelDeltaY / 120;
+  const nx = (detent ? Math.sign(e.deltaX) : -e.wheelDeltaX / 120) * scale;
+  const ny = (detent ? Math.sign(e.deltaY) : -e.wheelDeltaY / 120) * scale;
   // A turn the other way starts from zero, so a carried fraction cannot swallow its first notch.
   if (nx * rem.x < 0) rem.x = 0;
   if (ny * rem.y < 0) rem.y = 0;
   rem.x += nx;
   rem.y += ny;
-  const sx = Math.trunc(rem.x);
-  const sy = Math.trunc(rem.y);
+  // The epsilon keeps a sum of parts (30 × 4/120) from landing just under a whole step.
+  const sx = Math.trunc(rem.x + Math.sign(rem.x) * 1e-9);
+  const sy = Math.trunc(rem.y + Math.sign(rem.y) * 1e-9);
   rem.x -= sx;
   rem.y -= sy;
   const out: InputMsg[] = [];
@@ -263,6 +271,8 @@ export interface Input {
   setLayout(monitors: ViewMonitor[]): void;
   onCursor(c: CursorMeta): void;
   setConnected(connected: boolean): void;
+  /** The active layout's scroll mode and speed (percent). */
+  setScroll(mode: ScrollMode, speed: number): void;
   detach(): void;
 }
 
@@ -285,6 +295,8 @@ export function attachInput(o: InputOptions): Input {
   let warpUntil = 0;
   let overlayUntil = 0;
   const rem = { x: 0, y: 0 };
+  let scrollMode: ScrollMode = "auto";
+  let scrollScale = 1;
   let scrollEnd: ReturnType<typeof setTimeout> | undefined;
 
   // The remote cursor: last position (monitor pixels), shape, and what was built from it.
@@ -488,7 +500,13 @@ export function attachInput(o: InputOptions): Input {
     e.preventDefault(); // no page scroll, no Ctrl+wheel zoom
     if (!connected) return;
     const w = e as WheelEvent & { wheelDeltaX: number; wheelDeltaY: number };
-    const msgs = wheelMessages(w, rem, scrollEnd !== undefined, os, devicePixelRatio);
+    const msgs = wheelMessages(w, rem, {
+      fingers: scrollEnd !== undefined,
+      os,
+      dpr: devicePixelRatio,
+      mode: scrollMode,
+      scale: scrollScale,
+    });
     for (const m of msgs) send(m);
     if (msgs[0]?.kind === "axis_continuous") {
       // Fingers lifted (no more events): finish the gesture so the clone's kinetic scroll ends.
@@ -566,6 +584,10 @@ export function attachInput(o: InputOptions): Input {
       }
       cursor = { x: c.x, y: c.y };
       tick();
+    },
+    setScroll(mode, speed) {
+      scrollMode = mode;
+      scrollScale = speed / 100;
     },
     setConnected(c) {
       connected = c;

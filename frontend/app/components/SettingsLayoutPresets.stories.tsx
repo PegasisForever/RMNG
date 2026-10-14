@@ -39,7 +39,7 @@ export const Several: Story = {
   args: {
     presets: [
       ...makeSettingsDraft().layoutPresets,
-      { name: "Single 1080p", monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }] },
+      { ...newLayoutPreset("Single 1080p"), scrollMode: "mouse", scrollSpeed: 150 },
       newLayoutPreset("Unnamed placeholder"),
     ],
   },

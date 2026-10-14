@@ -111,6 +111,9 @@ export default function Viewer() {
           if (buildId !== null && msg.build_id !== buildId) location.reload();
           buildId = msg.build_id;
           break;
+        case "scroll":
+          inp.setScroll(msg.mode, msg.speed);
+          break;
         case "view_spec":
           // No pointer moves go to a clone that shows a terminal.
           inp.setLayout(msg.content.mode === "desktop" ? msg.monitors : []);

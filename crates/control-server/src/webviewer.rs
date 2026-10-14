@@ -77,6 +77,8 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
 
         // First on the socket, so the page knows the build before anything else arrives.
         let _ = tx.try_send(Queued::of(&ToBrowser::Version { build_id: app.build_id() }));
+        let (mode, speed) = app.config().effective_scroll();
+        let _ = tx.try_send(Queued::of(&ToBrowser::Scroll { mode, speed }));
         let id = mediaplane::join_viewer(&app, &plane, tx, monitor);
         tracing::info!("browser viewer {id} connected (monitor {monitor})");
         // Input follows the selection: what this socket holds in the old clone is released at
