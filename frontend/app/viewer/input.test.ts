@@ -103,18 +103,38 @@ test("a manual release during a grab re-arms after the cursor shows", () => {
 test("on a Mac, a wheel detent is one notch and a trackpad is finger scroll", () => {
   const rem = { x: 0, y: 0 };
   const detent = { deltaMode: 0, deltaX: 0, deltaY: 4.000244140625, wheelDeltaX: 0, wheelDeltaY: -12 };
-  expect(wheelMessages(detent, rem, false, true)).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  expect(wheelMessages(detent, rem, false, "mac")).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
   // A fast spin: one event, still one notch.
-  expect(wheelMessages({ ...detent, deltaY: -380.0232, wheelDeltaY: 1140 }, rem, false, true)).toEqual([
+  expect(wheelMessages({ ...detent, deltaY: -380.0232, wheelDeltaY: 1140 }, rem, false, "mac")).toEqual([
     { kind: "axis", axis: 0, step: -1 },
   ]);
   // Shift turns the wheel sideways in whole lines.
   const sideways = { deltaMode: 0, deltaX: 40, deltaY: 0, wheelDeltaX: -120, wheelDeltaY: 0, shiftKey: true };
-  expect(wheelMessages(sideways, rem, false, true)).toEqual([{ kind: "axis", axis: 1, step: 1 }]);
+  expect(wheelMessages(sideways, rem, false, "mac")).toEqual([{ kind: "axis", axis: 1, step: 1 }]);
   // A trackpad scrolls in whole pixels.
   const pad = { deltaMode: 0, deltaX: 0, deltaY: 7, wheelDeltaX: 0, wheelDeltaY: -21 };
-  expect(wheelMessages(pad, rem, false, true)).toEqual([
+  expect(wheelMessages(pad, rem, false, "mac")).toEqual([
     { kind: "axis_continuous", dx: 0, dy: 7, flags: 4 },
+  ]);
+});
+
+test("on Linux, a wheel's whole deltas are notches and a touchpad's fractions finger scroll", () => {
+  const rem = { x: 0, y: 0 };
+  // A high-resolution wheel: eight events of 15 make one notch.
+  const hires = { deltaMode: 0, deltaX: 0, deltaY: 15, wheelDeltaX: 0, wheelDeltaY: -15 };
+  for (let i = 0; i < 7; i++) expect(wheelMessages(hires, rem, false, "linux")).toEqual([]);
+  expect(wheelMessages(hires, rem, false, "linux")).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  // A plain notch at device pixel ratio 1.5: 120 / 1.5 = 80.
+  const notch = { deltaMode: 0, deltaX: 0, deltaY: 80, wheelDeltaX: 0, wheelDeltaY: -120 };
+  expect(wheelMessages(notch, rem, false, "linux", 1.5)).toEqual([{ kind: "axis", axis: 0, step: 1 }]);
+  // Turning back starts from zero: a leftover fraction does not eat the first notch up.
+  wheelMessages({ ...hires, deltaY: 60, wheelDeltaY: -60 }, rem, false, "linux");
+  expect(wheelMessages({ ...notch, deltaY: -120, wheelDeltaY: 120 }, rem, false, "linux")).toEqual([
+    { kind: "axis", axis: 0, step: -1 },
+  ]);
+  const pad = { deltaMode: 0, deltaX: 0, deltaY: 3.92578125, wheelDeltaX: 0, wheelDeltaY: -4 };
+  expect(wheelMessages(pad, rem, false, "linux")).toEqual([
+    { kind: "axis_continuous", dx: 0, dy: 3.92578125, flags: 4 },
   ]);
 });
 

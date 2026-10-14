@@ -173,35 +173,55 @@ function isMacDetent(e: WheelLike): boolean {
   return !!e.shiftKey && e.deltaY === 0 && e.deltaX !== 0 && e.deltaX % MAC_WHEEL_LINE_PX === 0;
 }
 
+const isWhole = (v: number) => Math.abs(v - Math.round(v)) < 1e-3;
+
+/** Whether a wheel event comes from a mouse wheel on Linux. Chrome turns a wheel into a mouse
+ *  wheel event whose offset is whole by type: 120 a notch, or a high-resolution wheel's part
+ *  of 120 (15, 30). A touchpad is a scroll event in fractional pixels. The page sees the offset
+ *  divided by the device pixel ratio, so a whole number there, too, is a wheel. */
+function isLinuxWheel(e: WheelLike, dpr: number): boolean {
+  if (e.deltaMode !== 0) return true;
+  const whole = (v: number) => isWhole(v) || isWhole(v * dpr);
+  return whole(e.deltaX) && whole(e.deltaY);
+}
+
 /** One wheel event → input messages. A mouse wheel becomes `axis` notches: on a Mac one per
- *  detent (`isMacDetent`), whatever distance macOS's acceleration gave it; elsewhere Chrome
- *  reports `wheelDelta` in multiples of 120 per notch, with the fraction carried in `rem`.
- *  Anything else (a trackpad) becomes smooth finger scroll in CSS pixels. `fingers`: a finger
- *  scroll is still running, so this event belongs to it even if its delta looks like a notch.
- *  Browser and Mutter agree on the direction: positive is down and right. */
+ *  detent (`isMacDetent`), whatever distance macOS's acceleration gave it; on Linux and
+ *  elsewhere its `wheelDelta` over 120 (a high-resolution wheel reports parts of a notch), with
+ *  the fraction carried in `rem`. Anything else (a trackpad) becomes smooth finger scroll in
+ *  CSS pixels. `fingers`: a finger scroll is still running, so this event belongs to it even if
+ *  it looks like a wheel's. Browser and Mutter agree on the direction: positive is down and
+ *  right. */
 export function wheelMessages(
   e: WheelLike,
   rem: { x: number; y: number },
   fingers = false,
-  mac = false,
+  os: "mac" | "linux" | "other" = "other",
+  dpr = 1,
 ): InputMsg[] {
-  if (mac && isMacDetent(e)) {
+  if (os === "mac" && isMacDetent(e)) {
     const out: InputMsg[] = [];
     if (e.deltaY) out.push({ kind: "axis", axis: 0, step: Math.sign(e.deltaY) });
     if (e.deltaX) out.push({ kind: "axis", axis: 1, step: Math.sign(e.deltaX) });
     return out;
   }
-  const notched =
-    !fingers &&
-    (e.wheelDeltaX !== 0 || e.wheelDeltaY !== 0) &&
-    e.wheelDeltaX % 120 === 0 &&
-    e.wheelDeltaY % 120 === 0;
-  if (e.deltaMode === 0 && !notched) {
+  const wheel =
+    os === "linux"
+      ? isLinuxWheel(e, dpr)
+      : (e.wheelDeltaX !== 0 || e.wheelDeltaY !== 0) &&
+        e.wheelDeltaX % 120 === 0 &&
+        e.wheelDeltaY % 120 === 0;
+  if (e.deltaMode === 0 && (fingers || !wheel)) {
     if (!e.deltaX && !e.deltaY) return [];
     return [{ kind: "axis_continuous", dx: e.deltaX, dy: e.deltaY, flags: AXIS_SOURCE_FINGER }];
   }
-  rem.x += -e.wheelDeltaX / 120;
-  rem.y += -e.wheelDeltaY / 120;
+  const nx = -e.wheelDeltaX / 120;
+  const ny = -e.wheelDeltaY / 120;
+  // A turn the other way starts from zero, so a carried fraction cannot swallow its first notch.
+  if (nx * rem.x < 0) rem.x = 0;
+  if (ny * rem.y < 0) rem.y = 0;
+  rem.x += nx;
+  rem.y += ny;
   const sx = Math.trunc(rem.x);
   const sy = Math.trunc(rem.y);
   rem.x -= sx;
@@ -249,6 +269,7 @@ export interface Input {
 export function attachInput(o: InputOptions): Input {
   const { canvas, overlay, monitor, send } = o;
   const isMac = /Mac/.test(navigator.platform);
+  const os = isMac ? "mac" : /Linux/.test(navigator.platform) ? "linux" : "other";
   let layout: ViewMonitor[] = [];
   /** This window's monitor in the layout. */
   let size: { w: number; h: number } | null = null;
@@ -467,7 +488,7 @@ export function attachInput(o: InputOptions): Input {
     e.preventDefault(); // no page scroll, no Ctrl+wheel zoom
     if (!connected) return;
     const w = e as WheelEvent & { wheelDeltaX: number; wheelDeltaY: number };
-    const msgs = wheelMessages(w, rem, scrollEnd !== undefined, isMac);
+    const msgs = wheelMessages(w, rem, scrollEnd !== undefined, os, devicePixelRatio);
     for (const m of msgs) send(m);
     if (msgs[0]?.kind === "axis_continuous") {
       // Fingers lifted (no more events): finish the gesture so the clone's kinetic scroll ends.
