@@ -72,7 +72,9 @@ const pending = (): Pending | null => JSON.parse(localStorage.getItem(PENDING_KE
 const setPending = (p: Pending | null) => localStorage.setItem(PENDING_KEY, JSON.stringify(p));
 
 /** The local clipboard's content in the types Chrome can write; null when Chrome refuses the
- *  read (no focus, or no permission). */
+ *  read (no focus, or no permission). Some apps (Slack) copy HTML with no plain text, which
+ *  a Mac text box turns into text on paste but a clone's terminal cannot paste; so plain text
+ *  is made from the HTML when there is none. */
 async function readLocal(): Promise<Map<LocalType, Blob> | null> {
   try {
     const [item] = await navigator.clipboard.read();
@@ -80,10 +82,33 @@ async function readLocal(): Promise<Map<LocalType, Blob> | null> {
     for (const t of LOCAL_TYPES) {
       if (item?.types.includes(t)) blobs.set(t, await item.getType(t));
     }
+    const html = blobs.get("text/html");
+    if (html && !blobs.get("text/plain")?.size) {
+      blobs.set("text/plain", new Blob([htmlToText(await html.text())], { type: "text/plain" }));
+    }
     return blobs;
   } catch {
     return null;
   }
+}
+
+/** The text a paste of `html` into a plain text field gives. `innerText` follows the layout
+ *  (blocks and `<br>` become line breaks), so the HTML is put off-screen in the page for a
+ *  moment; images become their alt text and styles, scripts and frames are dropped first, so
+ *  nothing loads and the page's own look does not change. */
+export function htmlToText(html: string): string {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  for (const img of doc.querySelectorAll("img")) img.replaceWith(img.alt);
+  for (const e of doc.querySelectorAll("script,style,link,meta,iframe,object,embed,video,audio")) {
+    e.remove();
+  }
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed;left:-10000px;top:0;white-space:normal";
+  box.append(...doc.body.childNodes);
+  document.body.append(box);
+  const text = box.innerText;
+  box.remove();
+  return text;
 }
 
 async function digest(blobs: Map<LocalType, Blob>) {
