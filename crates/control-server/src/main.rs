@@ -32,6 +32,7 @@ mod mountns;
 mod naming;
 mod oauth;
 mod operation;
+mod outbox;
 mod pool;
 mod provision;
 mod shared;

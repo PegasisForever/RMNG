@@ -12,9 +12,11 @@
 //! stop it with Ctrl+C. When the server closes the socket, it connects again after 1 s, as a
 //! viewer window does, and counts it.
 //!
-//! The delay is the time from an `echo` to its answer (every 200 ms). The answer waits in the
-//! server's queue for this socket and in the kernel send buffer behind the video, so the delay
-//! is the round trip plus the time the video waits to be sent.
+//! The delay is the time from an `echo` to its answer (every 200 ms). The server sends the
+//! answer ahead of the video in its queue, so the delay is the round trip plus the wait in the
+//! kernel send buffer and in any proxy on the way. The video's own delay is in the server's
+//! log: `rmng-fps` acknowledges frames as a viewer window does (`ack`), and the server logs
+//! the round trip and how far behind the window is.
 
 use std::time::{Duration, Instant};
 
@@ -24,6 +26,10 @@ use tokio_tungstenite::tungstenite::Message;
 use wire::browser::{FromBrowser, KIND_VIDEO, ToBrowser, VIDEO_HEADER_LEN};
 
 const ECHO_EVERY: Duration = Duration::from_millis(200);
+/// Acknowledge the newest frame this often when it changed, and every `ACK_HEARTBEAT` when it
+/// did not (`ACK_MS` and `ACK_HEARTBEAT_MS` in `viewer/worker.ts`).
+const ACK_EVERY: Duration = Duration::from_millis(50);
+const ACK_HEARTBEAT: Duration = Duration::from_secs(1);
 /// The viewer window's wait before it connects again (`RECONNECT_MS` in `viewer/worker.ts`).
 const RECONNECT: Duration = Duration::from_secs(1);
 
@@ -51,6 +57,7 @@ async fn main() -> Result<()> {
 
     let start = Instant::now();
     let mut echo = tokio::time::interval(ECHO_EVERY);
+    let mut ack = tokio::time::interval(ACK_EVERY);
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // the first tick is at once
@@ -71,6 +78,9 @@ async fn main() -> Result<()> {
         };
         eprintln!("connected to {url}");
         let (mut sink, mut stream) = ws.split();
+        // The newest frame and when it arrived; the last acknowledged one and when.
+        let mut newest: Option<(u32, Instant)> = None;
+        let mut acked: Option<(u32, Instant)> = None;
         loop {
             tokio::select! {
                 msg = stream.next() => match msg {
@@ -80,6 +90,8 @@ async fn main() -> Result<()> {
                             frames += 1;
                             keys += (b[1] & 1) as u32;
                             bytes += b.len();
+                            let seq = u32::from_be_bytes(b[6..10].try_into().unwrap());
+                            newest = Some((seq, Instant::now()));
                         }
                     }
                     Some(Ok(Message::Text(t))) => {
@@ -96,6 +108,16 @@ async fn main() -> Result<()> {
                     let msg = serde_json::to_string(&FromBrowser::Echo { id })?;
                     // A failed send closes the socket, and the read above sees that.
                     let _ = sink.send(Message::Text(msg)).await;
+                }
+                _ = ack.tick() => {
+                    let Some((seq, at)) = newest else { continue };
+                    if acked.is_some_and(|(s, t)| s == seq && t.elapsed() < ACK_HEARTBEAT) {
+                        continue;
+                    }
+                    let held_ms = at.elapsed().as_millis() as u32;
+                    let msg = serde_json::to_string(&FromBrowser::Ack { seq, held_ms })?;
+                    let _ = sink.send(Message::Text(msg)).await;
+                    acked = Some((seq, Instant::now()));
                 }
                 _ = tick.tick() => {
                     let s = since.elapsed().as_secs_f64();

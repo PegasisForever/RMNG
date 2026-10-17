@@ -112,11 +112,18 @@ pub enum FromBrowser {
     TermInput(TermInput),
     TermResize(TermResize),
     TermNewSession,
-    /// Encode the monitor's next frame as a keyframe: at connect, and after a decode error.
+    /// Encode the monitor's next frame as a keyframe: after a decode error, or when the decoder
+    /// falls behind. A join gets one without asking.
     RequestKeyframe(RequestKeyframe),
-    /// Answered with [`ToBrowser::Echo`] through the same queue as the video, so the time to
-    /// the answer includes the wait in that queue and in the kernel send buffer. `rmng-fps`
-    /// measures the delay with it; the viewer does not send it.
+    /// The newest video frame received (`seq` from its [`VideoHeader`]) and how long it waited
+    /// here before this message (`held_ms`). Sent every 50 ms when `seq` changed, and once a
+    /// second when it did not. The server takes the round trip and how far behind the window
+    /// is from it.
+    Ack { seq: u32, held_ms: u32 },
+    /// Answered with [`ToBrowser::Echo`], ahead of the video waiting in this socket's queue
+    /// (as every control message), so the time to the answer is the round trip plus the wait
+    /// in the kernel send buffer and any proxy on the way. `rmng-fps` measures it; the viewer
+    /// does not send it.
     Echo { id: u32 },
 }
 
@@ -283,6 +290,9 @@ mod tests {
         );
         let new: FromBrowser = serde_json::from_str(r#"{"t":"term_new_session"}"#).unwrap();
         assert_eq!(new, FromBrowser::TermNewSession);
+        let ack: FromBrowser =
+            serde_json::from_str(r#"{"t":"ack","seq":9,"held_ms":12}"#).unwrap();
+        assert_eq!(ack, FromBrowser::Ack { seq: 9, held_ms: 12 });
         let echo: FromBrowser = serde_json::from_str(r#"{"t":"echo","id":7}"#).unwrap();
         assert_eq!(echo, FromBrowser::Echo { id: 7 });
         assert_eq!(

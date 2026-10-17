@@ -147,6 +147,7 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     use_bbr(&listener);
+    small_send_queue(&listener);
     tracing::info!("web API + SSE + static + viewer on http://{addr}");
     // `with_connect_info` is what puts the peer address in reach of a handler, and
     // [`caller_clone`] needs it: a clone's address on the rmng bridge is the one thing about
@@ -186,6 +187,34 @@ fn use_bbr(listener: &tokio::net::TcpListener) {
             available.trim()
         ),
         Err(e) => tracing::warn!("web port TCP congestion control: {e}"),
+    }
+}
+
+/// Unsent bytes a web-port socket may hold in the kernel before a write waits
+/// (`TCP_NOTSENT_LOWAT`). Without a limit several MB of video can wait there, where nothing can
+/// drop it or put a control message before it; with it, video waits in the viewer's queue
+/// ([`crate::outbox`]) instead. Bytes sent and not yet acknowledged by TCP do not count.
+const NOTSENT_LOWAT: libc::c_int = 128 * 1024;
+
+/// Set [`NOTSENT_LOWAT`] on the listener: accepted sockets take its value. Core TCP, so no
+/// kernel module is involved.
+fn small_send_queue(listener: &impl std::os::fd::AsRawFd) {
+    let value = NOTSENT_LOWAT;
+    // SAFETY: a valid socket fd and a c_int option value of the size given.
+    let r = unsafe {
+        libc::setsockopt(
+            listener.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_NOTSENT_LOWAT,
+            (&value as *const libc::c_int).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if r != 0 {
+        tracing::warn!(
+            "web port: TCP_NOTSENT_LOWAT: {}",
+            std::io::Error::last_os_error()
+        );
     }
 }
 
@@ -2239,6 +2268,31 @@ async fn codex_rotate(State(app): State<App>) -> Json<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    /// An accepted socket takes the listener's `TCP_NOTSENT_LOWAT`, so setting it once on the
+    /// listener covers every viewer.
+    #[test]
+    fn accepted_sockets_take_the_listeners_notsent_lowat() {
+        use std::os::fd::AsRawFd;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        super::small_send_queue(&listener);
+        let _client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let mut value: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: a valid socket fd and a c_int out value of the size given.
+        let r = unsafe {
+            libc::getsockopt(
+                accepted.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_NOTSENT_LOWAT,
+                (&mut value as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(r, 0);
+        assert_eq!(value, super::NOTSENT_LOWAT);
+    }
+
     use super::*;
     use std::sync::Arc;
 

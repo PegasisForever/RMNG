@@ -1,15 +1,16 @@
 //! The browser viewer's WebSocket (`/api/viewer?monitor=<id>`, protocol in [`wire::browser`]).
 //!
 //! A browser viewer is one entry in the media plane's viewer set: it joins, is primed, gets the
-//! broadcast, and is closed when its 128-message queue fills (the browser then reconnects and
-//! is primed again).
+//! broadcast through its queue ([`Outbox`]: control first, video dropped and resynced when it
+//! falls behind), and is closed when it makes no progress (the browser then reconnects and is
+//! primed again).
 //!
 //! - Writer thread: drains the queue (the media plane queues only this socket's monitor's
 //!   video, each message already in its WebSocket form) and sends it.
 //! - Reader thread: parses [`FromBrowser`] and hands it to the media plane's handler. It owns
 //!   the teardown.
 
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -29,14 +30,16 @@ use wire::socket::{ClipboardMsg, InputMsg};
 use crate::app::App;
 use crate::clone_home::CloneHome;
 use crate::mediaplane::{self, Queued};
+use crate::outbox::{Next, Outbox};
 use crate::shared::CLONE_UID;
 
-/// A send that makes no progress for this long closes the socket (the browser stopped reading).
-const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// The writer pings this often, so a browser that has gone away is noticed: Chrome answers
 /// every ping with a pong, which the reader counts as traffic.
 const PING_EVERY: Duration = Duration::from_secs(5);
-/// No message at all (pongs included) for this long closes the socket.
+/// No message at all (pongs and acknowledgements included) for this long closes the socket.
+/// One write has no time limit: a large clipboard message on a slow link may take longer, and
+/// the socket is closed only when the browser stops acknowledging frames
+/// ([`Outbox::stalled`]).
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Serve one browser viewer window showing `monitor`.
@@ -47,11 +50,11 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
     let rt = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
         let (mut sink, mut stream) = ws.split();
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Queued>(mediaplane::VIEWER_CHAN_CAP);
+        let outbox = Arc::new(Outbox::new());
         // Tells the reader the writer gave up, so it tears down without waiting for a read.
         let (gone_tx, mut gone_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let writer_rt = rt.clone();
+        let (writer_rt, writer_box) = (rt.clone(), outbox.clone());
         std::thread::spawn(move || {
             let mut last_ping = Instant::now();
             loop {
@@ -59,16 +62,20 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
                     last_ping = Instant::now();
                     Message::Ping(Vec::new())
                 } else {
-                    match rx.recv_timeout(PING_EVERY.saturating_sub(last_ping.elapsed())) {
-                        Ok(q) => message(q),
-                        Err(RecvTimeoutError::Timeout) => continue,
-                        Err(RecvTimeoutError::Disconnected) => break,
+                    match writer_box.next(PING_EVERY.saturating_sub(last_ping.elapsed())) {
+                        Next::Msg(q) => message(q),
+                        Next::Idle => continue,
+                        Next::Closed => break,
                     }
                 };
-                // Built inside `block_on`: a tokio timer needs the runtime when it is created.
-                let sent = writer_rt
-                    .block_on(async { tokio::time::timeout(SEND_TIMEOUT, sink.send(msg)).await });
-                if !matches!(sent, Ok(Ok(()))) {
+                // A closed queue ends a send that waits for the socket.
+                let sent = writer_rt.block_on(async {
+                    tokio::select! {
+                        r = sink.send(msg) => r.is_ok(),
+                        _ = writer_box.closed() => false,
+                    }
+                });
+                if !sent {
                     break;
                 }
             }
@@ -76,10 +83,11 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
         });
 
         // First on the socket, so the page knows the build before anything else arrives.
-        let _ = tx.try_send(Queued::of(&ToBrowser::Version { build_id: app.build_id() }));
+        outbox.push(Queued::of(&ToBrowser::Version { build_id: app.build_id() }));
         let (mode, speed) = app.config().effective_scroll();
-        let _ = tx.try_send(Queued::of(&ToBrowser::Scroll { mode, speed }));
-        let id = mediaplane::join_viewer(&app, &plane, tx, monitor);
+        outbox.push(Queued::of(&ToBrowser::Scroll { mode, speed }));
+        let id = mediaplane::next_viewer_id();
+        mediaplane::join_viewer(&app, &plane, id, outbox.clone(), monitor);
         tracing::info!("browser viewer {id} connected (monitor {monitor})");
         // Input follows the selection: what this socket holds in the old clone is released at
         // its next input message (a dashboard switch blurs the window, which releases all) and
@@ -94,6 +102,16 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
                 }
             });
             deadline = tokio::time::Instant::now() + READ_TIMEOUT;
+            // Checked on every message: a live browser sends an acknowledgement at least once a
+            // second, and Chrome answers every ping.
+            let now = Instant::now();
+            if outbox.stalled(now) {
+                tracing::info!("browser viewer {id}: no frame acknowledged for 10 s; closing");
+                break;
+            }
+            if let Some(s) = outbox.summary(now) {
+                tracing::debug!("browser viewer {id}: {s}");
+            }
             let msg = match next {
                 Some(Ok(Message::Text(text))) => match serde_json::from_str::<FromBrowser>(&text) {
                     Ok(msg) => msg,
@@ -119,6 +137,8 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
         // closes) never sends the release, so send it here.
         held.follow(&app, None);
         mediaplane::leave_viewer(&app, &plane, id);
+        // Also when the registry dropped it already: stops the writer, also inside a send.
+        outbox.close();
         tracing::info!("browser viewer {id} left");
         // Dropping `stream` here and `sink` in the writer closes the socket.
     });

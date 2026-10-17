@@ -37,7 +37,7 @@ Dockerfile-stage/`RUN` steps) and the **developer scripts** in `scripts/`.
 | `template/gnome-patch/build-shell-deb.sh` | the `gnome-build` stage of `template/Dockerfile` | `docker build` | Build the patched gnome-shell `.deb` |
 | `scripts/publish-server.sh` | a developer's machine | by hand | Build + push the control-server image |
 | `scripts/publish-template.sh` | a developer's machine | by hand | Build + push the clone template image |
-| `scripts/wan-shape.sh` | the machine that publishes port 9000 (CT 101), as root | by hand | Make port 9000 look like a slow link (`tc`), for the viewer test bench ([WAN-BENCH.md](WAN-BENCH.md)) |
+| `scripts/wan-shape.sh` | the machine that publishes port 9000 (CT 101), as root | by hand | A proxy on port 9001 in front of port 9000 (as `tailscale serve`), and a slow link (`tc`) on port 9001 or 9000, for the viewer test bench ([WAN-BENCH.md](WAN-BENCH.md)) |
 | `scripts/wan-motion.sh` | a clone with a desktop, as the clone user | by hand | Repeatable screen activity for the viewer test bench |
 
 The template build scripts are `COPY`'d into the build context and `RUN` by the Dockerfile

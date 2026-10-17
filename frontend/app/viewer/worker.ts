@@ -32,6 +32,11 @@ const SOFTWARE_AFTER_ERRORS = 3;
 const ERROR_WINDOW_MS = 5000;
 /** More chunks than this waiting in the decoder: drop until the next keyframe to catch up. */
 const DECODE_BACKLOG_MAX = 8;
+/** Acknowledge the newest received frame this often when it changed, and every
+ *  ACK_HEARTBEAT_MS when it did not. The server takes the round trip and how far behind this
+ *  window is from it, and closes a socket whose frames stay unacknowledged for 10 s. */
+const ACK_MS = 50;
+const ACK_HEARTBEAT_MS = 1000;
 
 let url = "";
 let monitor = 0;
@@ -52,8 +57,22 @@ let lastErrorAt = -Infinity;
  *  keyframe and then fails again would otherwise never get here. */
 let software = false;
 
+/** The newest frame received on this socket and when; the last acknowledged one and when. */
+let newest: { seq: number; at: number } | null = null;
+let acked: { seq: number; at: number } | null = null;
+
 function send(msg: FromBrowser) {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
+/** `held_ms` is how long the frame number waited here, so the server can take it off the
+ *  round trip. */
+function ack() {
+  if (!newest) return;
+  const now = performance.now();
+  if (acked?.seq === newest.seq && now - acked.at < ACK_HEARTBEAT_MS) return;
+  send({ t: "ack", seq: newest.seq, held_ms: Math.round(now - newest.at) });
+  acked = { seq: newest.seq, at: now };
 }
 
 function requestKeyframe() {
@@ -94,6 +113,8 @@ function configure(c: string) {
 
 function onVideo(buf: ArrayBuffer) {
   const h = parseVideoHeader(buf);
+  // Received is what counts, decoded or not.
+  newest = { seq: h.seq, at: performance.now() };
   if (waitKey && !h.key) return;
   const au = new Uint8Array(buf, VIDEO_HEADER_LEN);
   if (h.key) {
@@ -135,6 +156,7 @@ function draw() {
 }
 
 function connect() {
+  newest = acked = null;
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
@@ -179,4 +201,5 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   ctx = m.canvas.getContext("2d")!;
   resetDecoder();
   connect();
+  setInterval(ack, ACK_MS);
 };
