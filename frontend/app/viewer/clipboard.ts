@@ -121,7 +121,7 @@ async function digest(blobs: Map<LocalType, Blob>) {
 interface ClipboardOptions {
   /** An offer or a request, as JSON. */
   send(msg: ClipboardMsg): void;
-  /** Bytes for a request, as a binary message. */
+  /** Bytes for a request (the worker sends them in pieces). Takes `d.bytes`' buffer. */
   sendData(d: ClipboardBytes): void;
 }
 

@@ -14,12 +14,7 @@ import type { ViewContent } from "~/lib/wire/ViewContent";
 import type { ViewMonitor } from "~/lib/wire/ViewMonitor";
 import { attachClipboard } from "~/viewer/clipboard";
 import { type Input, attachInput, toggleFullscreen } from "~/viewer/input";
-import {
-  type WorkerIn,
-  type WorkerOut,
-  encodeClipboardData,
-  parseClipboardData,
-} from "~/viewer/protocol";
+import type { WorkerIn, WorkerOut } from "~/viewer/protocol";
 import { TermView } from "~/viewer/terminal";
 
 export function meta() {
@@ -85,10 +80,7 @@ export default function Viewer() {
     sendRef.current = (msg) => post({ type: "send", msg });
     const clip = attachClipboard({
       send: (msg) => post({ type: "send", msg: { t: "clipboard", ...msg } }),
-      sendData: (d) => {
-        const buf = encodeClipboardData(d);
-        post({ type: "binary", buf }, [buf]);
-      },
+      sendData: (d) => post({ type: "clipboard", data: d }, [d.bytes.buffer]),
     });
     const inp = attachInput({
       canvas,
@@ -134,10 +126,9 @@ export default function Viewer() {
     worker.onmessage = (e: MessageEvent<WorkerOut>) => {
       const m = e.data;
       if (m.type === "message") onServerMessage(m.msg);
-      else if (m.type === "binary") clip.onData(parseClipboardData(m.buf));
+      else if (m.type === "clipboard") clip.onData(m.data);
       else {
         setConnected(m.connected);
-        inp.setConnected(m.connected);
         clip.setConnected(m.connected);
       }
     };

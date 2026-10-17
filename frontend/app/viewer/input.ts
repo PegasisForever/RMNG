@@ -29,6 +29,9 @@ const CSS_CURSOR_MAX = 128;
 const SCROLL_END_MS = 200;
 /** Pixels Chrome reports for a line a macOS wheel turned (`isMacDetent`). */
 const MAC_WHEEL_LINE_PX = 40;
+/** Input made while the socket is down is sent when it is back, unless it is older than this
+ *  (a release is always sent). */
+const HOLD_MAX_MS = 2000;
 
 /** Evdev buttons by `MouseEvent.button`: left, middle, right, back, forward. */
 const BUTTONS = [0x110, 0x112, 0x111, 0x113, 0x114];
@@ -240,6 +243,33 @@ export function wheelMessages(e: WheelLike, rem: { x: number; y: number }, o: Wh
   return out;
 }
 
+/** Input made while the socket is down, oldest first, with when it was made. */
+export type HeldInput = { msg: InputMsg; at: number }[];
+
+const isRelease = (m: InputMsg) =>
+  (m.kind === "key_code" || m.kind === "key" || m.kind === "button") && !m.pressed;
+
+/** The held input that is still worth sending at `now`: what is at most HOLD_MAX_MS old, and
+ *  every release. */
+export function freshInput(held: HeldInput, now: number): HeldInput {
+  return held.filter((h) => now - h.at <= HOLD_MAX_MS || isRelease(h.msg));
+}
+
+/** Hold `msg` until the socket is back. A pointer move right after another replaces it (the
+ *  newest wins) and relative moves add up, so a drag keeps its shape. */
+export function holdInput(held: HeldInput, msg: InputMsg, now: number): HeldInput {
+  const out = freshInput(held, now);
+  const last = out.at(-1)?.msg;
+  if (msg.kind === "pointer_move" && last?.kind === "pointer_move") {
+    out.pop();
+  } else if (msg.kind === "pointer_relative" && last?.kind === "pointer_relative") {
+    out.pop();
+    msg = { ...msg, dx: last.dx + msg.dx, dy: last.dy + msg.dy };
+  }
+  out.push({ msg, at: now });
+  return out;
+}
+
 /** Fullscreen on or off, on the screen the window is on. The page's own fullscreen hides
  *  Chrome's address bar, which macOS fullscreen (the green button) keeps. */
 export function toggleFullscreen() {
@@ -257,6 +287,7 @@ interface InputOptions {
   /** The drawn cursor (fixed position, no pointer events). */
   overlay: HTMLImageElement;
   monitor: number;
+  /** Send one event. While the socket is down the worker holds it (`holdInput`). */
   send(msg: InputMsg): void;
   /** A key press or click: the user activation Chrome wants for some calls (a clipboard
    *  write it refused before). */
@@ -270,7 +301,6 @@ export interface Input {
    *  not among them. */
   setLayout(monitors: ViewMonitor[]): void;
   onCursor(c: CursorMeta): void;
-  setConnected(connected: boolean): void;
   /** The active layout's scroll mode and speed (percent). */
   setScroll(mode: ScrollMode, speed: number): void;
   detach(): void;
@@ -285,7 +315,6 @@ export function attachInput(o: InputOptions): Input {
   let size: { w: number; h: number } | null = null;
   /** The canvas in device pixels. */
   let box: { w: number; h: number } | null = null;
-  let connected = false;
   const keys = new Set<number>();
   const buttons = new Set<number>();
   const auto = new AutoLock(performance.now());
@@ -309,10 +338,8 @@ export function attachInput(o: InputOptions): Input {
   const locked = () => document.pointerLockElement === canvas;
   const now = () => performance.now();
 
-  /** Release every key and button the clone holds from this window. While the socket is down
-   *  there is nothing to release: the server released them when the socket closed. */
+  /** Release every key and button the clone holds from this window. */
   function releaseAll() {
-    if (!connected) return;
     for (const k of keys) send({ kind: "key_code", keycode: k, pressed: false });
     for (const b of buttons) send({ kind: "button", button: b, pressed: false });
     keys.clear();
@@ -421,7 +448,7 @@ export function attachInput(o: InputOptions): Input {
     if (k === undefined) return;
     e.preventDefault();
     // The clone runs its own key repeat, so the browser's repeats are not sent.
-    if (e.repeat || !connected) return;
+    if (e.repeat) return;
     // Held already: on macOS no keyup comes for a key released while Command is down, so a
     // second Cmd+C is a second press of a C the clone still holds. Release it first.
     if (keys.has(k)) send({ kind: "key_code", keycode: k, pressed: false });
@@ -435,7 +462,7 @@ export function attachInput(o: InputOptions): Input {
     const k = evdevFor(e.code, isMac);
     if (k === undefined) return;
     e.preventDefault();
-    if (!connected || !keys.delete(k)) return;
+    if (!keys.delete(k)) return;
     send({ kind: "key_code", keycode: k, pressed: false });
     // Chrome on macOS fires no keyup for a key released while Command is down (Cmd+C sends
     // only C's keydown), so Command's own release ends every key pressed with it.
@@ -446,14 +473,13 @@ export function attachInput(o: InputOptions): Input {
    *  each event is one press of the key: a tap flips the clone's own lock. */
   function capsTap(e: KeyboardEvent) {
     e.preventDefault();
-    if (!connected) return;
     send({ kind: "key_code", keycode: 58, pressed: true });
     send({ kind: "key_code", keycode: 58, pressed: false });
   }
 
   function onPointerMove(e: PointerEvent) {
     // Chrome already sends at most one pointermove per frame, so moves need no other merging.
-    if (!connected || now() < warpUntil) return;
+    if (now() < warpUntil) return;
     if (locked()) {
       if (e.movementX || e.movementY) {
         send({ kind: "pointer_relative", dx: e.movementX, dy: e.movementY });
@@ -484,7 +510,7 @@ export function attachInput(o: InputOptions): Input {
       needGesture = false;
       if (size && auto.want(now())) requestLock();
     }
-    if (b === undefined || !connected || buttons.has(b)) return;
+    if (b === undefined || buttons.has(b)) return;
     buttons.add(b);
     send({ kind: "button", button: b, pressed: true });
   }
@@ -492,13 +518,12 @@ export function attachInput(o: InputOptions): Input {
   function onMouseUp(e: MouseEvent) {
     e.preventDefault(); // the back and forward buttons do not navigate
     const b = BUTTONS[e.button];
-    if (b === undefined || !connected || !buttons.delete(b)) return;
+    if (b === undefined || !buttons.delete(b)) return;
     send({ kind: "button", button: b, pressed: false });
   }
 
   function onWheel(e: WheelEvent) {
     e.preventDefault(); // no page scroll, no Ctrl+wheel zoom
-    if (!connected) return;
     const w = e as WheelEvent & { wheelDeltaX: number; wheelDeltaY: number };
     const msgs = wheelMessages(w, rem, {
       fingers: scrollEnd !== undefined,
@@ -588,14 +613,6 @@ export function attachInput(o: InputOptions): Input {
     setScroll(mode, speed) {
       scrollMode = mode;
       scrollScale = speed / 100;
-    },
-    setConnected(c) {
-      connected = c;
-      // The server releases what a socket held when it closes; start the next one clean.
-      if (!c) {
-        keys.clear();
-        buttons.clear();
-      }
     },
     detach() {
       clearInterval(timer);

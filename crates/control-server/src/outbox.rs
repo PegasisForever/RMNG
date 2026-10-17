@@ -1,46 +1,42 @@
 //! One browser viewer's send queue, and what the browser's acknowledgements say about its path.
 //!
-//! - **Two lanes.** Control messages (every text message, and clipboard bytes) go before video,
-//!   so a cursor move or an `echo` never waits behind queued frames. The writer
-//!   ([`crate::webviewer`]) takes from [`Outbox::next`], which stamps each video frame as it
-//!   hands it to the socket.
-//! - **Acknowledgements.** The browser sends the newest frame it received and how long it held
-//!   that number ([`wire::browser::FromBrowser::Ack`]). Each one gives a round trip (from the
-//!   stamp, less the hold) and a floor (the lowest round trip of the last 1–2 minutes, of
-//!   deltas sent while no keyframe was on the way), and ends the frames it covers.
+//! - **Lanes.** Control messages (every text message) go first, so a cursor move or an `echo`
+//!   never waits behind queued frames. Then video, then clipboard replies, cut into pieces
+//!   ([`wire::browser::CLIPBOARD_PIECE_BYTES`]) as they go: a piece goes only when no video
+//!   waits, the viewer has room ([`State::has_room`]) and the piece before it arrived, so a
+//!   large copy holds video back by one piece at most. The writer ([`crate::webviewer`]) takes
+//!   from [`Outbox::next`], which stamps each video frame as it hands it to the socket.
+//! - **Acknowledgements.** The browser sends the newest frame it decoded, how long it held
+//!   that number, and how many clipboard pieces arrived ([`wire::browser::FromBrowser::Ack`]).
+//!   Each one gives a round trip (from the stamp, less the hold) and a floor (the lowest round
+//!   trip of the last 1–2 minutes, of deltas sent while no keyframe was out), and ends the
+//!   frames it covers.
 //! - **Behind** ([`State::behind`]): how long the oldest video frame that is not acknowledged
 //!   (queued here or on the way) has waited since it was queued, less the floor. One number
-//!   for our queue, the kernel's, any proxy's and the path's.
-//! - **Resync.** A viewer more than [`BEHIND_MAX`] behind with video queued here loses that
-//!   video (with nothing queued, [`Outbox::room`] already holds new frames back). Frames already
-//!   handed to the socket cannot be taken back, so it then gets no video until those are
-//!   acknowledged, and then asks for a keyframe ([`Outbox::ack`] returns true). Deltas are
-//!   dropped until a keyframe comes.
-//! - **Keyframes** (resync, join, selection change, request): the delay is not judged from when
-//!   one is handed to the socket until it is acknowledged, so one slow keyframe does not start
-//!   a resync. While it still waits in our queue it is judged as usual.
+//!   for our queue, the kernel's, any proxy's, the path's and the browser's decoder.
 //! - **Room** ([`Outbox::room`]): whether the encoder may make another frame for this viewer
 //!   (R1 in `docs/WEB-VIEWER-WAN-SCOPE.md`; the media plane holds the newest captured frame
-//!   until every viewer of its monitor has room). While a keyframe is on the way, nothing is
-//!   held: the deltas behind it stay small, and the video lane is bounded by the time the
-//!   keyframe takes to be acknowledged ([`STALL`] at most).
-//! - **Stall** ([`Outbox::stalled`]): frames on the way and no acknowledgement that moves for
-//!   [`STALL`]. The socket is closed only then, whatever one write takes.
+//!   until every viewer of its monitor has room). Why the rule has its parts is in
+//!   `docs/WAN-BENCH.md` (round 3).
+//! - **Stall** ([`Outbox::stalled`]): frames or a clipboard piece on the way and no
+//!   acknowledgement that moves for [`STALL`]. The socket is closed only then, whatever one
+//!   write takes.
 
 use std::collections::VecDeque;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+use wire::browser::{CLIPBOARD_PIECE_BYTES, encode_clipboard_piece};
+use wire::socket::ClipboardData;
 
 use crate::mediaplane::Queued;
 
-/// A viewer further behind than this is resynced.
+/// A frame that waited [`MAX_HOLD`] gets room while the viewer is at most this far behind.
 const BEHIND_MAX: Duration = Duration::from_secs(1);
 /// Frames on the way and no acknowledgement that moves for this long: the viewer is stuck.
 const STALL: Duration = Duration::from_secs(10);
-/// More bytes than this queued in both lanes closes the viewer, so one that stops reading
-/// cannot hold more memory. Video stays under about one second (the resync), or the time a
-/// keyframe on the way takes to be acknowledged; this is for the control lane: two of the
-/// largest messages (a 32 MiB clipboard image).
+/// More bytes than this queued in all lanes closes the viewer, so one that stops reading
+/// cannot hold more memory: two of the largest clipboard replies.
 const MAX_QUEUED_BYTES: usize = 2 * wire::socket::chunk::MAX_MESSAGE_BYTES;
 /// The floor is the lowest round trip of this bucket and the one before, so of the last 1 to
 /// 2 minutes. Long enough that a queue which stands for a while (a scroll on a slow link) does
@@ -49,20 +45,15 @@ const FLOOR_BUCKET: Duration = Duration::from_secs(60);
 /// An acknowledgement held longer than its frame has been out names an earlier frame with the
 /// same number (a new encoder counts from 1 again). This much is rounding.
 const HELD_SLACK: Duration = Duration::from_millis(5);
-/// A viewer has room for another frame while it is at most this plus one floor behind
-/// ([`State::behind`]): its oldest frame not acknowledged has been out at most two round trips
-/// and this. Acknowledgements come up to 50 ms late (`ACK_MS` in `viewer/worker.ts`), and the
-/// other 50 ms keeps a link busy across one of them. The extra round trip is for loss: TCP
-/// needs about one round trip to repair a lost packet, and without it a 1 % loss link held
-/// frames back at every repair.
+/// A viewer has room while it is at most this plus one floor behind: its oldest frame not
+/// acknowledged has been out at most two round trips and this. The second round trip is for
+/// TCP's repair of a lost packet; acknowledgements come up to 50 ms late (`ACK_MS` in
+/// `viewer/worker.ts`).
 const ROOM: Duration = Duration::from_millis(100);
-/// While a viewer is less than [`BEHIND_MAX`] behind, a frame waits for room at most this
-/// long: at least 10 frames per second. A held frame covers more motion when it is encoded,
-/// and on scrolling text a step twice as long costs more than twice the bytes (the encoder
-/// follows only short motion). Held without a limit, the frames grew until a 3 Mbit/s link
-/// carried 2–3 frames per second at a higher bitrate than 50 frames per second need
-/// (docs/WAN-BENCH.md, round 3). For the same reason nothing is held while a keyframe is on
-/// the way, and the floor leaves out keyframes and the deltas behind them.
+/// A frame that has waited this long for room gets it while the viewer is at most
+/// [`BEHIND_MAX`] behind: a frame held longer covers more motion and costs more than its share
+/// of bytes. No timer: the media plane looks at a held frame again only at the next captured
+/// frame, acknowledgement or leave.
 const MAX_HOLD: Duration = Duration::from_millis(100);
 /// The debug summary comes at most this often.
 const LOG_EVERY: Duration = Duration::from_secs(5);
@@ -87,14 +78,19 @@ struct State {
     control: VecDeque<Queued>,
     /// Video not yet handed to the socket, with the time it was queued.
     video: VecDeque<(Queued, Instant)>,
+    /// Clipboard replies not yet sent, and how many of each one's bytes went already.
+    clip: VecDeque<(Arc<ClipboardData>, usize)>,
     /// Video handed to the socket and not yet acknowledged, oldest first.
     in_flight: VecDeque<Sent>,
+    /// Clipboard pieces handed to the socket, and those the browser says arrived (both wrap).
+    clip_sent: u32,
+    clip_acked: u32,
     queued_bytes: usize,
     closed: bool,
-    mode: Mode,
-    /// The delay is judged only from here: when the last keyframe was acknowledged.
-    judge_from: Option<Instant>,
-    /// When an acknowledgement last moved, or a frame went out with none on the way.
+    /// The keyframe with this number is queued or on the way: the deltas sent until it is
+    /// acknowledged do not count for the floor.
+    key_out: Option<u32>,
+    /// When an acknowledgement last moved, or something went out with nothing on the way.
     progress_at: Instant,
     floor: Floor,
     period: Period,
@@ -106,20 +102,10 @@ struct Sent {
     len: usize,
     queued: Instant,
     sent: Instant,
-    /// A delta handed to the socket while no keyframe was on the way. Only its round trip
-    /// counts for the floor: a keyframe's, and those of the deltas behind it, are longer than
-    /// the path's, and every join starts with a keyframe.
+    /// A delta handed to the socket while no keyframe was out. Only its round trip counts for
+    /// the floor: a keyframe's, and those of the deltas behind it, are longer than the path's,
+    /// and every join starts with a keyframe.
     for_floor: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum Mode {
-    Live,
-    /// Too far behind: drop video until a keyframe.
-    Behind,
-    /// The keyframe `seq` is queued or on the way. Once it is on the way, the delay is not
-    /// judged until it is acknowledged.
-    KeyOut(u32),
 }
 
 /// The lowest round trip of two buckets of [`FLOOR_BUCKET`].
@@ -155,8 +141,7 @@ struct Period {
     rtt_sum: Duration,
     rtts: u32,
     acked_bytes: usize,
-    dropped: u32,
-    resyncs: u32,
+    clip_bytes: usize,
     /// Captured frames of this viewer's monitor that were never encoded (R1).
     not_encoded: u32,
     /// Each acknowledged frame's time from our queue to its acknowledgement, less the hold.
@@ -170,8 +155,7 @@ impl Period {
             rtt_sum: Duration::ZERO,
             rtts: 0,
             acked_bytes: 0,
-            dropped: 0,
-            resyncs: 0,
+            clip_bytes: 0,
             not_encoded: 0,
             delays: Vec::new(),
         }
@@ -181,6 +165,7 @@ impl Period {
 fn len(msg: &Queued) -> usize {
     match msg {
         Queued::Video { bytes, .. } | Queued::Binary(bytes) => bytes.len(),
+        Queued::Clipboard(d) => d.bytes.len(),
         Queued::Text(t) => t.len(),
     }
 }
@@ -195,33 +180,34 @@ impl State {
                 None => return Duration::ZERO,
             },
         };
-        let from = self.judge_from.map_or(oldest, |j| oldest.max(j));
-        now.saturating_duration_since(from)
+        now.saturating_duration_since(oldest)
             .saturating_sub(self.floor.get().unwrap_or_default())
     }
 
-    /// Start a resync if the viewer is judged, too far behind, and video waits in our queue:
-    /// drop that video, also a keyframe that still waits there (never only the deltas behind
-    /// it). With nothing queued here a resync cannot help: what is on the way stays on the way,
-    /// and [`Outbox::room`] already holds new frames back, so the next frame can be a delta
-    /// instead of a keyframe.
-    fn judge(&mut self, now: Instant) {
-        let judged = match self.mode {
-            Mode::Live => true,
-            Mode::KeyOut(k) => self
-                .video
-                .iter()
-                .any(|(m, _)| matches!(m, Queued::Video { seq, .. } if *seq == k)),
-            Mode::Behind => false,
-        };
-        if !judged || self.video.is_empty() || self.behind(now) <= BEHIND_MAX {
-            return;
+    /// At most [`ROOM`] plus one floor behind.
+    fn has_room(&self, now: Instant) -> bool {
+        self.behind(now) <= ROOM + self.floor.get().unwrap_or_default()
+    }
+
+    /// Something is on the way that an acknowledgement must end.
+    fn waiting(&self) -> bool {
+        !self.in_flight.is_empty() || self.clip_sent != self.clip_acked
+    }
+
+    /// The next piece of the first clipboard reply, as a binary message.
+    fn next_piece(&mut self) -> Option<Vec<u8>> {
+        let (d, off) = self.clip.front_mut()?;
+        let end = (*off + CLIPBOARD_PIECE_BYTES).min(d.bytes.len());
+        let last = end == d.bytes.len();
+        let piece = encode_clipboard_piece(d, &d.bytes[*off..end], last);
+        self.queued_bytes -= end - *off;
+        self.period.clip_bytes += end - *off;
+        if last {
+            self.clip.pop_front();
+        } else {
+            *off = end;
         }
-        self.period.dropped += self.video.len() as u32;
-        let dropped: usize = self.video.drain(..).map(|(m, _)| len(&m)).sum();
-        self.queued_bytes -= dropped;
-        self.period.resyncs += 1;
-        self.mode = Mode::Behind;
+        Some(piece)
     }
 }
 
@@ -232,11 +218,13 @@ impl Outbox {
             state: Mutex::new(State {
                 control: VecDeque::new(),
                 video: VecDeque::new(),
+                clip: VecDeque::new(),
                 in_flight: VecDeque::new(),
+                clip_sent: 0,
+                clip_acked: 0,
                 queued_bytes: 0,
                 closed: false,
-                mode: Mode::Live,
-                judge_from: None,
+                key_out: None,
                 progress_at: now,
                 floor: Floor {
                     start: now,
@@ -261,21 +249,17 @@ impl Outbox {
         if st.closed {
             return false;
         }
-        let n = len(&msg);
+        st.queued_bytes += len(&msg);
         match msg {
             Queued::Video { seq, key, .. } => {
-                st.judge(now);
                 if key {
-                    st.mode = Mode::KeyOut(seq);
-                } else if st.mode == Mode::Behind {
-                    st.period.dropped += 1;
-                    return true;
+                    st.key_out = Some(seq);
                 }
                 st.video.push_back((msg, now));
             }
+            Queued::Clipboard(d) => st.clip.push_back((d, 0)),
             _ => st.control.push_back(msg),
         }
-        st.queued_bytes += n;
         if st.queued_bytes > MAX_QUEUED_BYTES {
             return false;
         }
@@ -283,8 +267,8 @@ impl Outbox {
         true
     }
 
-    /// The next message to send, control first. Waits up to `timeout`. A video frame counts as
-    /// handed to the socket from here.
+    /// The next message to send: control, then video, then a clipboard piece. Waits up to
+    /// `timeout`. A video frame or a clipboard piece counts as handed to the socket from here.
     pub(crate) fn next(&self, timeout: Duration) -> Next {
         let deadline = Instant::now() + timeout;
         let mut st = self.state.lock().unwrap();
@@ -296,17 +280,17 @@ impl Outbox {
                 st.queued_bytes -= len(&msg);
                 return Next::Msg(msg);
             }
+            let now = Instant::now();
             if let Some((msg, queued)) = st.video.pop_front() {
                 let n = len(&msg);
                 st.queued_bytes -= n;
                 let Queued::Video { seq, key, .. } = msg else {
                     unreachable!("the video lane holds video")
                 };
-                let now = Instant::now();
-                if st.in_flight.is_empty() {
+                if !st.waiting() {
                     st.progress_at = now;
                 }
-                let for_floor = !key && !matches!(st.mode, Mode::KeyOut(_));
+                let for_floor = !key && st.key_out.is_none();
                 st.in_flight.push_back(Sent {
                     seq,
                     len: n,
@@ -316,12 +300,29 @@ impl Outbox {
                 });
                 return Next::Msg(msg);
             }
-            let wait = deadline.saturating_duration_since(Instant::now());
+            if st.clip_sent == st.clip_acked && st.has_room(now) {
+                if let Some(piece) = st.next_piece() {
+                    if !st.waiting() {
+                        st.progress_at = now;
+                    }
+                    st.clip_sent = st.clip_sent.wrapping_add(1);
+                    return Next::Msg(Queued::Binary(piece.into()));
+                }
+            }
+            let wait = deadline.saturating_duration_since(now);
             if wait.is_zero() {
                 return Next::Idle;
             }
             st = self.ready.wait_timeout(st, wait).unwrap().0;
         }
+    }
+
+    /// A newer copy: drop the clipboard replies not sent yet. Pieces already sent stay sent; the
+    /// browser drops a reply it got only part of when it sees the new copy's offer.
+    pub(crate) fn cancel_clipboard(&self) {
+        let mut st = self.state.lock().unwrap();
+        let left: usize = st.clip.drain(..).map(|(d, off)| d.bytes.len() - off).sum();
+        st.queued_bytes -= left;
     }
 
     /// Drop everything and stop the writer, also inside a send.
@@ -330,6 +331,7 @@ impl Outbox {
         st.closed = true;
         st.control.clear();
         st.video.clear();
+        st.clip.clear();
         st.queued_bytes = 0;
         self.ready.notify_all();
         // Stores a permit when the writer is not waiting yet.
@@ -341,9 +343,9 @@ impl Outbox {
         self.closing.notified().await
     }
 
-    /// The browser received every frame up to `seq` and held that number for `held`. True when
-    /// the viewer waits to resync and has caught up: the caller asks for a keyframe.
-    pub(crate) fn ack(&self, seq: u32, held: Duration, now: Instant) -> bool {
+    /// The browser decoded every frame up to `seq` and held that number for `held`, and `clip`
+    /// clipboard pieces arrived.
+    pub(crate) fn ack(&self, seq: u32, held: Duration, clip: u32, now: Instant) {
         let mut st = self.state.lock().unwrap();
         // The first match. After an encoder restart (a new size) the new encoder counts from 1
         // again, so an older frame on the way can have the same number: then this ends less
@@ -355,14 +357,11 @@ impl Outbox {
                 let rtt = out.saturating_sub(held);
                 let delay = now.saturating_duration_since(st.in_flight[i].queued);
                 st.period.delays.push(delay.saturating_sub(held));
-                let mut key_acked = false;
                 for f in st.in_flight.drain(..=i).collect::<Vec<_>>() {
                     st.period.acked_bytes += f.len;
-                    key_acked |= st.mode == Mode::KeyOut(f.seq);
-                }
-                if key_acked {
-                    st.mode = Mode::Live;
-                    st.judge_from = Some(now);
+                    if st.key_out == Some(f.seq) {
+                        st.key_out = None;
+                    }
                 }
                 st.progress_at = now;
                 if for_floor {
@@ -370,27 +369,30 @@ impl Outbox {
                 }
                 st.period.rtt_sum += rtt;
                 st.period.rtts += 1;
-                st.judge(now);
             }
         }
-        st.mode == Mode::Behind && st.in_flight.is_empty()
+        // Only a count between the last acknowledged and the last sent.
+        let new = clip.wrapping_sub(st.clip_acked);
+        if new != 0 && new <= st.clip_sent.wrapping_sub(st.clip_acked) {
+            st.clip_acked = clip;
+            st.progress_at = now;
+        }
+        // Room for a clipboard piece may have come.
+        self.ready.notify_one();
     }
 
     /// Whether the encoder may make another frame for this viewer, when a frame has waited
     /// `held` for room: at most one frame waits in our queue (the socket writes it while the
-    /// next one is encoded; a frame larger than the kernel's 128 KiB waits there while it is
-    /// written), and it is at most [`ROOM`] plus the floor behind, or less than [`BEHIND_MAX`]
-    /// behind once the frame has waited [`MAX_HOLD`]. A viewer that waits for its resync
-    /// drops deltas anyway, and one with a keyframe on the way holds nothing back (see the
-    /// module docs). A viewer that stops acknowledging holds the others back until [`STALL`]
-    /// closes it.
+    /// next one is encoded), and the viewer is at most [`ROOM`] plus the floor behind; or, once
+    /// the frame has waited [`MAX_HOLD`], at most [`BEHIND_MAX`] behind. A keyframe on the way
+    /// counts as any frame: so the frames behind a slow keyframe come at least 10 per second
+    /// and do not fill the path. A viewer that stops acknowledging holds the others back until
+    /// [`STALL`] closes it.
     pub(crate) fn room(&self, now: Instant, held: Duration) -> bool {
         let st = self.state.lock().unwrap();
-        let behind = st.behind(now);
-        matches!(st.mode, Mode::Behind | Mode::KeyOut(_))
-            || (st.video.len() <= 1
-                && (behind <= ROOM + st.floor.get().unwrap_or_default()
-                    || (held >= MAX_HOLD && behind <= BEHIND_MAX)))
+        st.video.len() <= 1
+            && (st.has_room(now)
+                || (held >= MAX_HOLD && st.behind(now) <= BEHIND_MAX))
     }
 
     /// A captured frame of this viewer's monitor was replaced before it was encoded.
@@ -398,14 +400,15 @@ impl Outbox {
         self.state.lock().unwrap().period.not_encoded += 1;
     }
 
-    /// Frames are on the way and no acknowledgement has moved for [`STALL`].
+    /// Frames or a clipboard piece are on the way and no acknowledgement has moved for
+    /// [`STALL`].
     pub(crate) fn stalled(&self, now: Instant) -> bool {
         let st = self.state.lock().unwrap();
-        !st.in_flight.is_empty() && now.saturating_duration_since(st.progress_at) >= STALL
+        st.waiting() && now.saturating_duration_since(st.progress_at) >= STALL
     }
 
     /// The summary for the debug log, at most once per [`LOG_EVERY`], and only when video
-    /// moved or waits.
+    /// or clipboard bytes moved or wait.
     pub(crate) fn summary(&self, now: Instant) -> Option<String> {
         let mut st = self.state.lock().unwrap();
         let secs = now.saturating_duration_since(st.period.start).as_secs_f64();
@@ -413,7 +416,7 @@ impl Outbox {
             return None;
         }
         let mut p = std::mem::replace(&mut st.period, Period::new(now));
-        if p.acked_bytes == 0 && p.dropped == 0 && st.in_flight.is_empty() && st.video.is_empty() {
+        if p.acked_bytes == 0 && p.clip_bytes == 0 && !st.waiting() && st.video.is_empty() {
             return None;
         }
         let ms = |d: Duration| format!("{:.0}", d.as_secs_f64() * 1000.0);
@@ -429,8 +432,8 @@ impl Outbox {
         let in_flight_bytes: usize = st.in_flight.iter().map(|f| f.len).sum();
         Some(format!(
             "rtt {rtt} ms, delay p50 {} ms p95 {} ms, floor {} ms, behind {} ms, in flight {} \
-             frames {} KB, queued {} frames, {:.2} Mbit/s delivered, {} dropped, {} resyncs, {} \
-             not encoded",
+             frames {} KB, queued {} frames, {:.2} Mbit/s delivered, {} KB clipboard, {} not \
+             encoded",
             pct(0.5),
             pct(0.95),
             st.floor.get().map_or("-".into(), ms),
@@ -439,8 +442,7 @@ impl Outbox {
             in_flight_bytes / 1000,
             st.video.len(),
             p.acked_bytes as f64 * 8.0 / secs / 1e6,
-            p.dropped,
-            p.resyncs,
+            p.clip_bytes / 1000,
             p.not_encoded,
         ))
     }
@@ -449,7 +451,6 @@ impl Outbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     fn video(seq: u32, key: bool) -> Queued {
         Queued::Video {
@@ -462,6 +463,14 @@ mod tests {
 
     fn text(s: &str) -> Queued {
         Queued::Text(s.into())
+    }
+
+    fn clipboard(serial: u64, n: usize) -> Queued {
+        Queued::Clipboard(Arc::new(ClipboardData {
+            serial,
+            mime_type: "image/png".into(),
+            bytes: vec![7; n],
+        }))
     }
 
     /// The writer's next message, which must be there already.
@@ -479,6 +488,15 @@ mod tests {
         }
     }
 
+    /// A clipboard piece: its serial, its length and whether it is the last.
+    fn piece(m: &Queued) -> (u64, usize, bool) {
+        let Queued::Binary(b) = m else {
+            panic!("not a clipboard piece: {m:?}")
+        };
+        let (d, last) = wire::browser::decode_clipboard_piece(b).unwrap();
+        (d.serial, d.bytes.len(), last)
+    }
+
     #[test]
     fn control_goes_before_queued_video() {
         let o = Outbox::new();
@@ -491,6 +509,57 @@ mod tests {
         assert!(matches!(o.next(Duration::ZERO), Next::Idle));
     }
 
+    /// A clipboard reply goes after video, in pieces, each one only once the one before it
+    /// arrived.
+    #[test]
+    fn a_clipboard_reply_goes_in_pieces_after_video_one_at_a_time() {
+        let o = Outbox::new();
+        let n = CLIPBOARD_PIECE_BYTES + 10;
+        o.push(clipboard(5, n));
+        o.push(video(1, false));
+        assert_eq!(seq(&take(&o)), 1);
+        let t = o.state.lock().unwrap().in_flight[0].sent;
+        o.ack(1, Duration::ZERO, 0, t);
+        assert_eq!(piece(&take(&o)), (5, CLIPBOARD_PIECE_BYTES, false));
+        assert!(
+            matches!(o.next(Duration::ZERO), Next::Idle),
+            "a piece is on the way"
+        );
+        o.ack(1, Duration::ZERO, 1, t);
+        assert_eq!(piece(&take(&o)), (5, 10, true));
+        o.ack(1, Duration::ZERO, 2, t);
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle));
+        assert_eq!(o.state.lock().unwrap().queued_bytes, 0);
+    }
+
+    /// No clipboard piece while the viewer has no room: it would hold back the video behind it.
+    #[test]
+    fn no_clipboard_piece_without_room() {
+        let o = Outbox::new();
+        // Frame 1 was queued longer than `ROOM` ago (no floor yet).
+        let t0 = Instant::now().checked_sub(ROOM * 2).unwrap();
+        o.push_at(video(1, false), t0);
+        take(&o);
+        o.push(clipboard(5, 10));
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle));
+        o.ack(1, Duration::ZERO, 0, Instant::now());
+        assert_eq!(piece(&take(&o)), (5, 10, true));
+    }
+
+    /// A newer copy drops what is left of the replies not sent yet.
+    #[test]
+    fn a_newer_copy_cancels_the_rest_of_a_reply() {
+        let o = Outbox::new();
+        o.push(clipboard(5, 3 * CLIPBOARD_PIECE_BYTES));
+        take(&o);
+        o.cancel_clipboard();
+        o.ack(0, Duration::ZERO, 1, Instant::now());
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle));
+        assert_eq!(o.state.lock().unwrap().queued_bytes, 0);
+        o.push(clipboard(6, 1));
+        assert_eq!(piece(&take(&o)), (6, 1, true));
+    }
+
     /// An acknowledgement ends every frame up to it and gives one round trip, less the hold.
     #[test]
     fn an_ack_gives_a_round_trip_and_ends_the_frames_before_it() {
@@ -501,7 +570,7 @@ mod tests {
         }
         let sent = o.state.lock().unwrap().in_flight[1].sent;
         let ms = Duration::from_millis;
-        assert!(!o.ack(2, ms(10), sent + ms(60)));
+        o.ack(2, ms(10), 0, sent + ms(60));
         let st = o.state.lock().unwrap();
         assert_eq!(st.in_flight.len(), 1);
         assert_eq!(st.floor.get(), Some(ms(50)));
@@ -519,13 +588,13 @@ mod tests {
         take(&o);
         take(&o);
         let sent = o.state.lock().unwrap().in_flight[1].sent;
-        o.ack(1, ms(0), sent + ms(400));
-        o.ack(2, ms(0), sent + ms(450));
+        o.ack(1, ms(0), 0, sent + ms(400));
+        o.ack(2, ms(0), 0, sent + ms(450));
         assert_eq!(o.state.lock().unwrap().floor.get(), None);
         o.push(video(3, false));
         take(&o);
         let sent = o.state.lock().unwrap().in_flight[0].sent;
-        o.ack(3, ms(0), sent + ms(150));
+        o.ack(3, ms(0), 0, sent + ms(150));
         assert_eq!(o.state.lock().unwrap().floor.get(), Some(ms(150)));
     }
 
@@ -537,85 +606,20 @@ mod tests {
         o.push(video(1, true));
         take(&o);
         let sent = o.state.lock().unwrap().in_flight[0].sent;
-        o.ack(1, Duration::from_secs(5), sent + Duration::from_millis(20));
+        o.ack(
+            1,
+            Duration::from_secs(5),
+            0,
+            sent + Duration::from_millis(20),
+        );
         let st = o.state.lock().unwrap();
         assert_eq!(st.in_flight.len(), 1);
         assert_eq!(st.floor.get(), None);
     }
 
-    /// More than a second behind: the queued video goes, deltas are dropped, and once the
-    /// frames on the way are acknowledged the viewer asks for a keyframe. The keyframe is not
-    /// judged while it crosses; after its acknowledgement the clock starts again.
-    #[test]
-    fn a_viewer_far_behind_drops_its_video_and_resyncs_on_a_keyframe() {
-        let o = Outbox::new();
-        let t0 = Instant::now();
-        let ms = Duration::from_millis;
-        o.push_at(video(1, false), t0);
-        take(&o); // on the way
-        o.push_at(video(2, false), t0 + ms(10)); // queued
-        // 1.2 s later frame 1 is still not acknowledged: the next frame starts a resync.
-        assert!(o.push_at(video(3, false), t0 + ms(1200)));
-        {
-            let st = o.state.lock().unwrap();
-            assert_eq!(st.mode, Mode::Behind);
-            assert!(st.video.is_empty(), "the queued video was not dropped");
-            assert_eq!(st.period.dropped, 2);
-        }
-        // Frame 1 arrives: caught up, so ask for a keyframe; deltas still go.
-        let sent = o.state.lock().unwrap().in_flight[0].sent;
-        assert!(o.ack(1, ms(0), sent + ms(1300)));
-        o.push_at(video(4, false), t0 + ms(1310));
-        assert!(o.state.lock().unwrap().video.is_empty());
-        // The keyframe is taken and not judged while it crosses, however long that is.
-        o.push_at(video(5, true), t0 + ms(1400));
-        take(&o);
-        o.push_at(video(6, false), t0 + ms(1410));
-        o.push_at(video(7, false), t0 + ms(4000));
-        assert_eq!(o.state.lock().unwrap().video.len(), 2);
-        // Acknowledged: live again, and the frames behind it are judged from now.
-        let sent = o.state.lock().unwrap().in_flight[0].sent;
-        assert!(!o.ack(5, ms(0), sent + ms(10)));
-        let st = o.state.lock().unwrap();
-        assert_eq!(st.mode, Mode::Live);
-        assert_eq!(st.video.len(), 2);
-    }
-
-    /// Any keyframe (a join, a request) is not judged while it crosses, so a slow one does not
-    /// drop the deltas behind it and cause a second keyframe.
-    #[test]
-    fn a_keyframe_on_the_way_is_not_judged() {
-        let o = Outbox::new();
-        let t0 = Instant::now();
-        let ms = Duration::from_millis;
-        o.push_at(video(1, true), t0);
-        take(&o);
-        assert!(o.push_at(video(2, false), t0 + ms(1500)));
-        let st = o.state.lock().unwrap();
-        assert_eq!(st.mode, Mode::KeyOut(1));
-        assert_eq!(st.video.len(), 1);
-    }
-
-    /// A keyframe that still waits in our queue (behind a large clipboard message) is judged:
-    /// the whole lane goes, keyframe included, so deltas cannot pile up behind it.
-    #[test]
-    fn a_keyframe_still_queued_is_judged_and_dropped_with_its_lane() {
-        let o = Outbox::new();
-        let t0 = Instant::now();
-        let ms = Duration::from_millis;
-        o.push_at(video(1, true), t0);
-        o.push_at(video(2, false), t0 + ms(10));
-        assert!(o.push_at(video(3, false), t0 + ms(1200)));
-        let st = o.state.lock().unwrap();
-        assert_eq!(st.mode, Mode::Behind);
-        assert!(st.video.is_empty());
-        assert_eq!(st.period.dropped, 3);
-    }
-
     /// Room: at most one frame queued here, and the oldest frame on the way out at most two
-    /// floors and `ROOM`; or, for a frame held `MAX_HOLD`, less than `BEHIND_MAX` behind; or a
-    /// keyframe on the way. Far behind with nothing queued is no resync: the next frame can be
-    /// a delta.
+    /// floors and `ROOM`; or, for a frame held `MAX_HOLD`, less than `BEHIND_MAX` behind, also
+    /// while a keyframe is on the way. Far behind, nothing is dropped: the next frame is a delta.
     #[test]
     fn room_needs_a_short_queue_and_a_short_wait() {
         let o = Outbox::new();
@@ -636,7 +640,7 @@ mod tests {
         let o = Outbox::new();
         o.push_at(video(1, false), t0);
         take(&o);
-        o.ack(1, ms(0), t0 + ms(150));
+        o.ack(1, ms(0), 0, t0 + ms(150));
         let t1 = t0 + ms(160);
         o.push_at(video(2, false), t1);
         take(&o);
@@ -644,15 +648,17 @@ mod tests {
         assert!(!o.room(t1 + ms(420), fresh));
         assert!(o.room(t1 + ms(420), long));
         assert!(!o.room(t1 + ms(1200), long));
-        assert!(o.push_at(video(3, false), t1 + ms(1500)));
-        assert_eq!(o.state.lock().unwrap().mode, Mode::Live);
+        o.push_at(video(3, false), t1 + ms(1500));
+        assert_eq!(o.state.lock().unwrap().video.len(), 1, "nothing is dropped");
         take(&o);
-        o.push_at(video(4, true), t1 + ms(1500));
+
+        // A slow keyframe on the way is judged as any frame.
+        let o = Outbox::new();
+        o.push_at(video(1, true), t0);
         take(&o);
-        assert!(
-            o.room(t1 + ms(3000), fresh),
-            "a keyframe on the way holds nothing back"
-        );
+        assert!(!o.room(t0 + ms(900), fresh));
+        assert!(o.room(t0 + ms(900), long));
+        assert!(!o.room(t0 + ms(1200), long));
     }
 
     #[test]
@@ -665,14 +671,25 @@ mod tests {
         let sent = o.state.lock().unwrap().in_flight[0].sent;
         assert!(!o.stalled(sent + Duration::from_secs(9)));
         assert!(o.stalled(sent + STALL));
-        o.ack(1, Duration::ZERO, sent + Duration::from_secs(9));
+        o.ack(1, Duration::ZERO, 0, sent + Duration::from_secs(9));
         assert!(!o.stalled(sent + STALL));
+    }
+
+    #[test]
+    fn a_clipboard_piece_out_and_no_ack_for_ten_seconds_is_a_stall() {
+        let o = Outbox::new();
+        o.push(clipboard(5, 10));
+        take(&o);
+        let t = Instant::now();
+        assert!(o.stalled(t + STALL));
+        o.ack(0, Duration::ZERO, 1, t);
+        assert!(!o.stalled(t + STALL));
     }
 
     #[test]
     fn too_many_queued_bytes_or_a_close_refuse_the_message() {
         let o = Outbox::new();
-        let big = Queued::Binary(Arc::from(vec![0u8; MAX_QUEUED_BYTES / 2 + 1]));
+        let big = clipboard(1, MAX_QUEUED_BYTES / 2 + 1);
         assert!(o.push(big.clone()));
         assert!(!o.push(big));
         let o = Outbox::new();

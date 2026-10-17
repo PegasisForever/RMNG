@@ -1,14 +1,13 @@
 //! The browser viewer's WebSocket (`/api/viewer?monitor=<id>`, protocol in [`wire::browser`]).
 //!
 //! A browser viewer is one entry in the media plane's viewer set: it joins, is primed, gets the
-//! broadcast through its queue ([`Outbox`]: control first, video dropped and resynced when it
-//! falls behind), and is closed when it makes no progress (the browser then reconnects and is
-//! primed again).
+//! broadcast through its queue ([`Outbox`]: control first, then video, then clipboard pieces),
+//! and is closed when it makes no progress (the browser then reconnects and is primed again).
 //!
 //! - Writer thread: drains the queue (the media plane queues only this socket's monitor's
-//!   video, each message already in its WebSocket form) and sends it.
-//! - Reader thread: parses [`FromBrowser`] and hands it to the media plane's handler. It owns
-//!   the teardown.
+//!   video) and sends it.
+//! - Reader thread: parses [`FromBrowser`], puts clipboard pieces together, and hands it to the
+//!   media plane's handler. It owns the teardown.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +24,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use wire::browser::{FromBrowser, ToBrowser};
-use wire::socket::{ClipboardMsg, InputMsg};
+use wire::socket::{ClipboardData, ClipboardMsg, InputMsg};
 
 use crate::app::App;
 use crate::clone_home::CloneHome;
@@ -37,9 +36,8 @@ use crate::shared::CLONE_UID;
 /// every ping with a pong, which the reader counts as traffic.
 const PING_EVERY: Duration = Duration::from_secs(5);
 /// No message at all (pongs and acknowledgements included) for this long closes the socket.
-/// One write has no time limit: a large clipboard message on a slow link may take longer, and
-/// the socket is closed only when the browser stops acknowledging frames
-/// ([`Outbox::stalled`]).
+/// One write has no time limit; the socket is closed only when the browser stops
+/// acknowledging what was sent ([`Outbox::stalled`]).
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Serve one browser viewer window showing `monitor`.
@@ -93,6 +91,8 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
         // its next input message (a dashboard switch blurs the window, which releases all) and
         // at close.
         let mut held = Held::default();
+        let mut upload = Upload::default();
+        let mut pieces_in = 0u32;
         let mut deadline = tokio::time::Instant::now() + READ_TIMEOUT;
         loop {
             let next = rt.block_on(async {
@@ -120,16 +120,28 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
                         continue;
                     }
                 },
-                Some(Ok(Message::Binary(b))) => match wire::browser::decode_clipboard_data(&b) {
-                    Some(d) => FromBrowser::Clipboard(ClipboardMsg::Data(d)),
-                    None => continue,
-                },
+                Some(Ok(Message::Binary(b))) => {
+                    let Some((piece, last)) = wire::browser::decode_clipboard_piece(&b) else {
+                        continue;
+                    };
+                    // The browser sends its next piece when it hears this one arrived.
+                    pieces_in = pieces_in.wrapping_add(1);
+                    outbox.push(Queued::of(&ToBrowser::ClipAck { n: pieces_in }));
+                    match upload.add(piece, last) {
+                        Some(d) => FromBrowser::Clipboard(ClipboardMsg::Data(d)),
+                        None => continue,
+                    }
+                }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => continue,
             };
             if let FromBrowser::Input(input) = &msg {
                 held.follow(&app, app.store.selected());
                 held.track(input);
+            }
+            // A newer copy: the browser stopped sending the old one.
+            if let FromBrowser::Clipboard(ClipboardMsg::Offer(_)) = &msg {
+                upload = Upload::default();
             }
             mediaplane::handle_viewer_msg(&app, &plane, id, msg);
         }
@@ -211,6 +223,41 @@ fn message(q: Queued) -> Message {
     match q {
         Queued::Video { bytes, .. } | Queued::Binary(bytes) => Message::Binary(bytes.to_vec()),
         Queued::Text(text) => Message::Text(text.to_string()),
+        Queued::Clipboard(_) => unreachable!("the outbox sends a clipboard reply in pieces"),
+    }
+}
+
+/// A clipboard reply from the browser, arriving in pieces
+/// ([`wire::browser::encode_clipboard_piece`]).
+#[derive(Default)]
+struct Upload {
+    reply: Option<ClipboardData>,
+    /// The reply grew past the largest clipboard message; it ends as "could not read".
+    too_big: bool,
+}
+
+impl Upload {
+    /// Add one piece. A piece of another serial or MIME type starts a new reply (the browser
+    /// stopped sending the old one). The whole reply once its last piece came.
+    fn add(&mut self, piece: ClipboardData, last: bool) -> Option<ClipboardData> {
+        match &mut self.reply {
+            Some(r) if r.serial == piece.serial && r.mime_type == piece.mime_type => {
+                if !self.too_big {
+                    r.bytes.extend_from_slice(&piece.bytes);
+                }
+            }
+            _ => (self.reply, self.too_big) = (Some(piece), false),
+        }
+        let r = self.reply.as_mut()?;
+        if r.bytes.len() > wire::socket::chunk::MAX_MESSAGE_BYTES {
+            (r.bytes, self.too_big) = (Vec::new(), true);
+        }
+        if last {
+            self.too_big = false;
+            self.reply.take()
+        } else {
+            None
+        }
     }
 }
 
@@ -305,6 +352,24 @@ mod tests {
         }
         assert_eq!(held.releases(), vec![key(29, false), button(0x110, false)]);
         assert!(held.releases().is_empty());
+    }
+
+    #[test]
+    fn a_clipboard_reply_is_put_together_from_its_pieces() {
+        let piece = |serial, bytes: &[u8]| ClipboardData {
+            serial,
+            mime_type: "image/png".into(),
+            bytes: bytes.to_vec(),
+        };
+        let mut up = Upload::default();
+        assert_eq!(up.add(piece(1, b"ab"), false), None);
+        assert_eq!(up.add(piece(1, b"cd"), true), Some(piece(1, b"abcd")));
+        // A piece of a newer copy drops what came of the older one.
+        assert_eq!(up.add(piece(2, b"ab"), false), None);
+        assert_eq!(up.add(piece(3, b"x"), false), None);
+        assert_eq!(up.add(piece(3, b"y"), true), Some(piece(3, b"xy")));
+        // A reply in one piece.
+        assert_eq!(up.add(piece(4, b""), true), Some(piece(4, b"")));
     }
 
     #[test]

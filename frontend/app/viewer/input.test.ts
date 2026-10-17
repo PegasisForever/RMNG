@@ -4,6 +4,8 @@ import {
   AutoLock,
   ENGAGE_MS,
   RELEASE_MS,
+  freshInput,
+  holdInput,
   letterbox,
   routeDrag,
   shapeToRgba,
@@ -186,5 +188,26 @@ test("a mouse wheel sends notches, a trackpad sends finger scroll", () => {
   // During a finger scroll, an event that looks like a notch is still finger scroll.
   expect(wheelMessages({ ...pad, wheelDeltaY: -120 }, rem, { fingers: true })).toEqual([
     { kind: "axis_continuous", dx: 1.5, dy: -7.25, flags: 4 },
+  ]);
+});
+
+test("input held during a reconnect: moves merge, old input goes but releases stay", () => {
+  let held = holdInput([], { kind: "pointer_move", monitor_id: 0, x: 1, y: 1 }, 0);
+  held = holdInput(held, { kind: "pointer_move", monitor_id: 0, x: 2, y: 2 }, 10);
+  held = holdInput(held, { kind: "button", button: 0x110, pressed: true }, 20);
+  held = holdInput(held, { kind: "pointer_move", monitor_id: 0, x: 3, y: 3 }, 30);
+  held = holdInput(held, { kind: "pointer_relative", dx: 1, dy: 2 }, 40);
+  held = holdInput(held, { kind: "pointer_relative", dx: 3, dy: -1 }, 50);
+  held = holdInput(held, { kind: "button", button: 0x110, pressed: false }, 60);
+  expect(held.map((h) => h.msg)).toEqual([
+    { kind: "pointer_move", monitor_id: 0, x: 2, y: 2 },
+    { kind: "button", button: 0x110, pressed: true },
+    { kind: "pointer_move", monitor_id: 0, x: 3, y: 3 },
+    { kind: "pointer_relative", dx: 4, dy: 1 },
+    { kind: "button", button: 0x110, pressed: false },
+  ]);
+  // After 2 s only the release is still worth sending.
+  expect(freshInput(held, 2055).map((h) => h.msg)).toEqual([
+    { kind: "button", button: 0x110, pressed: false },
   ]);
 });

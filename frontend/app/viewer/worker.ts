@@ -11,28 +11,35 @@
 // Relative imports only: Vite builds the worker without the app's path aliases.
 import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
-import { letterbox } from "./input";
+import { type HeldInput, freshInput, holdInput, letterbox } from "./input";
 import {
+  type ClipboardBytes,
   KIND_VIDEO,
   VIDEO_HEADER_LEN,
   type WorkerIn,
   type WorkerOut,
+  clipboardPieces,
   codecFromAnnexB,
+  isClipboardPiece,
+  parseClipboardPiece,
   parseVideoHeader,
 } from "./protocol";
 
 const scope = self as unknown as Worker;
 const post = (m: WorkerOut, transfer: Transferable[] = []) => scope.postMessage(m, transfer);
 
-/** Wait this long after the socket closes before connecting again. */
-const RECONNECT_MS = 1000;
+/** After a socket that was open closes, connect again at once; after each try that fails, wait
+ *  this long, doubled each time up to RECONNECT_MAX_MS. */
+const RECONNECT_FIRST_MS = 400;
+const RECONNECT_MAX_MS = 1000;
 /** After this many decoder errors, each within ERROR_WINDOW_MS of the one before, use Chrome's
  *  software decoder for the rest of the page's life. */
 const SOFTWARE_AFTER_ERRORS = 3;
 const ERROR_WINDOW_MS = 5000;
-/** More chunks than this waiting in the decoder: drop until the next keyframe to catch up. */
-const DECODE_BACKLOG_MAX = 8;
-/** Acknowledge the newest received frame this often when it changed, and every
+/** A keyframe that finds more chunks than this waiting in the decoder resets the decoder and is
+ *  decoded alone, so the picture catches up at once. */
+const KEY_RESET_BACKLOG = 6;
+/** Acknowledge the newest decoded frame this often when it changed, and every
  *  ACK_HEARTBEAT_MS when it did not, also before the first frame. The server takes the round
  *  trip and how far behind this window is from it, and closes a socket whose frames stay
  *  unacknowledged for 10 s, or that sends nothing for 10 s. */
@@ -43,6 +50,8 @@ let url = "";
 let monitor = 0;
 let ctx: OffscreenCanvasRenderingContext2D;
 let ws: WebSocket | null = null;
+/** The wait before the next connect, when the last try failed. */
+let reconnectMs = 0;
 /** The last frame drawn, kept to draw again when the canvas changes size. */
 let last: VideoFrame | null = null;
 
@@ -58,12 +67,25 @@ let lastErrorAt = -Infinity;
  *  keyframe and then fails again would otherwise never get here. */
 let software = false;
 
-/** The newest frame received on this socket and when; the last acknowledged one and when. */
+/** The newest frame done on this socket (decoded, or dropped while waiting for a keyframe) and
+ *  when; the last acknowledgement and when. */
 let newest: { seq: number; at: number } | null = null;
-let acked: { seq: number; at: number } | null = null;
+let acked: { seq: number; clip: number; at: number } | null = null;
+/** Clipboard pieces received on this socket; the reply they are putting together. */
+let clipIn = 0;
+let incoming: { serial: number; mimeType: string; parts: Uint8Array[] } | null = null;
+/** Clipboard pieces waiting to be sent; those sent on this socket, and those the server says
+ *  arrived (`clip_ack`). */
+let upload: ArrayBuffer[] = [];
+let upSent = 0;
+let upAcked = 0;
+/** Input made while the socket is down. */
+let held: HeldInput = [];
 
 function send(msg: FromBrowser) {
+  if (msg.t === "clipboard" && msg.k === "offer") newCopy();
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+  else if (msg.t === "input") held = holdInput(held, msg, performance.now());
 }
 
 /** `held_ms` is how long the frame number waited here, so the server can take it off the
@@ -72,9 +94,14 @@ function send(msg: FromBrowser) {
 function ack() {
   const now = performance.now();
   const seq = newest?.seq ?? 0;
-  if (acked?.seq === seq && now - acked.at < ACK_HEARTBEAT_MS) return;
-  send({ t: "ack", seq, held_ms: newest ? Math.round(now - newest.at) : 0 });
-  acked = { seq, at: now };
+  if (acked?.seq === seq && acked.clip === clipIn && now - acked.at < ACK_HEARTBEAT_MS) return;
+  send({ t: "ack", seq, held_ms: newest ? Math.round(now - newest.at) : 0, clip: clipIn });
+  acked = { seq, clip: clipIn, at: now };
+}
+
+/** `seq` is done: decoded, or dropped while waiting for a keyframe. */
+function done(seq: number) {
+  newest = { seq, at: performance.now() };
 }
 
 function requestKeyframe() {
@@ -115,22 +142,16 @@ function configure(c: string) {
 
 function onVideo(buf: ArrayBuffer) {
   const h = parseVideoHeader(buf);
-  // Received is what counts, decoded or not.
-  newest = { seq: h.seq, at: performance.now() };
-  if (waitKey && !h.key) return;
   const au = new Uint8Array(buf, VIDEO_HEADER_LEN);
+  // A keyframe behind a backlog: drop the backlog, so the picture catches up at once.
+  if (h.key && decoder!.decodeQueueSize > KEY_RESET_BACKLOG) resetDecoder();
   if (h.key) {
     const c = codecFromAnnexB(au);
     if (c && c !== codec) configure(c);
   }
-  if (!codec) return; // a keyframe without an SPS before any with one: wait for the next
-  // Never drop the keyframe itself: it is the frame that ends the wait. Ask for one: the
-  // server sends keyframes only on request.
-  if (!h.key && decoder!.decodeQueueSize > DECODE_BACKLOG_MAX) {
-    waitKey = true;
-    requestKeyframe();
-    return;
-  }
+  // A frame dropped while waiting for a keyframe (or for a keyframe with an SPS) is done when
+  // it arrives; a decoded one when the decoder outputs it, so the server sees a slow decoder.
+  if ((waitKey && !h.key) || !codec) return done(h.seq);
   waitKey = false;
   decoder!.decode(
     new EncodedVideoChunk({ type: h.key ? "key" : "delta", timestamp: h.seq, data: au }),
@@ -138,6 +159,7 @@ function onVideo(buf: ArrayBuffer) {
 }
 
 function onFrame(frame: VideoFrame) {
+  done(frame.timestamp);
   // A new monitor size leaves parts of the old picture in the bars.
   if (last?.displayWidth !== frame.displayWidth || last.displayHeight !== frame.displayHeight) {
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -157,28 +179,87 @@ function draw() {
   ctx.drawImage(last, offX, offY, w * scale, h * scale);
 }
 
+/** One piece of a clipboard reply from the server. Acknowledged at once: the server sends the
+ *  next piece only when this one arrived. */
+function onClipboardPiece(buf: ArrayBuffer) {
+  clipIn++;
+  ack();
+  const p = parseClipboardPiece(buf);
+  if (incoming?.serial !== p.serial || incoming.mimeType !== p.mimeType) {
+    incoming = { serial: p.serial, mimeType: p.mimeType, parts: [] };
+  }
+  incoming.parts.push(p.bytes);
+  if (!p.last) return;
+  const bytes = new Uint8Array(incoming.parts.reduce((n, b) => n + b.length, 0));
+  let at = 0;
+  for (const b of incoming.parts) {
+    bytes.set(b, at);
+    at += b.length;
+  }
+  incoming = null;
+  post({ type: "clipboard", data: { serial: p.serial, mimeType: p.mimeType, bytes } }, [
+    bytes.buffer,
+  ]);
+}
+
+/** Send the next clipboard piece once the one before it arrived, so acks and input wait
+ *  behind one piece at most. (`bufferedAmount` does not see the data waiting in the kernel
+ *  and on the link, which on a slow uplink held acks back for seconds.) */
+function sendUpload() {
+  if (upload.length && upSent === upAcked && ws?.readyState === WebSocket.OPEN) {
+    ws.send(upload.shift()!);
+    upSent++;
+  }
+}
+
+function queueUpload(d: ClipboardBytes) {
+  upload.push(...clipboardPieces(d));
+  sendUpload();
+}
+
+/** A newer copy, here or anywhere: the clipboard replies still on their way are stale. */
+function newCopy() {
+  upload = [];
+  incoming = null;
+}
+
 function connect() {
   newest = acked = null;
+  clipIn = upSent = upAcked = 0;
+  newCopy();
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
-    // No keyframe request: joining primes this monitor with a fresh keyframe.
+    reconnectMs = 0;
+    // No keyframe request: joining primes this monitor with a fresh keyframe. Frames still in
+    // the old decoder belong to the old socket.
+    resetDecoder();
     post({ type: "connected", connected: true });
-    waitKey = true;
+    const now = performance.now();
+    for (const h of freshInput(held, now)) send({ t: "input", ...h.msg });
+    held = [];
   };
   ws.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
     if (typeof e.data === "string") {
-      post({ type: "message", msg: JSON.parse(e.data) as ToBrowser });
+      const msg = JSON.parse(e.data) as ToBrowser;
+      if (msg.t === "clip_ack") {
+        upAcked = msg.n;
+        sendUpload();
+        return;
+      }
+      if (msg.t === "clipboard" && msg.k === "offer") newCopy();
+      post({ type: "message", msg });
     } else if (new Uint8Array(e.data, 0, 1)[0] === KIND_VIDEO) {
       onVideo(e.data);
-    } else {
-      post({ type: "binary", buf: e.data }, [e.data]);
+    } else if (isClipboardPiece(e.data)) {
+      onClipboardPiece(e.data);
     }
   };
   ws.onclose = () => {
     ws = null;
     post({ type: "connected", connected: false });
-    setTimeout(connect, RECONNECT_MS);
+    setTimeout(connect, reconnectMs);
+    reconnectMs = Math.min(reconnectMs * 2 || RECONNECT_FIRST_MS, RECONNECT_MAX_MS);
   };
 }
 
@@ -188,8 +269,8 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
     send(m.msg);
     return;
   }
-  if (m.type === "binary") {
-    if (ws?.readyState === WebSocket.OPEN) ws.send(m.buf);
+  if (m.type === "clipboard") {
+    if (ws?.readyState === WebSocket.OPEN) queueUpload(m.data);
     return;
   }
   if (m.type === "resize") {

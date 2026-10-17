@@ -1,5 +1,5 @@
-// The browser viewer's binary messages (`wire::browser`: video, clipboard data), the H.264 fact
-// the decoder needs from a video message, and the messages between the viewer page and its
+// The browser viewer's binary messages (`wire::browser`: video, clipboard pieces), the H.264
+// fact the decoder needs from a video message, and the messages between the viewer page and its
 // worker.
 //
 // The worker imports this file, so it uses relative imports only: Vite builds the worker
@@ -7,9 +7,13 @@
 import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
 
-/** Byte 0 of a binary message. */
+/** Byte 0 of a binary message. A clipboard reply crosses in pieces: kind 2 while more follow,
+ *  kind 1 for the last (or only) one. */
 export const KIND_VIDEO = 0;
 const KIND_CLIPBOARD_DATA = 1;
+const KIND_CLIPBOARD_PIECE = 2;
+/** Most bytes of a clipboard reply in one piece (`wire::browser::CLIPBOARD_PIECE_BYTES`). */
+export const CLIPBOARD_PIECE_BYTES = 64 * 1024;
 
 export const VIDEO_HEADER_LEN = 10;
 
@@ -38,12 +42,17 @@ export interface ClipboardBytes {
   bytes: Uint8Array<ArrayBuffer>;
 }
 
-/** Clipboard bytes as a binary message: kind, serial (u64), MIME length (u16), MIME, bytes. */
-export function encodeClipboardData(d: ClipboardBytes): ArrayBuffer {
+/** Whether a binary message is a clipboard piece. */
+export const isClipboardPiece = (buf: ArrayBuffer) =>
+  [KIND_CLIPBOARD_DATA, KIND_CLIPBOARD_PIECE].includes(new Uint8Array(buf, 0, 1)[0]);
+
+/** One piece of a clipboard reply as a binary message: kind, serial (u64), MIME length (u16),
+ *  MIME, the piece's bytes. `last` marks the reply's last piece. */
+export function encodeClipboardPiece(d: ClipboardBytes, last: boolean): ArrayBuffer {
   const mime = new TextEncoder().encode(d.mimeType);
   const out = new Uint8Array(11 + mime.length + d.bytes.length);
   const v = new DataView(out.buffer);
-  v.setUint8(0, KIND_CLIPBOARD_DATA);
+  v.setUint8(0, last ? KIND_CLIPBOARD_DATA : KIND_CLIPBOARD_PIECE);
   v.setBigUint64(1, BigInt(d.serial));
   v.setUint16(9, mime.length);
   out.set(mime, 11);
@@ -51,15 +60,26 @@ export function encodeClipboardData(d: ClipboardBytes): ArrayBuffer {
   return out.buffer;
 }
 
-/** Read a binary message written by `encodeClipboardData` (or by the server). The bytes are a
+/** A clipboard reply as the binary messages to send, in order. */
+export function clipboardPieces(d: ClipboardBytes): ArrayBuffer[] {
+  const out: ArrayBuffer[] = [];
+  for (let at = 0; at === 0 || at < d.bytes.length; at += CLIPBOARD_PIECE_BYTES) {
+    const bytes = d.bytes.subarray(at, at + CLIPBOARD_PIECE_BYTES);
+    out.push(encodeClipboardPiece({ ...d, bytes }, at + CLIPBOARD_PIECE_BYTES >= d.bytes.length));
+  }
+  return out;
+}
+
+/** Read a binary message written by `encodeClipboardPiece` (or by the server). The bytes are a
  *  view into `buf`, not a copy. */
-export function parseClipboardData(buf: ArrayBuffer): ClipboardBytes {
+export function parseClipboardPiece(buf: ArrayBuffer): ClipboardBytes & { last: boolean } {
   const v = new DataView(buf);
   const n = v.getUint16(9);
   return {
     serial: Number(v.getBigUint64(1)),
     mimeType: new TextDecoder().decode(new Uint8Array(buf, 11, n)),
     bytes: new Uint8Array(buf, 11 + n),
+    last: v.getUint8(0) === KIND_CLIPBOARD_DATA,
   };
 }
 
@@ -83,18 +103,18 @@ export function codecFromAnnexB(au: Uint8Array): string | null {
 }
 
 /** Page → worker: first the canvas to draw on and the socket to read (`init`, once), then a
- *  message to send on the socket (`send`, or `binary` for a transferred binary message such as
- *  `encodeClipboardData`; both dropped while the socket is closed), or the canvas's new size
- *  in device pixels (`resize`). */
+ *  message to send on the socket (`send`: input waits while the socket is down, the rest is
+ *  dropped), a clipboard reply to send in pieces (`clipboard`, its bytes transferred), or the
+ *  canvas's new size in device pixels (`resize`). */
 export type WorkerIn =
   | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number }
   | { type: "send"; msg: FromBrowser }
-  | { type: "binary"; buf: ArrayBuffer }
+  | { type: "clipboard"; data: ClipboardBytes }
   | { type: "resize"; width: number; height: number };
 
 /** Worker → page. */
 export type WorkerOut =
   | { type: "message"; msg: ToBrowser }
-  /** A binary message that is not video (clipboard data), transferred. */
-  | { type: "binary"; buf: ArrayBuffer }
+  /** A clipboard reply, put together from its pieces, its bytes transferred. */
+  | { type: "clipboard"; data: ClipboardBytes }
   | { type: "connected"; connected: boolean };

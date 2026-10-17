@@ -12,6 +12,8 @@
 //! - A captured frame is encoded only when every viewer of its monitor has room
 //!   ([`Outbox::room`]); else it is held (only the newest one) and encoded when they have room
 //!   again ([`encode_newest`]).
+//! - Cursor messages go only to the windows of their monitor, terminal output only to the
+//!   window that shows the terminal (monitor 0).
 //! - Selection switch / viewer connect → force a fresh IDR on every encoder.
 
 use std::collections::HashMap;
@@ -55,7 +57,9 @@ pub(crate) enum Queued {
         key: bool,
         bytes: Arc<[u8]>,
     },
-    /// Any other binary message: clipboard bytes ([`wire::browser::encode_clipboard_data`]).
+    /// One clipboard reply. The outbox sends it in pieces, each as a [`Queued::Binary`].
+    Clipboard(Arc<ClipboardData>),
+    /// One clipboard piece ([`wire::browser::encode_clipboard_piece`]).
     Binary(Arc<[u8]>),
     /// A JSON [`ToBrowser`] text message.
     Text(Arc<str>),
@@ -65,7 +69,7 @@ impl Queued {
     /// The message for `msg`. Clipboard bytes go binary, not as base64 in JSON.
     pub(crate) fn of(msg: &ToBrowser) -> Queued {
         if let ToBrowser::Clipboard(ClipboardMsg::Data(d)) = msg {
-            return Queued::Binary(wire::browser::encode_clipboard_data(d).into());
+            return Queued::Clipboard(Arc::new(d.clone()));
         }
         Queued::Text(serde_json::to_string(msg).expect("ToBrowser serializes").into())
     }
@@ -81,18 +85,16 @@ pub(crate) fn next_viewer_id() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Fan one message out to every viewer (video only to the viewers of its monitor). A viewer
+/// Fan one message out to the viewers of `monitor`, or to every viewer with `None`. A viewer
 /// whose queue refuses it (closed, or over its memory cap) is removed from the registry and
 /// closed, which stops its writer, also inside a send, and tears the viewer down. Never
 /// blocks.
-fn broadcast_queued(viewers: &Viewers, msg: &Queued) {
+fn broadcast_queued(viewers: &Viewers, msg: &Queued, monitor: Option<u32>) {
     let mut guard = viewers.lock().unwrap();
     let mut dead: Vec<u64> = Vec::new();
     for v in guard.values() {
-        if let Queued::Video { monitor_id, .. } = msg {
-            if *monitor_id != v.monitor {
-                continue;
-            }
+        if monitor.is_some_and(|m| m != v.monitor) {
+            continue;
         }
         if !v.outbox.push(msg.clone()) {
             dead.push(v.id);
@@ -107,7 +109,12 @@ fn broadcast_queued(viewers: &Viewers, msg: &Queued) {
 
 /// Fan one control message out to every viewer.
 pub(crate) fn broadcast(viewers: &Viewers, msg: &ToBrowser) {
-    broadcast_queued(viewers, &Queued::of(msg));
+    broadcast_queued(viewers, &Queued::of(msg), None);
+}
+
+/// Send one control message to the viewers (windows) of `monitor` only.
+pub(crate) fn send_to_monitor(viewers: &Viewers, monitor: u32, msg: &ToBrowser) {
+    broadcast_queued(viewers, &Queued::of(msg), Some(monitor));
 }
 
 /// Send one message to a single viewer; remove it on failure.
@@ -594,6 +601,10 @@ fn clip_dests(handle: &MediaHandle, viewers: &Viewers, source: &str) -> Vec<Stri
 fn broker_offer(handle: &MediaHandle, viewers: &Viewers, offer: ClipboardOffer, source: &str) {
     tracing::debug!(target: "clip", "offer serial={} from {source:?}: {:?}", offer.serial, offer.mime_types);
     handle.clip.lock().unwrap().offer = Some((offer.clone(), source.to_string()));
+    // A newer copy: the replies still on their way to the windows are stale.
+    for v in viewers.lock().unwrap().values() {
+        v.outbox.cancel_clipboard();
+    }
     let dests = clip_dests(handle, viewers, source);
     for d in dests {
         send_clip_to(handle, viewers, &d, ClipboardMsg::Offer(offer.clone()));
@@ -695,7 +706,11 @@ fn encoder_for(
         let mut seq = 0u32;
         match Encoder::new(move |au, idr| {
             seq = seq.wrapping_add(1);
-            broadcast_queued(&viewers, &video_message(monitor_id, &au, idr, seq))
+            broadcast_queued(
+                &viewers,
+                &video_message(monitor_id, &au, idr, seq),
+                Some(monitor_id),
+            )
         }) {
             Ok(e) => Arc::new(e),
             Err(err) => {
@@ -857,14 +872,15 @@ fn is_headless(state: &wire::ControlState, sel: &str) -> bool {
     state.hosts.iter().any(|h| h.id == sel && h.headless)
 }
 
-/// Prime a freshly-connected viewer's metadata: push the selected clone's view spec / cursor /
-/// clipboard offer straight into its own queue. Touches only this viewer's queue — no
+/// Prime a freshly-connected viewer's metadata: push the selected clone's view spec / cursor of
+/// `monitor` / clipboard offer straight into its own queue. Touches only this viewer's queue — no
 /// encoder, no registry, so it's safe to call before the viewer is inserted into `viewers`. A
 /// headless selection sends no `ViewSpec` here — termplane broadcasts the `Terminal` spec via
 /// `on_viewers_changed` right after this viewer registers.
 fn prime_viewer_metadata(
     handle: &MediaHandle,
     outbox: &Outbox,
+    monitor: u32,
     selected: Option<String>,
     state: &wire::ControlState,
     cfg: &wire::AppConfig,
@@ -881,9 +897,11 @@ fn prime_viewer_metadata(
     if !is_headless(state, &sel) {
         send(ToBrowser::ViewSpec(desktop_view_spec(cfg)));
     }
-    // Last cursor shape + current clipboard offer, targeted to this viewer.
+    // Last cursor shape of its monitor + current clipboard offer, targeted to this viewer.
     for c in cached_cursors(handle, &sel) {
-        send(ToBrowser::Cursor(c));
+        if c.monitor_id == monitor {
+            send(ToBrowser::Cursor(c));
+        }
     }
     if let Some((offer, _)) = handle.clip.lock().unwrap().offer.clone() {
         send(ToBrowser::Clipboard(ClipboardMsg::Offer(offer)));
@@ -903,24 +921,19 @@ fn cached_cursors(handle: &MediaHandle, sel: &str) -> Vec<CursorMeta> {
 /// of the monitor and is many times the size of a normal frame, so a burst of requests
 /// (windows that reconnect together, a decoder that keeps failing) would fill a slow link.
 const KEYFRAME_GAP: Duration = Duration::from_millis(250);
-/// Keyframes that resync a viewer which fell behind ([`crate::outbox`]) are at least this far
-/// apart per monitor, on top of [`KEYFRAME_GAP`].
-const RESYNC_GAP: Duration = Duration::from_secs(1);
 
-/// One monitor's forced keyframes: when the last one was made, whether the next one is
-/// already waiting for the end of the gap, and when the last resync asked for one.
+/// One monitor's forced keyframes: when the last one was made, and whether the next one is
+/// already waiting for the end of the gap.
 #[derive(Default)]
 struct KeyGate {
     last: Option<Instant>,
     waiting: bool,
-    resync: Option<Instant>,
 }
 
 /// Forget the monitors whose gaps are over, so ids that come and go (any `?monitor=` can
 /// join) do not grow the map.
 fn prune_gates(gates: &mut HashMap<u32, KeyGate>, now: Instant) {
-    let open = |t: Option<Instant>, gap: Duration| t.is_some_and(|t| now < t + gap);
-    gates.retain(|_, g| g.waiting || open(g.last, KEYFRAME_GAP) || open(g.resync, RESYNC_GAP));
+    gates.retain(|_, g| g.waiting || g.last.is_some_and(|t| now < t + KEYFRAME_GAP));
 }
 
 /// What [`keyframe_gate`] decides for one request.
@@ -964,25 +977,10 @@ fn keyframe_made(gates: &Mutex<HashMap<u32, KeyGate>>, monitor: u32, now: Option
     g.waiting = false;
 }
 
-/// Whether a viewer of `monitor` that caught up after falling behind may ask for its keyframe
-/// at `now`: at most one per [`RESYNC_GAP`] per monitor. A refused one asks again at its next
-/// acknowledgement.
-fn resync_gate(gates: &Mutex<HashMap<u32, KeyGate>>, monitor: u32, now: Instant) -> bool {
-    let mut gates = gates.lock().unwrap();
-    prune_gates(&mut gates, now);
-    let g = gates.entry(monitor).or_default();
-    if g.resync.is_some_and(|t| now < t + RESYNC_GAP) {
-        return false;
-    }
-    g.resync = Some(now);
-    true
-}
-
 /// Prime a viewer's video: a keyframe of the selected clone's last frame of `monitor`, so it
 /// paints at once even on a static, damage-driven desktop. Keyframes come only on demand, so
-/// every window that needs one comes here: a join, a decode error or backlog, a selection
-/// change. At most one per [`KEYFRAME_GAP`]; a request inside the gap gets the keyframe at
-/// its end. The keyframe goes to every viewer of the monitor (the encoder is shared), so the
+/// every window that needs one comes here: a join, a decode error, a selection change. At most
+/// one per [`KEYFRAME_GAP`]; a request inside the gap gets the keyframe at its end. The keyframe goes to every viewer of the monitor (the encoder is shared), so the
 /// caller must register a new viewer in `viewers` before calling this.
 fn prime_viewer_video(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
     match keyframe_gate(&app.media.keyframes, monitor, Instant::now()) {
@@ -1051,21 +1049,15 @@ enum Encode {
     Room,
 }
 
-/// Encode only when the viewers have room (R1 in `docs/WEB-VIEWER-WAN-SCOPE.md`). A captured
-/// frame is pushed into `monitor`'s encoder only while every viewer of the monitor has room
+/// Encode only when the viewers have room (R1 in `docs/WEB-VIEWER-WAN-SCOPE.md`): a captured
+/// frame goes into `monitor`'s encoder only while every viewer of the monitor has room
 /// ([`Outbox::room`]); else only the newest one is held and pushed when they have room again.
-/// On a link slower than the video the frame rate falls to what the link carries, each frame
-/// keeps its quality, and a frame that was never encoded is not in the reference chain, so no
-/// keyframe is needed.
+/// A frame that was never encoded is not in the reference chain, so no keyframe is needed.
 ///
-/// The held frame is `latest`: an fd of the PipeWire buffer, not a copy of its pixels, as for
-/// a join. The daemon gives the buffer back to Mutter at once, so Mutter may paint into it, but
-/// its pool is first in, first out (`pw_stream` keeps free buffers in a ring): it reuses the
-/// newest buffer last, after it has painted into every other one. Each of those frames comes
-/// here (the server acknowledges a frame on receipt) and becomes the newest, so the held frame
-/// is always the newest buffer and nothing paints into it while it waits. (Only when the daemon
-/// drops several frames in a row at its one-frame gate can Mutter reach it, as for any frame
-/// on its way into the encoder.)
+/// The held frame is `latest`: an fd of the PipeWire buffer, not a copy of its pixels. Mutter
+/// reuses its free buffers first in, first out, so it paints into the newest one last. The
+/// daemon ships the newest buffer of each batch, and the server acknowledges each frame on
+/// receipt, so the held frame is the newest buffer and nothing paints into it while it waits.
 ///
 /// Everything happens under `held`: the frame is read from `latest` and pushed under it, and
 /// the capture path stores a frame in `latest` before it calls this, so two threads never push
@@ -1130,11 +1122,15 @@ fn room(viewers: &Viewers, monitor: u32, held: Duration) -> bool {
         .all(|v| v.monitor != monitor || v.outbox.room(now, held))
 }
 
-/// The viewers of `monitor` may have room again: encode its held frame if they do.
+/// The viewers of `monitor` may have room again: encode its held frame if they do. With no
+/// encoder for it, the held frame is forgotten.
 fn encode_held(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
     let enc = encoders.lock().unwrap().get(&monitor).cloned();
-    if let Some((enc, w, h)) = enc {
-        encode_newest(app, viewers, &enc, (w, h), monitor, Encode::Room);
+    match enc {
+        Some((enc, w, h)) => encode_newest(app, viewers, &enc, (w, h), monitor, Encode::Room),
+        None => {
+            app.media.held.lock().unwrap().remove(&monitor);
+        }
     }
 }
 
@@ -1203,7 +1199,7 @@ fn reprime_all(
         broadcast(viewers, &ToBrowser::ViewSpec(desktop_view_spec(&app.config())));
     }
     for c in cached_cursors(handle, &sel) {
-        broadcast(viewers, &ToBrowser::Cursor(c));
+        send_to_monitor(viewers, c.monitor_id, &ToBrowser::Cursor(c));
     }
     // Every running encoder, and every monitor the new clone has a frame of. Copied out first:
     // neither lock is held across an encode.
@@ -1348,9 +1344,11 @@ fn serve_clone(
                             .or_default()
                             .insert(c.monitor_id, c.clone());
                     }
-                    // Only the selected clone's cursor reaches the viewers.
+                    // Only the selected clone's cursor reaches the viewers, and only the windows
+                    // of its monitor: each window draws only its own monitor's cursor, and a
+                    // drag that crosses into another monitor routes by the layout.
                     if app.store.selected().as_deref() == Some(id.as_str()) {
-                        broadcast(&viewers, &ToBrowser::Cursor(c));
+                        send_to_monitor(&viewers, c.monitor_id, &ToBrowser::Cursor(c));
                     }
                 }
             }
@@ -1379,6 +1377,8 @@ fn serve_clone(
                             });
                             retired
                         };
+                        // A held frame of a monitor that is gone would never be encoded.
+                        handle.held.lock().unwrap().retain(|m, _| live.contains(m));
                         for e in retired {
                             e.shutdown();
                         }
@@ -1444,7 +1444,7 @@ pub(crate) fn join_viewer(app: &App, plane: &Plane, id: u64, outbox: Arc<Outbox>
     let cfg = app.config();
     let selected = app.store.selected();
     // Queue the metadata straight into this viewer's queue.
-    prime_viewer_metadata(handle, &outbox, selected.clone(), &state, &cfg);
+    prime_viewer_metadata(handle, &outbox, monitor, selected.clone(), &state, &cfg);
     // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
     // (independent of encode latency).
     plane
@@ -1511,18 +1511,18 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
         // desktop no new frame may come for a long time. Only for the viewer's own monitor.
         FromBrowser::RequestKeyframe(r) => {
             if viewer(viewers, id).is_some_and(|(_, m)| m == r.monitor_id) {
+                tracing::debug!("browser viewer {id} asks for a keyframe");
                 prime_viewer_video(app, &plane.encoders, viewers, r.monitor_id)
             }
         }
-        FromBrowser::Ack { seq, held_ms } => {
+        FromBrowser::Ack {
+            seq,
+            held_ms,
+            clip,
+        } => {
             let Some((outbox, monitor)) = viewer(viewers, id) else { return };
             let held = Duration::from_millis(held_ms.into());
-            if outbox.ack(seq, held, Instant::now())
-                && resync_gate(&handle.keyframes, monitor, Instant::now())
-            {
-                tracing::debug!("browser viewer {id} caught up; keyframe for monitor {monitor}");
-                prime_viewer_video(app, &plane.encoders, viewers, monitor);
-            }
+            outbox.ack(seq, held, clip, Instant::now());
             // An acknowledgement frees room.
             encode_held(app, &plane.encoders, viewers, monitor);
         }
@@ -1916,17 +1916,6 @@ mod tests {
         assert_eq!(gates.lock().unwrap().keys().collect::<Vec<_>>(), [&7]);
     }
 
-    /// A resync keyframe at most once a second per monitor.
-    #[test]
-    fn resync_keyframes_are_a_second_apart() {
-        let gates = Mutex::new(HashMap::new());
-        let t0 = Instant::now();
-        assert!(resync_gate(&gates, 0, t0));
-        assert!(resync_gate(&gates, 1, t0));
-        assert!(!resync_gate(&gates, 0, t0 + Duration::from_millis(900)));
-        assert!(resync_gate(&gates, 0, t0 + RESYNC_GAP));
-    }
-
     /// The message the writer of `outbox` would send next, if one is queued.
     fn queued(outbox: &Outbox) -> Option<Queued> {
         match outbox.next(Duration::ZERO) {
@@ -1958,10 +1947,10 @@ mod tests {
             },
         );
 
-        broadcast_queued(&viewers, &Queued::Binary(Arc::from(vec![7u8, 8, 9])));
+        broadcast_queued(&viewers, &Queued::Text("x".into()), None);
 
         // A received the message and stayed; B refused it and got removed.
-        assert_eq!(queued(&a), Some(Queued::Binary(Arc::from(vec![7u8, 8, 9]))));
+        assert_eq!(queued(&a), Some(Queued::Text("x".into())));
         assert!(
             viewers.lock().unwrap().contains_key(&1),
             "fast viewer was wrongly dropped"
@@ -1972,10 +1961,10 @@ mod tests {
         );
     }
 
-    /// A browser window's queue gets only its own monitor's video, so the other monitors'
-    /// frames do not fill it; everything else still reaches it.
+    /// A browser window's queue gets only its own monitor's video and cursor, so the other
+    /// monitors' do not fill it; everything else still reaches it.
     #[test]
-    fn broadcast_video_reaches_only_its_monitors_viewer() {
+    fn video_and_cursor_reach_only_their_monitors_viewer() {
         let outbox = Arc::new(Outbox::new());
         let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
         viewers.lock().unwrap().insert(
@@ -1986,10 +1975,24 @@ mod tests {
                 monitor: 1,
             },
         );
-        broadcast_queued(&viewers, &video_message(0, &[0, 0, 0, 1, 0x65], true, 1));
-        broadcast_queued(&viewers, &video_message(1, &[0, 0, 0, 1, 0x65], true, 2));
+        let video = |m| video_message(m, &[0, 0, 0, 1, 0x65], true, 1);
+        broadcast_queued(&viewers, &video(0), Some(0));
+        broadcast_queued(&viewers, &video(1), Some(1));
+        let cursor = |monitor_id| {
+            ToBrowser::Cursor(CursorMeta {
+                monitor_id,
+                x: 1,
+                y: 2,
+                shape: None,
+                warp: false,
+                hidden: false,
+            })
+        };
+        send_to_monitor(&viewers, 0, &cursor(0));
+        send_to_monitor(&viewers, 1, &cursor(1));
         broadcast(&viewers, &ToBrowser::ViewSpec(empty_view_spec()));
-        // The control message goes first, then the video of monitor 1 only.
+        // The control messages go first, then the video of monitor 1 only.
+        assert_eq!(queued(&outbox), Some(Queued::of(&cursor(1))));
         assert!(matches!(queued(&outbox), Some(Queued::Text(_))));
         assert!(matches!(
             queued(&outbox),
@@ -2019,7 +2022,8 @@ mod tests {
         assert_eq!(&bytes[n..], &au);
     }
 
-    /// Clipboard bytes go out as a binary message; every other message is `ToBrowser` JSON.
+    /// Clipboard bytes go to the outbox's clipboard lane (which sends them in binary pieces);
+    /// every other message is `ToBrowser` JSON.
     #[test]
     fn clipboard_data_is_binary_and_the_rest_is_json() {
         let data = ClipboardData {
@@ -2027,11 +2031,11 @@ mod tests {
             mime_type: "image/png".into(),
             bytes: vec![1, 2, 3],
         };
-        let Queued::Binary(b) = Queued::of(&ToBrowser::Clipboard(ClipboardMsg::Data(data.clone())))
+        let Queued::Clipboard(d) = Queued::of(&ToBrowser::Clipboard(ClipboardMsg::Data(data.clone())))
         else {
-            panic!("data is a binary message");
+            panic!("data goes to the clipboard lane");
         };
-        assert_eq!(wire::browser::decode_clipboard_data(&b), Some(data));
+        assert_eq!(*d, data);
         let offer = ToBrowser::Clipboard(ClipboardMsg::Offer(ClipboardOffer {
             serial: 5,
             mime_types: vec!["image/png".into()],

@@ -30,9 +30,12 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::app::App;
-use crate::mediaplane::{Viewers, broadcast, configured_monitors};
+use crate::mediaplane::{Viewers, broadcast, configured_monitors, send_to_monitor};
 use wire::browser::{TermData, ToBrowser, ViewContent, ViewSpec};
 
+/// The monitor whose window shows the terminal (`routes/viewer.tsx`); terminal output goes
+/// only to its windows.
+const TERMINAL_MONITOR: u32 = 0;
 /// The clone user every session PTY runs as (uid 1000).
 const CLONE_USER: &str = "rmng";
 /// argv[0] our `tmux attach` clients run under, so we can reap *our* orphans without touching a
@@ -435,8 +438,9 @@ async fn pump_session(
                 Some(Ok(log)) => {
                     let bytes = log.into_bytes();
                     if !bytes.is_empty() {
-                        broadcast(
+                        send_to_monitor(
                             &viewers,
+                            TERMINAL_MONITOR,
                             &ToBrowser::TermData(TermData { session: session.clone(), data: bytes.to_vec() }),
                         );
                     }

@@ -57,7 +57,10 @@ server's queue, the kernel, the proxy and the link, but not the encode or the de
 line gives its p50 and p95 for those 5 s; for a 30 s cell the table shows the median of the
 p50 values and the highest p95 value. The `echo` delay goes ahead of the video in the
 server's queue, so from round 2 it is not the video's delay. The same line counts the
-captured frames that were never encoded (round 3, R1).
+captured frames that were never encoded (round 3, R1). From round 4 a browser window
+acknowledges a frame when its decoder has output it, so for a window the video delay includes
+the decode; `rmng-fps` does not decode and acknowledges a frame when it arrives. Round 4 drops
+the resync count (resync is gone) and adds the clipboard KB sent.
 
 ## Run it
 
@@ -275,3 +278,88 @@ the last frame was current and not torn. During the full-screen scroll the delay
 s; in one such run the page's first round trips came while its 1.8 MB of JavaScript loaded
 over the same 3 Mbit/s link, so the floor started at 617 ms and the margin with it. Compressed
 frontend files (Z1, round 4) make that load smaller; a cached page does not load it.
+
+### Round 4: side traffic and the browser
+
+2026-10-17, same clone, monitor and client, 30 s per cell, through the proxy on port 9001. Each
+cell shows **round 3 → round 4**.
+
+- **Round 3**: the round 3 build (image label `8ab9260-round3`).
+- **Round 4**: image label `18b9fb9-round4`. Cursor only to its window (V1), clipboard in
+  pieces (V2), keyframe reset in the browser (K3), faster reconnect (D2), compressed frontend
+  files (Z1); no resync; a keyframe on the way gets no room of its own; the browser
+  acknowledges a frame when its decoder outputs it; the clone daemon ships the newest buffer
+  of each batch.
+
+| Link | Motion | fps | Mbit/s mean (peak) | Keyframes | Not encoded | Reconnects | Video delay p50 / p95 (ms) | Echo p50 / p95 (ms) |
+|---|---|---|---|---|---|---|---|---|
+| lan | still | 0.1 → 0.1 | 0.00 (0.05) → 0.00 (0.05) | 1 → 1 | 0 → 0 | 0 → 0 | 1 / 1 → 1 / 1 | 1 / 1 → 1 / 1 |
+| lan | scroll | 50.0 → 50.0 | 0.89 (1.75) → 0.89 (1.73) | 2 → 2 | 0 → 0 | 0 → 0 | 1 / 2 → 1 / 2 | 1 / 21 → 0 / 8 |
+| lan | large | 50.0 → 50.0 | 1.61 (4.01) → 1.61 (4.04) | 2 → 2 | 0 → 0 | 0 → 0 | 1 / 2 → 1 / 2 | 1 / 14 → 1 / 11 |
+| home | still | 0.1 → 0.1 | 0.07 (2.09) → 0.07 (2.08) | 1 → 1 | 0 → 0 | 0 → 0 | 221 / 221 → 217 / 217 | 51 / 92 → 51 / 92 |
+| home | scroll | 49.8 → 49.8 | 0.88 (1.70) → 0.88 (1.75) | 2 → 2 | 0 → 2 | 0 → 0 | 84 / 119 → 78 / 113 | 98 / 99 → 70 / 93 |
+| home | large | 49.8 → 49.4 | 1.61 (3.80) → 1.60 (3.62) | 2 → 2 | 3 → 12 | 0 → 0 | 87 / 111 → 81 / 104 | 93 / 111 → 103 / 105 |
+| hotspot | still | 0.1 → 0.1 | 0.07 (2.10) → 0.07 (2.10) | 1 → 1 | 0 → 0 | 0 → 0 | 1112 / 1112 → 1383 / 1383 | 194 / 504 → 194 / 603 |
+| hotspot | scroll | 42.0 → 43.0 | 0.78 (1.10) → 0.81 (1.32) | 2 → 2 | 176 → 192 | 0 → 0 | 251 / 788 → 275 / 933 | 280 / 540 → 276 / 553 |
+| hotspot | large | 27.1 → 35.0 | 1.28 (3.02) → 1.41 (3.42) | 1 → 2 | 478 → 358 | 0 → 0 | 410 / 1715 → 266 / 2015 | 466 / 1519 → 305 / 1438 |
+
+The hotspot cells ran again (fps, video delay p50 / p95 in ms; the round 4 runs include four
+of a build that differed only in the version label):
+
+| Motion | Round 3 | Round 4 |
+|---|---|---|
+| scroll | 46.6, 237 / 835; 45.2, 230 / 750 | 43.6, 236 / 1122; 39.2, 239 / 704 |
+| large | 38.1, 244 / 1704; 34.1, 368 / 1513 | 23.4, 388 / 2449; 26.7, 333 / 1837; 34.1, 278 / 1410; 35.0, 255 / 1019; 33.8, 229 / 1871 |
+
+**Headless Chrome** through the proxy, hotspot, full-screen scroll, `/viewer?monitor=1`, 30 s.
+A CDP script counted what the page's worker sent. The video delay is the server's p50 of each
+5 s line.
+
+| | Keyframe requests | Keyframes in | Video delay p50 per 5 s (ms) | Floor (ms) |
+|---|---|---|---|---|
+| Round 3 | 6 | 6 | 2221, 2591, 2326, 4649, 4063 | 675 |
+| Round 4, run 1 | 0 | 1 | 198, 205, 294, 1502, 381 | 152 |
+| Round 4, run 2 | 0 | 2 | 258, 279, 171, 275, 354 | 152 |
+
+**Clipboard** with headless Chrome watching the window scroll through the proxy. A 4.2 MB PNG
+of noise (it does not compress). Clone → browser: the clone copies it (`xclip`) at 12 s, and
+the page fetches it (CDP turns on focus emulation, so the page acts as the focused window).
+Browser → clone: the page offers a 3.8 MB PNG at 12 s (headless Chrome has no clipboard, so the
+CDP script replaces the page's `navigator.clipboard.read`), and the clone pastes it.
+
+| Direction | Link | Round 3 | Round 4 |
+|---|---|---|---|
+| clone → browser | hotspot | One 4.2 MB message blocked the video: no `ack` for 10 s, so the socket closed, 4 times in 70 s; the transfer never ended; 7 keyframe requests. | Done in 40 s, socket open. Video delay p50 350–590 ms, p95 at most 960 ms during the transfer (150–300 ms before). |
+| clone → browser | lan | | 4.2 MB in less than 5 s. |
+| browser → clone | home | | Upload 5.8 s; the clone pasted it. Video delay p50 53–58 ms. |
+| browser → clone | hotspot | | Upload 35 s (the uplink is 1 Mbit/s), socket open, video delay p50 360–470 ms, p95 at most 1.2 s. The clone's paste gave up after its 10 s limit. |
+
+What the numbers show:
+
+- **The LAN and the home link do not change.**
+- **A large copy no longer stops the video or closes the socket.** A piece goes only when the
+  one before it arrived and the window has room, so it shares the link with the video. The
+  price is speed: on the hotspot the clipboard got about 0.8 Mbit/s of the 3.
+- **The browser's `bufferedAmount` is not enough for an upload.** The first round 4 build sent
+  a piece whenever less than 64 KiB waited unsent in the browser. On the hotspot uplink the
+  pieces waited in the kernel and on the link instead, and the window's acknowledgements waited
+  behind them: video delay p50 2.2–7.4 s and 0.1–0.3 Mbit/s of video for the 35 s of the
+  upload. Since the server acknowledges each piece (`clip_ack`) and the browser waits for it,
+  the acknowledgements wait behind one piece at most.
+- **Headless Chrome no longer asks for keyframes.** The window acknowledges a frame when its
+  (software) decoder has output it, so the server holds frames back for a slow decoder as for
+  a slow link, and the decoder's queue stays short. Compressed frontend files (2.7 MB of
+  JavaScript is 0.6 MB with brotli) made the first page load short, so the floor no longer
+  came from round trips made while the page loaded.
+- **No resync.** A build with only the round 3 review's first fix (a window gets room while a
+  keyframe is on the way only when at most one frame waits and it is less than 1 s behind)
+  ran the whole matrix and headless Chrome with no resync, so round 4 removes it.
+- **A keyframe on the way gets no room of its own.** With that fix, the frames sent while a slow
+  join keyframe crossed the hotspot link still filled about 1 s of the path: in one run the
+  deltas after it took 2 s, the floor rose to 2.3 s, and the video delay p50 was 1.6 s. Now
+  those frames follow the 100 ms hold like any other. Over 11 runs of the full-screen scroll on
+  the hotspot, that build had 17–36 fps and p50 239–1580 ms; round 4 had 23–35 fps and p50
+  229–388 ms in 6 runs.
+- The hotspot link changes much from run to run. A swap of only the clone daemon (newest or
+  oldest buffer of a batch) on the hotspot full-screen scroll gave 23–36 fps against 27–36 fps
+  in 6 runs each: no difference that the bench can show.

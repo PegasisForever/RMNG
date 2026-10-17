@@ -9,14 +9,15 @@
 //!
 //! The port defaults to 9000 and the monitor to 0. It shows the selected clone, as a viewer
 //! window does. With `seconds` it stops after that time and prints a summary line; without,
-//! stop it with Ctrl+C. When the server closes the socket, it connects again after 1 s, as a
-//! viewer window does, and counts it.
+//! stop it with Ctrl+C. When the server closes the socket, it connects again after 1 s, and
+//! counts it.
 //!
 //! The delay is the time from an `echo` to its answer (every 200 ms). The server sends the
 //! answer ahead of the video in its queue, so the delay is the round trip plus the wait in the
 //! kernel send buffer and in any proxy on the way. The video's own delay is in the server's
-//! log: `rmng-fps` acknowledges frames as a viewer window does (`ack`), and the server logs
-//! the round trip and how far behind the window is.
+//! log: `rmng-fps` acknowledges frames (`ack`), and the server logs the round trip and how far
+//! behind the window is. It does not decode, so it acknowledges a frame when it arrives; a
+//! viewer window acknowledges a frame when its decoder has output it.
 
 use std::time::{Duration, Instant};
 
@@ -30,7 +31,8 @@ const ECHO_EVERY: Duration = Duration::from_millis(200);
 /// did not (`ACK_MS` and `ACK_HEARTBEAT_MS` in `viewer/worker.ts`).
 const ACK_EVERY: Duration = Duration::from_millis(50);
 const ACK_HEARTBEAT: Duration = Duration::from_secs(1);
-/// The viewer window's wait before it connects again (`RECONNECT_MS` in `viewer/worker.ts`).
+/// The wait before it connects again. (A viewer window tries at once, then after 400 ms
+/// doubling up to 1 s; the bench needs no reconnect to be fast.)
 const RECONNECT: Duration = Duration::from_secs(1);
 
 #[tokio::main]
@@ -116,7 +118,12 @@ async fn main() -> Result<()> {
                     if acked.is_some_and(|(s, t)| s == seq && t.elapsed() < ACK_HEARTBEAT) {
                         continue;
                     }
-                    let msg = serde_json::to_string(&FromBrowser::Ack { seq, held_ms })?;
+                    // No clipboard comes here, so `clip` stays 0.
+                    let msg = serde_json::to_string(&FromBrowser::Ack {
+                        seq,
+                        held_ms,
+                        clip: 0,
+                    })?;
                     let _ = sink.send(Message::Text(msg)).await;
                     acked = Some((seq, Instant::now()));
                 }
@@ -140,7 +147,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        // The server closes a socket whose queue is full. Reconnect as a viewer window does.
+        // The server closes a socket that makes no progress. Connect again.
         run.reconnects += 1;
         eprintln!("the socket closed; reconnecting in {RECONNECT:?}");
         tokio::time::sleep(RECONNECT).await;

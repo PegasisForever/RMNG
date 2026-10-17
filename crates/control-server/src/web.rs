@@ -120,8 +120,17 @@ pub fn router(app: App) -> Router {
     let dir = crate::assets::static_dir();
     let routes = match dir {
         Some(dir) => {
-            let index = dir.join("index.html");
-            routes.fallback_service(ServeDir::new(&dir).fallback(ServeFile::new(index)))
+            // The build writes a `.br` and a `.gz` beside each large file
+            // (`frontend/scripts/compress.ts`); a browser that accepts one gets it.
+            let index = ServeFile::new(dir.join("index.html"))
+                .precompressed_br()
+                .precompressed_gzip();
+            routes.fallback_service(
+                ServeDir::new(&dir)
+                    .precompressed_br()
+                    .precompressed_gzip()
+                    .fallback(index),
+            )
         }
         None => {
             tracing::warn!(
@@ -336,8 +345,9 @@ async fn viewer_ws(
     Query(q): Query<ViewerQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Clipboard bytes arrive as one binary message: allow the 32 MiB clipboard limit in one
-    // frame (the default frame limit is 16 MiB, and Chrome does not fragment).
+    // Clipboard bytes arrive in 64 KiB pieces; any message (a large paste into the terminal)
+    // may still be up to the 32 MiB clipboard limit, in one frame (the default frame limit is
+    // 16 MiB, and Chrome does not fragment).
     let cap = wire::socket::chunk::MAX_MESSAGE_BYTES;
     ws.max_message_size(cap)
         .max_frame_size(cap)

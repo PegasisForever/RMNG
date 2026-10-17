@@ -433,9 +433,12 @@ fn build_meta_cursor_pod() -> Result<Vec<u8>> {
 /// Per-buffer processing: emit the dmabuf/shm frame and any cursor update.
 /// We process every dequeued buffer for the cursor meta (a shape change could
 /// land on a buffer that's superseded for frame purposes), but only ship the
-/// freshest buffer's frame.
+/// freshest buffer's frame: the frame gate takes the first frame it is given and
+/// drops the rest until the server acknowledges it, so shipping each buffer of a
+/// batch would ship the oldest and drop the newest, the last frame of a motion.
 fn on_process(stream: &pw::stream::Stream, data: &mut UserData) {
     let Some(info) = data.format else { return };
+    let mut newest = None;
     while let Some(mut buffer) = stream.dequeue_buffer() {
         // Cursor metadata first (independent of the frame data type / size).
         if let Some(cursor) = read_cursor(&buffer) {
@@ -444,9 +447,13 @@ fn on_process(stream: &pw::stream::Stream, data: &mut UserData) {
         // Frame (dmabuf fds or shm + plane layout). Skipped when there's no pixel
         // data this cycle (e.g. a cursor-only update has an empty chunk) — in
         // cursor-mode METADATA, pointer motion alone produces no frame damage.
+        // Its fds are dups, so it outlives the buffer, which goes back to Mutter here.
         if let Some(frame) = read_frame(&mut buffer, &info) {
-            (data.on_frame)(frame);
+            newest = Some(frame);
         }
+    }
+    if let Some(frame) = newest {
+        (data.on_frame)(frame);
     }
 }
 

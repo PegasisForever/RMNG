@@ -6,7 +6,7 @@
   "description": "RMNG dashboard and browser viewer: a React Router 7 single-page app that the control-server serves.",
   "scripts": {
     "dev": "react-router dev",
-    "build": "react-router build",
+    "build": "react-router build && bun scripts/compress.ts",
     "typecheck": "react-router typegen && tsc",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
