@@ -110,11 +110,12 @@ async fn main() -> Result<()> {
                     let _ = sink.send(Message::Text(msg)).await;
                 }
                 _ = ack.tick() => {
-                    let Some((seq, at)) = newest else { continue };
+                    // Before the first frame the heartbeat names frame 0, as a window does.
+                    let (seq, held_ms) =
+                        newest.map_or((0, 0), |(s, at)| (s, at.elapsed().as_millis() as u32));
                     if acked.is_some_and(|(s, t)| s == seq && t.elapsed() < ACK_HEARTBEAT) {
                         continue;
                     }
-                    let held_ms = at.elapsed().as_millis() as u32;
                     let msg = serde_json::to_string(&FromBrowser::Ack { seq, held_ms })?;
                     let _ = sink.send(Message::Text(msg)).await;
                     acked = Some((seq, Instant::now()));

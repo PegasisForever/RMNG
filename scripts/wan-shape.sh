@@ -29,10 +29,17 @@ PROXY_PORT=9001
 PIDFILE=/run/wan-proxy.pid
 MODULES=(sch_prio sch_netem sch_tbf sch_ingress cls_u32 act_mirred ifb)
 
+# Loaded as a module, or built into the kernel (then it may have a /sys/module entry, or be
+# listed in modules.builtin when the host's /lib/modules is visible).
+present() {
+  grep -q "^$1 " /proc/modules || [ -d "/sys/module/$1" ] ||
+    grep -qs "/$1\.ko" "/lib/modules/$(uname -r)/modules.builtin"
+}
+
 check_modules() {
   local missing=()
   for m in "${MODULES[@]}"; do
-    grep -q "^$m " /proc/modules || missing+=("$m")
+    present "$m" || missing+=("$m")
   done
   if [ ${#missing[@]} -gt 0 ]; then
     echo "not loaded: ${missing[*]}. Nothing was changed. The host owner can run:" >&2
@@ -81,9 +88,11 @@ apply() {
   leaf "$IFB" root "$1" "$2" "$4" "$5"
 }
 
+# The listener and the children that serve open connections share the listener's session
+# (`setsid`), so stop the whole session.
 proxy_stop() {
   if [ -f "$PIDFILE" ]; then
-    kill "$(cat "$PIDFILE")" 2>/dev/null || true
+    pkill -s "$(cat "$PIDFILE")" socat 2>/dev/null || true
     rm -f "$PIDFILE"
   fi
 }

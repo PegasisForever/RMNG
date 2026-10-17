@@ -2268,13 +2268,16 @@ async fn codex_rotate(State(app): State<App>) -> Json<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::sync::Arc;
+
     /// An accepted socket takes the listener's `TCP_NOTSENT_LOWAT`, so setting it once on the
     /// listener covers every viewer.
     #[test]
     fn accepted_sockets_take_the_listeners_notsent_lowat() {
         use std::os::fd::AsRawFd;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        super::small_send_queue(&listener);
+        small_send_queue(&listener);
         let _client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (accepted, _) = listener.accept().unwrap();
         let mut value: libc::c_int = 0;
@@ -2290,11 +2293,8 @@ mod tests {
             )
         };
         assert_eq!(r, 0);
-        assert_eq!(value, super::NOTSENT_LOWAT);
+        assert_eq!(value, NOTSENT_LOWAT);
     }
-
-    use super::*;
-    use std::sync::Arc;
 
     fn test_app() -> App {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

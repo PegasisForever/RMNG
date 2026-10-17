@@ -9,9 +9,13 @@
 //!   the viewer set through [`Plane`] and gets the selected clone's H.264 for its monitor,
 //!   **one encoder per monitor**, plus the control messages. Its input is relayed to that
 //!   clone.
+//! - A captured frame is encoded only when every viewer of its monitor has room
+//!   ([`Outbox::room`]); else it is held (only the newest one) and encoded when they have room
+//!   again ([`encode_newest`]).
 //! - Selection switch / viewer connect → force a fresh IDR on every encoder.
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -218,6 +222,10 @@ pub struct MediaHandle {
     capture_gate: Mutex<HashMap<String, bool>>,
     /// monitor_id → its forced keyframes, for [`KEYFRAME_GAP`].
     keyframes: Mutex<HashMap<u32, KeyGate>>,
+    /// The monitors whose newest captured frame of the selected clone (in `latest`) is not
+    /// encoded yet, and since when a frame waits: it waits for room. Locked across every push
+    /// to an encoder; see [`encode_newest`].
+    held: Mutex<HashMap<u32, Instant>>,
     /// Set once by [`spawn`]; the browser viewer's WebSocket joins through it. Unset when
     /// media init failed, and then there is no video to watch.
     pub(crate) plane: OnceLock<Arc<Plane>>,
@@ -1008,15 +1016,15 @@ fn prime_viewer_video(app: &App, encoders: &Encoders, viewers: &Viewers, monitor
 fn encode_keyframe(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
     let Some(sel) = app.store.selected() else { return };
     // The `latest` lock is released at the end of this statement, before any encode.
-    let frame = app
+    let size = app
         .media
         .latest
         .lock()
         .unwrap()
         .get(&sel)
         .and_then(|m| m.get(&monitor))
-        .and_then(LatestFrame::dup);
-    let Some(f) = frame else {
+        .map(|f| (f.width, f.height));
+    let Some((w, h)) = size else {
         // No stored frame, but an encoder may already be running: ask it for a keyframe from
         // the next frame, or a joining window never gets one. Clone the handle out first.
         let enc = encoders.lock().unwrap().get(&monitor).map(|(e, _, _)| e.clone());
@@ -1025,11 +1033,108 @@ fn encode_keyframe(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u
         }
         return;
     };
-    if let Some(enc) = encoder_for(encoders, viewers, monitor, f.width, f.height) {
+    if let Some(enc) = encoder_for(encoders, viewers, monitor, w, h) {
         enc.force_idr();
-        if let Err(e) = f.push_to(&enc) {
-            tracing::warn!("prime re-encode failed: {e}");
-        }
+        encode_newest(app, viewers, &enc, (w, h), monitor, Encode::Key);
+    }
+}
+
+/// Why [`encode_newest`] is called.
+#[derive(Clone, Copy, PartialEq)]
+enum Encode {
+    /// A keyframe: encode whatever room the viewers have.
+    Key,
+    /// A new frame was captured: encode it if the viewers have room, else hold it.
+    Captured,
+    /// The viewers may have room again (an acknowledgement, a viewer left): encode the held
+    /// frame if they do.
+    Room,
+}
+
+/// Encode only when the viewers have room (R1 in `docs/WEB-VIEWER-WAN-SCOPE.md`). A captured
+/// frame is pushed into `monitor`'s encoder only while every viewer of the monitor has room
+/// ([`Outbox::room`]); else only the newest one is held and pushed when they have room again.
+/// On a link slower than the video the frame rate falls to what the link carries, each frame
+/// keeps its quality, and a frame that was never encoded is not in the reference chain, so no
+/// keyframe is needed.
+///
+/// The held frame is `latest`: an fd of the PipeWire buffer, not a copy of its pixels, as for
+/// a join. The daemon gives the buffer back to Mutter at once, so Mutter may paint into it, but
+/// its pool is first in, first out (`pw_stream` keeps free buffers in a ring): it reuses the
+/// newest buffer last, after it has painted into every other one. Each of those frames comes
+/// here (the server acknowledges a frame on receipt) and becomes the newest, so the held frame
+/// is always the newest buffer and nothing paints into it while it waits. (Only when the daemon
+/// drops several frames in a row at its one-frame gate can Mutter reach it, as for any frame
+/// on its way into the encoder.)
+///
+/// Everything happens under `held`: the frame is read from `latest` and pushed under it, and
+/// the capture path stores a frame in `latest` before it calls this, so two threads never push
+/// one monitor's frames out of order and the last one pushed is the newest. `enc` is for frames
+/// of `size`; a newest frame of another size is left to the capture path, which rebuilds the
+/// encoder.
+fn encode_newest(
+    app: &App,
+    viewers: &Viewers,
+    enc: &Encoder,
+    size: (u32, u32),
+    monitor: u32,
+    why: Encode,
+) {
+    let mut held = app.media.held.lock().unwrap();
+    let now = Instant::now();
+    let since = match why {
+        Encode::Key => now,
+        Encode::Captured => match held.entry(monitor) {
+            Entry::Vacant(e) => *e.insert(now),
+            Entry::Occupied(e) => {
+                // The frame held until now is replaced and will never be encoded.
+                for v in viewers.lock().unwrap().values() {
+                    if v.monitor == monitor {
+                        v.outbox.not_encoded();
+                    }
+                }
+                *e.get()
+            }
+        },
+        Encode::Room => match held.get(&monitor) {
+            Some(since) => *since,
+            None => return,
+        },
+    };
+    if why != Encode::Key && !room(viewers, monitor, now - since) {
+        return;
+    }
+    held.remove(&monitor);
+    let Some(sel) = app.store.selected() else { return };
+    let frame = app
+        .media
+        .latest
+        .lock()
+        .unwrap()
+        .get(&sel)
+        .and_then(|m| m.get(&monitor))
+        .and_then(LatestFrame::dup);
+    let Some(f) = frame.filter(|f| (f.width, f.height) == size) else { return };
+    if let Err(e) = f.push_to(enc) {
+        tracing::warn!("encode push failed: {e}");
+    }
+}
+
+/// Whether every viewer of `monitor` has room for another frame, when a frame has waited
+/// `held` ([`Outbox::room`]).
+fn room(viewers: &Viewers, monitor: u32, held: Duration) -> bool {
+    let now = Instant::now();
+    let viewers = viewers.lock().unwrap();
+    viewers
+        .values()
+        .all(|v| v.monitor != monitor || v.outbox.room(now, held))
+}
+
+/// The viewers of `monitor` may have room again: encode its held frame if they do.
+fn encode_held(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
+    let enc = encoders.lock().unwrap().get(&monitor).cloned();
+    if let Some((enc, w, h)) = enc {
+        encode_newest(app, viewers, &enc, (w, h), monitor, Encode::Room);
     }
 }
 
@@ -1153,28 +1258,27 @@ fn serve_clone(
             Ok((DaemonMsg::Frame(f), fds)) => {
                 let Some(id) = clone_id.clone() else { continue };
                 if let Some(fd) = fds.into_iter().next() {
-                    if let Some(dup) = dup_owned(&fd) {
-                        handle
-                            .latest
-                            .lock()
-                            .unwrap()
-                            .entry(id.clone())
-                            .or_default()
-                            .insert(
-                                f.monitor_id,
-                                LatestFrame {
-                                    fd: dup,
-                                    fourcc: f.fourcc,
-                                    modifier: f.modifier,
-                                    width: f.width,
-                                    height: f.height,
-                                    planes: f.planes.clone(),
-                                    shm: f.shm,
-                                },
-                            );
-                    }
-                    // Ack as soon as the frame is received and `latest` owns its own dup of the
-                    // fd — BEFORE any encoding. The daemon's 1-deep gate exists precisely to shed
+                    // The encoder takes the frame from here (`encode_newest`).
+                    handle
+                        .latest
+                        .lock()
+                        .unwrap()
+                        .entry(id.clone())
+                        .or_default()
+                        .insert(
+                            f.monitor_id,
+                            LatestFrame {
+                                fd,
+                                fourcc: f.fourcc,
+                                modifier: f.modifier,
+                                width: f.width,
+                                height: f.height,
+                                planes: f.planes.clone(),
+                                shm: f.shm,
+                            },
+                        );
+                    // Ack as soon as the frame is received and `latest` owns its fd — BEFORE
+                    // any encoding. The daemon's 1-deep gate exists precisely to shed
                     // frames when we cannot keep up, but it only clears on this Ack: acking after
                     // the encode inverts that contract. A slow encoder then stops the Acks, the
                     // daemon's gate never clears, its capture thread blocks forever in a blocking
@@ -1207,11 +1311,14 @@ fn serve_clone(
                             f.width,
                             f.height,
                         ) {
-                            if let Err(e) = enc.push(
-                                fd, f.fourcc, f.modifier, f.width, f.height, &f.planes, f.shm,
-                            ) {
-                                tracing::warn!("encode push failed: {e}");
-                            }
+                            encode_newest(
+                                &app,
+                                &viewers,
+                                &enc,
+                                (f.width, f.height),
+                                f.monitor_id,
+                                Encode::Captured,
+                            );
                         }
                     }
                 }
@@ -1366,7 +1473,12 @@ pub(crate) fn join_viewer(app: &App, plane: &Plane, id: u64, outbox: Arc<Outbox>
 /// Remove a viewer: drop it from the registry (stops fan-out, disconnects its writer), forget
 /// its clipboard state, and let the terminal view and capture follow the new audience.
 pub(crate) fn leave_viewer(app: &App, plane: &Plane, id: u64) {
+    let monitor = viewer(&plane.viewers, id).map(|(_, m)| m);
     remove_viewer(&plane.viewers, id);
+    // It may have been the one that held its monitor's frames back.
+    if let Some(m) = monitor {
+        encode_held(app, &plane.encoders, &plane.viewers, m);
+    }
     clip_forget_source(&app.media.clip, &viewer_src(id));
     // A departing viewer may leave the headless terminal view with no audience → deactivate.
     plane.termplane.on_viewers_changed();
@@ -1411,6 +1523,8 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
                 tracing::debug!("browser viewer {id} caught up; keyframe for monitor {monitor}");
                 prime_viewer_video(app, &plane.encoders, viewers, monitor);
             }
+            // An acknowledgement frees room.
+            encode_held(app, &plane.encoders, viewers, monitor);
         }
         // Back through this viewer's own queue, ahead of the video waiting there.
         FromBrowser::Echo { id: n } => send_to(viewers, id, Queued::of(&ToBrowser::Echo { id: n })),
@@ -1742,13 +1856,37 @@ mod tests {
             .find("ServerMsg::Ack")
             .expect("frame arm sends an Ack");
         let push = frame_arm
-            .find("enc.push(")
+            .find("encode_newest(")
             .expect("frame arm pushes to an encoder");
         assert!(
             ack < push,
-            "Ack must precede enc.push in the frame arm: acking after the encode makes the \
+            "Ack must precede encode_newest in the frame arm: acking after the encode makes the \
              daemon's flow-control gate depend on encoder progress and wedges the socket"
         );
+    }
+
+    /// The slowest viewer of a monitor holds its frames back, and only that monitor's.
+    #[test]
+    fn a_monitor_has_room_when_each_of_its_viewers_has() {
+        let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
+        let add = |id: u64, monitor: u32| {
+            let outbox = Arc::new(Outbox::new());
+            let conn = ViewerConn {
+                id,
+                outbox: outbox.clone(),
+                monitor,
+            };
+            viewers.lock().unwrap().insert(id, conn);
+            outbox
+        };
+        add(1, 0);
+        let slow = add(2, 0);
+        add(3, 1);
+        assert!(room(&viewers, 0, Duration::ZERO));
+        slow.push(video_message(0, &[0; 10], false, 1));
+        slow.push(video_message(0, &[0; 10], false, 2));
+        assert!(!room(&viewers, 0, Duration::ZERO), "frames wait in the slow viewer's queue");
+        assert!(room(&viewers, 1, Duration::ZERO));
     }
 
     /// Keyframes of one monitor are at least `KEYFRAME_GAP` apart. A request inside the gap is

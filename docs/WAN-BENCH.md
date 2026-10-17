@@ -49,7 +49,15 @@ include the encode or the decode.
 
 **Video delay** (from round 2) comes from the server's log: one line per viewer every 5 s at
 debug level (`rmng_control_server::webviewer=debug` in `RUST_LOG`), with the round trip of the
-acknowledged frames, the floor, how far behind the viewer is, and resyncs.
+acknowledged frames, the floor, how far behind the viewer is, and resyncs. From round 3 the
+line also has the **video delay**: for each acknowledged frame, the time from when the server
+queued it for the socket (right after the encode) to its `ack`, less the time the viewer held
+the number before it sent the `ack`. So it is a round trip that includes the wait in the
+server's queue, the kernel, the proxy and the link, but not the encode or the decode. The
+line gives its p50 and p95 for those 5 s; for a 30 s cell the table shows the median of the
+p50 values and the highest p95 value. The `echo` delay goes ahead of the video in the
+server's queue, so from round 2 it is not the video's delay. The same line counts the
+captured frames that were never encoded (round 3, R1).
 
 ## Run it
 
@@ -185,3 +193,85 @@ What the numbers show:
 - A real browser: headless Chrome on the bench client opened `/viewer?monitor=1` on port 9000
   (`--unsafely-treat-insecure-origin-as-secure`) while monitor 1 scrolled. The server log showed
   its acknowledgements: round trip 1 ms, 0.8–1.4 Mbit/s delivered, nothing behind.
+
+### Round 3: encode only when there is room
+
+2026-10-17, same clone, monitor and client, 30 s per cell, through the proxy on port 9001
+unless the row says direct (port 9000 shaped, `rmng-fps 10.0.0.178`). Each cell shows
+**round 2 → round 3**.
+
+- **Round 2**: the round 2 code plus only the video delay in the debug line (image label
+  `8ab9260-round2-meter`), so that both rounds have the same delay numbers.
+- **Round 3**: R1 (image label `8ab9260-round3`). A captured frame is encoded only when each
+  window of the monitor has room; else only the newest frame is held. The rule is in
+  [PROTOCOL.md](PROTOCOL.md#browser-viewer-protocol-browser--control-server).
+
+**Not encoded** is the captured frames that a newer frame replaced while they waited for room
+(round 3 only). **Video delay** is the server's (above); **echo** is the `rmng-fps` delay.
+
+| Link | Motion | Path | fps | Mbit/s mean (peak) | Keyframes | Not encoded | Resyncs | Reconnects | Video delay p50 / p95 (ms) | Echo p50 / p95 (ms) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| lan | still | proxy | 0.0 → 0.0 | 0.00 (0.05) → 0.00 (0.05) | 1 → 1 | 0 | 0 → 0 | 0 → 0 | 1 / 1 → 1 / 1 | 1 / 1 → 1 / 1 |
+| lan | scroll | proxy | 50.0 → 50.0 | 0.89 (1.73) → 0.89 (1.75) | 2 → 2 | 0 | 0 → 0 | 0 → 0 | 1 / 2 → 1 / 1 | 0 / 3 → 0 / 20 |
+| lan | large | proxy | 50.0 → 50.0 | 1.61 (4.01) → 1.61 (4.00) | 2 → 2 | 0 | 0 → 0 | 0 → 0 | 1 / 2 → 1 / 2 | 1 / 14 → 0 / 6 |
+| home | still | proxy | 0.1 → 0.1 | 0.07 (2.09) → 0.07 (2.09) | 1 → 1 | 0 | 0 → 0 | 0 → 0 | 221 / 221 → 228 / 228 | 51 / 92 → 51 / 92 |
+| home | scroll | proxy | 49.9 → 49.9 | 0.88 (1.72) → 0.88 (1.74) | 2 → 2 | 0 | 0 → 0 | 0 → 0 | 85 / 108 → 84 / 107 | 85 / 108 → 84 / 108 |
+| home | large | proxy | 49.9 → 49.8 | 1.61 (3.81) → 1.61 (3.82) | 2 → 2 | 1 | 0 → 0 | 0 → 0 | 68 / 103 → 79 / 106 | 82 / 98 → 79 / 96 |
+| hotspot | still | proxy | 0.1 → 0.1 | 0.07 (2.08) → 0.07 (2.10) | 1 → 1 | 0 | 0 → 0 | 0 → 0 | 1154 / 1154 → 1112 / 1112 | 193 / 603 → 208 / 659 |
+| hotspot | scroll | proxy | 49.5 → 45.1 | 0.88 (1.36) → 0.83 (1.14) | 2 → 2 | 132 | 0 → 0 | 0 → 0 | 244 / 695 → 231 / 742 | 276 / 626 → 255 / 571 |
+| hotspot | large | proxy | 29.0 → 37.3 | 1.18 (3.23) → 1.40 (3.39) | 5 → 2 | 338 | 4 → 0 | 0 → 0 | 2132 / 4008 → 265 / 2112 | 1738 / 3767 → 307 / 1568 |
+| hotspot | large | direct | 47.1 → 43.4 | 1.64 (4.40) → 1.50 (4.38) | 3 → 2 | 179 | 1 → 0 | 0 → 0 | 262 / 1645 → 243 / 1446 | 271 / 814 → 257 / 893 |
+
+The lossy hotspot link changes much from run to run, so its cells ran again (round 2 once, round
+3 twice, same code):
+
+| Motion | Path | Round 2 | Round 3, run 2 | Round 3, run 3 |
+|---|---|---|---|---|
+| scroll | proxy | 46.7 fps, 1 resync, 243 / 1547 ms | 43.6 fps, 0 resyncs, 244 / 697 ms | 39.8 fps, 0 resyncs, 248 / 1177 ms |
+| large | proxy | 31.4 fps, 4 resyncs, 1425 / 2464 ms | 36.7 fps, 0 resyncs, 260 / 1331 ms | 24.8 fps, 0 resyncs, 395 / 2011 ms |
+| large | direct | 47.3 fps, 1 resync, 235 / 1213 ms | 42.5 fps, 0 resyncs, 238 / 1664 ms | 45.4 fps, 0 resyncs, 238 / 1162 ms |
+
+(fps, resyncs, video delay p50 / p95.)
+
+What the numbers show:
+
+- **The LAN and the home link do not change.** Same frame rate, bitrate and delay; at most one
+  frame in 30 s was not encoded.
+- **Through the proxy on the hotspot, the full-screen scroll now stays near one round trip.**
+  The video delay p50 fell from 1.4–2.1 s to 0.26–0.4 s, with no resyncs and one keyframe
+  less per resync. Round 2 sent every frame into the proxy's buffers; round 3 holds the
+  frames back that the link cannot carry yet, and encodes the newest one when it can.
+- **The p95 stays at 1.2–2.1 s.** TCP loss repair on the 1 % loss link stops the
+  acknowledgements for a round trip or more, and the frames on the way then wait. Frames that
+  are already on the way cannot be taken back.
+- **Direct path:** the same as round 2, without resyncs.
+
+**What did not work, and why the rule has its parts.** The first rule held a frame while the
+window was more than 100 ms past the floor, with no other limit. On the hotspot it made the
+large scroll worse: 2–6 fps, 2.3–2.7 Mbit/s, 1–2 s delay. On this text, a frame that covers
+more motion costs more than its share of bytes: the encoder follows only short motion (the
+same scroll needs about 1.6 Mbit/s at 50 fps, 2.3 at 10 fps, 2.7 at 2 fps). So each hold made
+the next frame larger, which caused the next hold. Three parts stop this:
+
+- A frame waits at most 100 ms while the window is less than 1 s behind (at least 10 fps).
+- Nothing is held while a keyframe is on the way. Before, the first frame after a 250 KB join
+  keyframe covered the 0.7 s it took to cross, and was almost as large.
+- The margin is one floor plus 100 ms, for one loss repair; and the floor leaves out keyframes
+  and the deltas sent behind them. Before, the floor came from the join keyframe (0.6–1.3 s),
+  the margin grew with it, and the window behaved as in round 2.
+
+A byte budget (no more on the way than the path delivered in the last floor + 100 ms) held
+frames back at every loss repair in the same way, and was dropped.
+
+**Headless Chrome** (through the proxy, hotspot, `/viewer?monitor=1`): the page received and
+acknowledged frames, with no resyncs. During a window scroll the video delay p50 was 151–174
+ms for 20 s. Then the page asked for 6 keyframes in 30 s (`request_keyframe`: more than 8
+frames waited in its decoder, which runs in software in headless Chrome), and in the last 5 s
+the delay was 754 / 974 ms: nothing is held while a keyframe is on the way, so the deltas sent
+behind each one were all sent. After the full-screen scroll was frozen (`SIGSTOP` on the
+player), a screenshot of the page matched the clone's own screenshot (0.02 % of the pixels
+differ by more than 40 of 255; a scroll offset of one line would differ almost everywhere), so
+the last frame was current and not torn. During the full-screen scroll the delay was 0.75–2.2
+s; in one such run the page's first round trips came while its 1.8 MB of JavaScript loaded
+over the same 3 Mbit/s link, so the floor started at 617 ms and the margin with it. Compressed
+frontend files (Z1, round 4) make that load smaller; a cached page does not load it.

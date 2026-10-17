@@ -33,8 +33,9 @@ const ERROR_WINDOW_MS = 5000;
 /** More chunks than this waiting in the decoder: drop until the next keyframe to catch up. */
 const DECODE_BACKLOG_MAX = 8;
 /** Acknowledge the newest received frame this often when it changed, and every
- *  ACK_HEARTBEAT_MS when it did not. The server takes the round trip and how far behind this
- *  window is from it, and closes a socket whose frames stay unacknowledged for 10 s. */
+ *  ACK_HEARTBEAT_MS when it did not, also before the first frame. The server takes the round
+ *  trip and how far behind this window is from it, and closes a socket whose frames stay
+ *  unacknowledged for 10 s, or that sends nothing for 10 s. */
 const ACK_MS = 50;
 const ACK_HEARTBEAT_MS = 1000;
 
@@ -66,13 +67,14 @@ function send(msg: FromBrowser) {
 }
 
 /** `held_ms` is how long the frame number waited here, so the server can take it off the
- *  round trip. */
+ *  round trip. Before the first frame (a terminal, or no video yet) the heartbeat names frame
+ *  0, which the server ignores: it only shows that this window still reads. */
 function ack() {
-  if (!newest) return;
   const now = performance.now();
-  if (acked?.seq === newest.seq && now - acked.at < ACK_HEARTBEAT_MS) return;
-  send({ t: "ack", seq: newest.seq, held_ms: Math.round(now - newest.at) });
-  acked = { seq: newest.seq, at: now };
+  const seq = newest?.seq ?? 0;
+  if (acked?.seq === seq && now - acked.at < ACK_HEARTBEAT_MS) return;
+  send({ t: "ack", seq, held_ms: newest ? Math.round(now - newest.at) : 0 });
+  acked = { seq, at: now };
 }
 
 function requestKeyframe() {

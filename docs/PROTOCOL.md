@@ -78,7 +78,7 @@ as raw bytes, not as base64 in JSON (`encode_clipboard_data` / `decode_clipboard
 | `term_resize` | `TermResize {cols, rows}` | The terminal size. Every session is resized to it. |
 | `term_new_session` | — | Make a new tmux session (the "+" tab). |
 | `request_keyframe` | `RequestKeyframe {monitor_id}` | Re-encode the monitor's last frame as a keyframe: after a decode error, or when the decoder falls behind. Ignored for a monitor other than the socket's own (`?monitor=`). |
-| `ack` | `{seq, held_ms}` (u32, u32) | The newest video frame received (`seq` from its header) and how long, in ms, the window held that number before this message. Sent every 50 ms when `seq` changed, and once a second when it did not. Below. |
+| `ack` | `{seq, held_ms}` (u32, u32) | The newest video frame received (`seq` from its header) and how long, in ms, the window held that number before this message. Sent every 50 ms when `seq` changed, and once a second when it did not. Before the first frame (a terminal, or no video yet) the once-a-second message has `seq` 0, which the server ignores. Below. |
 | `echo` | `{id}` (u32) | The server answers with `echo` and the same `id`, ahead of the video that waits in this socket's queue. The time to the answer is the round trip plus the wait in the kernel send buffer and in any proxy on the way. `rmng-fps` uses it; the viewer does not send it. |
 
 **Connect.** The server queues the view spec, the last cursor of each monitor and the
@@ -100,27 +100,53 @@ queue, where it can be dropped and where control messages can go before it.
 **Acknowledgements.** The server stamps each video frame when the socket's writer hands it
 to the socket. On each `ack` it ends every frame up to `seq` and takes one round trip: the
 time since the stamp of `seq`, less `held_ms`. The floor is the lowest round trip of the
-last 1 to 2 minutes. An `ack` whose `held_ms` is longer than its frame has been out names an
+last 1 to 2 minutes, of deltas sent while no keyframe was on the way. An `ack` whose `held_ms` is longer than its frame has been out names an
 earlier frame with the same number (a new encoder counts from 1 again) and is ignored. Off
 the LAN the browser's TCP connection often ends in a proxy (`tailscale serve`), so the
 acknowledgements are the only signal that sees the whole path. At debug level
 (`rmng_control_server::webviewer`) the server logs one line per socket every 5 s while video
-moves: round trip, floor, how far behind, frames and KB on the way, frames queued, the
-delivered Mbit/s, frames dropped and resyncs.
+moves: round trip, video delay (p50 and p95 of each acknowledged frame's time from the
+server's queue to its `ack`, less `held_ms`), floor, how far behind, frames and KB on the
+way, frames queued, the delivered Mbit/s, frames dropped, resyncs, and captured frames that
+were never encoded (below).
 
 **Queue.** Each socket has one queue with two lanes: control messages (every text message,
 and clipboard bytes) go before video. A window is **behind** by the time its oldest video
 frame that is not acknowledged (queued, or on the way) has waited since it was queued, less
-the floor. More than 1 s behind, the server drops the window's queued video and sends it no
-more frames. Frames already handed to the socket cannot be taken back, so once those are
+the floor. More than 1 s behind with video in its queue, the server drops that video and
+sends it no more frames. Frames already handed to the socket cannot be taken back, so once those are
 acknowledged the window gets a keyframe (the 250 ms keyframe limit applies, and at most one
-such keyframe per monitor per second), and the frames after it. The delay is judged again
-only after that keyframe is acknowledged. A queue over 64 MiB (two of the largest messages)
-closes the socket.
+such keyframe per monitor per second), and the frames after it. Any keyframe (a join, a
+request, a selection change, a resync) is not judged from when it is handed to the socket
+until it is acknowledged, so a slow keyframe does not start a resync. While it still waits
+in the queue (for example behind a large clipboard message) it is judged as usual: more than
+1 s behind drops the whole video lane, keyframe included. A queue over 64 MiB (two of the
+largest messages) closes the socket.
+
+**Encode only when there is room.** A captured frame goes into the monitor's encoder only
+when every window of that monitor has room: at most one frame waits in its video lane, and it
+is at most the floor plus 100 ms behind (so its oldest frame on the way has been out at most
+two round trips and 100 ms: acknowledgements come up to 50 ms late, and TCP needs about one
+round trip to repair a lost packet). Else the server keeps only the newest captured frame and
+encodes it at the next captured frame or `ack` that finds room, or when a window leaves. A
+held frame waits at most 100 ms while every window is less than 1 s behind (at least 10
+frames per second), and nothing is held while a keyframe is on the way to a window: a held
+frame covers more motion, and on scrolling text a frame that covers twice the motion costs
+more than twice the bytes. A window waiting for its resync does not count either. The floor
+leaves out keyframes and the deltas sent while a keyframe was on the way. On a link slower
+than the video the frame rate falls to what the link carries and no keyframe is needed: a
+frame that was never encoded is not in the reference chain. The slowest window sets the frame
+rate for all windows of the monitor. A window that stops acknowledging holds the others back
+until it is closed (10 s, below). Keyframes are made whatever the room. More than 1 s behind
+with video in the lane is still a resync (above); more than 1 s behind with nothing in the
+lane is not, since the server's own queue is empty and the next frame can be a delta.
 
 **Timeouts.** A socket with video frames on the way and no `ack` that moves for 10 s is
 closed: the browser stopped reading. One send has no time limit, so a large clipboard message
-on a slow link does not close a socket that works. The server sends a ping every 5 s. A
+on a slow link does not close a socket that works. The other way it still can: a large
+clipboard message from the browser on a slow uplink arrives as one message, and the socket
+is closed when nothing complete arrives for 10 s (clipboard data in pieces is row V2 of
+[WEB-VIEWER-WAN-SCOPE.md](WEB-VIEWER-WAN-SCOPE.md)). The server sends a ping every 5 s. A
 socket that receives nothing (pongs and acks included) for 10 s is closed. The browser then
 reconnects and is primed again. One WebSocket message may be up to 32 MiB (a clipboard
 image).
@@ -158,7 +184,8 @@ MCP-driven move) the viewer snaps the drawn remote cursor and **ignores local mo
 **Frame-rate test.** `rmng-fps` ([rmng-fps.rs](../crates/control-client/src/bin/rmng-fps.rs))
 connects to `/api/viewer` like a viewer window and prints once a second how many frames,
 keyframes and megabits arrived, and the delay (the median `echo` time). It does not decode.
-It sends `ack` as a window does, so the server's log has the video's own delay.
+It sends `ack` as a window does, so the server's log has the video's own delay (the `echo`
+answer goes ahead of the video, so its time is not the video's delay).
 Given a number of seconds, it stops after them and prints a summary. When the server closes
 the socket, it connects again after 1 s, as a window does. The test bench uses it
 ([WAN-BENCH.md](WAN-BENCH.md)).
