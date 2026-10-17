@@ -16,8 +16,9 @@ wire.workspace = true
 # builds + runs on the GPU host, so these are unconditional.
 media.workspace = true
 gstreamer = "0.23"
-nix = { version = "0.29", features = ["fs", "mount", "sched"] }
-# Overlay mounts for per-clone homes (src/home_overlay.rs) via nix::mount.
+nix = { version = "0.29", features = ["fs", "mount", "net", "sched"] }
+# Overlay mounts for per-clone homes (src/home_overlay.rs) via nix::mount; `net` for
+# TCP_CONGESTION on the web port's listener (src/web.rs `use_bbr`).
 # Raw `open_tree`/`move_mount`/`setns` for the shared-folder reconciler (src/shared.rs).
 # nix 0.29 wraps neither of the two new mount syscalls, so those go through `libc::syscall`.
 libc = "0.2"

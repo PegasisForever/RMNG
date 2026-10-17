@@ -31,7 +31,7 @@ clone-daemon ──dmabuf────┤                                        
    low-latency (no B-frames, small/zero GOP, CQP/CBR as tuned in Phase 0),
    **force-IDR on demand**. One encoder per monitor of the selected clone. Emit Annex-B
    access units tagged `{monitor_id, idr}` for the browser viewer protocol (`wire::browser`).
-   - The stream is `constrained-baseline` with `aud=true`, `key-int-max` short for fast reconnect, and ample decoder/encoder
+   - The stream is `constrained-baseline` with `aud=true`, `key-int-max` at its highest (1024: keyframes come on demand, a reconnect asks for one), and ample decoder/encoder
      surface headroom (the large-window 60fps cap was decoder surface starvation).
    - **Colour**: pin `colorimetry=2:3:0:0` on the NV12 caps (limited range, BT.709 matrix,
      transfer left unset). The encoder writes no VUI colour description, so the viewer has to

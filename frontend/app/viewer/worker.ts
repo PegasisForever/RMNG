@@ -101,8 +101,8 @@ function onVideo(buf: ArrayBuffer) {
     if (c && c !== codec) configure(c);
   }
   if (!codec) return; // a keyframe without an SPS before any with one: wait for the next
-  // Never drop the keyframe itself: it is the frame that ends the wait. Ask for one, or a
-  // still screen would stay stale until the encoder's next periodic keyframe.
+  // Never drop the keyframe itself: it is the frame that ends the wait. Ask for one: the
+  // server sends keyframes only on request.
   if (!h.key && decoder!.decodeQueueSize > DECODE_BACKLOG_MAX) {
     waitKey = true;
     requestKeyframe();

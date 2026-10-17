@@ -98,6 +98,8 @@ pub enum ToBrowser {
     Cursor(CursorMeta),
     Clipboard(ClipboardMsg),
     TermData(TermData),
+    /// The answer to [`FromBrowser::Echo`], with the same `id`.
+    Echo { id: u32 },
 }
 
 /// Browser → server, as a JSON text message.
@@ -112,6 +114,10 @@ pub enum FromBrowser {
     TermNewSession,
     /// Encode the monitor's next frame as a keyframe: at connect, and after a decode error.
     RequestKeyframe(RequestKeyframe),
+    /// Answered with [`ToBrowser::Echo`] through the same queue as the video, so the time to
+    /// the answer includes the wait in that queue and in the kernel send buffer. `rmng-fps`
+    /// measures the delay with it; the viewer does not send it.
+    Echo { id: u32 },
 }
 
 /// Browser → server: encode the monitor's next frame as a keyframe.
@@ -277,5 +283,11 @@ mod tests {
         );
         let new: FromBrowser = serde_json::from_str(r#"{"t":"term_new_session"}"#).unwrap();
         assert_eq!(new, FromBrowser::TermNewSession);
+        let echo: FromBrowser = serde_json::from_str(r#"{"t":"echo","id":7}"#).unwrap();
+        assert_eq!(echo, FromBrowser::Echo { id: 7 });
+        assert_eq!(
+            serde_json::to_string(&ToBrowser::Echo { id: 7 }).unwrap(),
+            r#"{"t":"echo","id":7}"#
+        );
     }
 }

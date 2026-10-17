@@ -146,16 +146,47 @@ pub async fn serve(app: App) -> anyhow::Result<()> {
     let router = router(app);
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    use_bbr(&listener);
     tracing::info!("web API + SSE + static + viewer on http://{addr}");
     // `with_connect_info` is what puts the peer address in reach of a handler, and
     // [`caller_clone`] needs it: a clone's address on the rmng bridge is the one thing about
     // the caller that Docker assigns and nothing inside the clone can restate.
+    // No Nagle: the end of a video frame and a small message (cursor, clipboard offer) would
+    // otherwise wait up to one round trip for the browser's acknowledgement.
     axum::serve(
         listener,
         router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .tcp_nodelay(true)
     .await?;
     Ok(())
+}
+
+/// BBR congestion control for the web port when the kernel has it loaded (`tcp_bbr`), else the
+/// kernel's default. CUBIC cuts its rate hard at each random loss (Wi-Fi, a phone) and fills
+/// the buffers on the path, which delays the viewer's video. Accepted sockets take the
+/// listener's algorithm. Logs the one in use.
+///
+/// Only a loaded one: asking for one that is not makes the kernel load its module on the host,
+/// because the server runs privileged. Loading it is the host owner's decision.
+fn use_bbr(listener: &tokio::net::TcpListener) {
+    use nix::sys::socket::{getsockopt, setsockopt, sockopt::TcpCongestion};
+    let available =
+        std::fs::read_to_string("/proc/sys/net/ipv4/tcp_available_congestion_control")
+            .unwrap_or_default();
+    if available.split_whitespace().any(|a| a == "bbr") {
+        if let Err(e) = setsockopt(listener, TcpCongestion, &"bbr".into()) {
+            tracing::warn!("web port: setting TCP congestion control bbr: {e}");
+        }
+    }
+    match getsockopt(listener, TcpCongestion) {
+        Ok(a) => tracing::info!(
+            "web port TCP congestion control: {} (available: {})",
+            a.to_string_lossy().trim_end_matches('\0'),
+            available.trim()
+        ),
+        Err(e) => tracing::warn!("web port TCP congestion control: {e}"),
+    }
 }
 
 /// `GET /events` — five multiplexed streams on one connection:

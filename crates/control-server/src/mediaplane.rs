@@ -16,6 +16,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast::error::RecvError;
 
@@ -212,6 +213,8 @@ pub struct MediaHandle {
     /// What we last told each clone about whether anyone is watching it, so a selection
     /// change sends one message to the two clones it concerns instead of to the fleet.
     capture_gate: Mutex<HashMap<String, bool>>,
+    /// monitor_id → its forced keyframes, for [`KEYFRAME_GAP`].
+    keyframes: Mutex<HashMap<u32, KeyGate>>,
     /// Set once by [`spawn`]; the browser viewer's WebSocket joins through it. Unset when
     /// media init failed, and then there is no video to watch.
     pub(crate) plane: OnceLock<Arc<Plane>>,
@@ -639,21 +642,6 @@ fn broker_data(handle: &MediaHandle, viewers: &Viewers, data: ClipboardData) {
     }
 }
 
-fn force_idr_all(encoders: &Encoders) {
-    // Snapshot the handles, then release the lock before touching GStreamer: `force_idr`
-    // pushes an event into the pipeline and can block on its streaming thread. Holding the
-    // global map across that would stall every clone's reader thread (see `encoder_for`).
-    let snapshot: Vec<Arc<Encoder>> = encoders
-        .lock()
-        .unwrap()
-        .values()
-        .map(|(e, _, _)| e.clone())
-        .collect();
-    for e in snapshot {
-        e.force_idr();
-    }
-}
-
 /// Get-or-create the encoder for a monitor at `w`×`h`; its AUs go to the viewers of
 /// `monitor_id`. If an encoder exists at a different
 /// resolution it is rebuilt fresh.
@@ -668,7 +656,7 @@ fn encoder_for(
     // A stale-size entry is REMOVED here and shut down below, outside the lock:
     // dropping it in the map would destroy a PLAYING pipeline under the global
     // lock (`set_state(NULL)` blocks on the streaming threads) and stall every
-    // clone's reader thread — the same rule `force_idr_all` documents.
+    // clone's reader thread — the same rule `encode_keyframe` documents.
     let stale: Option<Arc<Encoder>> = {
         let mut map = encoders.lock().unwrap();
         match map.get(&monitor_id) {
@@ -898,25 +886,91 @@ fn cached_cursors(handle: &MediaHandle, sel: &str) -> Vec<CursorMeta> {
         .unwrap_or_default()
 }
 
-/// Prime a viewer's video: force a shared keyframe and re-encode the selected clone's last
-/// frame of `monitor` so it paints at once even on a static, damage-driven desktop. The
-/// re-encode BROADCASTS via the shared encoder (existing
-/// viewers get one redundant keyframe per join — negligible), so the caller must
-/// register the new viewer in `viewers` before calling this — otherwise the new
-/// viewer's own first keyframe would depend on beating the encode (ms) against the
-/// registry insert (µs), a latent race. (`force_idr` only forces the *next* pushed
-/// frame to be a keyframe; it does not retroactively mark frames already encoded.)
-fn prime_viewer_video(
-    handle: &MediaHandle,
-    encoders: &Encoders,
-    viewers: &Viewers,
-    selected: Option<String>,
-    monitor: u32,
-) {
-    let Some(sel) = selected else { return };
-    // Re-encode the monitor's latest frame (broadcasts via the shared encoder). The `latest`
-    // lock is released at the end of this statement, before any encode.
-    let frame = handle
+/// Forced keyframes of one monitor are at least this far apart. Each one goes to every viewer
+/// of the monitor and is many times the size of a normal frame, so a burst of requests
+/// (windows that reconnect together, a decoder that keeps failing) would fill a slow link.
+const KEYFRAME_GAP: Duration = Duration::from_millis(250);
+
+/// One monitor's forced keyframes: when the last one was made, and whether the next one is
+/// already waiting for the end of the gap.
+#[derive(Default)]
+struct KeyGate {
+    last: Option<Instant>,
+    waiting: bool,
+}
+
+/// What [`keyframe_gate`] decides for one request.
+#[derive(Debug, PartialEq)]
+enum Keyframe {
+    Now,
+    /// Make it after this wait, at the end of the gap.
+    After(Duration),
+    /// One is already waiting for the end of the gap, and it serves this request too.
+    Waiting,
+}
+
+/// Decide a keyframe request for `monitor` at `now`. A request inside the gap is deferred, not
+/// dropped: a window that joins inside it still needs its keyframe.
+fn keyframe_gate(gates: &Mutex<HashMap<u32, KeyGate>>, monitor: u32, now: Instant) -> Keyframe {
+    let mut gates = gates.lock().unwrap();
+    let g = gates.entry(monitor).or_default();
+    if g.waiting {
+        return Keyframe::Waiting;
+    }
+    match g.last {
+        Some(last) if now < last + KEYFRAME_GAP => {
+            g.waiting = true;
+            Keyframe::After(last + KEYFRAME_GAP - now)
+        }
+        _ => {
+            g.last = Some(now);
+            Keyframe::Now
+        }
+    }
+}
+
+/// The deferred keyframe of `monitor` is being made at `now`.
+fn keyframe_made(gates: &Mutex<HashMap<u32, KeyGate>>, monitor: u32, now: Instant) {
+    let mut gates = gates.lock().unwrap();
+    let g = gates.entry(monitor).or_default();
+    g.last = Some(now);
+    g.waiting = false;
+}
+
+/// Prime a viewer's video: a keyframe of the selected clone's last frame of `monitor`, so it
+/// paints at once even on a static, damage-driven desktop. Keyframes come only on demand, so
+/// every window that needs one comes here: a join, a decode error or backlog, a selection
+/// change. At most one per [`KEYFRAME_GAP`]; a request inside the gap gets the keyframe at
+/// its end. The keyframe goes to every viewer of the monitor (the encoder is shared), so the
+/// caller must register a new viewer in `viewers` before calling this.
+fn prime_viewer_video(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
+    match keyframe_gate(&app.media.keyframes, monitor, Instant::now()) {
+        Keyframe::Now => encode_keyframe(app, encoders, viewers, monitor),
+        Keyframe::Waiting => {}
+        Keyframe::After(wait) => {
+            let (app, encoders, viewers) = (app.clone(), encoders.clone(), viewers.clone());
+            std::thread::spawn(move || {
+                std::thread::sleep(wait);
+                keyframe_made(&app.media.keyframes, monitor, Instant::now());
+                encode_keyframe(&app, &encoders, &viewers, monitor);
+            });
+        }
+    }
+}
+
+/// Force a keyframe on `monitor`'s encoder and re-encode the selected clone's last frame of it.
+/// The new viewer must already be in `viewers`, or its first keyframe would depend on beating
+/// the encode (ms) against the registry insert (µs). (`force_idr` only forces the *next*
+/// pushed frame to be a keyframe; it does not retroactively mark frames already encoded.)
+///
+/// `force_idr` pushes an event into the pipeline and can block on its streaming thread, so it
+/// never runs under the encoder map's lock: holding the global map across it would stall
+/// every clone's reader thread (see `encoder_for`).
+fn encode_keyframe(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
+    let Some(sel) = app.store.selected() else { return };
+    // The `latest` lock is released at the end of this statement, before any encode.
+    let frame = app
+        .media
         .latest
         .lock()
         .unwrap()
@@ -924,9 +978,8 @@ fn prime_viewer_video(
         .and_then(|m| m.get(&monitor))
         .and_then(LatestFrame::dup);
     let Some(f) = frame else {
-        // No stored frame, but an encoder may already be running: ask it for a keyframe, or
-        // a joining window waits for a periodic one that a still screen never brings. Clone
-        // the handle out first; `force_idr` must not run under the map lock (`force_idr_all`).
+        // No stored frame, but an encoder may already be running: ask it for a keyframe from
+        // the next frame, or a joining window never gets one. Clone the handle out first.
         let enc = encoders.lock().unwrap().get(&monitor).map(|(e, _, _)| e.clone());
         if let Some(enc) = enc {
             enc.force_idr();
@@ -986,8 +1039,8 @@ fn adopt_selection(
     true
 }
 
-/// Re-prime ALL viewers after a selection change: force fresh keyframes + rebroadcast
-/// the newly-selected clone's view spec / cursor / last frame to everyone.
+/// Re-prime ALL viewers after a selection change: rebroadcast the newly-selected clone's view
+/// spec and cursor, and a keyframe of its last frame on every monitor.
 fn reprime_all(
     handle: &MediaHandle,
     encoders: &Encoders,
@@ -995,7 +1048,6 @@ fn reprime_all(
     app: &App,
     selected: Option<String>,
 ) {
-    force_idr_all(encoders);
     let Some(sel) = selected else {
         // Nothing selected: clear every viewer's window set.
         broadcast(viewers, &ToBrowser::ViewSpec(empty_view_spec()));
@@ -1009,18 +1061,16 @@ fn reprime_all(
     for c in cached_cursors(handle, &sel) {
         broadcast(viewers, &ToBrowser::Cursor(c));
     }
-    // Copy the frames out first: the `latest` lock is never held across an encode.
-    let frames: Vec<(u32, LatestFrame)> = handle
-        .latest
-        .lock()
-        .unwrap()
-        .get(&sel)
-        .map(|m| m.iter().filter_map(|(mid, f)| Some((*mid, f.dup()?))).collect())
-        .unwrap_or_default();
-    for (mid, f) in frames {
-        if let Some(enc) = encoder_for(encoders, viewers, mid, f.width, f.height) {
-            f.push_to(&enc).ok();
-        }
+    // Every running encoder, and every monitor the new clone has a frame of. Copied out first:
+    // neither lock is held across an encode.
+    let mut monitors: Vec<u32> = encoders.lock().unwrap().keys().copied().collect();
+    if let Some(m) = handle.latest.lock().unwrap().get(&sel) {
+        monitors.extend(m.keys());
+    }
+    monitors.sort_unstable();
+    monitors.dedup();
+    for mid in monitors {
+        prime_viewer_video(app, encoders, viewers, mid);
     }
 }
 
@@ -1267,7 +1317,7 @@ pub(crate) fn join_viewer(
     // behind the primed one.
     update_capture_gates(handle, app, &plane.viewers);
     // Only its own monitor, so it does not re-key the other windows.
-    prime_viewer_video(handle, &plane.encoders, &plane.viewers, selected, monitor);
+    prime_viewer_video(app, &plane.encoders, &plane.viewers, monitor);
     // If the selected clone is headless, activate its tmux view and prime this
     // viewer with the current session list.
     plane.termplane.on_viewers_changed();
@@ -1308,13 +1358,11 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
         FromBrowser::TermNewSession => plane.termplane.new_session(),
         // Re-encode the monitor's last frame as a keyframe, as a join does: on a still
         // desktop no new frame may come for a long time.
-        FromBrowser::RequestKeyframe(r) => prime_viewer_video(
-            handle,
-            &plane.encoders,
-            viewers,
-            app.store.selected(),
-            r.monitor_id,
-        ),
+        FromBrowser::RequestKeyframe(r) => {
+            prime_viewer_video(app, &plane.encoders, viewers, r.monitor_id)
+        }
+        // Back through this viewer's own queue, behind any video waiting there.
+        FromBrowser::Echo { id: n } => send_to(viewers, id, Queued::of(&ToBrowser::Echo { id: n })),
     }
 }
 
@@ -1646,6 +1694,25 @@ mod tests {
             "Ack must precede enc.push in the frame arm: acking after the encode makes the \
              daemon's flow-control gate depend on encoder progress and wedges the socket"
         );
+    }
+
+    /// Keyframes of one monitor are at least `KEYFRAME_GAP` apart. A request inside the gap is
+    /// deferred to its end, never dropped, and further requests join the deferred one.
+    #[test]
+    fn keyframe_requests_inside_the_gap_wait_for_its_end() {
+        let gates = Mutex::new(HashMap::new());
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        assert_eq!(keyframe_gate(&gates, 0, t0), Keyframe::Now);
+        // Another monitor has its own gap.
+        assert_eq!(keyframe_gate(&gates, 1, t0), Keyframe::Now);
+        assert_eq!(keyframe_gate(&gates, 0, t0 + ms(100)), Keyframe::After(ms(150)));
+        assert_eq!(keyframe_gate(&gates, 0, t0 + ms(200)), Keyframe::Waiting);
+        // The deferred one is made at the end of the gap and starts the next gap.
+        keyframe_made(&gates, 0, t0 + ms(250));
+        assert_eq!(keyframe_gate(&gates, 0, t0 + ms(300)), Keyframe::After(ms(200)));
+        keyframe_made(&gates, 0, t0 + ms(500));
+        assert_eq!(keyframe_gate(&gates, 0, t0 + ms(750)), Keyframe::Now);
     }
 
     #[test]

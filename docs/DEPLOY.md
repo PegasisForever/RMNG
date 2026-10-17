@@ -599,6 +599,28 @@ the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no 
   `/srv/rmng-sock`; the server `chmod 0777`s the socket so a different-uid clone-daemon can
   connect. See [PROTOCOL.md](PROTOCOL.md).
 
+## The viewer off the LAN: check the Tailscale path
+
+Tailscale sends the traffic straight between two machines when it can. When it cannot (for
+example, a strict NAT or firewall on one side), the traffic goes through a DERP relay server.
+A relay adds delay and gives much less bandwidth, so the viewer is slow even on a fast link.
+
+Check the path from the machine you view from. `<machine>` is the machine that runs
+`tailscale serve` for port 9000.
+
+```sh
+tailscale ping <machine>
+# pong from <machine> (100.x.y.z) via DERP(fra) in 80ms     ← relay
+# pong from <machine> (100.x.y.z) via 203.0.113.5:41641 in 12ms   ← direct
+tailscale status
+# the line of <machine> says "direct 203.0.113.5:41641" or "relay \"fra\""
+```
+
+`tailscale ping` also tries to make a direct path, so the first replies can come through DERP
+and the next ones directly. If the path stays on DERP, run `tailscale netcheck` on both
+machines: `UDP: false` means a firewall blocks UDP; `MappingVariesByDestIP: true` means a hard
+NAT. Let UDP out on both sides, or open UDP port 41641 to the server machine.
+
 ## Patched gnome-shell
 
 The clone-daemon needs two gnome-shell patches: **shell-01** (hide the screen-sharing pill

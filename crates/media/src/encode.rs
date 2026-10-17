@@ -62,7 +62,12 @@ const ENC_COLORIMETRY: &str = "2:3:0:0";
 /// `target-usage=1` is deliberate and **counterintuitive**: on this AMD VCN the usage mapping is
 /// effectively inverted — `tu=1` (the "quality" preset) encodes faster than `tu=7` (the "speed"
 /// preset).
-const ENC_TAIL: &str = "vah264enc name=enc aud=true b-frames=0 ref-frames=1 key-int-max=30 \
+///
+/// Keyframes come on demand ([`Encoder::force_idr`]: a window joins, a decoder fails or falls
+/// behind, the selection moves), so the periodic one is pushed as far out as `vah264enc` goes:
+/// `key-int-max` is 0–1024, and 0 means "auto", about one per second. 1024 frames is 17 s of
+/// motion at 60 fps; a still screen sends no frames at all.
+const ENC_TAIL: &str = "vah264enc name=enc aud=true b-frames=0 ref-frames=1 key-int-max=1024 \
        rate-control=cqp qpi=23 qpp=25 target-usage=1 ! \
      video/x-h264,profile=constrained-baseline ! \
      h264parse config-interval=-1 ! \

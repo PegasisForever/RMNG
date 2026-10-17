@@ -8,4 +8,4 @@ import type { ViewSpec } from "./ViewSpec";
 /**
  * Server → browser, as a JSON text message.
  */
-export type ToBrowser = { "t": "version", build_id: string, } | { "t": "scroll", mode: ScrollMode, speed: number, } | { "t": "view_spec" } & ViewSpec | { "t": "cursor" } & CursorMeta | { "t": "clipboard" } & ClipboardMsg | { "t": "term_data" } & TermData;
+export type ToBrowser = { "t": "version", build_id: string, } | { "t": "scroll", mode: ScrollMode, speed: number, } | { "t": "view_spec" } & ViewSpec | { "t": "cursor" } & CursorMeta | { "t": "clipboard" } & ClipboardMsg | { "t": "term_data" } & TermData | { "t": "echo", id: number, };

@@ -66,6 +66,7 @@ as raw bytes, not as base64 in JSON (`encode_clipboard_data` / `decode_clipboard
 | `cursor` | `CursorMeta` | The remote cursor (position, shape on change, `warp`). Each window uses the messages for its own `monitor_id`. |
 | `clipboard` | `ClipboardMsg` (`k`: `offer` / `request`) | The clipboard broker. `data` never goes as JSON; it is a binary message. |
 | `term_data` | `TermData {session, data /* b64 */}` | Terminal output of one tmux session. |
+| `echo` | `{id}` | The answer to the browser's `echo`, with the same `id`. |
 
 `FromBrowser` (browser → server):
 
@@ -76,11 +77,21 @@ as raw bytes, not as base64 in JSON (`encode_clipboard_data` / `decode_clipboard
 | `term_input` | `TermInput {session, data /* b64 */}` | Keys or pasted bytes for one tmux session. |
 | `term_resize` | `TermResize {cols, rows}` | The terminal size. Every session is resized to it. |
 | `term_new_session` | — | Make a new tmux session (the "+" tab). |
-| `request_keyframe` | `RequestKeyframe {monitor_id}` | Re-encode the monitor's last frame as a keyframe: at connect and after a decode error. |
+| `request_keyframe` | `RequestKeyframe {monitor_id}` | Re-encode the monitor's last frame as a keyframe: after a decode error, or when the decoder falls behind. |
+| `echo` | `{id}` (u32) | The server answers with `echo` and the same `id`, through this socket's queue, behind the video that waits there. The time to the answer is the round trip plus that wait and the wait in the kernel send buffer. `rmng-fps` uses it; the viewer does not send it. |
 
 **Connect.** The server queues the view spec, the last cursor of each monitor and the
 current clipboard offer, then re-encodes the last frame of this monitor as a keyframe. A
 selection change sends a new view spec, the cursors and a keyframe to every window.
+
+**Keyframes** come only on demand: a join, `request_keyframe`, a selection change. The
+encoder adds a periodic one only after 1024 frames (`key-int-max`, its highest value). A
+keyframe goes to every window of that monitor, so the server makes at most one per monitor
+per 250 ms. A request inside that time is not dropped: it gets its keyframe at the end of it.
+
+**Socket options.** Port 9000 turns off Nagle's algorithm (`TCP_NODELAY`) and uses BBR
+congestion control when the kernel has it (`tcp_bbr`), else the kernel's default. The log
+says which one at start (`web port TCP congestion control: …`).
 
 **Queue and timeouts.** Each socket has a queue of 128 messages. When the queue is full
 (the browser does not read fast enough), the server closes the socket. The browser then
@@ -120,7 +131,10 @@ MCP-driven move) the viewer snaps the drawn remote cursor and **ignores local mo
 
 **Frame-rate test.** `rmng-fps` ([rmng-fps.rs](../crates/control-client/src/bin/rmng-fps.rs))
 connects to `/api/viewer` like a viewer window and prints once a second how many frames,
-keyframes and megabits arrived. It does not decode.
+keyframes and megabits arrived, and the delay (the median `echo` time). It does not decode.
+Given a number of seconds, it stops after them and prints a summary. When the server closes
+the socket, it connects again after 1 s, as a window does. The test bench uses it
+([WAN-BENCH.md](WAN-BENCH.md)).
 
 ---
 
