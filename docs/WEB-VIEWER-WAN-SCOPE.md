@@ -37,6 +37,23 @@ What already works well off the LAN:
 - **Cursor drawn locally.** The cursor is a CSS cursor in the browser, so it moves at local speed whatever the delay.
 - **Separate upload.** File upload uses its own HTTP connection, not the video socket.
 
+## Finding after round 1: the off-LAN path goes through `tailscale serve`
+
+Off the LAN, the operators open the viewer through `tailscale serve` on the CT (`https://<ct>.<tailnet>.ts.net`,
+proxied to `http://127.0.0.1:9000`). CT 204, CT 205 and CT 206 all do this. The browser's TCP connection ends in
+`tailscaled`, and `tailscaled` opens a second connection to port 9000. So:
+
+- Socket options on port 9000 (L1 Nagle off, L2 small send buffer, L3 BBR) act only on the local hop. They help on
+  the LAN and on a direct connection, but not on the internet hop.
+- The kernel queue of our socket (Q1) drains at once into `tailscaled`'s own buffers. A slow link shows there only
+  after those buffers are full, which can be seconds.
+- The only signal that sees the whole path is an acknowledgement from the browser (R2). Selkies uses the same
+  signal, and it works behind any proxy.
+
+Changes to the rows: R2 moves into round 2. Q1 and Q4 use the acknowledgements, and the kernel queue is only an extra
+signal. R1 waits for the acknowledgements. The bench (S1) puts a proxy on CT 101 in front of port 9000 and slows the
+proxy's port, as `tailscale serve` does.
+
 ## How Selkies handles a slow link (short summary)
 
 Selkies uses one WebSocket for everything, as we do. In WebSocket mode it adds four automatic controls, all on by
@@ -129,10 +146,10 @@ Same as [WEB-VIEWER-SCOPE.md](WEB-VIEWER-SCOPE.md):
 
 | ID | Feature | Proposed | Effort | How | Notes | Decision |
 |---|---|---|---|---|---|---|
-| Q1 | Measure how far each viewer is behind: bytes in our queue + unsent bytes in the kernel (`SIOCOUTQNSD`), and the age of the oldest queued frame | Yes | S | R | Needed by Q3, R1 and D4. Selkies uses the same kernel number. | Yes |
+| Q1 | Measure how far each viewer is behind: frames sent and not yet acknowledged (R2), beyond the round-trip floor; plus bytes in our queue and unsent bytes in the kernel (`SIOCOUTQNSD`) as an extra signal | Yes | S | R | Needed by Q3, R1 and D4. Selkies uses the same kernel number. | Yes |
 | Q2 | Control messages go before video in the queue (cursor, `view_spec`, clipboard offer, `version`, `scroll`) | Yes | S | K | Today one queue holds everything in order of arrival. A queued frame cannot be taken back once written, so this works only together with L2. | Yes |
 | Q3 | Replace the "128 messages, then close" rule (A1 in the old scope) with a budget in time: when a viewer is more than about 1 s behind, drop its queued frames, keep the socket, and send it a keyframe | Yes | M | R | This changes A1. With R1 in place, this happens only after a sudden drop of the link. The keyframe goes to all viewers of that monitor, because they share one encoder. Limit it to one keyframe per second. | Yes |
-| Q4 | Close a socket only when TCP makes no progress for 10 s, instead of when one write takes 10 s | Yes | S | R | Selkies reads `tcpi_bytes_acked` from `TCP_INFO`. Today a big clipboard message on a slow link closes a socket that still works. | Yes |
+| Q4 | Close a socket only when it makes no progress for 10 s (no acknowledgement from the browser, R2), instead of when one write takes 10 s | Yes | S | R | Selkies reads `tcpi_bytes_acked` from `TCP_INFO`. Today a big clipboard message on a slow link closes a socket that still works. | Yes |
 
 ## R. Rate: how much the encoder sends
 
@@ -206,7 +223,7 @@ keyframe with our encoder.
 
 ## Implementation rounds
 
-**Status: not started.**
+**Status: round 1 is done (`4ea09ac`).**
 
 Work happens on `main`. Each round is one worker agent, then one reviewer agent that checks correctness and
 over-engineering. The orchestrator commits the worker's result, and the reviewer's findings go into the next
@@ -218,7 +235,7 @@ Each round is measured on the test bench (S1), off the LAN and on the LAN.
 | Round | Content | Rows |
 |---|---|---|
 | 1 | **Test bench and quick fixes.** Measure today's behaviour first, then turn off Nagle, use BBR, send keyframes only on demand, and limit keyframe requests. | S1, L1, L3, K1, K2, Z3 |
-| 2 | **Queue.** Small kernel buffer, measure how far each viewer is behind, control messages first, drop and resync instead of close, close only when stuck. | L2, Q1–Q4 |
+| 2 | **Acknowledgements and queue.** Frame acknowledgements, small kernel buffer, measure how far each viewer is behind, control messages first, drop and resync instead of close, close only when stuck. A proxy hop in the bench. | R2, L2, Q1–Q4 |
 | 3 | **Encode only when there is room.** | R1 |
 | 4 | **Side traffic and browser.** Cursor only to its window, clipboard in pieces, keyframe flush in the browser, faster reconnect, compressed frontend files. | V1, V2, K3, D2, Z1 |
-| 5 | **Automatic bitrate.** Acknowledgements, CBR or VBR with a highest QP, congestion control that acts only after R1 holds the frame rate low. | R2, R4, R5 |
+| 5 | **Automatic bitrate.** CBR or VBR with a highest QP, congestion control that acts only after R1 holds the frame rate low. | R4, R5 |
