@@ -118,11 +118,12 @@ async fn main() -> Result<()> {
                     if acked.is_some_and(|(s, t)| s == seq && t.elapsed() < ACK_HEARTBEAT) {
                         continue;
                     }
-                    // No clipboard comes here, so `clip` stays 0.
+                    // No clipboard comes here and nothing is decoded.
                     let msg = serde_json::to_string(&FromBrowser::Ack {
                         seq,
                         held_ms,
                         clip: 0,
+                        decoding: 0,
                     })?;
                     let _ = sink.send(Message::Text(msg)).await;
                     acked = Some((seq, Instant::now()));

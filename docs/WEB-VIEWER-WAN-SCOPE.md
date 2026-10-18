@@ -223,7 +223,7 @@ keyframe with our encoder.
 
 ## Implementation rounds
 
-**Status: rounds 1–5 are done.**
+**Status: rounds 1–6 are done.**
 
 Work happens on `main`. Each round is one worker agent, then one reviewer agent that checks correctness and
 over-engineering. The orchestrator commits the worker's result, and the reviewer's findings go into the next
@@ -239,3 +239,4 @@ Each round is measured on the test bench (S1), off the LAN and on the LAN.
 | 3 | **Encode only when there is room.** | R1 |
 | 4 | **Side traffic and browser.** Cursor only to its window, clipboard in pieces, keyframe flush in the browser, faster reconnect, compressed frontend files. | V1, V2, K3, D2, Z1 |
 | 5 | **Automatic bitrate.** CBR or VBR with a highest QP, congestion control that acts only after R1 holds the frame rate low. | R4, R5 |
+| 6 | **Fixes from review 5, and a clean round-trip floor.** | R1, R4 |

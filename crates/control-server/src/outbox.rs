@@ -4,14 +4,15 @@
 //!   never waits behind queued frames. Then video, then clipboard replies, cut into pieces
 //!   ([`wire::browser::CLIPBOARD_PIECE_BYTES`]) as they go: a piece goes only when no video
 //!   waits, the viewer has room as for a frame ([`State::may_send`]), and the bytes on the way
-//!   stay within what the path delivers in [`CLIP_WINDOW`] (at least one piece), so a large
-//!   copy holds video back by about that long. The writer ([`crate::webviewer`]) takes from
-//!   [`Outbox::next`], which stamps each video frame as it hands it to the socket.
+//!   stay within what the path delivers in one floor and [`CLIP_WINDOW`] (at least one piece),
+//!   so a large copy holds video back by about [`CLIP_WINDOW`]. The writer
+//!   ([`crate::webviewer`]) takes from [`Outbox::next`], which stamps each video frame as it
+//!   hands it to the socket.
 //! - **Acknowledgements.** The browser sends the newest frame it decoded, how long it held
 //!   that number, and how many clipboard pieces arrived ([`wire::browser::FromBrowser::Ack`]).
 //!   Each one gives a round trip (from the stamp, less the hold) and a floor (the lowest round
-//!   trip of the last 1–2 minutes, of deltas sent while no keyframe was out), and ends the
-//!   frames it covers. The bytes they end give the delivered rate ([`Meter`]).
+//!   trip of the last 1–2 minutes, of deltas sent with no keyframe and no queue in front of them,
+//!   [`State::clean`]), and ends the frames it covers. The bytes they end give the delivered rate ([`Meter`]).
 //! - **Behind** ([`State::behind`]): how long the oldest video frame that is not acknowledged
 //!   (queued here or on the way) has waited since it was queued, less the floor. One number
 //!   for our queue, the kernel's, any proxy's, the path's and the browser's decoder.
@@ -59,11 +60,20 @@ const MAX_HOLD: Duration = Duration::from_millis(100);
 /// The debug summary comes at most this often.
 const LOG_EVERY: Duration = Duration::from_secs(5);
 /// Clipboard pieces on the way (with the video on the way) stay within what the path
-/// delivered in this long, so the video behind them waits about this long at most. At least one
-/// piece is always allowed; on the LAN the window is megabytes.
+/// delivered in one floor and this long: the path holds one floor of it, so the video behind
+/// them waits about this long at most. At least one piece is always allowed; on the LAN the
+/// window is megabytes.
 const CLIP_WINDOW: Duration = Duration::from_millis(100);
+/// A delta's round trip counts for the floor only when it is at most this long of the path's
+/// rate, and it and what was on the way before it at most one floor and this long
+/// ([`State::clean`]): a round trip behind more has a queue in it, and a large frame is its own
+/// queue. (On the hotspot link the floor came from such round trips, 0.8–2.7 s, one of them a
+/// lone 297 KB delta, and R1 let two floors of frames onto the path.)
+const FLOOR_QUEUE: Duration = Duration::from_millis(100);
 /// The delivered rate is measured over periods of this length.
 const METER_PERIOD: Duration = Duration::from_millis(500);
+/// No acknowledgement ended bytes for this long: the delivered rate is not known.
+const METER_STALE: Duration = Duration::from_secs(2);
 
 pub(crate) struct Outbox {
     state: Mutex<State>,
@@ -105,8 +115,11 @@ struct State {
     progress_at: Instant,
     floor: Floor,
     meter: Meter,
-    /// Video frames acknowledged since [`Outbox::take_shown`] last took them.
+    /// Since [`Outbox::take_shown`] last took them: the video frames acknowledged, whether a
+    /// keyframe was queued, and the most frames the browser's decoder held.
     shown: u32,
+    key_queued: bool,
+    decoding: u32,
     period: Period,
 }
 
@@ -117,14 +130,47 @@ struct Meter {
     bytes: usize,
     /// Bytes per second; 0 until one period is complete.
     rate: f64,
+    /// When an acknowledgement last ended bytes.
+    at: Option<Instant>,
+    /// The highest rate of two buckets of [`FLOOR_BUCKET`]: about what the path carries, where
+    /// `rate` is only what the screen sent.
+    peak: Peak,
+}
+
+/// The highest rate of two buckets of [`FLOOR_BUCKET`], as [`Floor`] keeps the lowest round trip.
+struct Peak {
+    start: Instant,
+    cur: f64,
+    prev: f64,
+}
+
+impl Peak {
+    fn add(&mut self, rate: f64, now: Instant) {
+        let age = now.saturating_duration_since(self.start);
+        if age >= 2 * FLOOR_BUCKET {
+            (self.prev, self.cur, self.start) = (0.0, 0.0, now);
+        } else if age >= FLOOR_BUCKET {
+            (self.prev, self.cur) = (self.cur, 0.0);
+            self.start += FLOOR_BUCKET;
+        }
+        self.cur = self.cur.max(rate);
+    }
+
+    fn get(&self) -> f64 {
+        self.cur.max(self.prev)
+    }
 }
 
 impl Meter {
     fn add(&mut self, bytes: usize, now: Instant) {
+        if bytes > 0 {
+            self.at = Some(now);
+        }
         self.bytes += bytes;
         let secs = now.saturating_duration_since(self.start).as_secs_f64();
         if secs >= METER_PERIOD.as_secs_f64() {
             self.rate = self.bytes as f64 / secs;
+            self.peak.add(self.rate, now);
             (self.start, self.bytes) = (now, 0);
         }
     }
@@ -229,12 +275,30 @@ impl State {
         self.has_room(now) || (held >= MAX_HOLD && self.behind(now) <= BEHIND_MAX)
     }
 
-    /// Whether a clipboard piece of `len` bytes fits in [`CLIP_WINDOW`] with what is on the way.
+    /// Video and clipboard bytes on the way.
+    fn on_the_way(&self) -> usize {
+        self.in_flight.iter().map(|f| f.len).sum::<usize>() + self.clip_out.iter().sum::<usize>()
+    }
+
+    /// Whether a clipboard piece of `len` bytes fits in one floor and [`CLIP_WINDOW`] with what
+    /// is on the way.
     fn clip_fits(&self, len: usize) -> bool {
-        let out: usize = self.in_flight.iter().map(|f| f.len).sum::<usize>()
-            + self.clip_out.iter().sum::<usize>();
+        let window = self.floor.get().unwrap_or_default() + CLIP_WINDOW;
         self.clip_out.is_empty()
-            || (out + len) as f64 <= self.meter.rate * CLIP_WINDOW.as_secs_f64()
+            || (self.on_the_way() + len) as f64 <= self.meter.rate * window.as_secs_f64()
+    }
+
+    /// Whether a delta of `len` bytes handed to the socket now has no queue in front of it: it
+    /// is at most [`FLOOR_QUEUE`] of the path's rate (the highest delivered of the last 1–2
+    /// minutes), and with the bytes on the way at most one floor and [`FLOOR_QUEUE`] of it (the
+    /// path holds one floor of it without a queue). Not the last delivered rate: that is what
+    /// the screen sent, and on a link with a round trip over [`FLOOR_QUEUE`] the bytes on the
+    /// way are more than [`FLOOR_QUEUE`] of it whenever frames flow.
+    fn clean(&self, len: usize) -> bool {
+        let rate = self.meter.peak.get();
+        let window = self.floor.get().unwrap_or_default() + FLOOR_QUEUE;
+        len as f64 <= rate * FLOOR_QUEUE.as_secs_f64()
+            && (self.on_the_way() + len) as f64 <= rate * window.as_secs_f64()
     }
 
     /// Something is on the way that an acknowledgement must end.
@@ -292,8 +356,16 @@ impl Outbox {
                     start: now,
                     bytes: 0,
                     rate: 0.0,
+                    at: None,
+                    peak: Peak {
+                        start: now,
+                        cur: 0.0,
+                        prev: 0.0,
+                    },
                 },
                 shown: 0,
+                key_queued: false,
+                decoding: 0,
                 period: Period::new(now),
             }),
             ready: Condvar::new(),
@@ -319,6 +391,7 @@ impl Outbox {
             Queued::Video { seq, key, .. } => {
                 if key {
                     st.key_out = Some(seq);
+                    st.key_queued = true;
                 }
                 st.video.push_back((msg, now));
             }
@@ -356,7 +429,7 @@ impl Outbox {
                 if !st.waiting() {
                     st.progress_at = now;
                 }
-                let for_floor = !key && st.key_out.is_none();
+                let for_floor = !key && st.key_out.is_none() && st.clean(n);
                 st.in_flight.push_back(Sent {
                     seq,
                     len: n,
@@ -417,10 +490,11 @@ impl Outbox {
         self.closing.notified().await
     }
 
-    /// The browser decoded every frame up to `seq` and held that number for `held`, and `clip`
-    /// clipboard pieces arrived.
-    pub(crate) fn ack(&self, seq: u32, held: Duration, clip: u32, now: Instant) {
+    /// The browser decoded every frame up to `seq` and held that number for `held`, `clip`
+    /// clipboard pieces arrived, and its decoder holds `decoding` frames.
+    pub(crate) fn ack(&self, seq: u32, held: Duration, clip: u32, decoding: u32, now: Instant) {
         let mut st = self.state.lock().unwrap();
+        st.decoding = st.decoding.max(decoding);
         // The first match. After an encoder restart (a new size) the new encoder counts from 1
         // again, so an older frame on the way can have the same number: then this ends less
         // than it could and the round trip is too long, until the old frames are acknowledged.
@@ -472,17 +546,25 @@ impl Outbox {
     }
 
     /// The bytes per second the acknowledgements ended lately (video and clipboard), or `None`
-    /// before the first measurement. For the automatic bitrate ([`crate::bitrate`]).
-    pub(crate) fn delivered(&self) -> Option<f64> {
-        let rate = self.state.lock().unwrap().meter.rate;
-        (rate > 0.0).then_some(rate)
+    /// before the first measurement and when none ended bytes for [`METER_STALE`]. For the
+    /// automatic bitrate ([`crate::bitrate`]).
+    pub(crate) fn delivered(&self, now: Instant) -> Option<f64> {
+        let m = &self.state.lock().unwrap().meter;
+        let fresh =
+            m.at.is_some_and(|at| now.saturating_duration_since(at) < METER_STALE);
+        (fresh && m.rate > 0.0).then_some(m.rate)
     }
 
-    /// The video frames acknowledged since the last call, and whether a keyframe is queued or on
-    /// the way.
-    pub(crate) fn take_shown(&self) -> (u32, bool) {
+    /// Since the last call: the video frames acknowledged, whether a keyframe was queued or is
+    /// on the way, and the most frames the browser's decoder held.
+    pub(crate) fn take_shown(&self) -> (u32, bool, u32) {
         let mut st = self.state.lock().unwrap();
-        (std::mem::take(&mut st.shown), st.key_out.is_some())
+        let key = std::mem::take(&mut st.key_queued) || st.key_out.is_some();
+        (
+            std::mem::take(&mut st.shown),
+            key,
+            std::mem::take(&mut st.decoding),
+        )
     }
 
     /// A captured frame of this viewer's monitor was replaced before it was encoded.
@@ -563,6 +645,13 @@ mod tests {
         }))
     }
 
+    /// A viewer whose floor is `ms`.
+    fn with_floor(ms: u64) -> Outbox {
+        let o = Outbox::new();
+        o.state.lock().unwrap().floor.cur = Some(Duration::from_millis(ms));
+        o
+    }
+
     /// The writer's next message, which must be there already.
     fn take(o: &Outbox) -> Queued {
         match o.next(Duration::ZERO) {
@@ -617,15 +706,15 @@ mod tests {
         o.push(video(1, false));
         assert_eq!(seq(&take(&o)), 1);
         let t = o.state.lock().unwrap().in_flight[0].sent;
-        o.ack(1, Duration::ZERO, 0, t);
+        o.ack(1, Duration::ZERO, 0, 0, t);
         assert_eq!(piece(&take(&o)), (5, CLIPBOARD_PIECE_BYTES, false));
         assert!(
             matches!(o.next(Duration::ZERO), Next::Idle),
             "a piece is on the way"
         );
-        o.ack(1, Duration::ZERO, 1, t);
+        o.ack(1, Duration::ZERO, 1, 0, t);
         assert_eq!(piece(&take(&o)), (5, 10, true));
-        o.ack(1, Duration::ZERO, 2, t);
+        o.ack(1, Duration::ZERO, 2, 0, t);
         assert!(matches!(o.next(Duration::ZERO), Next::Idle));
         assert_eq!(o.state.lock().unwrap().queued_bytes, 0);
     }
@@ -633,14 +722,14 @@ mod tests {
     /// No clipboard piece while the viewer has no room: it would hold back the video behind it.
     #[test]
     fn no_clipboard_piece_without_room() {
-        let o = Outbox::new();
-        // Frame 1 was queued longer than `ROOM` ago (no floor yet).
+        let o = with_floor(0);
+        // Frame 1 was queued longer than `ROOM` ago.
         let t0 = Instant::now().checked_sub(ROOM * 2).unwrap();
         o.push_at(video(1, false), t0);
         take(&o);
         o.push(clipboard(5, 10));
         assert!(matches!(o.next(Duration::ZERO), Next::Idle));
-        o.ack(1, Duration::ZERO, 0, Instant::now());
+        o.ack(1, Duration::ZERO, 0, 0, Instant::now());
         assert_eq!(piece(&take(&o)), (5, 10, true));
     }
 
@@ -648,7 +737,7 @@ mod tests {
     /// frame does: else a full link that gets frames by that rule would never send a piece.
     #[test]
     fn a_clipboard_piece_that_waited_goes_as_a_held_frame_does() {
-        let o = Outbox::new();
+        let o = with_floor(0);
         let t0 = Instant::now().checked_sub(ROOM * 3).unwrap();
         o.push_at(video(1, false), t0);
         take(&o);
@@ -663,14 +752,14 @@ mod tests {
     /// Once the path has shown its rate, the pieces on the way may fill `CLIP_WINDOW` of it.
     #[test]
     fn clipboard_pieces_fill_a_window_of_the_delivered_rate() {
-        let o = Outbox::new();
-        o.push(clipboard(5, 10 * CLIPBOARD_PIECE_BYTES));
+        let o = with_floor(0);
+        o.push(clipboard(5, 12 * CLIPBOARD_PIECE_BYTES));
         take(&o);
         assert!(matches!(o.next(Duration::ZERO), Next::Idle), "no rate yet: one piece");
         // The piece arrived after `METER_PERIOD`: the rate is one piece per period, so the
         // window holds a fifth of a piece, and one piece goes at a time.
         let t = o.state.lock().unwrap().meter.start + METER_PERIOD;
-        o.ack(0, Duration::ZERO, 1, t);
+        o.ack(0, Duration::ZERO, 1, 0, t);
         take(&o);
         assert!(matches!(o.next(Duration::ZERO), Next::Idle));
         // Twenty pieces per period: the window holds four.
@@ -680,9 +769,15 @@ mod tests {
             take(&o);
         }
         assert!(matches!(o.next(Duration::ZERO), Next::Idle));
-        o.ack(0, Duration::ZERO, 3, Instant::now());
+        o.ack(0, Duration::ZERO, 3, 0, Instant::now());
         take(&o);
         take(&o);
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle));
+        // A floor of 100 ms: the path holds that much too, so the window holds eight.
+        o.state.lock().unwrap().floor.cur = Some(Duration::from_millis(100));
+        for _ in 0..4 {
+            take(&o);
+        }
         assert!(matches!(o.next(Duration::ZERO), Next::Idle));
     }
 
@@ -693,7 +788,7 @@ mod tests {
         o.push(clipboard(5, 3 * CLIPBOARD_PIECE_BYTES));
         take(&o);
         o.cancel_clipboard();
-        o.ack(0, Duration::ZERO, 1, Instant::now());
+        o.ack(0, Duration::ZERO, 1, 0, Instant::now());
         assert!(matches!(o.next(Duration::ZERO), Next::Idle));
         assert_eq!(o.state.lock().unwrap().queued_bytes, 0);
         o.push(clipboard(6, 1));
@@ -704,13 +799,15 @@ mod tests {
     #[test]
     fn an_ack_gives_a_round_trip_and_ends_the_frames_before_it() {
         let o = Outbox::new();
+        // A fast path: the frames on the way are no queue.
+        o.state.lock().unwrap().meter.peak.cur = 1e9;
         for s in 1..=3 {
             o.push(video(s, false));
             take(&o);
         }
         let sent = o.state.lock().unwrap().in_flight[1].sent;
         let ms = Duration::from_millis;
-        o.ack(2, ms(10), 0, sent + ms(60));
+        o.ack(2, ms(10), 0, 0, sent + ms(60));
         let st = o.state.lock().unwrap();
         assert_eq!(st.in_flight.len(), 1);
         assert_eq!(st.floor.get(), Some(ms(50)));
@@ -728,14 +825,58 @@ mod tests {
         take(&o);
         take(&o);
         let sent = o.state.lock().unwrap().in_flight[1].sent;
-        o.ack(1, ms(0), 0, sent + ms(400));
-        o.ack(2, ms(0), 0, sent + ms(450));
+        o.ack(1, ms(0), 0, 0, sent + ms(400));
+        o.ack(2, ms(0), 0, 0, sent + ms(450));
         assert_eq!(o.state.lock().unwrap().floor.get(), None);
+        o.state.lock().unwrap().meter.peak.cur = 1e9;
         o.push(video(3, false));
         take(&o);
         let sent = o.state.lock().unwrap().in_flight[0].sent;
-        o.ack(3, ms(0), 0, sent + ms(150));
+        o.ack(3, ms(0), 0, 0, sent + ms(150));
         assert_eq!(o.state.lock().unwrap().floor.get(), Some(ms(150)));
+    }
+
+    /// A delta that with the bytes on the way before it is more than 100 ms of the path's rate
+    /// does not give the floor: its round trip has a queue in it. One that is less does.
+    #[test]
+    fn the_floor_skips_deltas_sent_behind_a_queue() {
+        let o = Outbox::new();
+        let ms = Duration::from_millis;
+        // 25 KB per second: 100 ms is 2.5 frames of 1000 bytes.
+        o.state.lock().unwrap().meter.peak.cur = 25_000.0;
+        for s in 1..=3 {
+            o.push(video(s, false));
+            take(&o);
+        }
+        let sent = o.state.lock().unwrap().in_flight[2].sent;
+        o.ack(3, ms(0), 0, 0, sent + ms(900));
+        assert_eq!(
+            o.state.lock().unwrap().floor.get(),
+            None,
+            "behind 2000 bytes"
+        );
+        o.state.lock().unwrap().meter.peak.cur = 25_000.0;
+        o.push(video(4, false));
+        o.push(video(5, false));
+        take(&o);
+        take(&o);
+        let sent = o.state.lock().unwrap().in_flight[1].sent;
+        o.ack(5, ms(0), 0, 0, sent + ms(300));
+        assert_eq!(
+            o.state.lock().unwrap().floor.get(),
+            Some(ms(300)),
+            "behind 1000 bytes"
+        );
+        // With a floor of 300 ms the path holds 7.5 KB without a queue: behind 5000 bytes is
+        // clean, and a lower round trip lowers the floor.
+        o.state.lock().unwrap().meter.peak.cur = 25_000.0;
+        for s in 6..=11 {
+            o.push(video(s, false));
+            take(&o);
+        }
+        let sent = o.state.lock().unwrap().in_flight[5].sent;
+        o.ack(11, ms(0), 0, 0, sent + ms(200));
+        assert_eq!(o.state.lock().unwrap().floor.get(), Some(ms(200)));
     }
 
     /// A hold longer than the frame has been out is an earlier frame's number: no round trip,
@@ -750,6 +891,7 @@ mod tests {
             1,
             Duration::from_secs(5),
             0,
+            0,
             sent + Duration::from_millis(20),
         );
         let st = o.state.lock().unwrap();
@@ -762,7 +904,7 @@ mod tests {
     /// while a keyframe is on the way. Far behind, nothing is dropped: the next frame is a delta.
     #[test]
     fn room_needs_a_short_queue_and_a_short_wait() {
-        let o = Outbox::new();
+        let o = with_floor(0);
         let t0 = Instant::now();
         let ms = Duration::from_millis;
         let (fresh, long) = (Duration::ZERO, MAX_HOLD);
@@ -773,14 +915,15 @@ mod tests {
         take(&o);
         assert!(o.room(t0, fresh), "one may wait while the next is encoded");
         take(&o);
-        assert!(o.room(t0 + ms(90), fresh), "no floor yet: 100 ms");
+        assert!(o.room(t0 + ms(90), fresh), "a floor of 0: 100 ms");
         assert!(!o.room(t0 + ms(120), fresh));
 
         // Frame 1 went out alone and came back after 150 ms: the next may be out 400 ms.
         let o = Outbox::new();
+        o.state.lock().unwrap().meter.peak.cur = 1e9;
         o.push_at(video(1, false), t0);
         take(&o);
-        o.ack(1, ms(0), 0, t0 + ms(150));
+        o.ack(1, ms(0), 0, 0, t0 + ms(150));
         let t1 = t0 + ms(160);
         o.push_at(video(2, false), t1);
         take(&o);
@@ -793,7 +936,7 @@ mod tests {
         take(&o);
 
         // A slow keyframe on the way is judged as any frame.
-        let o = Outbox::new();
+        let o = with_floor(0);
         o.push_at(video(1, true), t0);
         take(&o);
         assert!(!o.room(t0 + ms(900), fresh));
@@ -811,7 +954,7 @@ mod tests {
         let sent = o.state.lock().unwrap().in_flight[0].sent;
         assert!(!o.stalled(sent + Duration::from_secs(9)));
         assert!(o.stalled(sent + STALL));
-        o.ack(1, Duration::ZERO, 0, sent + Duration::from_secs(9));
+        o.ack(1, Duration::ZERO, 0, 0, sent + Duration::from_secs(9));
         assert!(!o.stalled(sent + STALL));
     }
 
@@ -822,7 +965,7 @@ mod tests {
         take(&o);
         let t = Instant::now();
         assert!(o.stalled(t + STALL));
-        o.ack(0, Duration::ZERO, 1, t);
+        o.ack(0, Duration::ZERO, 1, 0, t);
         assert!(!o.stalled(t + STALL));
     }
 

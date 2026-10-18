@@ -1525,10 +1525,11 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
             seq,
             held_ms,
             clip,
+            decoding,
         } => {
             let Some((outbox, monitor)) = viewer(viewers, id) else { return };
             let held = Duration::from_millis(held_ms.into());
-            outbox.ack(seq, held, clip, Instant::now());
+            outbox.ack(seq, held, clip, decoding, Instant::now());
             // An acknowledgement frees room.
             encode_held(app, &plane.encoders, viewers, monitor);
             steer_bitrate(app, &plane.encoders, viewers, monitor);
@@ -1545,13 +1546,17 @@ fn steer_bitrate(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32
     crate::bitrate::tick(&app.media.bitrate, monitor, &enc, || {
         let viewers = viewers.lock().unwrap();
         let mine = || viewers.values().filter(|v| v.monitor == monitor);
-        let (mut shown, mut key_out) = (None::<u32>, false);
-        for (n, key) in mine().map(|v| v.outbox.take_shown()) {
-            shown = Some(shown.map_or(n, |s| s.min(n)));
+        let (mut slowest, mut key_out) = (None::<(u32, u32)>, false);
+        for (n, key, decoding) in mine().map(|v| v.outbox.take_shown()) {
+            if slowest.is_none_or(|(s, _)| n < s) {
+                slowest = Some((n, decoding));
+            }
             key_out |= key;
         }
-        let delivered = mine().filter_map(|v| v.outbox.delivered()).reduce(f64::min);
-        (shown.unwrap_or(0), key_out, delivered)
+        let (shown, decoding) = slowest.unwrap_or_default();
+        let now = Instant::now();
+        let delivered = mine().filter_map(|v| v.outbox.delivered(now)).reduce(f64::min);
+        crate::bitrate::Seen { shown, decoding, key_out, delivered }
     });
 }
 

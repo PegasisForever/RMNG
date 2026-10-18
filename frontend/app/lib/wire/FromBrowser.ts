@@ -8,4 +8,4 @@ import type { TermResize } from "./TermResize";
 /**
  * Browser → server, as a JSON text message.
  */
-export type FromBrowser = { "t": "input" } & InputMsg | { "t": "clipboard" } & ClipboardMsg | { "t": "term_input" } & TermInput | { "t": "term_resize" } & TermResize | { "t": "term_new_session" } | { "t": "request_keyframe" } & RequestKeyframe | { "t": "ack", seq: number, held_ms: number, clip: number, } | { "t": "echo", id: number, };
+export type FromBrowser = { "t": "input" } & InputMsg | { "t": "clipboard" } & ClipboardMsg | { "t": "term_input" } & TermInput | { "t": "term_resize" } & TermResize | { "t": "term_new_session" } | { "t": "request_keyframe" } & RequestKeyframe | { "t": "ack", seq: number, held_ms: number, clip: number, decoding: number, } | { "t": "echo", id: number, };

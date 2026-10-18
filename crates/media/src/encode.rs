@@ -62,7 +62,7 @@ const ENC_COLORIMETRY: &str = "2:3:0:0";
 
 /// The bitrate limit that limits nothing (kbit/s, as in `ENC_TAIL`): 208 KB per frame at the
 /// VA rate control's 30 frames per second.
-const NO_LIMIT_KBPS: u32 = 50_000;
+pub const NO_LIMIT_KBPS: u32 = 50_000;
 
 /// `vah264enc → h264parse → appsink` tail.
 ///
@@ -83,8 +83,18 @@ const NO_LIMIT_KBPS: u32 = 50_000;
 ///
 /// Not CQP with a switch to VBR for a limit: on radeonsi a pipeline that started in CQP and
 /// switches to VBR keeps QP 26 for every frame, whatever the bitrate.
+///
+/// `cpb-size` (the HRD buffer, kbit) is fixed and large, about what GStreamer computes for the
+/// starting 50 Mbit/s (2 × 50000 / 0.66) and writes back into the property, so that it stays the
+/// same for every later limit. With it, radeonsi keeps each frame near `limit / 30` within the
+/// QP range, also after a still period (measured at a 700 kbit/s limit: text 2.7 KB per frame,
+/// at most 4 KB; a picture pan at QP 35, 7–8 KB). A CPB of half a second of the limit, with or
+/// without `target-percentage=100`, did not bound frames better: it made 20–30 % more bytes
+/// during motion and frames of 10–55 KB after the motion stopped (the rate control spends the
+/// full buffer on a sharper copy of the still picture). `target-percentage` stays at its 66:
+/// the peak it allows (1.5 × the limit) did not show.
 const ENC_TAIL: &str = "vah264enc name=enc aud=true b-frames=0 ref-frames=1 key-int-max=1024 \
-       rate-control=vbr bitrate=50000 min-qp=25 max-qp=35 target-usage=1 ! \
+       rate-control=vbr bitrate=50000 cpb-size=150000 min-qp=25 max-qp=35 target-usage=1 ! \
      video/x-h264,profile=constrained-baseline ! \
      h264parse config-interval=-1 ! \
      video/x-h264,stream-format=byte-stream,alignment=au ! \
@@ -125,9 +135,10 @@ impl Encoder {
 
     /// Limit the bitrate to `kbps`, or with `None` to [`NO_LIMIT_KBPS`]. `vah264enc` applies it
     /// at the next frame: it drains, reconfigures and starts again with a keyframe (6 ms on the
-    /// W6800, no frame lost; the keyframe has the QP the rate control had reached). The VA rate
-    /// control counts 30 frames per second (the input has no frame rate), so the limit is
-    /// really a size per frame of `kbps / 30`.
+    /// W6800, no frame lost; the keyframe has the QP the rate control had reached). One
+    /// property, so one keyframe. The VA rate control counts 30 frames per second (the input
+    /// has no frame rate), so the limit is really a size per frame of `kbps / 30`: radeonsi
+    /// keeps frames near it unless the QP reaches 35 (`ENC_TAIL`).
     pub fn set_bitrate(&self, kbps: Option<u32>) {
         if let Some(enc) = self.pipeline.by_name("enc") {
             enc.set_property("bitrate", kbps.unwrap_or(NO_LIMIT_KBPS));

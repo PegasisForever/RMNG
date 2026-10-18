@@ -38,6 +38,7 @@ Motion (on monitor 1 of the default two-monitor 1920×1080 layout):
 | Motion | Screen |
 |---|---|
 | `still` | Nothing moves. |
+| `type` | A 400×100 window shows a new number 5 times per second, as typing does (from round 6). |
 | `scroll` | A 960×540 window scrolls text at 240 px/s, 60 frames per second. |
 | `large` | The same text scrolls on the full monitor: every frame changes. |
 | `photo` | A picture full of fine detail (a Mandelbrot set) pans on the full monitor, 4 px right and 2 px down per frame: about 5.8 Mbit/s at 50 fps on the LAN, more than the hotspot link carries (from round 5). |
@@ -482,3 +483,129 @@ on a test program:
   are so poor that motion search fails. QP 35 is the highest.
 - The rate control counts 30 frames per second (the input has no frame rate), so a limit is a
   size per frame of limit / 30.
+
+### Round 6: fixes from review 5, and a clean round-trip floor
+
+2026-10-18, same clone, monitor and client, 30 s per cell, through the proxy on port 9001, a
+fresh server before each link. Each cell shows **round 5 → round 6**, both measured the same
+night.
+
+- **Round 5**: image label `a3a92cf-round5`.
+- **Round 6**: image label `ad10ccc-round6`. Only a second in which the screen made at least
+  15 frames counts for the limit; the limit no longer goes away when the screen calms down, it
+  goes up by 1.25 only while the frames use 80 % of it, and at 50 Mbit/s it is no limit; one
+  tick counts for at most 1.5 s; a low second in which the window's decoder held more than 2
+  frames does not count; no delivered rate after 2 s without acknowledged bytes; the floor
+  takes only deltas with no queue in front of them; the clipboard window is one floor and
+  100 ms. The rules are in [PROTOCOL.md](PROTOCOL.md#browser-viewer-protocol-browser--control-server).
+
+| Link | Motion | fps | Mbit/s mean (peak) | Keyframes | Video delay p50 / p95 (ms) | Bitrate changes |
+|---|---|---|---|---|---|---|
+| lan | still | 0.1 → 0.0 | 0.00 (0.05) → 0.00 (0.05) | 1 → 1 | 1 / 1 → 1 / 1 | 0 → 0 |
+| lan | scroll | 50.0 → 50.0 | 0.89 (1.67) → 0.91 (1.90) | 2 → 2 | 1 / 2 → 1 / 2 | 0 → 0 |
+| lan | large | 50.0 → 50.0 | 1.61 (3.99) → 1.61 (3.96) | 2 → 2 | 1 / 2 → 1 / 2 | 0 → 0 |
+| lan | photo | 50.0 → 50.0 | 5.77 (12.59) → 5.75 (12.51) | 2 → 2 | 1 / 2 → 1 / 3 | 0 → 0 |
+| home | still | 0.1 → 0.1 | 0.00 (0.05) → 0.00 (0.05) | 1 → 1 | 136 / 136 → 51 / 51 | 0 → 0 |
+| home | scroll | 49.8 → 49.7 | 0.88 (1.73) → 0.89 (1.38) | 2 → 2 | 85 / 109 → 76 / 116 | 0 → 0 |
+| home | large | 49.6 → 49.6 | 1.60 (3.66) → 1.60 (3.55) | 2 → 2 | 84 / 107 → 87 / 111 | 0 → 0 |
+| home | photo | 48.4 → 48.3 | 5.59 (9.83) → 5.59 (10.01) | 2 → 2 | 88 / 145 → 75 / 111 | 0 → 0 |
+| hotspot | still | 0.0 → 0.0 | 0.00 (0.05) → 0.00 (0.05) | 1 → 1 | 257 / 257 → 255 / 255 | 0 → 0 |
+| hotspot | scroll | 37.4 → 43.6 | 0.77 (1.07) → 0.80 (1.23) | 2 → 2 | 264 / 1248 → 242 / 753 | 0 → 0 |
+| hotspot | large | 27.9 → 26.4 | 1.24 (3.31) → 1.14 (2.57) | 1 → 1 | 308 / 1589 → 235 / 3567 | 1 → 0 |
+| hotspot | photo | 8.0 → 3.5 | 1.04 (3.84) → 1.55 (5.90) | 2 → 2 | 4288 / 9549 → 1950 / 4782 | 1 → 1 |
+
+The hotspot `large` and `photo` cells ran again, each on a fresh server (fps, video delay
+p50 / p95 in ms, bitrate changes):
+
+| Motion | Round 5 | Round 6 |
+|---|---|---|
+| large | 35.7, 242 / 867, 0; 28.3, 256 / 1864, 0; 26.2, 332 / 3122, 1; 32.2, 1248 / 2798, 0; 26.1, 318 / 2564, 0; 34.1, 284 / 1313, 0 | 20.6, 325 / 2715, 2; 20.8, 374 / 3138, 1; 16.8, 1262 / 7187, 2; 16.8, 297 / 4855, 1; 34.2, 273 / 1580, 0; 28.7, 271 / 2270, 1 |
+| photo | 5.3, 5322 / 17160, 2; 12.2, 4081 / 10126, 1 | 2.8, 3792 / 5462, 1; 3.2, 2469 / 5508, 1 |
+
+**The hotspot drops to 1 Mbit/s for 20 s**, as in round 5 (fps before / during / after):
+
+| Motion | Build | fps before / during / after | Keyframes | Video delay p50 / p95 (ms) | Bitrate changes |
+|---|---|---|---|---|---|
+| large | round 5 | 24.1 / 21.1 / 37.6 | 6 | 317 / 2154 | 5: no limit → 500, 625, 937, 1405, 2107 kbit/s |
+| large | round 5, run 2 | 42.9 / 20.4 / 33.3 | 5 | 342 / 2653 | 4: no limit → 500, 625, 937, 1405 kbit/s |
+| large | round 6 | 39.3 / 18.1 / 33.9 | 4 | 325 / 2475 | 3: no limit → 576, 720, 900 kbit/s |
+| large | round 6, run 2 | 37.3 / 20.4 / 40.1 | 4 | 302 / 2109 | 3: no limit → 665, 831, 1038 kbit/s |
+| photo | round 5 | 8.1 / 6.6 / 9.6 | 2 | 4385 / 13566 | 2: no limit → 1016 → 500 kbit/s |
+| photo | round 6 | 3.7 / 3.0 / 4.7 | 2 | 2222 / 4055 | 1: no limit → 1498 kbit/s |
+
+**Calm, then pan** (new): hotspot, the picture pans 20 s, then only `type` for 15 s, then the
+picture pans 20 s again; one 58 s run on a fresh server.
+
+| Build | fps pan / type / pan | Keyframes | Video delay p50 / p95 (ms) | Bitrate changes |
+|---|---|---|---|---|
+| round 5 | 14.7 / 8.8 / 6.1 | 4 | 2582 / 10427 | 3: no limit → 871; **→ no limit** while typing; → 1840 kbit/s in the second pan |
+| round 5, run 2 | 9.1 / 8.0 / 4.8 | 4 | 4647 / 18076 | 3: no limit → 500; **→ no limit** while typing; → 584 kbit/s |
+| round 6 | 4.0 / 4.4 / 6.5 | 2 | 2022 / 4600 | 1: no limit → 1790 kbit/s, kept |
+| round 6, run 2 | 4.3 / 4.6 / 7.1 | 2 | 1742 / 4814 | 1: no limit → 870 kbit/s, kept |
+
+**A slow or frozen browser on the LAN** (port 9000, no shaping, the picture pans; the server
+log's `bitrate:` lines):
+
+| Test | Round 5 | Round 6 |
+|---|---|---|
+| Headless Chrome (software decoder); its worker paused for 8 s with the debugger, as a frozen tab | 4 changes: no limit → 500 kbit/s at once after the pause ("3 fps for 9 s", one tick of 9 s), then 625, 937, 1405: the limit stays on the LAN | none; after the pause the decoder held 7 frames |
+| Headless Chrome (software decoder), 40 s | | none; 50 fps decoded, at most 2 frames in the decoder |
+| Headed Chrome (hardware decoder), the window minimized for 30 s (`visibilityState` hidden) | | none; the decoder kept up (20 `ack`s per second, 0 frames in the decoder) |
+
+**Clipboard** with headless Chrome watching the window scroll through the proxy, as in round 5:
+4.2 MB down on the hotspot took 40 s (round 5: 28–58 s), with video delay p50 0.3–1.0 s; 3.8 MB
+up on the home link 3.7 s, and the clone pasted it; up on the hotspot 37 s, and the paste
+failed after Mutter's 15 s, as before. On the hotspot the pieces wait for room as video
+frames do, so the larger window does not change the speed.
+
+**The encoder's buffer.** Review 5 found that GStreamer sizes the HRD buffer (`cpb-size`) for
+the starting 50 Mbit/s and writes that size (151,514 kbit) back into the property, so it stays
+for every later limit; the concern was that nothing then bounds one frame at a low limit.
+Measured on CT 101 (the `rmng` container: GStreamer 1.28, radeonsi) with a test program that
+feeds the same pipeline 60 frames per second, at a 700 kbit/s limit (23 kbit per frame):
+
+| `target-percentage`, `cpb-size` | Text scroll: kbit/s, largest frame | After the motion stops (same picture again) | Picture pan, QP 35 |
+|---|---|---|---|
+| 66, 151,514 (round 5) | 1180–1400, 4 KB | 0 KB frames | 7–8 KB frames, also right after 5 s still |
+| 66, 150,000 (round 6, fixed) | 1240–1400, 4 KB | 0 KB frames | the same |
+| 100, 100,000 (auto) | 1200–1400, 4 KB | 0 KB frames | |
+| 100, 350 (half a second) | 1530–1830, 30 KB | 10–55 KB frames (a sharper copy) | the same as 66, 151,514 |
+| 66, 531 (the smallest it takes) | 1490–1700, 17 KB | up to 20 KB frames | |
+| 66, 5000 | 1290–1490, 9 KB | up to 29 KB frames | |
+
+At 60 frames per second the bitrate is about twice the limit, because the VA rate control
+counts 30. The large buffer keeps each frame near its share; a small one makes more bytes,
+because the rate control spends a full buffer on a sharper copy of a still picture. So round
+6 keeps it, and fixes it in `ENC_TAIL` so that it does not depend on the write-back. A limit
+change sets one property, so it is one keyframe.
+
+What the numbers show:
+
+- **The LAN and the home link do not change**, and the limit never engaged there, also with
+  a frozen or minimized browser. Round 5 cut the bitrate on the LAN after a frozen tab (one
+  9 s tick counted as 9 low seconds) and kept the limit.
+- **A calm period keeps the limit.** Round 5 removed it while the user typed and set a new one
+  in the next pan: 3 changes and 4 keyframes in 58 s; round 6 has 1 change and 2 keyframes.
+  The drop test also needs fewer changes (3 instead of 4–5), as the limit goes up only while
+  the frames use it.
+- **The floor.** Round 5's hotspot `photo` floor was 0.8–2.6 s. A diagnostic build logged
+  why: the first round trip that counted was a lone 297 KB delta, which took 2.7 s to cross,
+  and R1 then let 5 s of frames onto the path. The rule from review 5 (at most 100 ms of the
+  delivered rate on the way before the delta) was not enough, and as written it also holds
+  back good samples: with a round trip over 100 ms the bytes on the way are always more than
+  100 ms of the delivered rate while frames flow (on the hotspot `scroll` the first floor came
+  only after 8 s, R1 meanwhile let 10 frames per second through, and the bitrate was cut for
+  that). So round 6 compares with the path's rate (the highest delivered rate of the last 1–2
+  minutes), counts the delta's own bytes, and allows one floor of bytes on the way (a path
+  with no queue holds that much). Text floors are now 152–160 ms on the hotspot from the start;
+  the picture pan never gets a floor (its frames are larger than 100 ms of the link), so R1
+  uses the 100 ms / 1 s rule for it.
+- **The picture pan on the hotspot**: the video delay p50 fell from 4.1–5.3 s to 2.0–3.8 s,
+  and the p95 from 10–17 s to 5 s, but the frame rate fell from 5–12 to 3–4. It is still too
+  much for this link.
+- **The full-screen text scroll on the hotspot lost frame rate**: 17–34 fps (mean 23) in 7
+  runs against 26–36 (mean 30) for round 5, with more bitrate changes (7 against 2). The floors
+  are the same (about 155 ms) and the cuts come after 5–6 s of loss repair, as in round 5; the
+  bench did not show why round 6 cuts more often there. This link changes much from run to run
+  (round 4: 23–35 fps). A first build with the review's rule as written had 34 fps in 3 runs,
+  with floors of 175–270 ms (a looser R1).

@@ -112,8 +112,9 @@ pub enum ToBrowser {
     /// The answer to [`FromBrowser::Echo`], with the same `id`.
     Echo { id: u32 },
     /// How many clipboard pieces from the browser arrived on this socket (wraps). The browser
-    /// keeps the pieces on the way within 100 ms of the rate these show (and always one), so
-    /// its acknowledgements and input wait about that long behind an upload.
+    /// keeps the pieces on the way within the lowest piece round trip and 100 ms of the rate
+    /// these show (and always one), so its acknowledgements and input wait about 100 ms behind
+    /// an upload.
     ClipAck { n: u32 },
 }
 
@@ -132,15 +133,19 @@ pub enum FromBrowser {
     RequestKeyframe(RequestKeyframe),
     /// The newest video frame decoded (`seq` from its [`VideoHeader`]; a frame the window drops
     /// counts when it arrives) and how long the window held that number before this message
-    /// (`held_ms`), and how many clipboard pieces arrived on this socket (`clip`, wraps). Sent
-    /// every 50 ms when `seq` changed, at once when `clip` did, and once a second otherwise.
-    /// The server takes the round trip, how far behind the window is and the delivered rate
-    /// from it, and keeps the clipboard pieces on the way within 100 ms of that rate.
+    /// (`held_ms`), how many clipboard pieces arrived on this socket (`clip`, wraps), and how
+    /// many frames wait in the window's decoder (`decoding`). Sent every 50 ms when `seq`
+    /// changed, at once when `clip` did, and once a second otherwise. The server takes the
+    /// round trip, how far behind the window is and the delivered rate from it, keeps the
+    /// clipboard pieces on the way within one round trip and 100 ms of that rate, and does not
+    /// lower the bitrate for a window whose decoder is behind.
     Ack {
         seq: u32,
         held_ms: u32,
         #[serde(default)]
         clip: u32,
+        #[serde(default)]
+        decoding: u32,
     },
     /// Answered with [`ToBrowser::Echo`], ahead of the video waiting in this socket's queue
     /// (as every control message), so the time to the answer is the round trip plus the wait
@@ -315,19 +320,21 @@ mod tests {
         let new: FromBrowser = serde_json::from_str(r#"{"t":"term_new_session"}"#).unwrap();
         assert_eq!(new, FromBrowser::TermNewSession);
         let ack: FromBrowser =
-            serde_json::from_str(r#"{"t":"ack","seq":9,"held_ms":12,"clip":3}"#).unwrap();
+            serde_json::from_str(r#"{"t":"ack","seq":9,"held_ms":12,"clip":3,"decoding":2}"#)
+                .unwrap();
         assert_eq!(
             ack,
             FromBrowser::Ack {
                 seq: 9,
                 held_ms: 12,
-                clip: 3
+                clip: 3,
+                decoding: 2
             }
         );
-        // `rmng-fps` gets no clipboard and does not send `clip`.
+        // A window of an older build sends neither `clip` nor `decoding`.
         let ack: FromBrowser =
             serde_json::from_str(r#"{"t":"ack","seq":9,"held_ms":12}"#).unwrap();
-        assert!(matches!(ack, FromBrowser::Ack { clip: 0, .. }));
+        assert!(matches!(ack, FromBrowser::Ack { clip: 0, decoding: 0, .. }));
         let echo: FromBrowser = serde_json::from_str(r#"{"t":"echo","id":7}"#).unwrap();
         assert_eq!(echo, FromBrowser::Echo { id: 7 });
         assert_eq!(

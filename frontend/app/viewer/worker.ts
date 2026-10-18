@@ -46,8 +46,9 @@ const KEY_RESET_BACKLOG = 6;
  *  unacknowledged for 10 s, or that sends nothing for 10 s. */
 const ACK_MS = 50;
 const ACK_HEARTBEAT_MS = 1000;
-/** Clipboard pieces on the way to the server stay within what the uplink carried in this long
- *  (at least one piece), so acks and input wait about this long behind an upload at most. */
+/** Clipboard pieces on the way to the server stay within what the uplink carried in the lowest
+ *  piece round trip and this long (at least one piece), so acks and input wait about this long
+ *  behind an upload at most. */
 const UPLOAD_WINDOW_MS = 100;
 
 let url = "";
@@ -81,12 +82,14 @@ let incoming: { serial: number; mimeType: string; parts: Uint8Array[] } | null =
 /** The replies this window asked for since the last copy (`serial mime`). A piece of anything
  *  else is the rest of a reply the window no longer wants. */
 let wanted = new Set<string>();
-/** Clipboard pieces waiting to be sent; the sizes of those sent on this socket that the server
- *  has not said arrived (`clip_ack`), how many arrived, and the rate they arrived at. */
+/** Clipboard pieces waiting to be sent; the size and send time of those sent on this socket
+ *  that the server has not said arrived (`clip_ack`), how many arrived, the rate they arrived
+ *  at, and the lowest round trip of one. */
 let upload: ArrayBuffer[] = [];
-let upOut: number[] = [];
+let upOut: { len: number; at: number }[] = [];
 let upAcked = 0;
 let upRate = new RateMeter();
+let upFloor = Infinity;
 /** Input made while the socket is down. */
 let held: HeldInput = [];
 
@@ -104,7 +107,13 @@ function ack() {
   const now = performance.now();
   const seq = newest?.seq ?? 0;
   if (acked?.seq === seq && acked.clip === clipIn && now - acked.at < ACK_HEARTBEAT_MS) return;
-  send({ t: "ack", seq, held_ms: newest ? Math.round(now - newest.at) : 0, clip: clipIn });
+  send({
+    t: "ack",
+    seq,
+    held_ms: newest ? Math.round(now - newest.at) : 0,
+    clip: clipIn,
+    decoding: decoder?.decodeQueueSize ?? 0,
+  });
   acked = { seq, clip: clipIn, at: now };
 }
 
@@ -214,23 +223,29 @@ function onClipboardPiece(buf: ArrayBuffer) {
   ]);
 }
 
-/** Send clipboard pieces while those on the way fit in UPLOAD_WINDOW_MS of the rate the
- *  server's `clip_ack`s show, and always one. (`bufferedAmount` does not see the data waiting
- *  in the kernel and on the link, which on a slow uplink held acks back for seconds.) */
+/** Send clipboard pieces while those on the way fit in the lowest round trip and
+ *  UPLOAD_WINDOW_MS of the rate the server's `clip_ack`s show, and always one. (`bufferedAmount`
+ *  does not see the data waiting in the kernel and on the link, which on a slow uplink held
+ *  acks back for seconds.) */
 function sendUpload() {
+  const windowMs = (Number.isFinite(upFloor) ? upFloor : 0) + UPLOAD_WINDOW_MS;
   while (upload.length && ws?.readyState === WebSocket.OPEN) {
-    const out = upOut.reduce((n, b) => n + b, 0) + upload[0].byteLength;
-    if (upOut.length && out > upRate.rate * UPLOAD_WINDOW_MS) return;
+    const out = upOut.reduce((n, p) => n + p.len, 0) + upload[0].byteLength;
+    if (upOut.length && out > upRate.rate * windowMs) return;
     const piece = upload.shift()!;
     ws.send(piece);
-    upOut.push(piece.byteLength);
+    upOut.push({ len: piece.byteLength, at: performance.now() });
   }
 }
 
 /** The server says `n` pieces of this socket arrived (wraps). */
 function onClipAck(n: number) {
   const now = performance.now();
-  for (let i = (n - upAcked) >>> 0; i > 0 && upOut.length; i--) upRate.add(upOut.shift()!, now);
+  for (let i = (n - upAcked) >>> 0; i > 0 && upOut.length; i--) {
+    const p = upOut.shift()!;
+    upRate.add(p.len, now);
+    upFloor = Math.min(upFloor, now - p.at);
+  }
   upAcked = n;
   sendUpload();
 }
@@ -251,6 +266,7 @@ function connect() {
   clipIn = upAcked = 0;
   upOut = [];
   upRate = new RateMeter();
+  upFloor = Infinity;
   newCopy();
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";

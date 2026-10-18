@@ -61,11 +61,12 @@ The pieces yield to video and to the other messages. The server sends a piece on
 video waits in the socket's queue and the window has room as for a video frame (below: room,
 or a piece that waited 100 ms while the window is at most 1 s behind), and only while the bytes
 on the way (video and pieces the window has not acknowledged with `clip` in `ack`) stay within
-what the window acknowledged in 100 ms lately; one piece may always be on the way. So a large
-copy delays a frame by about 100 ms, also through a proxy, and on the LAN it goes at the
-link's speed. The other way, the browser keeps the pieces on the way within 100 ms of the rate
-the server's `clip_ack`s show (and always one), so the window's acknowledgements and input
-wait about 100 ms behind an upload. (`bufferedAmount` alone is not enough: it does not see
+what the window acknowledged lately in one floor (below) and 100 ms; one piece may always be on
+the way. The path holds one floor of it, so a large copy delays a frame by about 100 ms, also
+through a proxy, and on the LAN it goes at the link's speed. The other way, the browser keeps
+the pieces on the way within the rate the server's `clip_ack`s show times the lowest round trip
+of one piece and 100 ms (and always one), so the window's acknowledgements and input wait about
+100 ms behind an upload. (`bufferedAmount` alone is not enough: it does not see
 what waits in the kernel and on the link, and on a 1 Mbit/s uplink the acknowledgements
 waited 2 to 7 s behind an upload.) The delivered rate is measured over periods of 500 ms.
 A newer copy stops a transfer that still runs: the server drops the pieces not sent yet
@@ -98,7 +99,7 @@ keeps only the pieces of the replies it asked for since then.
 | `term_resize` | `TermResize {cols, rows}` | The terminal size. Every session is resized to it. |
 | `term_new_session` | — | Make a new tmux session (the "+" tab). |
 | `request_keyframe` | `RequestKeyframe {monitor_id}` | Re-encode the monitor's last frame as a keyframe: after a decode error. Ignored for a monitor other than the socket's own (`?monitor=`). |
-| `ack` | `{seq, held_ms, clip}` (u32, u32, u32) | The newest video frame the decoder output (`seq` from its header; a frame dropped while the window waits for a keyframe counts when it arrives), how long, in ms, the window held that number before this message, and how many clipboard pieces arrived on this socket (`clip`, wraps; 0 when left out). Sent every 50 ms when `seq` changed, at once when a clipboard piece arrives, and once a second otherwise. Before the first frame (a terminal, or no video yet) `seq` is 0, which the server ignores. Below. |
+| `ack` | `{seq, held_ms, clip, decoding}` (u32 each) | The newest video frame the decoder output (`seq` from its header; a frame dropped while the window waits for a keyframe counts when it arrives), how long, in ms, the window held that number before this message, how many clipboard pieces arrived on this socket (`clip`, wraps; 0 when left out), and how many frames wait in the window's decoder (`decoding`, its `decodeQueueSize`; 0 when left out). Sent every 50 ms when `seq` changed, at once when a clipboard piece arrives, and once a second otherwise. Before the first frame (a terminal, or no video yet) `seq` is 0, which the server ignores. Below. |
 | `echo` | `{id}` (u32) | The server answers with `echo` and the same `id`, ahead of the video that waits in this socket's queue. The time to the answer is the round trip plus the wait in the kernel send buffer and in any proxy on the way. `rmng-fps` uses it; the viewer does not send it. |
 
 **Connect.** The server queues the view spec, the last cursor of this monitor and the
@@ -121,8 +122,14 @@ to the socket. On each `ack` it ends every frame up to `seq` and takes one round
 time since the stamp of `seq`, less `held_ms`. The window acknowledges a frame when its
 decoder has output it, so the round trip includes the decode, and a slow decoder holds frames
 back as a slow link does. The floor is the lowest round trip of the last 1 to 2 minutes, of
-deltas sent while no keyframe was out and behind at most 100 ms of the delivered rate (a
-round trip behind more has a queue in it). An `ack` whose `held_ms` is longer than its frame has
+deltas sent while no keyframe was out and with no queue in front of them: the delta is at most
+100 ms of the path's rate (the highest delivered rate of the last 1–2 minutes, below), and with
+the video and clipboard bytes on the way when it was handed to the socket at most one floor and
+100 ms of it (a path with no queue holds one floor of it). Not the last delivered rate: that is
+only what the screen sent, and with a round trip over 100 ms the bytes on the way are more than
+100 ms of it whenever frames flow. A round trip behind more has a queue in it, and a large frame is its own queue (on the
+hotspot link a lone 297 KB delta took 2.7 s, and that floor let 5 s of frames onto the path).
+Before the first rate is measured (500 ms of `ack`s), no delta counts. An `ack` whose `held_ms` is longer than its frame has
 been out names an earlier frame with the same number (a new encoder counts from 1 again) and
 is ignored. Off the LAN the browser's TCP connection often ends in a proxy (`tailscale
 serve`), so the acknowledgements are the only signal that sees the whole path. At debug level
@@ -163,25 +170,34 @@ closed (10 s, below). Keyframes are made whatever the room. Why the rule has its
 
 **Automatic bitrate.** The encoder runs VBR with a QP from 25 to 35. With no limit (50 Mbit/s)
 every frame gets QP 25, as the fixed quality (CQP 23/25) of earlier rounds gave: that is the
-LAN behaviour. Once a second, on an `ack`, the server looks at each monitor's encoder. When the
-slowest window of that monitor is shown (acknowledges) fewer than 15 frames per second for 5 s
-while the screen makes at least 15, the server limits the bitrate to 70 % of what that window
-delivered (the median of those seconds; each second takes the video and clipboard bytes its
-`ack`s ended in the last 500 ms period). 5 s, so that a loss repair on a lossy link (no `ack`
-for 1–2 s) is not taken for a slow link. A second in which a keyframe is on the way to a window
-does not count: on a slow link a join's keyframe holds the frames behind it back for seconds.
-The QP then rises, at most to 35 so that text stays readable: a frame that needs more bytes
-than its share is larger, and the frame rate falls again (quality first, then frame rate). A
-window that still gets under 15 frames per second lowers the limit again, by at least 20 % and
-not under 500 kbit/s, unless the frames are over their share already (a lower limit would not
-make them smaller). After 5 s that show at least 24 frames per second, or all but one of the
-frames the screen made, the limit goes up by 1.5 (by 1.25 while that would pass the rate
-delivered at the last cut), and it goes away once the screen needs at most half of it. Each
-change makes the encoder start again with a keyframe, so the limit changes at most once per
-5 s. The VA rate control counts 30 frames per second, so the limit is really a size per frame
-(limit / 30). The server logs each change at info level (`monitor 1 bitrate: no limit → 1400
-kbit/s (…)`). A new encoder (a new monitor size, a server restart) starts with no limit; a
-window that reconnects keeps the encoder and its limit.
+LAN behaviour. Once a second, on an `ack`, the server looks at each monitor's encoder. Only a
+second in which the screen made at least 15 frames (encoded, or replaced while they waited for
+room) counts: a still screen, a caret or typing says nothing about the link. When the slowest
+window of that monitor is shown (acknowledges) fewer than 15 frames per second for 5 s, the
+server limits the bitrate to 70 % of what that window delivered (the median of those seconds;
+each second takes the video and clipboard bytes its `ack`s ended in the last 500 ms period,
+and none when no `ack` ended bytes for 2 s). 5 s, so that a loss repair on a lossy link (no
+`ack` for 1–2 s) is not taken for a slow link; one second counts for at most 1.5 s, also after
+a gap in the `ack`s. A second in which a keyframe was queued or on the way to a window does not
+count and starts the 5 s again: on a slow link a join's keyframe holds the frames behind it
+back for seconds. A low second in which the slowest window's decoder held more than 2 frames
+(`decoding`) is the browser's (a slow decoder, a hidden tab), not the link's, and does not
+count. The QP then rises, at most to 35 so that text stays readable: a frame that needs more
+bytes than its share is larger, and the frame rate falls again (quality first, then frame
+rate). A window that still gets under 15 frames per second lowers the limit again, by at least
+20 % and not under 500 kbit/s, unless the frames are over their share already (a lower limit
+would not make them smaller). After 5 s that show at least 24 frames per second, or all but
+one of the frames the screen made, the limit goes up by 1.25, but only while the frames use at
+least 80 % of it (below that VBR gives QP 25 anyway); a limit that reaches 50 Mbit/s is no limit.
+A calm screen keeps the limit. Each change makes the encoder start again with a keyframe, so
+the limit changes at most once per 5 s. The VA rate control counts 30 frames per second, so
+the limit is really a size per frame (limit / 30), and radeonsi keeps each frame near it unless
+the QP reaches 35: at a 700 kbit/s limit, text frames were 2.7 KB (at most 4 KB) and a picture
+pan at QP 35 7–8 KB, also right after a still period. Its buffer (`cpb-size`) is fixed at
+150,000 kbit; a smaller one made more bytes, not fewer (`media::encode`). The server logs each
+change at info level (`monitor 1 bitrate: no limit → 1400 kbit/s (…)`). A new encoder (a new
+monitor size, a server restart) starts with no limit; a window that reconnects keeps the
+encoder and its limit.
 
 **Timeouts.** A socket with video frames or a clipboard piece on the way and no `ack` that
 moves for 10 s is closed: the browser stopped reading. One send has no time limit. The server
