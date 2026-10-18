@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -26,6 +27,8 @@ pub struct Encoder {
     /// to measure per-frame push→AU latency. (This VA encoder doesn't preserve input PTS to its
     /// output AUs, so latency is correlated by push order — valid while frames aren't dropped.)
     lat: Option<Arc<Mutex<VecDeque<Instant>>>>,
+    /// Access units and bytes encoded so far, for the automatic bitrate.
+    output: Arc<(AtomicU64, AtomicU64)>,
 }
 
 /// DRM fourcc (e.g. 0x34325241) → "AR24".
@@ -57,18 +60,31 @@ const APPSRC_BOUND: &str = "max-buffers=2 leaky-type=downstream";
 /// the browser viewer supplies the missing transfer in its decoder config (`viewer/worker.ts`).
 const ENC_COLORIMETRY: &str = "2:3:0:0";
 
+/// The bitrate limit that limits nothing (kbit/s, as in `ENC_TAIL`): 208 KB per frame at the
+/// VA rate control's 30 frames per second.
+const NO_LIMIT_KBPS: u32 = 50_000;
+
 /// `vah264enc → h264parse → appsink` tail.
 ///
 /// `target-usage=1` is deliberate and **counterintuitive**: on this AMD VCN the usage mapping is
 /// effectively inverted — `tu=1` (the "quality" preset) encodes faster than `tu=7` (the "speed"
 /// preset).
 ///
-/// Keyframes come on demand ([`Encoder::force_idr`]: a window joins, a decoder fails or falls
-/// behind, the selection moves), so the periodic one is pushed as far out as `vah264enc` goes:
+/// Keyframes come on demand ([`Encoder::force_idr`]: a window joins, a decoder fails, the
+/// selection moves), so the periodic one is pushed as far out as `vah264enc` goes:
 /// `key-int-max` is 0–1024, and 0 means "auto", about one per second. 1024 frames is 17 s of
 /// motion at 60 fps; a still screen sends no frames at all.
+///
+/// VBR with a QP from 25 to 35. With no limit ([`NO_LIMIT_KBPS`]) every frame gets QP 25, as
+/// fixed quality (CQP 23/25) gave before, within 3 % of its bytes on the bench's text and
+/// picture; only keyframes are QP 25 instead of 23. [`Encoder::set_bitrate`] lowers the limit
+/// on a slow link: the QP then rises, at most to 35 so that text stays readable, and a frame
+/// that needs more bytes than its share is larger.
+///
+/// Not CQP with a switch to VBR for a limit: on radeonsi a pipeline that started in CQP and
+/// switches to VBR keeps QP 26 for every frame, whatever the bitrate.
 const ENC_TAIL: &str = "vah264enc name=enc aud=true b-frames=0 ref-frames=1 key-int-max=1024 \
-       rate-control=cqp qpi=23 qpp=25 target-usage=1 ! \
+       rate-control=vbr bitrate=50000 min-qp=25 max-qp=35 target-usage=1 ! \
      video/x-h264,profile=constrained-baseline ! \
      h264parse config-interval=-1 ! \
      video/x-h264,stream-format=byte-stream,alignment=au ! \
@@ -96,9 +112,26 @@ impl Encoder {
         let pipeline = launch_pipeline(&desc)?;
         let appsrc = by_name_appsrc(&pipeline, "src")?;
         let lat = lat_fifo();
-        attach_au_sink(&pipeline, on_au, lat.clone())?;
+        let output = Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
+        attach_au_sink(&pipeline, on_au, lat.clone(), output.clone())?;
         pipeline.set_state(gst::State::Playing).context("encoder PLAYING")?;
-        Ok(Self { appsrc, pipeline, cur: Mutex::new(None), lat })
+        Ok(Self { appsrc, pipeline, cur: Mutex::new(None), lat, output })
+    }
+
+    /// Access units and bytes encoded so far.
+    pub fn output(&self) -> (u64, u64) {
+        (self.output.0.load(Ordering::Relaxed), self.output.1.load(Ordering::Relaxed))
+    }
+
+    /// Limit the bitrate to `kbps`, or with `None` to [`NO_LIMIT_KBPS`]. `vah264enc` applies it
+    /// at the next frame: it drains, reconfigures and starts again with a keyframe (6 ms on the
+    /// W6800, no frame lost; the keyframe has the QP the rate control had reached). The VA rate
+    /// control counts 30 frames per second (the input has no frame rate), so the limit is
+    /// really a size per frame of `kbps / 30`.
+    pub fn set_bitrate(&self, kbps: Option<u32>) {
+        if let Some(enc) = self.pipeline.by_name("enc") {
+            enc.set_property("bitrate", kbps.unwrap_or(NO_LIMIT_KBPS));
+        }
     }
 
     /// Force the next encoded frame to be an IDR (keyframe).
@@ -348,6 +381,7 @@ fn attach_au_sink<F: FnMut(Vec<u8>, bool) + Send + 'static>(
     p: &gst::Pipeline,
     mut on_au: F,
     lat: Option<Arc<Mutex<VecDeque<Instant>>>>,
+    output: Arc<(AtomicU64, AtomicU64)>,
 ) -> Result<()> {
     let appsink: AppSink =
         p.by_name("out").context("appsink out")?.downcast().map_err(|_| anyhow!("not appsink"))?;
@@ -367,6 +401,8 @@ fn attach_au_sink<F: FnMut(Vec<u8>, bool) + Send + 'static>(
                         }
                     }
                     if let Ok(map) = buf.map_readable() {
+                        output.0.fetch_add(1, Ordering::Relaxed);
+                        output.1.fetch_add(map.size() as u64, Ordering::Relaxed);
                         on_au(map.as_slice().to_vec(), idr);
                     }
                 }

@@ -7,6 +7,7 @@ mod account;
 mod agentlog;
 mod app;
 mod assets;
+mod bitrate;
 mod buildinfra;
 mod cgroup;
 mod chat;

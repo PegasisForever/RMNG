@@ -3,14 +3,15 @@
 //! - **Lanes.** Control messages (every text message) go first, so a cursor move or an `echo`
 //!   never waits behind queued frames. Then video, then clipboard replies, cut into pieces
 //!   ([`wire::browser::CLIPBOARD_PIECE_BYTES`]) as they go: a piece goes only when no video
-//!   waits, the viewer has room ([`State::has_room`]) and the piece before it arrived, so a
-//!   large copy holds video back by one piece at most. The writer ([`crate::webviewer`]) takes
-//!   from [`Outbox::next`], which stamps each video frame as it hands it to the socket.
+//!   waits, the viewer has room as for a frame ([`State::may_send`]), and the bytes on the way
+//!   stay within what the path delivers in [`CLIP_WINDOW`] (at least one piece), so a large
+//!   copy holds video back by about that long. The writer ([`crate::webviewer`]) takes from
+//!   [`Outbox::next`], which stamps each video frame as it hands it to the socket.
 //! - **Acknowledgements.** The browser sends the newest frame it decoded, how long it held
 //!   that number, and how many clipboard pieces arrived ([`wire::browser::FromBrowser::Ack`]).
 //!   Each one gives a round trip (from the stamp, less the hold) and a floor (the lowest round
 //!   trip of the last 1–2 minutes, of deltas sent while no keyframe was out), and ends the
-//!   frames it covers.
+//!   frames it covers. The bytes they end give the delivered rate ([`Meter`]).
 //! - **Behind** ([`State::behind`]): how long the oldest video frame that is not acknowledged
 //!   (queued here or on the way) has waited since it was queued, less the floor. One number
 //!   for our queue, the kernel's, any proxy's, the path's and the browser's decoder.
@@ -57,6 +58,12 @@ const ROOM: Duration = Duration::from_millis(100);
 const MAX_HOLD: Duration = Duration::from_millis(100);
 /// The debug summary comes at most this often.
 const LOG_EVERY: Duration = Duration::from_secs(5);
+/// Clipboard pieces on the way (with the video on the way) stay within what the path
+/// delivered in this long, so the video behind them waits about this long at most. At least one
+/// piece is always allowed; on the LAN the window is megabytes.
+const CLIP_WINDOW: Duration = Duration::from_millis(100);
+/// The delivered rate is measured over periods of this length.
+const METER_PERIOD: Duration = Duration::from_millis(500);
 
 pub(crate) struct Outbox {
     state: Mutex<State>,
@@ -85,6 +92,10 @@ struct State {
     /// Clipboard pieces handed to the socket, and those the browser says arrived (both wrap).
     clip_sent: u32,
     clip_acked: u32,
+    /// The sizes of the pieces on the way, oldest first.
+    clip_out: VecDeque<usize>,
+    /// Since when the next clipboard piece waits for room.
+    clip_wait: Option<Instant>,
     queued_bytes: usize,
     closed: bool,
     /// The keyframe with this number is queued or on the way: the deltas sent until it is
@@ -93,7 +104,30 @@ struct State {
     /// When an acknowledgement last moved, or something went out with nothing on the way.
     progress_at: Instant,
     floor: Floor,
+    meter: Meter,
+    /// Video frames acknowledged since [`Outbox::take_shown`] last took them.
+    shown: u32,
     period: Period,
+}
+
+/// The rate at which acknowledgements end bytes (video and clipboard pieces), over the last
+/// complete [`METER_PERIOD`].
+struct Meter {
+    start: Instant,
+    bytes: usize,
+    /// Bytes per second; 0 until one period is complete.
+    rate: f64,
+}
+
+impl Meter {
+    fn add(&mut self, bytes: usize, now: Instant) {
+        self.bytes += bytes;
+        let secs = now.saturating_duration_since(self.start).as_secs_f64();
+        if secs >= METER_PERIOD.as_secs_f64() {
+            self.rate = self.bytes as f64 / secs;
+            (self.start, self.bytes) = (now, 0);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -189,9 +223,29 @@ impl State {
         self.behind(now) <= ROOM + self.floor.get().unwrap_or_default()
     }
 
+    /// Whether something that has waited `held` may go: with room, or after [`MAX_HOLD`] while
+    /// at most [`BEHIND_MAX`] behind.
+    fn may_send(&self, now: Instant, held: Duration) -> bool {
+        self.has_room(now) || (held >= MAX_HOLD && self.behind(now) <= BEHIND_MAX)
+    }
+
+    /// Whether a clipboard piece of `len` bytes fits in [`CLIP_WINDOW`] with what is on the way.
+    fn clip_fits(&self, len: usize) -> bool {
+        let out: usize = self.in_flight.iter().map(|f| f.len).sum::<usize>()
+            + self.clip_out.iter().sum::<usize>();
+        self.clip_out.is_empty()
+            || (out + len) as f64 <= self.meter.rate * CLIP_WINDOW.as_secs_f64()
+    }
+
     /// Something is on the way that an acknowledgement must end.
     fn waiting(&self) -> bool {
         !self.in_flight.is_empty() || self.clip_sent != self.clip_acked
+    }
+
+    /// The size of the next piece of the first clipboard reply.
+    fn next_piece_len(&self) -> Option<usize> {
+        let (d, off) = self.clip.front()?;
+        Some((d.bytes.len() - off).min(CLIPBOARD_PIECE_BYTES))
     }
 
     /// The next piece of the first clipboard reply, as a binary message.
@@ -202,6 +256,7 @@ impl State {
         let piece = encode_clipboard_piece(d, &d.bytes[*off..end], last);
         self.queued_bytes -= end - *off;
         self.period.clip_bytes += end - *off;
+        self.clip_out.push_back(end - *off);
         if last {
             self.clip.pop_front();
         } else {
@@ -222,6 +277,8 @@ impl Outbox {
                 in_flight: VecDeque::new(),
                 clip_sent: 0,
                 clip_acked: 0,
+                clip_out: VecDeque::new(),
+                clip_wait: None,
                 queued_bytes: 0,
                 closed: false,
                 key_out: None,
@@ -231,6 +288,12 @@ impl Outbox {
                     cur: None,
                     prev: None,
                 },
+                meter: Meter {
+                    start: now,
+                    bytes: 0,
+                    rate: 0.0,
+                },
+                shown: 0,
                 period: Period::new(now),
             }),
             ready: Condvar::new(),
@@ -245,6 +308,8 @@ impl Outbox {
     }
 
     fn push_at(&self, msg: Queued, now: Instant) -> bool {
+        // Pieces are cut in `next`; one from outside would skip the clipboard lane's rules.
+        assert!(!matches!(msg, Queued::Binary(_)), "only the outbox cuts clipboard pieces");
         let mut st = self.state.lock().unwrap();
         if st.closed {
             return false;
@@ -268,7 +333,8 @@ impl Outbox {
     }
 
     /// The next message to send: control, then video, then a clipboard piece. Waits up to
-    /// `timeout`. A video frame or a clipboard piece counts as handed to the socket from here.
+    /// `timeout`, and wakes on its own when a waiting piece has waited [`MAX_HOLD`]. A video
+    /// frame or a clipboard piece counts as handed to the socket from here.
     pub(crate) fn next(&self, timeout: Duration) -> Next {
         let deadline = Instant::now() + timeout;
         let mut st = self.state.lock().unwrap();
@@ -300,16 +366,23 @@ impl Outbox {
                 });
                 return Next::Msg(msg);
             }
-            if st.clip_sent == st.clip_acked && st.has_room(now) {
-                if let Some(piece) = st.next_piece() {
+            let mut wait = deadline.saturating_duration_since(now);
+            if let Some(len) = st.next_piece_len() {
+                let since = *st.clip_wait.get_or_insert(now);
+                let held = now.saturating_duration_since(since);
+                if st.may_send(now, held) && st.clip_fits(len) {
                     if !st.waiting() {
                         st.progress_at = now;
                     }
+                    let piece = st.next_piece().expect("a piece is queued");
                     st.clip_sent = st.clip_sent.wrapping_add(1);
+                    st.clip_wait = None;
                     return Next::Msg(Queued::Binary(piece.into()));
                 }
+                if held < MAX_HOLD {
+                    wait = wait.min(MAX_HOLD - held);
+                }
             }
-            let wait = deadline.saturating_duration_since(now);
             if wait.is_zero() {
                 return Next::Idle;
             }
@@ -323,6 +396,7 @@ impl Outbox {
         let mut st = self.state.lock().unwrap();
         let left: usize = st.clip.drain(..).map(|(d, off)| d.bytes.len() - off).sum();
         st.queued_bytes -= left;
+        st.clip_wait = None;
     }
 
     /// Drop everything and stop the writer, also inside a send.
@@ -359,6 +433,8 @@ impl Outbox {
                 st.period.delays.push(delay.saturating_sub(held));
                 for f in st.in_flight.drain(..=i).collect::<Vec<_>>() {
                     st.period.acked_bytes += f.len;
+                    st.meter.add(f.len, now);
+                    st.shown += 1;
                     if st.key_out == Some(f.seq) {
                         st.key_out = None;
                     }
@@ -376,6 +452,8 @@ impl Outbox {
         if new != 0 && new <= st.clip_sent.wrapping_sub(st.clip_acked) {
             st.clip_acked = clip;
             st.progress_at = now;
+            let bytes: usize = st.clip_out.drain(..new as usize).sum();
+            st.meter.add(bytes, now);
         }
         // Room for a clipboard piece may have come.
         self.ready.notify_one();
@@ -390,9 +468,21 @@ impl Outbox {
     /// [`STALL`] closes it.
     pub(crate) fn room(&self, now: Instant, held: Duration) -> bool {
         let st = self.state.lock().unwrap();
-        st.video.len() <= 1
-            && (st.has_room(now)
-                || (held >= MAX_HOLD && st.behind(now) <= BEHIND_MAX))
+        st.video.len() <= 1 && st.may_send(now, held)
+    }
+
+    /// The bytes per second the acknowledgements ended lately (video and clipboard), or `None`
+    /// before the first measurement. For the automatic bitrate ([`crate::bitrate`]).
+    pub(crate) fn delivered(&self) -> Option<f64> {
+        let rate = self.state.lock().unwrap().meter.rate;
+        (rate > 0.0).then_some(rate)
+    }
+
+    /// The video frames acknowledged since the last call, and whether a keyframe is queued or on
+    /// the way.
+    pub(crate) fn take_shown(&self) -> (u32, bool) {
+        let mut st = self.state.lock().unwrap();
+        (std::mem::take(&mut st.shown), st.key_out.is_some())
     }
 
     /// A captured frame of this viewer's monitor was replaced before it was encoded.
@@ -481,6 +571,14 @@ mod tests {
         }
     }
 
+    /// The writer's next message within `timeout`.
+    fn take_within(o: &Outbox, timeout: Duration) -> Queued {
+        match o.next(timeout) {
+            Next::Msg(m) => m,
+            _ => panic!("nothing came"),
+        }
+    }
+
     fn seq(m: &Queued) -> u32 {
         match m {
             Queued::Video { seq, .. } => *seq,
@@ -544,6 +642,48 @@ mod tests {
         assert!(matches!(o.next(Duration::ZERO), Next::Idle));
         o.ack(1, Duration::ZERO, 0, Instant::now());
         assert_eq!(piece(&take(&o)), (5, 10, true));
+    }
+
+    /// A piece that waited `MAX_HOLD` goes while the viewer is at most `BEHIND_MAX` behind, as a
+    /// frame does: else a full link that gets frames by that rule would never send a piece.
+    #[test]
+    fn a_clipboard_piece_that_waited_goes_as_a_held_frame_does() {
+        let o = Outbox::new();
+        let t0 = Instant::now().checked_sub(ROOM * 3).unwrap();
+        o.push_at(video(1, false), t0);
+        take(&o);
+        o.push(clipboard(5, 10));
+        let t = Instant::now();
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle), "no room yet");
+        // The writer wakes on its own once the piece has waited `MAX_HOLD`.
+        assert_eq!(piece(&take_within(&o, MAX_HOLD * 2)), (5, 10, true));
+        assert!(t.elapsed() >= MAX_HOLD);
+    }
+
+    /// Once the path has shown its rate, the pieces on the way may fill `CLIP_WINDOW` of it.
+    #[test]
+    fn clipboard_pieces_fill_a_window_of_the_delivered_rate() {
+        let o = Outbox::new();
+        o.push(clipboard(5, 10 * CLIPBOARD_PIECE_BYTES));
+        take(&o);
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle), "no rate yet: one piece");
+        // The piece arrived after `METER_PERIOD`: the rate is one piece per period, so the
+        // window holds a fifth of a piece, and one piece goes at a time.
+        let t = o.state.lock().unwrap().meter.start + METER_PERIOD;
+        o.ack(0, Duration::ZERO, 1, t);
+        take(&o);
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle));
+        // Twenty pieces per period: the window holds four.
+        o.state.lock().unwrap().meter.rate =
+            20.0 * CLIPBOARD_PIECE_BYTES as f64 / METER_PERIOD.as_secs_f64();
+        for _ in 0..3 {
+            take(&o);
+        }
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle));
+        o.ack(0, Duration::ZERO, 3, Instant::now());
+        take(&o);
+        take(&o);
+        assert!(matches!(o.next(Duration::ZERO), Next::Idle));
     }
 
     /// A newer copy drops what is left of the replies not sent yet.

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   CLIPBOARD_PIECE_BYTES,
+  RateMeter,
   clipboardPieces,
   codecFromAnnexB,
   encodeClipboardPiece,
@@ -59,4 +60,17 @@ test("a clipboard reply goes in pieces, the last one marked; an empty one in one
   expect(empty.map(parseClipboardPiece)).toEqual([
     { serial: 7, mimeType: "image/png", bytes: new Uint8Array(0), last: true },
   ]);
+});
+
+test("the rate meter gives the rate of the last complete period", () => {
+  const m = new RateMeter(500);
+  m.add(1000, 0);
+  m.add(1000, 250);
+  expect(m.rate).toBe(0);
+  m.add(3000, 500);
+  expect(m.rate).toBe(10);
+  m.add(100, 600);
+  expect(m.rate).toBe(10);
+  m.add(400, 1000);
+  expect(m.rate).toBe(1);
 });

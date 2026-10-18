@@ -112,8 +112,8 @@ pub enum ToBrowser {
     /// The answer to [`FromBrowser::Echo`], with the same `id`.
     Echo { id: u32 },
     /// How many clipboard pieces from the browser arrived on this socket (wraps). The browser
-    /// sends its next piece only when the one before arrived, so its acknowledgements and input
-    /// never wait behind more than one piece.
+    /// keeps the pieces on the way within 100 ms of the rate these show (and always one), so
+    /// its acknowledgements and input wait about that long behind an upload.
     ClipAck { n: u32 },
 }
 
@@ -134,8 +134,8 @@ pub enum FromBrowser {
     /// counts when it arrives) and how long the window held that number before this message
     /// (`held_ms`), and how many clipboard pieces arrived on this socket (`clip`, wraps). Sent
     /// every 50 ms when `seq` changed, at once when `clip` did, and once a second otherwise.
-    /// The server takes the round trip and how far behind the window is from it, and sends the
-    /// next clipboard piece only when the last one arrived.
+    /// The server takes the round trip, how far behind the window is and the delivered rate
+    /// from it, and keeps the clipboard pieces on the way within 100 ms of that rate.
     Ack {
         seq: u32,
         held_ms: u32,

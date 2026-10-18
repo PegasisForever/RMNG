@@ -2,13 +2,15 @@
 # Screen activity for the viewer test bench (docs/WAN-BENCH.md). Run inside a clone with a
 # desktop, as the clone user, while that clone is selected:
 #
-#   scripts/wan-motion.sh still|scroll|large
+#   scripts/wan-motion.sh still|scroll|large|photo
 #
 # Each call first stops the activity of the call before it.
 #   still   nothing moves.
 #   scroll  a 960×540 window scrolls a page of text at 240 px/s.
 #   large   the same text scrolls full screen: every frame changes.
-# Both are on monitor 1 (x 1920..3840 of the default two-monitor layout): monitor 0 has the
+#   photo   a picture full of fine detail (a Mandelbrot set) pans full screen: about 5–9 Mbit/s
+#           at QP 23/25, more than the hotspot link carries.
+# All are on monitor 1 (x 1920..3840 of the default two-monitor layout): monitor 0 has the
 # top bar, and Mutter puts a full-screen window there on monitor 1 anyway.
 # Both use ffplay on a picture of text that is made once (GPL-3 in two columns of a monospace font, light on
 # dark like an editor) and scroll it at 60 frames per second.
@@ -33,10 +35,22 @@ if [ ! -f "$IMG" ]; then
     "$IMG"
 fi
 
+PIC=/tmp/$TAG-photo.png
+if [ "${1:-}" = photo ] && [ ! -f "$PIC" ]; then
+  ffmpeg -loglevel error -f lavfi \
+    -i "mandelbrot=s=3840x2160:start_scale=0.02:end_scale=0.02:maxiter=1000" -frames:v 1 "$PIC"
+fi
+
 case "${1:-}" in
   scroll) w=960 h=540 extra=(-left 2400 -top 270) ;;
   large) w=1920 h=1080 extra=(-left 1920 -top 0 -fs) ;;
-  *) echo "usage: $0 still|scroll|large" >&2; exit 2 ;;
+  photo)
+    # 4 px right and 2 px down per frame, at 60 frames per second.
+    setsid ffplay -hide_banner -loglevel error -window_title $TAG -noborder -left 1920 -top 0 -fs \
+      -f lavfi "movie=$PIC,loop=loop=-1:size=1,setpts=N/(60*TB),crop=1920:1080:'mod(n*4,iw-1920)':'mod(n*2,ih-1080)'" \
+      </dev/null >/dev/null 2>&1 &
+    exit 0 ;;
+  *) echo "usage: $0 still|scroll|large|photo" >&2; exit 2 ;;
 esac
 # 4 px per frame at 60 frames per second; the picture is decoded once and looped.
 setsid ffplay -hide_banner -loglevel error -window_title $TAG -noborder "${extra[@]}" -f lavfi \

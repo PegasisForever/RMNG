@@ -4,6 +4,7 @@
 #
 #   scripts/wan-shape.sh proxy start|stop
 #   scripts/wan-shape.sh apply lan|home|hotspot [port]
+#   scripts/wan-shape.sh down <rate>
 #   scripts/wan-shape.sh clear
 #   scripts/wan-shape.sh show
 #
@@ -16,7 +17,8 @@
 # is shaped on an ifb device: the ingress of $DEV sends the port there. Each direction gets
 # half of the round trip. In each direction netem adds the delay and loss, then tbf limits the
 # rate; tbf's `latency` is the link's buffer. No jitter: netem jitter reorders packets, which a
-# real link seldom does.
+# real link seldom does. `down` changes only the down rate of the applied profile (for example
+# `1mbit`), in place, so nothing queued is lost: a link that drops and comes back.
 #
 # The CT shares the Proxmox host's kernel, and `tc` makes the kernel load a missing qdisc,
 # filter or action module on the host. So `apply` first checks that every module it needs is
@@ -115,9 +117,12 @@ case "${1:-}/${2:-}" in
   apply/home) apply "$port" 25ms 0% 20mbit 10mbit 200ms ;;
   # About 150 ms round trip, 3 Mbit/s down, 1 up, 1 % loss each way, deep buffer.
   apply/hotspot) apply "$port" 75ms 1% 3mbit 1mbit 500ms ;;
+  down/?*)
+    buffer=$(tc qdisc show dev "$DEV" parent 10:1 | grep -o 'lat [0-9.]*ms' | cut -d' ' -f2)
+    tc qdisc change dev "$DEV" parent 10:1 handle 20: tbf rate "$2" burst 16kb latency "$buffer" ;;
   show/) tc -s qdisc show dev "$DEV"; tc -s qdisc show dev "$IFB" 2>/dev/null || true ;;
   *)
-    echo "usage: $0 proxy start|stop | apply lan|home|hotspot [port] | clear | show" >&2
+    echo "usage: $0 proxy start|stop | apply lan|home|hotspot [port] | down <rate> | clear | show" >&2
     exit 2
     ;;
 esac

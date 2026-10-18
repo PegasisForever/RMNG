@@ -225,7 +225,13 @@ pub async fn run(
 /// Generous on purpose. The reply crosses two hops and the far end has to read the host's
 /// clipboard first, which for a large image is not instant. This is the outer bound on a
 /// transfer that is not coming, not a budget for one that is.
-const PASTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+///
+/// Not longer than Mutter's own limit: it cancels the transfer requests it has not seen an
+/// answer for 15 s after the last one (`TRANSFER_REQUEST_CLEANUP_TIMEOUT_MS` in
+/// `meta-clipboard-session.c`), and bytes that come later fail with "Transfer serial … doesn't
+/// match any transfer request". So a paste from a browser viewer on a slow uplink (4 MB takes
+/// 35 s at 1 Mbit/s) fails whatever this is.
+const PASTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Fail one pending paste if [`PASTE_TIMEOUT`] passes with no bytes for it.
 ///

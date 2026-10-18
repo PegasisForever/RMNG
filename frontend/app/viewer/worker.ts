@@ -18,6 +18,7 @@ import {
   VIDEO_HEADER_LEN,
   type WorkerIn,
   type WorkerOut,
+  RateMeter,
   clipboardPieces,
   codecFromAnnexB,
   isClipboardPiece,
@@ -28,8 +29,8 @@ import {
 const scope = self as unknown as Worker;
 const post = (m: WorkerOut, transfer: Transferable[] = []) => scope.postMessage(m, transfer);
 
-/** After a socket that was open closes, connect again at once; after each try that fails, wait
- *  this long, doubled each time up to RECONNECT_MAX_MS. */
+/** After a socket on which the server spoke closes, connect again at once; after each try that
+ *  fails, wait this long, doubled each time up to RECONNECT_MAX_MS. */
 const RECONNECT_FIRST_MS = 400;
 const RECONNECT_MAX_MS = 1000;
 /** After this many decoder errors, each within ERROR_WINDOW_MS of the one before, use Chrome's
@@ -45,6 +46,9 @@ const KEY_RESET_BACKLOG = 6;
  *  unacknowledged for 10 s, or that sends nothing for 10 s. */
 const ACK_MS = 50;
 const ACK_HEARTBEAT_MS = 1000;
+/** Clipboard pieces on the way to the server stay within what the uplink carried in this long
+ *  (at least one piece), so acks and input wait about this long behind an upload at most. */
+const UPLOAD_WINDOW_MS = 100;
 
 let url = "";
 let monitor = 0;
@@ -74,16 +78,21 @@ let acked: { seq: number; clip: number; at: number } | null = null;
 /** Clipboard pieces received on this socket; the reply they are putting together. */
 let clipIn = 0;
 let incoming: { serial: number; mimeType: string; parts: Uint8Array[] } | null = null;
-/** Clipboard pieces waiting to be sent; those sent on this socket, and those the server says
- *  arrived (`clip_ack`). */
+/** The replies this window asked for since the last copy (`serial mime`). A piece of anything
+ *  else is the rest of a reply the window no longer wants. */
+let wanted = new Set<string>();
+/** Clipboard pieces waiting to be sent; the sizes of those sent on this socket that the server
+ *  has not said arrived (`clip_ack`), how many arrived, and the rate they arrived at. */
 let upload: ArrayBuffer[] = [];
-let upSent = 0;
+let upOut: number[] = [];
 let upAcked = 0;
+let upRate = new RateMeter();
 /** Input made while the socket is down. */
 let held: HeldInput = [];
 
 function send(msg: FromBrowser) {
   if (msg.t === "clipboard" && msg.k === "offer") newCopy();
+  if (msg.t === "clipboard" && msg.k === "request") wanted.add(`${msg.serial} ${msg.mime_type}`);
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   else if (msg.t === "input") held = holdInput(held, msg, performance.now());
 }
@@ -179,12 +188,15 @@ function draw() {
   ctx.drawImage(last, offX, offY, w * scale, h * scale);
 }
 
-/** One piece of a clipboard reply from the server. Acknowledged at once: the server sends the
- *  next piece only when this one arrived. */
+/** One piece of a clipboard reply from the server. Acknowledged at once: the server keeps only
+ *  a few pieces on the way. */
 function onClipboardPiece(buf: ArrayBuffer) {
   clipIn++;
   ack();
   const p = parseClipboardPiece(buf);
+  const key = `${p.serial} ${p.mimeType}`;
+  if (!wanted.has(key)) return;
+  if (p.last) wanted.delete(key);
   if (incoming?.serial !== p.serial || incoming.mimeType !== p.mimeType) {
     incoming = { serial: p.serial, mimeType: p.mimeType, parts: [] };
   }
@@ -202,14 +214,25 @@ function onClipboardPiece(buf: ArrayBuffer) {
   ]);
 }
 
-/** Send the next clipboard piece once the one before it arrived, so acks and input wait
- *  behind one piece at most. (`bufferedAmount` does not see the data waiting in the kernel
- *  and on the link, which on a slow uplink held acks back for seconds.) */
+/** Send clipboard pieces while those on the way fit in UPLOAD_WINDOW_MS of the rate the
+ *  server's `clip_ack`s show, and always one. (`bufferedAmount` does not see the data waiting
+ *  in the kernel and on the link, which on a slow uplink held acks back for seconds.) */
 function sendUpload() {
-  if (upload.length && upSent === upAcked && ws?.readyState === WebSocket.OPEN) {
-    ws.send(upload.shift()!);
-    upSent++;
+  while (upload.length && ws?.readyState === WebSocket.OPEN) {
+    const out = upOut.reduce((n, b) => n + b, 0) + upload[0].byteLength;
+    if (upOut.length && out > upRate.rate * UPLOAD_WINDOW_MS) return;
+    const piece = upload.shift()!;
+    ws.send(piece);
+    upOut.push(piece.byteLength);
   }
+}
+
+/** The server says `n` pieces of this socket arrived (wraps). */
+function onClipAck(n: number) {
+  const now = performance.now();
+  for (let i = (n - upAcked) >>> 0; i > 0 && upOut.length; i--) upRate.add(upOut.shift()!, now);
+  upAcked = n;
+  sendUpload();
 }
 
 function queueUpload(d: ClipboardBytes) {
@@ -221,19 +244,21 @@ function queueUpload(d: ClipboardBytes) {
 function newCopy() {
   upload = [];
   incoming = null;
+  wanted = new Set();
 }
 
 function connect() {
-  newest = acked = null;
-  clipIn = upSent = upAcked = 0;
+  clipIn = upAcked = 0;
+  upOut = [];
+  upRate = new RateMeter();
   newCopy();
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
-    reconnectMs = 0;
     // No keyframe request: joining primes this monitor with a fresh keyframe. Frames still in
-    // the old decoder belong to the old socket.
+    // the old decoder belong to the old socket, and so does what it decoded until now.
     resetDecoder();
+    newest = acked = null;
     post({ type: "connected", connected: true });
     const now = performance.now();
     for (const h of freshInput(held, now)) send({ t: "input", ...h.msg });
@@ -242,9 +267,11 @@ function connect() {
   ws.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
     if (typeof e.data === "string") {
       const msg = JSON.parse(e.data) as ToBrowser;
+      // The server's first message: it is up, so a later close reconnects at once. (Reset on
+      // open, a server that accepts and closes at once would be tried in a tight loop.)
+      if (msg.t === "version") reconnectMs = 0;
       if (msg.t === "clip_ack") {
-        upAcked = msg.n;
-        sendUpload();
+        onClipAck(msg.n);
         return;
       }
       if (msg.t === "clipboard" && msg.k === "offer") newCopy();

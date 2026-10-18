@@ -8,7 +8,7 @@ It is row S1 of [WEB-VIEWER-WAN-SCOPE.md](WEB-VIEWER-WAN-SCOPE.md).
 | Part | Runs on | Does |
 |---|---|---|
 | [`scripts/wan-shape.sh`](../scripts/wan-shape.sh) | CT 101, as root | Starts a TCP proxy on port 9001 in front of port 9000, as `tailscale serve` is in production. Makes one port (9001 by default, or 9000) look like a slow link with `tc`. Other traffic is not shaped. |
-| [`scripts/wan-motion.sh`](../scripts/wan-motion.sh) | the clone, as the clone user | Makes the screen still, or scrolls text in a window, or scrolls text on the full screen. |
+| [`scripts/wan-motion.sh`](../scripts/wan-motion.sh) | the clone, as the clone user | Makes the screen still, or scrolls text in a window, or scrolls text on the full screen, or pans a detailed picture on the full screen. |
 | `rmng-fps` ([PROTOCOL.md](PROTOCOL.md#browser-viewer-protocol-browser--control-server)) | the bench client | Joins as one viewer window and acknowledges frames as a window does. Prints each second, then for the run: frames, Mbit/s, keyframes, delay, reconnects. |
 
 **The proxy path is the main path.** Off the LAN, operators open the viewer through
@@ -40,6 +40,7 @@ Motion (on monitor 1 of the default two-monitor 1920×1080 layout):
 | `still` | Nothing moves. |
 | `scroll` | A 960×540 window scrolls text at 240 px/s, 60 frames per second. |
 | `large` | The same text scrolls on the full monitor: every frame changes. |
+| `photo` | A picture full of fine detail (a Mandelbrot set) pans on the full monitor, 4 px right and 2 px down per frame: about 5.8 Mbit/s at 50 fps on the LAN, more than the hotspot link carries (from round 5). |
 
 **Delay** is the time from an `echo` message to its answer, every 200 ms. Up to round 1 the
 answer waited in the server's queue behind the video; from round 2 it goes ahead of the video
@@ -98,7 +99,9 @@ $CT /root/wan-shape.sh proxy stop
 ```
 
 Always end with `clear`; it removes only what `apply` added. `wan-shape.sh show` prints the
-qdiscs and their counters.
+qdiscs and their counters. `wan-shape.sh down 1mbit` changes only the down rate of the applied
+profile, in place, so nothing queued is lost: round 5 drops the hotspot to 1 Mbit/s for 20 s
+and back to 3 (`down 3mbit`).
 
 ## Results
 
@@ -363,3 +366,119 @@ What the numbers show:
 - The hotspot link changes much from run to run. A swap of only the clone daemon (newest or
   oldest buffer of a batch) on the hotspot full-screen scroll gave 23–36 fps against 27–36 fps
   in 6 runs each: no difference that the bench can show.
+
+### Round 5: automatic bitrate
+
+2026-10-17, same clone, monitor and client, 30 s per cell, through the proxy on port 9001. Each
+cell shows **round 4 → round 5**.
+
+- **Round 4**: image label `18b9fb9-round4`.
+- **Round 5**: image label `a3a92cf-round5`. The encoder runs VBR with a QP from 25 to 35 and
+  no limit (every frame QP 25, as CQP 23/25 before); when the slowest window is shown fewer than
+  15 frames per second for 5 s while the screen makes more, the bitrate gets a limit of 70 % of
+  what that window delivered (R4, R5; the rule is in
+  [PROTOCOL.md](PROTOCOL.md#browser-viewer-protocol-browser--control-server)). Clipboard pieces
+  fill 100 ms of the delivered rate in both directions. The server was restarted before each
+  link, so no limit carried over from the cells before.
+- New motion `photo` (see above), and a column for the bitrate changes (each one is a
+  keyframe).
+
+| Link | Motion | fps | Mbit/s mean (peak) | Keyframes | Not encoded | Reconnects | Video delay p50 / p95 (ms) | Echo p50 / p95 (ms) | Bitrate changes |
+|---|---|---|---|---|---|---|---|---|---|
+| lan | still | 0.1 → 0.1 | 0.02 (0.57) → 0.00 (0.05) | 1 → 1 | 0 → 0 | 0 → 0 | 1 / 1 → 1 / 1 | 1 / 1 → 1 / 1 | 0 |
+| lan | scroll | 50.0 → 50.0 | 0.89 (1.75) → 0.89 (1.67) | 2 → 2 | 0 → 0 | 0 → 0 | 1 / 2 → 1 / 2 | 1 / 15 → 1 / 7 | 0 |
+| lan | large | 50.0 → 50.1 | 1.61 (4.02) → 1.61 (4.01) | 2 → 2 | 0 → 0 | 0 → 0 | 1 / 2 → 1 / 2 | 1 / 14 → 1 / 10 | 0 |
+| lan | photo | 50.0 → 50.0 | 5.85 (15.30) → 5.76 (12.62) | 2 → 2 | 0 → 0 | 0 → 0 | 1 / 2 → 1 / 2 | 1 / 5 → 1 / 11 | 0 |
+| home | still | 0.1 → 0.0 | 0.00 (0.05) → 0.00 (0.05) | 1 → 1 | 0 → 0 | 0 → 0 | 95 / 95 → 84 / 84 | 51 / 92 → 51 / 83 | 0 |
+| home | scroll | 49.8 → 49.8 | 0.88 (1.74) → 0.88 (1.71) | 2 → 2 | 3 → 2 | 0 → 0 | 82 / 106 → 76 / 103 | 89 / 106 → 75 / 84 | 0 |
+| home | large | 49.5 → 49.6 | 1.60 (3.66) → 1.60 (3.56) | 2 → 2 | 11 → 8 | 0 → 0 | 75 / 103 → 76 / 104 | 75 / 92 → 76 / 92 | 0 |
+| home | photo | 48.3 → 48.4 | 5.58 (10.35) → 5.60 (10.20) | 2 → 2 | 48 → 42 | 0 → 0 | 81 / 125 → 85 / 139 | 103 / 204 → 107 / 207 | 0 |
+| hotspot | still | 0.1 → 0.1 | 0.00 (0.05) → 0.00 (0.05) | 1 → 1 | 0 → 0 | 0 → 0 | 359 / 359 → 154 / 154 | 192 / 293 → 193 / 335 | 0 |
+| hotspot | scroll | 38.9 → 42.8 | 0.75 (1.10) → 0.79 (1.18) | 2 → 2 | 232 → 190 | 0 → 0 | 272 / 515 → 265 / 777 | 299 / 522 → 267 / 588 | 0 |
+| hotspot | large | 28.4 → 34.1 | 1.05 (2.24) → 1.32 (2.80) | 1 → 1 | 617 → 411 | 0 → 0 | 3326 / 5966 → 339 / 1758 | 1805 / 5204 → 311 / 1629 | 0 |
+| hotspot | photo | 5.3 → 5.9 | 1.26 (5.20) → 1.03 (5.48) | 1 → 2 | 736 → 977 | 0 → 0 | 6055 / 8490 → 3767 / 8358 | 5473 / 11012 → 3950 / 10882 | 1 |
+
+The hotspot cells ran again, each on a fresh server (fps, video delay p50 / p95 in ms, bitrate
+changes):
+
+| Motion | Round 4 | Round 5 |
+|---|---|---|
+| large | 23.5, 347 / 1718; 28.9, 378 / 1754; 32.9, 250 / 1383 | 25.4, 300 / 2745, 1; 28.4, 259 / 2089, 1 |
+| photo | 6.7, 7689 / 17222; 7.1, 6213 / 16490 | 6.0, 6784 / 13492, 1; 9.7, 4074 / 10508, 1 |
+
+**The hotspot drops to 1 Mbit/s for 20 s** (`down 1mbit` at 15 s, `down 3mbit` at 35 s), one
+60 s run on a fresh server. fps is the mean of `rmng-fps`'s seconds 1–15, 16–35 and 41–60.
+
+| Motion | Build | fps before / during / after | Video delay p50 / p95 (ms) | Bitrate changes |
+|---|---|---|---|---|
+| large | round 4 | 38.6 / 13.3 / 41.3 | 364 / 2149 | – |
+| large | round 4, run 2 | 32.4 / 12.6 / 8.1 | 1386 / 2616 | – |
+| large | round 5 | 36.3 / 19.0 / 39.1 | 333 / 2924 | 5: no limit → 500 kbit/s 12 s into the drop (9 fps for 5 s, 693 kbit/s delivered); then 625, 781 during the drop and 1171, 1756 after it |
+| large | round 5, run 2 | 16.9 / 24.3 / 22.6 | 2468 / 4682 | 0 |
+| photo | round 4 | 9.3 / 5.7 / 7.8 | 7310 / 21702 | – |
+| photo | round 5 | 9.7 / 7.8 / 16.4 | 6109 / 17103 | 2: no limit → 2359 → 718 kbit/s |
+
+**Clipboard**, as in round 4 (headless Chrome watches the window scroll through the proxy; a
+4.2 MB noise PNG down, a 3.8 MB one up):
+
+| Direction | Link | Round 4 | Round 5 |
+|---|---|---|---|
+| clone → browser | lan | 0.5–1.4 s | 0.4 s |
+| browser → clone | lan | | upload 0.4 s, the clone pasted it |
+| clone → browser | hotspot | 40 s; video delay p50 350–590 ms, p95 at most 960 ms | 28 s; video delay p50 290–430 ms, p95 at most 690 ms |
+| browser → clone | hotspot | upload 35 s; the paste failed | upload 37 s; video delay p50 400–650 ms, p95 at most 950 ms; the paste failed |
+
+**A real Chrome with hardware decoding on the LAN** (headed `google-chrome` 153 on a GNOME
+Wayland desktop with a W6800, port 9000 direct, `/viewer?monitor=1`): `SystemInfo` said video
+decode is hardware accelerated, and the GPU process's VCN decode time (`drm-engine-dec` in its
+`fdinfo`) grew from 1.7 s to 4.4 s during the test, so the decoder was the hardware one. While
+the window scrolled, 2–3 frames (35–47 ms) were in its decoder. After each stop (scroll, large,
+photo), the next summary line had 0 frames on the way, and in 25 s after each stop the server
+logged no stall and the window did not reconnect: the decoder outputs its last frame.
+
+What the numbers show:
+
+- **The LAN and the home link do not change**: the same frame rate, bitrate and delay, and the
+  limit never engaged. VBR with no limit gives each frame QP 25; keyframes are QP 25 instead of
+  23 (the join keyframe of a still screen is a little smaller).
+- **A drop to 1 Mbit/s**: when it engaged (12 s into the drop), the frame rate during the drop
+  went from about 13 to about 19 (11–44 fps, most of them above 30, in its last 8 s, against 0–24
+in round 4), and after
+  the link came back the limit went up in four steps and the frame rate was back at 39. Every
+  change is a keyframe: 5 in 60 s, each 100–250 KB of text at QP 25–35. In run 2 the frames
+  never stayed under 15 fps for 5 s in a row, so nothing changed; that run started badly (the
+  floor came from round trips with a queue in them, see below).
+- **On the hotspot, the text cells change little.** A full-screen scroll fits the link at QP 25
+  most of the time. The limit engaged in 2 of 3 `large` runs, once each, after seconds in
+  which the lossy link delivered little.
+- **The picture pan is too much for the hotspot either way**: QP 35 roughly halves the frame
+  size (10 KB instead of 20–30 KB), and the frame rate went from 5–7 to 6–10, but the video
+  delay stays at seconds. The delay comes from R1, not from the frame size: on this link the
+  floor comes from round trips with a queue in them (0.8–2.5 s), R1 then lets that long of
+  frames at the capture rate onto the path, and they are 1–3 MB. Holding frames back by bytes
+  as well as by time made each held frame larger instead (2 fps, 300–400 KB frames after a
+  long hold), so round 5 does not change R1.
+- **Clipboard**: on the LAN a 4 MB copy takes 0.4 s each way, as the pieces on the way grow
+  with the delivered rate. On the hotspot the download went from 40 s to 28 s with a lower video
+  delay. **A paste into the clone of a copy that takes more than 15 s to upload fails**,
+  whatever the clone daemon waits: Mutter cancels a clipboard transfer request it has had no
+  answer for 15 s (`TRANSFER_REQUEST_CLEANUP_TIMEOUT_MS`), and the bytes that come later fail
+  with "Transfer serial … doesn't match any transfer request". On the 1 Mbit/s uplink a 3.8 MB
+  image needs 37 s. The clone daemon's own limit is now 15 s to match.
+
+How `vah264enc` on the W6800 (radeonsi, GStreamer 1.28) acts, measured with the same pipeline
+on a test program:
+
+- A bitrate change drains the encoder, reconfigures it (6–7 ms; no frame lost) and starts
+  again with an IDR at the QP the rate control had reached: 270–550 KB for the picture pan at
+  1080p, smaller for text.
+- `max-qp` and `min-qp` are kept to. With no limit the rate control sits at `min-qp`.
+- **A pipeline that starts in CQP and switches to VBR keeps QP 26 for every frame**, whatever
+  the bitrate, also after more changes; one that starts in VBR follows the bitrate. So the
+  encoder runs VBR all the time, and "no limit" is 50 Mbit/s.
+- CBR pads small frames up to the bitrate (50 Mbit/s CBR gave 40 Mbit/s for a pan that needs
+  9), so it is not used.
+- Under QP 51 (no `max-qp`), the picture pan needed more bytes than at QP 45: the references
+  are so poor that motion search fails. QP 35 is the highest.
+- The rate control counts 30 frames per second (the input has no frame rate), so a limit is a
+  size per frame of limit / 30.

@@ -11,7 +11,8 @@
 //!   clone.
 //! - A captured frame is encoded only when every viewer of its monitor has room
 //!   ([`Outbox::room`]); else it is held (only the newest one) and encoded when they have room
-//!   again ([`encode_newest`]).
+//!   again ([`encode_newest`]). When that keeps the frame rate low, the monitor's encoder gets
+//!   a bitrate limit ([`crate::bitrate`]).
 //! - Cursor messages go only to the windows of their monitor, terminal output only to the
 //!   window that shows the terminal (monitor 0).
 //! - Selection switch / viewer connect → force a fresh IDR on every encoder.
@@ -59,7 +60,8 @@ pub(crate) enum Queued {
     },
     /// One clipboard reply. The outbox sends it in pieces, each as a [`Queued::Binary`].
     Clipboard(Arc<ClipboardData>),
-    /// One clipboard piece ([`wire::browser::encode_clipboard_piece`]).
+    /// One clipboard piece ([`wire::browser::encode_clipboard_piece`]). Only the outbox makes
+    /// these, from a [`Queued::Clipboard`]; it refuses one pushed from outside.
     Binary(Arc<[u8]>),
     /// A JSON [`ToBrowser`] text message.
     Text(Arc<str>),
@@ -233,6 +235,8 @@ pub struct MediaHandle {
     /// encoded yet, and since when a frame waits: it waits for room. Locked across every push
     /// to an encoder; see [`encode_newest`].
     held: Mutex<HashMap<u32, Instant>>,
+    /// monitor_id → its automatic bitrate.
+    bitrate: crate::bitrate::Monitors,
     /// Set once by [`spawn`]; the browser viewer's WebSocket joins through it. Unset when
     /// media init failed, and then there is no video to watch.
     pub(crate) plane: OnceLock<Arc<Plane>>,
@@ -980,8 +984,9 @@ fn keyframe_made(gates: &Mutex<HashMap<u32, KeyGate>>, monitor: u32, now: Option
 /// Prime a viewer's video: a keyframe of the selected clone's last frame of `monitor`, so it
 /// paints at once even on a static, damage-driven desktop. Keyframes come only on demand, so
 /// every window that needs one comes here: a join, a decode error, a selection change. At most
-/// one per [`KEYFRAME_GAP`]; a request inside the gap gets the keyframe at its end. The keyframe goes to every viewer of the monitor (the encoder is shared), so the
-/// caller must register a new viewer in `viewers` before calling this.
+/// one per [`KEYFRAME_GAP`]; a request inside the gap gets the keyframe at its end. The
+/// keyframe goes to every viewer of the monitor (the encoder is shared), so the caller must
+/// register a new viewer in `viewers` before calling this.
 fn prime_viewer_video(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
     match keyframe_gate(&app.media.keyframes, monitor, Instant::now()) {
         Keyframe::Now => encode_keyframe(app, encoders, viewers, monitor),
@@ -1085,6 +1090,7 @@ fn encode_newest(
                         v.outbox.not_encoded();
                     }
                 }
+                crate::bitrate::not_encoded(&app.media.bitrate, monitor);
                 *e.get()
             }
         },
@@ -1525,10 +1531,28 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
             outbox.ack(seq, held, clip, Instant::now());
             // An acknowledgement frees room.
             encode_held(app, &plane.encoders, viewers, monitor);
+            steer_bitrate(app, &plane.encoders, viewers, monitor);
         }
         // Back through this viewer's own queue, ahead of the video waiting there.
         FromBrowser::Echo { id: n } => send_to(viewers, id, Queued::of(&ToBrowser::Echo { id: n })),
     }
+}
+
+/// Give `monitor`'s automatic bitrate a look ([`crate::bitrate`]): the slowest of its viewers
+/// sets the rate (W4 in `docs/WEB-VIEWER-WAN-SCOPE.md`).
+fn steer_bitrate(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
+    let Some((enc, _, _)) = encoders.lock().unwrap().get(&monitor).cloned() else { return };
+    crate::bitrate::tick(&app.media.bitrate, monitor, &enc, || {
+        let viewers = viewers.lock().unwrap();
+        let mine = || viewers.values().filter(|v| v.monitor == monitor);
+        let (mut shown, mut key_out) = (None::<u32>, false);
+        for (n, key) in mine().map(|v| v.outbox.take_shown()) {
+            shown = Some(shown.map_or(n, |s| s.min(n)));
+            key_out |= key;
+        }
+        let delivered = mine().filter_map(|v| v.outbox.delivered()).reduce(f64::min);
+        (shown.unwrap_or(0), key_out, delivered)
+    });
 }
 
 /// Viewer `id`'s queue and monitor, while it is registered.

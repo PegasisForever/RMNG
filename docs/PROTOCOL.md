@@ -58,16 +58,20 @@ of another serial or MIME type starts a new reply: the sender stopped the old on
 | `11+n..` | the piece's bytes (a reply with no bytes = the owner could not read them) |
 
 The pieces yield to video and to the other messages. The server sends a piece only when no
-video waits in the socket's queue, the window has room for video (below), and the window
-acknowledged the piece before it (`clip` in `ack`). So a large copy delays a frame by one
-piece at most, also through a proxy. The other way, the browser sends a piece only when the
-server said the piece before it arrived (`clip_ack`), so the window's acknowledgements and
-input wait behind one piece at most. (`bufferedAmount` alone is not enough: it does not see
+video waits in the socket's queue and the window has room as for a video frame (below: room,
+or a piece that waited 100 ms while the window is at most 1 s behind), and only while the bytes
+on the way (video and pieces the window has not acknowledged with `clip` in `ack`) stay within
+what the window acknowledged in 100 ms lately; one piece may always be on the way. So a large
+copy delays a frame by about 100 ms, also through a proxy, and on the LAN it goes at the
+link's speed. The other way, the browser keeps the pieces on the way within 100 ms of the rate
+the server's `clip_ack`s show (and always one), so the window's acknowledgements and input
+wait about 100 ms behind an upload. (`bufferedAmount` alone is not enough: it does not see
 what waits in the kernel and on the link, and on a 1 Mbit/s uplink the acknowledgements
-waited 2 to 7 s behind an upload.)
+waited 2 to 7 s behind an upload.) The delivered rate is measured over periods of 500 ms.
 A newer copy stops a transfer that still runs: the server drops the pieces not sent yet
 when any endpoint offers a new copy, and the window drops its own when it offers one or sees
-an offer. A window drops a reply it got only part of when it sees or makes an offer.
+an offer. A window drops a reply it got only part of when it sees or makes an offer, and
+keeps only the pieces of the replies it asked for since then.
 
 **Text messages** are JSON. The `t` field names the message (snake_case).
 
@@ -117,7 +121,8 @@ to the socket. On each `ack` it ends every frame up to `seq` and takes one round
 time since the stamp of `seq`, less `held_ms`. The window acknowledges a frame when its
 decoder has output it, so the round trip includes the decode, and a slow decoder holds frames
 back as a slow link does. The floor is the lowest round trip of the last 1 to 2 minutes, of
-deltas sent while no keyframe was out. An `ack` whose `held_ms` is longer than its frame has
+deltas sent while no keyframe was out and behind at most 100 ms of the delivered rate (a
+round trip behind more has a queue in it). An `ack` whose `held_ms` is longer than its frame has
 been out names an earlier frame with the same number (a new encoder counts from 1 again) and
 is ignored. Off the LAN the browser's TCP connection often ends in a proxy (`tailscale
 serve`), so the acknowledgements are the only signal that sees the whole path. At debug level
@@ -149,20 +154,43 @@ server keeps only the newest captured frame. It looks at that frame again only a
 captured frame, `ack`, or window that leaves; there is no timer. So when the screen stops
 after motion, the last frame can wait up to about one round trip and 50 ms (the next `ack`).
 The floor leaves
-out keyframes and the deltas sent while a keyframe was out. On a link slower than the video
+out keyframes, the deltas sent while a keyframe was out, and deltas sent behind a queue (above). On a link slower than the video
 the frame rate falls to what the link carries, and no keyframe is needed: a frame that was
 never encoded is not in the reference chain. The slowest window sets the frame rate for all
 windows of the monitor. A window that stops acknowledging holds the others back until it is
 closed (10 s, below). Keyframes are made whatever the room. Why the rule has its parts:
 [WAN-BENCH.md](WAN-BENCH.md) (rounds 3 and 4).
 
+**Automatic bitrate.** The encoder runs VBR with a QP from 25 to 35. With no limit (50 Mbit/s)
+every frame gets QP 25, as the fixed quality (CQP 23/25) of earlier rounds gave: that is the
+LAN behaviour. Once a second, on an `ack`, the server looks at each monitor's encoder. When the
+slowest window of that monitor is shown (acknowledges) fewer than 15 frames per second for 5 s
+while the screen makes at least 15, the server limits the bitrate to 70 % of what that window
+delivered (the median of those seconds; each second takes the video and clipboard bytes its
+`ack`s ended in the last 500 ms period). 5 s, so that a loss repair on a lossy link (no `ack`
+for 1–2 s) is not taken for a slow link. A second in which a keyframe is on the way to a window
+does not count: on a slow link a join's keyframe holds the frames behind it back for seconds.
+The QP then rises, at most to 35 so that text stays readable: a frame that needs more bytes
+than its share is larger, and the frame rate falls again (quality first, then frame rate). A
+window that still gets under 15 frames per second lowers the limit again, by at least 20 % and
+not under 500 kbit/s, unless the frames are over their share already (a lower limit would not
+make them smaller). After 5 s that show at least 24 frames per second, or all but one of the
+frames the screen made, the limit goes up by 1.5 (by 1.25 while that would pass the rate
+delivered at the last cut), and it goes away once the screen needs at most half of it. Each
+change makes the encoder start again with a keyframe, so the limit changes at most once per
+5 s. The VA rate control counts 30 frames per second, so the limit is really a size per frame
+(limit / 30). The server logs each change at info level (`monitor 1 bitrate: no limit → 1400
+kbit/s (…)`). A new encoder (a new monitor size, a server restart) starts with no limit; a
+window that reconnects keeps the encoder and its limit.
+
 **Timeouts.** A socket with video frames or a clipboard piece on the way and no `ack` that
 moves for 10 s is closed: the browser stopped reading. One send has no time limit. The server
 sends a ping every 5 s. A socket that receives nothing (pongs and acks included) for 10 s is
 closed. One WebSocket message may be up to 32 MiB; a clipboard reply is at most 32 MiB.
 
-**Reconnect.** When a socket that was open closes, the window connects again at once; after
-each try that fails it waits 400 ms, doubled each time up to 1 s. The new socket is primed
+**Reconnect.** When a socket on which the window got `version` closes, the window connects
+again at once; after each try that fails (also one the server accepts and closes at once) it
+waits 400 ms, doubled each time up to 1 s. The new socket is primed
 again. Input made while the socket is down waits in the window and goes when the new socket
 opens: pointer moves in a row become the newest one, relative moves in a row add up, and
 input more than 2 s old is dropped, except key and button releases.
@@ -291,7 +319,9 @@ chunked send waits for the peer to drain between datagrams, bounded at 10 s.
 On the viewer socket, clipboard bytes go in binary pieces of 64 KiB that yield to video
 ([above](#browser-viewer-protocol-browser--control-server)).
 
-**A paste that gets no bytes fails after 10 s** rather than hanging. Mutter opens the pipe and
+**A paste that gets no bytes fails after 15 s** rather than hanging. Mutter cancels the
+transfer requests it has no answer for 15 s after the last one, so a longer wait would not help:
+a 4 MB image from a browser window on a 1 Mbit/s uplink (about 35 s) cannot be pasted. Mutter opens the pipe and
 the pasting application blocks on it until somebody writes and calls `SelectionWriteDone`, so a
 reply that never arrives is not a dropped paste, it is a frozen one, and what the application
 eventually shows is whatever it had. That is what made a too-large image read as slow and then

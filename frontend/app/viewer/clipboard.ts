@@ -165,9 +165,10 @@ export function attachClipboard(o: ClipboardOptions): ViewerClipboard {
         localStorage.setItem(SEEN_KEY, hash);
         const offer = { serial: Date.now(), mime_types: offerMimes([...blobs.keys()]) };
         owned = blobs;
-        // This copy is newer than any offer not written yet.
+        // This copy is newer than any offer not written yet, and than the reply on its way.
         setPending({ ...offer, own: true });
         unwritten = null;
+        fetching = null;
         o.send({ k: "offer", ...offer });
         return;
       }

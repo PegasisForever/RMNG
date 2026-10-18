@@ -70,6 +70,26 @@ export function clipboardPieces(d: ClipboardBytes): ArrayBuffer[] {
   return out;
 }
 
+/** The rate at which bytes arrive, in bytes per ms, over the last complete period of
+ *  `periodMs`; 0 until one is complete. */
+export class RateMeter {
+  rate = 0;
+  private start = -1;
+  private bytes = 0;
+
+  constructor(private periodMs = 500) {}
+
+  add(bytes: number, now: number) {
+    if (this.start < 0) this.start = now;
+    this.bytes += bytes;
+    if (now - this.start >= this.periodMs) {
+      this.rate = this.bytes / (now - this.start);
+      this.start = now;
+      this.bytes = 0;
+    }
+  }
+}
+
 /** Read a binary message written by `encodeClipboardPiece` (or by the server). The bytes are a
  *  view into `buf`, not a copy. */
 export function parseClipboardPiece(buf: ArrayBuffer): ClipboardBytes & { last: boolean } {
