@@ -11,8 +11,9 @@
 //! - **Acknowledgements.** The browser sends the newest frame it decoded, how long it held
 //!   that number, and how many clipboard pieces arrived ([`wire::browser::FromBrowser::Ack`]).
 //!   Each one gives a round trip (from the stamp, less the hold) and a floor (the lowest round
-//!   trip of the last 1–2 minutes, of deltas sent with no keyframe and no queue in front of them,
-//!   [`State::clean`]), and ends the frames it covers. The bytes they end give the delivered rate ([`Meter`]).
+//!   trip of the last 1–2 minutes, of deltas sent with no keyframe and no queue in front of
+//!   them, [`State::clean`]), and ends the frames it covers. The bytes they end give the
+//!   delivered rate ([`Meter`]).
 //! - **Behind** ([`State::behind`]): how long the oldest video frame that is not acknowledged
 //!   (queued here or on the way) has waited since it was queued, less the floor. One number
 //!   for our queue, the kernel's, any proxy's, the path's and the browser's decoder.
@@ -67,11 +68,13 @@ const CLIP_WINDOW: Duration = Duration::from_millis(100);
 /// A delta's round trip counts for the floor only when it is at most this long of the path's
 /// rate, and it and what was on the way before it at most one floor and this long
 /// ([`State::clean`]): a round trip behind more has a queue in it, and a large frame is its own
-/// queue. (On the hotspot link the floor came from such round trips, 0.8–2.7 s, one of them a
-/// lone 297 KB delta, and R1 let two floors of frames onto the path.)
+/// queue (`docs/WAN-BENCH.md`, rounds 6 and 7).
 const FLOOR_QUEUE: Duration = Duration::from_millis(100);
 /// The delivered rate is measured over periods of this length.
 const METER_PERIOD: Duration = Duration::from_millis(500);
+/// The path's rate ([`Meter::peak`]) is measured over periods of this length: over 500 ms, the
+/// burst of what waited during a TCP loss repair was up to three times the path's rate.
+const PEAK_PERIOD: Duration = Duration::from_secs(1);
 /// No acknowledgement ended bytes for this long: the delivered rate is not known.
 const METER_STALE: Duration = Duration::from_secs(2);
 
@@ -113,13 +116,14 @@ struct State {
     key_out: Option<u32>,
     /// When an acknowledgement last moved, or something went out with nothing on the way.
     progress_at: Instant,
-    floor: Floor,
+    /// The lowest round trip of the last 1–2 minutes.
+    floor: Buckets<Duration>,
     meter: Meter,
     /// Since [`Outbox::take_shown`] last took them: the video frames acknowledged, whether a
-    /// keyframe was queued, and the most frames the browser's decoder held.
+    /// keyframe was queued, and the fewest frames the browser's decoder held.
     shown: u32,
     key_queued: bool,
-    decoding: u32,
+    decoding: Option<u32>,
     period: Period,
 }
 
@@ -132,46 +136,42 @@ struct Meter {
     rate: f64,
     /// When an acknowledgement last ended bytes.
     at: Option<Instant>,
-    /// The highest rate of two buckets of [`FLOOR_BUCKET`]: about what the path carries, where
-    /// `rate` is only what the screen sent.
-    peak: Peak,
-}
-
-/// The highest rate of two buckets of [`FLOOR_BUCKET`], as [`Floor`] keeps the lowest round trip.
-struct Peak {
-    start: Instant,
-    cur: f64,
-    prev: f64,
-}
-
-impl Peak {
-    fn add(&mut self, rate: f64, now: Instant) {
-        let age = now.saturating_duration_since(self.start);
-        if age >= 2 * FLOOR_BUCKET {
-            (self.prev, self.cur, self.start) = (0.0, 0.0, now);
-        } else if age >= FLOOR_BUCKET {
-            (self.prev, self.cur) = (self.cur, 0.0);
-            self.start += FLOOR_BUCKET;
-        }
-        self.cur = self.cur.max(rate);
-    }
-
-    fn get(&self) -> f64 {
-        self.cur.max(self.prev)
-    }
+    /// The start of the [`PEAK_PERIOD`] and the bytes ended since.
+    peak_start: Instant,
+    peak_bytes: usize,
+    /// The highest rate of a [`PEAK_PERIOD`] in the last 1–2 minutes: about what the path
+    /// carries, where `rate` is only what the screen sent.
+    peak: Buckets<f64>,
 }
 
 impl Meter {
+    fn new(now: Instant) -> Meter {
+        Meter {
+            start: now,
+            bytes: 0,
+            rate: 0.0,
+            at: None,
+            peak_start: now,
+            peak_bytes: 0,
+            peak: Buckets::new(now, f64::max),
+        }
+    }
+
     fn add(&mut self, bytes: usize, now: Instant) {
         if bytes > 0 {
             self.at = Some(now);
         }
         self.bytes += bytes;
+        self.peak_bytes += bytes;
         let secs = now.saturating_duration_since(self.start).as_secs_f64();
         if secs >= METER_PERIOD.as_secs_f64() {
             self.rate = self.bytes as f64 / secs;
-            self.peak.add(self.rate, now);
             (self.start, self.bytes) = (now, 0);
+        }
+        let secs = now.saturating_duration_since(self.peak_start).as_secs_f64();
+        if secs >= PEAK_PERIOD.as_secs_f64() {
+            self.peak.add(self.peak_bytes as f64 / secs, now);
+            (self.peak_start, self.peak_bytes) = (now, 0);
         }
     }
 }
@@ -188,15 +188,21 @@ struct Sent {
     for_floor: bool,
 }
 
-/// The lowest round trip of two buckets of [`FLOOR_BUCKET`].
-struct Floor {
+/// The lowest (or highest, by `pick`) value of two buckets of [`FLOOR_BUCKET`], so of the last 1
+/// to 2 minutes.
+struct Buckets<T> {
     start: Instant,
-    cur: Option<Duration>,
-    prev: Option<Duration>,
+    cur: Option<T>,
+    prev: Option<T>,
+    pick: fn(T, T) -> T,
 }
 
-impl Floor {
-    fn add(&mut self, rtt: Duration, now: Instant) {
+impl<T: Copy> Buckets<T> {
+    fn new(now: Instant, pick: fn(T, T) -> T) -> Buckets<T> {
+        Buckets { start: now, cur: None, prev: None, pick }
+    }
+
+    fn add(&mut self, v: T, now: Instant) {
         let age = now.saturating_duration_since(self.start);
         if age >= 2 * FLOOR_BUCKET {
             (self.prev, self.cur, self.start) = (None, None, now);
@@ -204,12 +210,12 @@ impl Floor {
             (self.prev, self.cur) = (self.cur, None);
             self.start += FLOOR_BUCKET;
         }
-        self.cur = Some(self.cur.map_or(rtt, |c| c.min(rtt)));
+        self.cur = Some(self.cur.map_or(v, |c| (self.pick)(c, v)));
     }
 
-    fn get(&self) -> Option<Duration> {
+    fn get(&self) -> Option<T> {
         match (self.cur, self.prev) {
-            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), Some(b)) => Some((self.pick)(a, b)),
             (a, b) => a.or(b),
         }
     }
@@ -293,10 +299,12 @@ impl State {
     /// minutes), and with the bytes on the way at most one floor and [`FLOOR_QUEUE`] of it (the
     /// path holds one floor of it without a queue). Not the last delivered rate: that is what
     /// the screen sent, and on a link with a round trip over [`FLOOR_QUEUE`] the bytes on the
-    /// way are more than [`FLOOR_QUEUE`] of it whenever frames flow.
+    /// way are more than [`FLOOR_QUEUE`] of it whenever frames flow. With no floor yet, it
+    /// takes one of [`FLOOR_QUEUE`]: with none, such a link seldom gets one, and R1 holds it to
+    /// 10 frames a second; with no test at all, a delta behind a slow start's queue sets it.
     fn clean(&self, len: usize) -> bool {
-        let rate = self.meter.peak.get();
-        let window = self.floor.get().unwrap_or_default() + FLOOR_QUEUE;
+        let rate = self.meter.peak.get().unwrap_or_default();
+        let window = self.floor.get().unwrap_or(FLOOR_QUEUE) + FLOOR_QUEUE;
         len as f64 <= rate * FLOOR_QUEUE.as_secs_f64()
             && (self.on_the_way() + len) as f64 <= rate * window.as_secs_f64()
     }
@@ -347,25 +355,11 @@ impl Outbox {
                 closed: false,
                 key_out: None,
                 progress_at: now,
-                floor: Floor {
-                    start: now,
-                    cur: None,
-                    prev: None,
-                },
-                meter: Meter {
-                    start: now,
-                    bytes: 0,
-                    rate: 0.0,
-                    at: None,
-                    peak: Peak {
-                        start: now,
-                        cur: 0.0,
-                        prev: 0.0,
-                    },
-                },
+                floor: Buckets::new(now, std::cmp::min),
+                meter: Meter::new(now),
                 shown: 0,
                 key_queued: false,
-                decoding: 0,
+                decoding: None,
                 period: Period::new(now),
             }),
             ready: Condvar::new(),
@@ -494,7 +488,7 @@ impl Outbox {
     /// clipboard pieces arrived, and its decoder holds `decoding` frames.
     pub(crate) fn ack(&self, seq: u32, held: Duration, clip: u32, decoding: u32, now: Instant) {
         let mut st = self.state.lock().unwrap();
-        st.decoding = st.decoding.max(decoding);
+        st.decoding = Some(st.decoding.map_or(decoding, |d| d.min(decoding)));
         // The first match. After an encoder restart (a new size) the new encoder counts from 1
         // again, so an older frame on the way can have the same number: then this ends less
         // than it could and the round trip is too long, until the old frames are acknowledged.
@@ -556,15 +550,12 @@ impl Outbox {
     }
 
     /// Since the last call: the video frames acknowledged, whether a keyframe was queued or is
-    /// on the way, and the most frames the browser's decoder held.
+    /// on the way, and the fewest frames the browser's decoder held (0 with no acknowledgement).
     pub(crate) fn take_shown(&self) -> (u32, bool, u32) {
         let mut st = self.state.lock().unwrap();
         let key = std::mem::take(&mut st.key_queued) || st.key_out.is_some();
-        (
-            std::mem::take(&mut st.shown),
-            key,
-            std::mem::take(&mut st.decoding),
-        )
+        let decoding = st.decoding.take().unwrap_or_default();
+        (std::mem::take(&mut st.shown), key, decoding)
     }
 
     /// A captured frame of this viewer's monitor was replaced before it was encoded.
@@ -800,7 +791,7 @@ mod tests {
     fn an_ack_gives_a_round_trip_and_ends_the_frames_before_it() {
         let o = Outbox::new();
         // A fast path: the frames on the way are no queue.
-        o.state.lock().unwrap().meter.peak.cur = 1e9;
+        o.state.lock().unwrap().meter.peak.cur = Some(1e9);
         for s in 1..=3 {
             o.push(video(s, false));
             take(&o);
@@ -828,7 +819,7 @@ mod tests {
         o.ack(1, ms(0), 0, 0, sent + ms(400));
         o.ack(2, ms(0), 0, 0, sent + ms(450));
         assert_eq!(o.state.lock().unwrap().floor.get(), None);
-        o.state.lock().unwrap().meter.peak.cur = 1e9;
+        o.state.lock().unwrap().meter.peak.cur = Some(1e9);
         o.push(video(3, false));
         take(&o);
         let sent = o.state.lock().unwrap().in_flight[0].sent;
@@ -836,14 +827,48 @@ mod tests {
         assert_eq!(o.state.lock().unwrap().floor.get(), Some(ms(150)));
     }
 
-    /// A delta that with the bytes on the way before it is more than 100 ms of the path's rate
-    /// does not give the floor: its round trip has a queue in it. One that is less does.
+    /// A delta that with the bytes on the way before it is more than one floor and 100 ms of the
+    /// path's rate does not give the floor: its round trip has a queue in it. One that is less
+    /// does.
     #[test]
     fn the_floor_skips_deltas_sent_behind_a_queue() {
+        // 25 KB per second and a floor of 300 ms: the path holds 7.5 KB without a queue, and
+        // 10 KB is one floor and 100 ms.
+        let o = with_floor(300);
+        let ms = Duration::from_millis;
+        o.state.lock().unwrap().meter.peak.cur = Some(25_000.0);
+        for s in 1..=11 {
+            o.push(video(s, false));
+            take(&o);
+        }
+        let sent = o.state.lock().unwrap().in_flight[10].sent;
+        o.ack(11, ms(0), 0, 0, sent + ms(200));
+        assert_eq!(
+            o.state.lock().unwrap().floor.get(),
+            Some(ms(300)),
+            "behind 10,000 bytes"
+        );
+        for s in 12..=17 {
+            o.push(video(s, false));
+            take(&o);
+        }
+        let sent = o.state.lock().unwrap().in_flight[5].sent;
+        o.ack(17, ms(0), 0, 0, sent + ms(200));
+        assert_eq!(
+            o.state.lock().unwrap().floor.get(),
+            Some(ms(200)),
+            "behind 5000 bytes"
+        );
+    }
+
+    /// With no floor yet, a floor of 100 ms is taken: a delta that with the bytes on the way
+    /// before it is at most 200 ms of the path's rate gives the floor, one behind more does not.
+    #[test]
+    fn with_no_floor_one_of_100_ms_is_taken() {
         let o = Outbox::new();
         let ms = Duration::from_millis;
-        // 25 KB per second: 100 ms is 2.5 frames of 1000 bytes.
-        o.state.lock().unwrap().meter.peak.cur = 25_000.0;
+        // 10 KB per second: 200 ms is two frames of 1000 bytes.
+        o.state.lock().unwrap().meter.peak.cur = Some(10_000.0);
         for s in 1..=3 {
             o.push(video(s, false));
             take(&o);
@@ -855,7 +880,6 @@ mod tests {
             None,
             "behind 2000 bytes"
         );
-        o.state.lock().unwrap().meter.peak.cur = 25_000.0;
         o.push(video(4, false));
         o.push(video(5, false));
         take(&o);
@@ -867,16 +891,6 @@ mod tests {
             Some(ms(300)),
             "behind 1000 bytes"
         );
-        // With a floor of 300 ms the path holds 7.5 KB without a queue: behind 5000 bytes is
-        // clean, and a lower round trip lowers the floor.
-        o.state.lock().unwrap().meter.peak.cur = 25_000.0;
-        for s in 6..=11 {
-            o.push(video(s, false));
-            take(&o);
-        }
-        let sent = o.state.lock().unwrap().in_flight[5].sent;
-        o.ack(11, ms(0), 0, 0, sent + ms(200));
-        assert_eq!(o.state.lock().unwrap().floor.get(), Some(ms(200)));
     }
 
     /// A hold longer than the frame has been out is an earlier frame's number: no round trip,
@@ -920,7 +934,7 @@ mod tests {
 
         // Frame 1 went out alone and came back after 150 ms: the next may be out 400 ms.
         let o = Outbox::new();
-        o.state.lock().unwrap().meter.peak.cur = 1e9;
+        o.state.lock().unwrap().meter.peak.cur = Some(1e9);
         o.push_at(video(1, false), t0);
         take(&o);
         o.ack(1, ms(0), 0, 0, t0 + ms(150));
@@ -981,15 +995,38 @@ mod tests {
         assert!(matches!(o.next(Duration::ZERO), Next::Closed));
     }
 
+    /// The path's rate is the highest of 1 s periods: a 500 ms burst after a loss repair counts
+    /// as half of it.
+    #[test]
+    fn the_path_rate_is_measured_over_one_second() {
+        let t0 = Instant::now();
+        let mut m = Meter::new(t0);
+        m.add(10_000, t0 + METER_PERIOD);
+        assert_eq!(m.rate, 20_000.0);
+        assert_eq!(m.peak.get(), None);
+        m.add(0, t0 + PEAK_PERIOD);
+        assert_eq!(m.peak.get(), Some(10_000.0));
+    }
+
+    /// The decoder's count for a second is the fewest frames it held: a moment with more is a
+    /// burst, not a slow decoder.
+    #[test]
+    fn decoding_is_the_fewest_frames_of_the_second() {
+        let o = Outbox::new();
+        let t = Instant::now();
+        assert_eq!(o.take_shown().2, 0, "no acknowledgement");
+        o.ack(0, Duration::ZERO, 0, 1, t);
+        o.ack(0, Duration::ZERO, 0, 6, t);
+        assert_eq!(o.take_shown().2, 1);
+        o.ack(0, Duration::ZERO, 0, 4, t);
+        assert_eq!(o.take_shown().2, 4);
+    }
+
     #[test]
     fn the_floor_is_the_lowest_of_the_last_one_to_two_minutes() {
         let t0 = Instant::now();
         let ms = Duration::from_millis;
-        let mut f = Floor {
-            start: t0,
-            cur: None,
-            prev: None,
-        };
+        let mut f = Buckets::new(t0, std::cmp::min);
         f.add(ms(40), t0);
         f.add(ms(90), t0 + FLOOR_BUCKET);
         assert_eq!(f.get(), Some(ms(40)));

@@ -123,15 +123,16 @@ time since the stamp of `seq`, less `held_ms`. The window acknowledges a frame w
 decoder has output it, so the round trip includes the decode, and a slow decoder holds frames
 back as a slow link does. The floor is the lowest round trip of the last 1 to 2 minutes, of
 deltas sent while no keyframe was out and with no queue in front of them: the delta is at most
-100 ms of the path's rate (the highest delivered rate of the last 1–2 minutes, below), and with
-the video and clipboard bytes on the way when it was handed to the socket at most one floor and
-100 ms of it (a path with no queue holds one floor of it). Not the last delivered rate: that is
-only what the screen sent, and with a round trip over 100 ms the bytes on the way are more than
-100 ms of it whenever frames flow. A round trip behind more has a queue in it, and a large frame is its own queue (on the
-hotspot link a lone 297 KB delta took 2.7 s, and that floor let 5 s of frames onto the path).
-Before the first rate is measured (500 ms of `ack`s), no delta counts. An `ack` whose `held_ms` is longer than its frame has
-been out names an earlier frame with the same number (a new encoder counts from 1 again) and
-is ignored. Off the LAN the browser's TCP connection often ends in a proxy (`tailscale
+100 ms of the path's rate (the highest rate the `ack`s ended bytes at over 1 s, in the last 1–2
+minutes), and with the video and clipboard bytes on the way when it was handed to the socket at
+most one floor and 100 ms of it (a path with no queue holds one floor of it). Not the last
+delivered rate: that is only what the screen sent, and with a round trip over 100 ms the bytes
+on the way are more than 100 ms of it whenever frames flow. A round trip behind more has a
+queue in it, and a large frame is its own queue. Before the first floor the server takes one of
+100 ms, so that a link with a round trip over 100 ms gets a floor from its first seconds. Before
+the path's rate is measured (1 s of `ack`s), no delta counts. Why: [WAN-BENCH.md](WAN-BENCH.md)
+(rounds 6 and 7). An `ack` whose `held_ms` is longer than its frame has been out names an
+earlier frame with the same number (a new encoder counts from 1 again) and is ignored. Off the LAN the browser's TCP connection often ends in a proxy (`tailscale
 serve`), so the acknowledgements are the only signal that sees the whole path. At debug level
 (`rmng_control_server::webviewer`) the server logs one line per socket every 5 s while video
 or clipboard bytes move: round trip, video delay (p50 and p95 of each acknowledged frame's
@@ -181,10 +182,11 @@ and none when no `ack` ended bytes for 2 s). 5 s, so that a loss repair on a los
 a gap in the `ack`s. A second in which a keyframe was queued or on the way to a window does not
 count and starts the 5 s again: on a slow link a join's keyframe holds the frames behind it
 back for seconds. A low second in which the slowest window's decoder held more than 2 frames
-(`decoding`) is the browser's (a slow decoder, a hidden tab), not the link's, and does not
-count. The QP then rises, at most to 35 so that text stays readable: a frame that needs more
-bytes than its share is larger, and the frame rate falls again (quality first, then frame
-rate). A window that still gets under 15 frames per second lowers the limit again, by at least
+(`decoding`) in every `ack` is the browser's (a slow decoder, a hidden tab), not the link's,
+and does not count; a window whose decoder does so is not taken as the slowest while another
+window of the monitor keeps up. The QP then rises, at most to 35 so that text stays readable:
+a frame that needs more bytes than its share is larger, and the frame rate falls again
+(quality first, then frame rate). A window that still gets under 15 frames per second lowers the limit again, by at least
 20 % and not under 500 kbit/s, unless the frames are over their share already (a lower limit
 would not make them smaller). After 5 s that show at least 24 frames per second, or all but
 one of the frames the screen made, the limit goes up by 1.25, but only while the frames use at
@@ -192,12 +194,13 @@ least 80 % of it (below that VBR gives QP 25 anyway); a limit that reaches 50 Mb
 A calm screen keeps the limit. Each change makes the encoder start again with a keyframe, so
 the limit changes at most once per 5 s. The VA rate control counts 30 frames per second, so
 the limit is really a size per frame (limit / 30), and radeonsi keeps each frame near it unless
-the QP reaches 35: at a 700 kbit/s limit, text frames were 2.7 KB (at most 4 KB) and a picture
-pan at QP 35 7–8 KB, also right after a still period. Its buffer (`cpb-size`) is fixed at
-150,000 kbit; a smaller one made more bytes, not fewer (`media::encode`). The server logs each
-change at info level (`monitor 1 bitrate: no limit → 1400 kbit/s (…)`). A new encoder (a new
-monitor size, a server restart) starts with no limit; a window that reconnects keeps the
-encoder and its limit.
+the QP reaches 35, also right after a still period. Its buffer (`cpb-size`) is fixed at 150,000
+kbit; a smaller one made more bytes, not fewer ([WAN-BENCH.md](WAN-BENCH.md), round 6). The
+server logs each change at info level (`monitor 1 bitrate: no limit → 1400 kbit/s (…)`). A new
+encoder (a new monitor size, a server restart) starts with no limit. When the last window of a
+monitor closes, its encoder loses the limit at once (the next window may be on the LAN), so
+also a window that reconnects alone starts with no limit, and on a slow link gets one again
+after 5 s.
 
 **Timeouts.** A socket with video frames or a clipboard piece on the way and no `ack` that
 moves for 10 s is closed: the browser stopped reading. One send has no time limit. The server

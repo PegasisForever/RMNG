@@ -597,7 +597,8 @@ What the numbers show:
   only after 8 s, R1 meanwhile let 10 frames per second through, and the bitrate was cut for
   that). So round 6 compares with the path's rate (the highest delivered rate of the last 1–2
   minutes), counts the delta's own bytes, and allows one floor of bytes on the way (a path
-  with no queue holds that much). Text floors are now 152–160 ms on the hotspot from the start;
+  with no queue holds that much). Text floors are now 152–160 ms on the hotspot from the start
+  (*superseded in round 7: in 3 of the 7 `large` runs the first floor came only after 10–15 s*);
   the picture pan never gets a floor (its frames are larger than 100 ms of the link), so R1
   uses the 100 ms / 1 s rule for it.
 - **The picture pan on the hotspot**: the video delay p50 fell from 4.1–5.3 s to 2.0–3.8 s,
@@ -606,6 +607,91 @@ What the numbers show:
 - **The full-screen text scroll on the hotspot lost frame rate**: 17–34 fps (mean 23) in 7
   runs against 26–36 (mean 30) for round 5, with more bitrate changes (7 against 2). The floors
   are the same (about 155 ms) and the cuts come after 5–6 s of loss repair, as in round 5; the
-  bench did not show why round 6 cuts more often there. This link changes much from run to run
-  (round 4: 23–35 fps). A first build with the review's rule as written had 34 fps in 3 runs,
+  bench did not show why round 6 cuts more often there (*superseded in round 7: review 6 named a
+  slow first floor as the cause; the round 7 runs show mostly this link's spread*). This link
+  changes much from run to run (round 4: 23–35 fps). A first build with the review's rule as written had 34 fps in 3 runs,
   with floors of 175–270 ms (a looser R1).
+
+### Round 7: fixes from review 6
+
+2026-10-18, same clone, monitor and client, 30 s per cell, through the proxy on port 9001, a
+fresh server before each cell of the hotspot rows and before each link of the others. Round 6
+(image label `ad10ccc-round6`) and round 7 (`d4899cc-round7`) ran the same night; the hotspot
+`large` and `photo` runs alternate between the two builds.
+
+- **Round 7**: when the last window of a monitor closes, the encoder loses its limit; a streak
+  of low or clear seconds starts again after 5 s also when it changes nothing; before the first
+  floor the server takes one of 100 ms (window 200 ms of the path's rate); the path's rate is the
+  highest rate over 1 s, not 500 ms; a second's `decoding` is the fewest frames the decoder held,
+  not the most; the slowest window is chosen among the windows whose decoder keeps up. The rules
+  are in [PROTOCOL.md](PROTOCOL.md#browser-viewer-protocol-browser--control-server).
+
+**The hotspot, many runs** (fps mean and range; video delay p50 and p95 in ms, median and
+range; bitrate changes in all runs; runs whose first floor came after 5 s):
+
+| Motion | Build | Runs | fps | Video delay p50 | Video delay p95 | Changes | Late floor |
+|---|---|---|---|---|---|---|---|
+| large | round 6 | 14 | 28.9 (20.5–34.9) | 298 (237–465) | 2115 (970–3136) | 7 | 3 (10–15 s) |
+| large | round 7 | 14 | 27.2 (20.7–35.0) | 274 (245–453) | 2102 (1111–3641) | 10 | 3 (10–15 s) |
+| large | review's rule as written | 4 | 26.0 (23.5–29.6) | 2 of 4 runs over 2 s | up to 8881 | 3 | floors of 1039 and 1393 ms |
+| photo | round 6 | 7 | 3.5 (2.7–4.1) | 2841 (1846–4395) | 4466 (3068–6109) | 7 | never a floor |
+| photo | round 7 | 7 | 3.6 (3.0–4.1) | 2051 (1478–2379) | 4059 (3395–7367) | 7 | never a floor |
+
+The 14 `large` runs are two sets of 7. In the first set round 6 ran first in each pair (round 6
+mean 30.9 fps, round 7 24.6); in the second, round 7 first (round 6 26.9, round 7 29.9).
+
+**The other cells** (round 6 → round 7):
+
+| Link | Motion | fps | Mbit/s mean | Video delay p50 / p95 (ms) | Bitrate changes |
+|---|---|---|---|---|---|
+| lan | scroll | 49.8 → 49.9 | 0.89 → 0.89 | 1 / 1 → 1 / 2 | 0 → 0 |
+| lan | large | 50.0 → 50.0 | 1.61 → 1.61 | 1 / 2 → 1 / 2 | 0 → 0 |
+| lan | photo | 50.0 → 50.1 | 5.75 → 5.77 | 1 / 2 → 1 / 2 | 0 → 0 |
+| home | scroll | 49.6 → 49.4 | 0.88 → 0.88 | 70 / 103 → 77 / 104 | 0 → 0 |
+| home | large | 49.6 → 49.5 | 1.60 → 1.60 | 76 / 103 → 88 / 111 | 0 → 0 |
+| home | photo | 48.2 → 48.0 | 5.57 → 5.57 | 80 / 133 → 80 / 190 | 0 → 0 |
+| hotspot | scroll, 3 runs | 40.5, 41.9, 42.5 → 32.5, 43.9, 38.5 | 0.78 → 0.74 | 243–288 / 533–1085 → 242–340 / 787–1174 | 0 → 0 |
+
+**The hotspot drops to 1 Mbit/s for 20 s**, and **calm, then pan**, as in round 6:
+
+| Test | Build | fps | Keyframes | Video delay p50 / p95 (ms) | Bitrate changes |
+|---|---|---|---|---|---|
+| drop, large | round 6 | 42.9 / 15.1 / 23.4 | 4 | 428 / 2289 | 3: no limit → 632, 790, 987 kbit/s |
+| drop, large | round 7 | 31.7 / 21.3 / 32.5 | 5 | 344 / 2103 | 4: no limit → 502, 627, 783, 978 kbit/s |
+| drop, photo | round 6 | 3.9 / 3.3 / 3.3 | 2 | 2683 / 4525 | 1: no limit → 2102 kbit/s |
+| drop, photo | round 7 | 4.2 / 2.6 / 3.2 | 2 | 2622 / 4400 | 1: no limit → 2037 kbit/s |
+| calm | round 6 | 2.6 / 4.7 / 7.9 | 2 | 1177 / 4898 | 1: no limit → 779 kbit/s, kept |
+| calm | round 6, run 2 | 3.8 / 4.6 / 6.9 | 2 | 2143 / 5187 | 1: no limit → 2138 kbit/s, kept |
+| calm | round 7 | 3.4 / 5.8 / 4.8 | 2 | 2453 / 7771 | 1: no limit → 2207 kbit/s, kept |
+| calm | round 7, run 2 | 3.4 / 5.1 / 6.1 | 2 | 1922 / 4721 | 1: no limit → 1876 kbit/s, kept |
+
+**The limit does not stick** (new): the hotspot picture pan until a limit is set, the viewer
+closes, the shaping is cleared, then a viewer on port 9000 (no proxy) watches the same pan for
+15 s. Mbit/s per second; the first second holds the keyframe. A fresh LAN session gave 12.7,
+then 3.6–4.9 Mbit/s, 5.77 mean (the pan is at another place in each run, so the seconds differ).
+
+| Build | Hotspot limit | When the viewer closes | LAN viewer: first 4 s | Mean | Changes on the LAN |
+|---|---|---|---|---|---|
+| round 6 | 1711 kbit/s | the limit stays | 9.4, 2.5, 2.8, 2.7 | 4.56 | 2: 1711 → 2138 → 2672 kbit/s |
+| round 7 | 2130 kbit/s | `2130 kbit/s → no limit (no viewer left)` | 14.8, 3.6, 4.5, 3.9 | 6.30 | none |
+
+What the numbers show:
+
+- **The limit no longer sticks.** Round 6 gave the LAN window the hotspot's limit (a smaller
+  keyframe, about half the bytes per frame) and raised it once per 5 s; round 7 takes it away
+  when the last window closes, and the LAN window gets the same bytes as a fresh session.
+- **The review's start fix as written made the start worse.** With no floor it took a delta's
+  size only. On a slow start (the join keyframe needs a loss repair, the first round trips are
+  2–3 s), the first delta that counted had seconds of queue in front of it: floors of 1039 and
+  1393 ms in 2 of 4 runs, then R1 let that much onto the path, and the video delay p50 was 2.0
+  and 2.7 s for the whole run. Round 7 instead takes a floor of 100 ms until it has one: a
+  delta counts when it and the bytes on the way before it are at most 200 ms of the path's
+  rate. On a good start the first floor comes in the first 5 s (151–172 ms); on a slow start
+  it comes when the queue has drained (10–15 s, 3 of 14 runs, the same as round 6 tonight).
+- **The full-screen text scroll on the hotspot is the same within this link's spread.** Round
+  6 had 3 late floors in 14 runs tonight as round 7 did, and the mean frame rate (28.9 against
+  27.2) changed with the order of the builds more than with the build. So the round 6 note that
+  round 6 lost frame rate here came mostly from this spread, not from the slow first floor.
+- **The picture pan on the hotspot keeps its gain from round 6** (video delay p50 2.1 s against
+  2.8 s, the same frame rate and 1 change per run).
+- **The LAN and the home link do not change.**

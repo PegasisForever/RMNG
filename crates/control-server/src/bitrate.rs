@@ -7,12 +7,13 @@
 //! [`HOLD`] while the screen makes more does this limit the bitrate, to [`SHARE`] of what that
 //! viewer delivered (the median of those seconds). (The frames the viewer acknowledges, not
 //! those encoded: frames that pile up on the way are not shown. A second in which that viewer's
-//! decoder held more than [`DECODER_HELD`] frames is the browser's, not the link's.)
+//! decoder held more than [`DECODER_HELD`] frames all along is the browser's, not the link's.)
 //! The encoder then raises the QP up to 35 ([`media::Encoder::set_bitrate`], R5); a frame that
 //! needs more is larger than its share, and R1 lowers the frame rate again. While the frame
 //! rate is fine and the frames use the limit, the limit goes up step by step; at
 //! [`media::encode::NO_LIMIT_KBPS`] it is no limit again. It does not go away when the screen
-//! calms down: below the limit VBR gives QP 25 anyway, and each change costs a keyframe.
+//! calms down: below the limit VBR gives QP 25 anyway, and each change costs a keyframe. It
+//! goes away when the monitor's last viewer leaves ([`forget`]): the next one may be on the LAN.
 //!
 //! Only seconds in which the screen made at least [`LOW_FPS`] frames count: a still or slow
 //! screen (a caret, typing) says nothing about the link. Each change costs a keyframe with
@@ -41,9 +42,10 @@ const HOLD: f64 = 5.0;
 /// One tick counts for at most this long: a gap in the acknowledgements (a hidden tab) is not
 /// many seconds.
 const MAX_TICK: f64 = 1.5;
-/// A low second in which the slowest viewer's decoder held more frames than this is the
-/// browser's (a slow decoder, a hidden tab), not the link's.
-const DECODER_HELD: u32 = 2;
+/// A low second in which the slowest viewer's decoder held more frames than this all along is
+/// the browser's (a slow decoder, a hidden tab), not the link's. Also, a viewer whose decoder
+/// does so is not taken as the slowest while another one keeps up.
+pub(crate) const DECODER_HELD: u32 = 2;
 /// A new limit is this share of the delivered rate (Selkies uses 0.5–0.85).
 const SHARE: f64 = 0.7;
 /// A lower limit is at most this much of the one before.
@@ -70,7 +72,8 @@ struct Tick {
     /// A keyframe was on the way to a viewer: a join's or a change's keyframe holds the frames
     /// behind it back for a while on a slow link, so such a second says nothing.
     key_out: bool,
-    /// The most frames the slowest viewer's decoder held, by its acknowledgements.
+    /// The fewest frames the slowest viewer's decoder held, by its acknowledgements: a moment
+    /// with more (a burst after a TCP loss repair) is not a slow decoder.
     decoding: u32,
     /// Frames and bytes the encoder made.
     frames: u64,
@@ -137,11 +140,13 @@ impl Steer {
         if s.secs < HOLD {
             return None;
         }
+        // Whether or not it changes the limit, the next streak starts here.
+        let s = std::mem::take(&mut self.streak);
         let fps = s.shown as f64 / s.secs;
         // kbit/s at 30 frames per second, to compare with the limit.
         let need = s.bytes as f64 * 8.0 / 1000.0 / s.frames.max(1) as f64 * NOMINAL_FPS;
         let (cap, why) = if low {
-            let mut d = s.delivered.clone();
+            let mut d = s.delivered;
             d.sort_by(f64::total_cmp);
             let delivered = d.get(d.len() / 2).copied();
             if self.cap.is_some_and(|c| need > c as f64 * OVERSHOOT)
@@ -163,20 +168,15 @@ impl Steer {
                 format!("{fps:.0} fps for {:.0} s, {d} kbit/s delivered", s.secs),
             )
         } else {
-            let Some(c) = self.cap.map(f64::from) else {
-                self.streak = Streak::default();
-                return None;
-            };
+            let c = self.cap.map(f64::from)?;
             let why = format!("{fps:.0} fps for {:.0} s, the frames use {need:.0}", s.secs);
             if need < c * USED {
-                self.streak = Streak::default();
                 return None;
             }
             let k = c * STEP;
             ((k < NO_LIMIT_KBPS as f64).then_some(k as u32), why)
         };
         self.cap = cap;
-        self.streak = Streak::default();
         Some((cap, why))
     }
 }
@@ -204,11 +204,11 @@ pub(crate) fn not_encoded(monitors: &Monitors, monitor: u32) {
 pub(crate) struct Seen {
     /// The frames the slowest viewer acknowledged...
     pub shown: u32,
-    /// ...and the most frames its decoder held.
+    /// ...and the fewest frames its decoder held.
     pub decoding: u32,
     /// A keyframe was queued or on the way to any viewer.
     pub key_out: bool,
-    /// The slowest delivered rate, bytes per second.
+    /// The slowest viewer's delivered rate, bytes per second.
     pub delivered: Option<f64>,
 }
 
@@ -256,6 +256,18 @@ pub(crate) fn tick(
             show(cap)
         );
         enc.set_bitrate(cap);
+    }
+}
+
+/// No viewer of `monitor` is left: forget its controller, and take the limit off `enc` now, while
+/// no viewer pays for the keyframe a change costs. The next viewer may be on another link; a
+/// window that reconnects on the same slow link gets its limit again after [`HOLD`].
+pub(crate) fn forget(monitors: &Monitors, monitor: u32, enc: &Arc<Encoder>) {
+    let Some(m) = monitors.lock().unwrap().remove(&monitor) else { return };
+    // A newer encoder than the controller's started with no limit.
+    if let (Some(k), true) = (m.steer.cap, std::ptr::eq(m.enc.as_ptr(), Arc::as_ptr(enc))) {
+        tracing::info!("monitor {monitor} bitrate: {k} kbit/s → no limit (no viewer left)");
+        enc.set_bitrate(None);
     }
 }
 
@@ -391,6 +403,20 @@ mod tests {
         assert_eq!(run(&mut s, 5, &sec(12, 5, 30, 1800.0)), vec![Some(1120)]);
         // 20 KB frames are far over 1120 / 30: no more cuts.
         assert!(run(&mut s, 20, &sec(5, 20, 30, 800.0)).is_empty());
+    }
+
+    /// A streak that makes no change ends as one that does: at the lowest limit, the next one
+    /// starts with nothing in it.
+    #[test]
+    fn a_streak_that_changes_nothing_starts_again() {
+        let mut s = Steer {
+            cap: Some(500),
+            ..Steer::default()
+        };
+        // 1 KB frames use 240 kbit/s at 30 frames per second, under 500 × 1.25.
+        assert!(run(&mut s, 60, &sec(5, 1, 30, 400.0)).is_empty());
+        assert_eq!(s.cap, Some(500));
+        assert!(s.streak.delivered.len() < 5);
     }
 
     /// A clear link raises the limit by 1.25 every 5 s while the frames use at least 80 % of

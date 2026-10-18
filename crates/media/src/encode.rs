@@ -87,12 +87,8 @@ pub const NO_LIMIT_KBPS: u32 = 50_000;
 /// `cpb-size` (the HRD buffer, kbit) is fixed and large, about what GStreamer computes for the
 /// starting 50 Mbit/s (2 × 50000 / 0.66) and writes back into the property, so that it stays the
 /// same for every later limit. With it, radeonsi keeps each frame near `limit / 30` within the
-/// QP range, also after a still period (measured at a 700 kbit/s limit: text 2.7 KB per frame,
-/// at most 4 KB; a picture pan at QP 35, 7–8 KB). A CPB of half a second of the limit, with or
-/// without `target-percentage=100`, did not bound frames better: it made 20–30 % more bytes
-/// during motion and frames of 10–55 KB after the motion stopped (the rate control spends the
-/// full buffer on a sharper copy of the still picture). `target-percentage` stays at its 66:
-/// the peak it allows (1.5 × the limit) did not show.
+/// QP range, also after a still period; a smaller buffer made more bytes, not fewer
+/// (`docs/WAN-BENCH.md`, round 6). `target-percentage` stays at its 66.
 const ENC_TAIL: &str = "vah264enc name=enc aud=true b-frames=0 ref-frames=1 key-int-max=1024 \
        rate-control=vbr bitrate=50000 cpb-size=150000 min-qp=25 max-qp=35 target-usage=1 ! \
      video/x-h264,profile=constrained-baseline ! \

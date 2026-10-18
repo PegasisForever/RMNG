@@ -1481,9 +1481,15 @@ pub(crate) fn join_viewer(app: &App, plane: &Plane, id: u64, outbox: Arc<Outbox>
 pub(crate) fn leave_viewer(app: &App, plane: &Plane, id: u64) {
     let monitor = viewer(&plane.viewers, id).map(|(_, m)| m);
     remove_viewer(&plane.viewers, id);
-    // It may have been the one that held its monitor's frames back.
     if let Some(m) = monitor {
+        // It may have been the one that held its monitor's frames back.
         encode_held(app, &plane.encoders, &plane.viewers, m);
+        // The last one of its monitor: the limit its link set must not stay for the next.
+        let left = plane.viewers.lock().unwrap().values().any(|v| v.monitor == m);
+        let enc = plane.encoders.lock().unwrap().get(&m).map(|(e, _, _)| e.clone());
+        if let (false, Some(enc)) = (left, enc) {
+            crate::bitrate::forget(&app.media.bitrate, m, &enc);
+        }
     }
     clip_forget_source(&app.media.clip, &viewer_src(id));
     // A departing viewer may leave the headless terminal view with no audience → deactivate.
@@ -1540,22 +1546,26 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
 }
 
 /// Give `monitor`'s automatic bitrate a look ([`crate::bitrate`]): the slowest of its viewers
-/// sets the rate (W4 in `docs/WEB-VIEWER-WAN-SCOPE.md`).
+/// sets the rate (W4 in `docs/WEB-VIEWER-WAN-SCOPE.md`). The slowest of those whose decoder
+/// keeps up, when one does: a slow decoder on the LAN must not hide a window on a slow link.
 fn steer_bitrate(app: &App, encoders: &Encoders, viewers: &Viewers, monitor: u32) {
     let Some((enc, _, _)) = encoders.lock().unwrap().get(&monitor).cloned() else { return };
     crate::bitrate::tick(&app.media.bitrate, monitor, &enc, || {
         let viewers = viewers.lock().unwrap();
-        let mine = || viewers.values().filter(|v| v.monitor == monitor);
-        let (mut slowest, mut key_out) = (None::<(u32, u32)>, false);
-        for (n, key, decoding) in mine().map(|v| v.outbox.take_shown()) {
-            if slowest.is_none_or(|(s, _)| n < s) {
-                slowest = Some((n, decoding));
-            }
-            key_out |= key;
-        }
-        let (shown, decoding) = slowest.unwrap_or_default();
         let now = Instant::now();
-        let delivered = mine().filter_map(|v| v.outbox.delivered(now)).reduce(f64::min);
+        let seen: Vec<_> = viewers
+            .values()
+            .filter(|v| v.monitor == monitor)
+            .map(|v| (v.outbox.take_shown(), v.outbox.delivered(now)))
+            .collect();
+        let slowest = |keeps_up: bool| {
+            seen.iter()
+                .filter(|((_, _, d), _)| !keeps_up || *d <= crate::bitrate::DECODER_HELD)
+                .min_by_key(|((n, _, _), _)| *n)
+        };
+        let ((shown, _, decoding), delivered) =
+            slowest(true).or_else(|| slowest(false)).copied().unwrap_or_default();
+        let key_out = seen.iter().any(|((_, key, _), _)| *key);
         crate::bitrate::Seen { shown, decoding, key_out, delivered }
     });
 }
