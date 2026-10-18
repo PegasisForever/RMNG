@@ -2035,8 +2035,6 @@ mod tests {
         );
     }
 
-    /// A browser window's queue gets only its own monitor's video and cursor, so the other
-    /// monitors' do not fill it; everything else still reaches it.
     /// A window that reconnects with the same tab id replaces its old socket, which is closed;
     /// other tabs, and windows with no id, stay.
     #[test]
@@ -2067,6 +2065,8 @@ mod tests {
         }
     }
 
+    /// A browser window's queue gets only its own monitor's video and cursor, so the other
+    /// monitors' do not fill it; everything else still reaches it.
     #[test]
     fn video_and_cursor_reach_only_their_monitors_viewer() {
         let outbox = Arc::new(Outbox::new());
