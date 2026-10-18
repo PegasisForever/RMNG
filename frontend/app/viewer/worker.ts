@@ -323,7 +323,10 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
     draw();
     return;
   }
-  ({ url, monitor } = m);
+  ({ monitor } = m);
+  // This page's id, the same on each reconnect: the server replaces the old socket of this
+  // window with the new one at once, which may still be open on a network that is gone.
+  url = `${m.url}&tab=${crypto.randomUUID()}`;
   ctx = m.canvas.getContext("2d")!;
   resetDecoder();
   connect();

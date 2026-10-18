@@ -1,7 +1,7 @@
 //! `rmng-fps`: frame-rate test tool for the browser viewer's WebSocket. It joins
-//! `ws://<host>/api/viewer?monitor=<n>` like one browser viewer window, reads each video
-//! message's header (`wire::browser::VideoHeader`) without decoding, and prints once a second
-//! how many frames, keyframes and megabits arrived, and the delay.
+//! `ws://<host>/api/viewer?monitor=<n>&tab=<id>` like one browser viewer window, reads each
+//! video message's header (`wire::browser::VideoHeader`) without decoding, and prints once a
+//! second how many frames, keyframes and megabits arrived, and the delay.
 //!
 //! ```sh
 //! cargo run -p control-client --bin rmng-fps -- <host>[:port] [monitor] [seconds]
@@ -10,7 +10,7 @@
 //! The port defaults to 9000 and the monitor to 0. It shows the selected clone, as a viewer
 //! window does. With `seconds` it stops after that time and prints a summary line; without,
 //! stop it with Ctrl+C. When the server closes the socket, it connects again after 1 s, and
-//! counts it.
+//! counts it. Its `tab` id is random per process, the same on each reconnect, as a window's.
 //!
 //! The delay is the time from an `echo` to its answer (every 200 ms). The server sends the
 //! answer ahead of the video in its queue, so the delay is the round trip plus the wait in the
@@ -55,7 +55,9 @@ async fn main() -> Result<()> {
         .map(|s| s.parse())
         .transpose()
         .context("seconds")?;
-    let url = format!("ws://{host}/api/viewer?monitor={monitor}");
+    // Random per process: the hasher's keys are.
+    let tab = std::hash::BuildHasher::hash_one(&std::collections::hash_map::RandomState::new(), 0);
+    let url = format!("ws://{host}/api/viewer?monitor={monitor}&tab={tab:016x}");
 
     let start = Instant::now();
     let mut echo = tokio::time::interval(ECHO_EVERY);

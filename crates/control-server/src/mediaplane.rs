@@ -15,7 +15,11 @@
 //!   a bitrate limit ([`crate::bitrate`]).
 //! - Cursor messages go only to the windows of their monitor, terminal output only to the
 //!   window that shows the terminal (monitor 0).
-//! - Selection switch / viewer connect → force a fresh IDR on every encoder.
+//! - A selection switch re-keys every monitor; a viewer that joins (or asks for a keyframe)
+//!   re-keys only its own. Forced keyframes of one monitor are at least [`KEYFRAME_GAP`] apart
+//!   ([`prime_viewer_video`]).
+//! - A window that reconnects with the same `tab` id replaces its old socket at once, which
+//!   may still be registered on a dead link ([`join_viewer`]).
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -44,6 +48,8 @@ pub(crate) struct ViewerConn {
     outbox: Arc<Outbox>,
     /// The one monitor whose video this viewer (a browser window) gets.
     monitor: u32,
+    /// The page's id (`?tab=`), the same on each reconnect of that window.
+    tab: Option<String>,
 }
 
 /// One message in a viewer's queue, already in its WebSocket form. Built once per broadcast
@@ -1444,7 +1450,18 @@ fn teardown_if_current(
 /// Add viewer `id` (from [`next_viewer_id`]) whose writer drains `outbox`, and prime it:
 /// metadata first, then a fresh keyframe of `monitor`, the one monitor whose video it gets.
 /// Blocks while an encoder is built, so call it from a thread.
-pub(crate) fn join_viewer(app: &App, plane: &Plane, id: u64, outbox: Arc<Outbox>, monitor: u32) {
+///
+/// An older viewer of the same `tab` is the same window on a socket it gave up (a new network,
+/// a laptop that wakes): it is removed and closed now, which ends its socket and runs its leave
+/// path. Else it would hold its monitor's frames back ([`room`]) until its read timeout.
+pub(crate) fn join_viewer(
+    app: &App,
+    plane: &Plane,
+    id: u64,
+    outbox: Arc<Outbox>,
+    monitor: u32,
+    tab: Option<String>,
+) {
     let handle = &app.media;
     let state = app.store.get();
     let cfg = app.config();
@@ -1453,18 +1470,15 @@ pub(crate) fn join_viewer(app: &App, plane: &Plane, id: u64, outbox: Arc<Outbox>
     prime_viewer_metadata(handle, &outbox, monitor, selected.clone(), &state, &cfg);
     // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
     // (independent of encode latency).
-    plane
-        .viewers
-        .lock()
-        .unwrap()
-        .insert(
+    register(
+        &plane.viewers,
+        ViewerConn {
             id,
-            ViewerConn {
-                id,
-                outbox,
-                monitor,
-            },
-        );
+            outbox,
+            monitor,
+            tab,
+        },
+    );
     // Somebody is watching now, so the selected clone has to start painting
     // again. Before the re-encode below, so its first fresh frame is close
     // behind the primed one.
@@ -1476,20 +1490,36 @@ pub(crate) fn join_viewer(app: &App, plane: &Plane, id: u64, outbox: Arc<Outbox>
     plane.termplane.on_viewers_changed();
 }
 
-/// Remove a viewer: drop it from the registry (stops fan-out, disconnects its writer), forget
-/// its clipboard state, and let the terminal view and capture follow the new audience.
-pub(crate) fn leave_viewer(app: &App, plane: &Plane, id: u64) {
-    let monitor = viewer(&plane.viewers, id).map(|(_, m)| m);
+/// Add `conn` to the viewer set, in place of any older viewer of its tab: that one is removed
+/// and its queue closed, which ends its socket and runs its leave path ([`join_viewer`]).
+fn register(viewers: &Viewers, conn: ViewerConn) {
+    let mut viewers = viewers.lock().unwrap();
+    if conn.tab.is_some() {
+        viewers.retain(|&old, v| {
+            if v.tab != conn.tab {
+                return true;
+            }
+            tracing::info!("browser viewer {old}: replaced by {} (same tab)", conn.id);
+            v.outbox.close();
+            false
+        });
+    }
+    viewers.insert(conn.id, conn);
+}
+
+/// Remove viewer `id` of `monitor`: drop it from the registry (stops fan-out, disconnects its
+/// writer), forget its clipboard state, and let the terminal view and capture follow the new
+/// audience. Also when the registry dropped it already (its queue refused a message, or a
+/// newer socket of its tab replaced it), so `monitor` comes from the caller.
+pub(crate) fn leave_viewer(app: &App, plane: &Plane, id: u64, monitor: u32) {
     remove_viewer(&plane.viewers, id);
-    if let Some(m) = monitor {
-        // It may have been the one that held its monitor's frames back.
-        encode_held(app, &plane.encoders, &plane.viewers, m);
-        // The last one of its monitor: the limit its link set must not stay for the next.
-        let left = plane.viewers.lock().unwrap().values().any(|v| v.monitor == m);
-        let enc = plane.encoders.lock().unwrap().get(&m).map(|(e, _, _)| e.clone());
-        if let (false, Some(enc)) = (left, enc) {
-            crate::bitrate::forget(&app.media.bitrate, m, &enc);
-        }
+    // It may have been the one that held its monitor's frames back.
+    encode_held(app, &plane.encoders, &plane.viewers, monitor);
+    // The last one of its monitor: the limit its link set must not stay for the next.
+    let left = plane.viewers.lock().unwrap().values().any(|v| v.monitor == monitor);
+    let enc = plane.encoders.lock().unwrap().get(&monitor).map(|(e, _, _)| e.clone());
+    if let (false, Some(enc)) = (left, enc) {
+        crate::bitrate::forget(&app.media.bitrate, monitor, &enc);
     }
     clip_forget_source(&app.media.clip, &viewer_src(id));
     // A departing viewer may leave the headless terminal view with no audience → deactivate.
@@ -1707,6 +1737,7 @@ mod tests {
                 id: 1,
                 outbox: Arc::new(Outbox::new()),
                 monitor: 0,
+                tab: None,
             },
         );
         update_capture_gates(&app.media, &app, &viewers);
@@ -1751,6 +1782,7 @@ mod tests {
                 id: 1,
                 outbox: Arc::new(Outbox::new()),
                 monitor: 0,
+                tab: None,
             },
         );
 
@@ -1914,6 +1946,7 @@ mod tests {
                 id,
                 outbox: outbox.clone(),
                 monitor,
+                tab: None,
             };
             viewers.lock().unwrap().insert(id, conn);
             outbox
@@ -1975,6 +2008,7 @@ mod tests {
                 id: 1,
                 outbox: a.clone(),
                 monitor: 0,
+                tab: None,
             },
         );
         viewers.lock().unwrap().insert(
@@ -1983,6 +2017,7 @@ mod tests {
                 id: 2,
                 outbox: b,
                 monitor: 0,
+                tab: None,
             },
         );
 
@@ -2002,6 +2037,36 @@ mod tests {
 
     /// A browser window's queue gets only its own monitor's video and cursor, so the other
     /// monitors' do not fill it; everything else still reaches it.
+    /// A window that reconnects with the same tab id replaces its old socket, which is closed;
+    /// other tabs, and windows with no id, stay.
+    #[test]
+    fn a_reconnect_of_the_same_tab_replaces_its_old_socket() {
+        let viewers: Viewers = Arc::new(Mutex::new(HashMap::new()));
+        let add = |id: u64, tab: Option<&str>| {
+            let outbox = Arc::new(Outbox::new());
+            let conn = ViewerConn {
+                id,
+                outbox: outbox.clone(),
+                monitor: 0,
+                tab: tab.map(String::from),
+            };
+            register(&viewers, conn);
+            outbox
+        };
+        let old = add(1, Some("a"));
+        let other = add(2, Some("b"));
+        let none = add(3, None);
+        let none2 = add(4, None);
+        let new = add(5, Some("a"));
+        let mut ids: Vec<u64> = viewers.lock().unwrap().keys().copied().collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![2, 3, 4, 5]);
+        assert!(!old.push(Queued::Text("x".into())), "the old socket's queue is closed");
+        for b in [&other, &none, &none2, &new] {
+            assert!(b.push(Queued::Text("x".into())));
+        }
+    }
+
     #[test]
     fn video_and_cursor_reach_only_their_monitors_viewer() {
         let outbox = Arc::new(Outbox::new());
@@ -2012,6 +2077,7 @@ mod tests {
                 id: 1,
                 outbox: outbox.clone(),
                 monitor: 1,
+                tab: None,
             },
         );
         let video = |m| video_message(m, &[0, 0, 0, 1, 0x65], true, 1);

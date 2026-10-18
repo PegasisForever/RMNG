@@ -221,40 +221,39 @@ pub(crate) fn tick(
     viewers: impl FnOnce() -> Seen,
 ) {
     let now = Instant::now();
-    let change = {
-        let mut map = monitors.lock().unwrap();
-        let m = map.entry(monitor).or_insert_with(|| fresh(enc, now));
-        if !std::ptr::eq(m.enc.as_ptr(), Arc::as_ptr(enc)) {
-            *m = fresh(enc, now);
-        }
-        let secs = now.saturating_duration_since(m.at).as_secs_f64();
-        if secs < TICK.as_secs_f64() {
-            return;
-        }
-        let output = enc.output();
-        let seen = viewers();
-        let t = Tick {
-            secs,
-            shown: seen.shown,
-            key_out: seen.key_out,
-            decoding: seen.decoding,
-            frames: output.0 - m.output.0,
-            bytes: output.1 - m.output.1,
-            not_encoded: std::mem::take(&mut m.not_encoded),
-            delivered: seen.delivered.map(|b| b * 8.0 / 1000.0),
-        };
-        (m.at, m.output) = (now, output);
-        let old = m.steer.cap;
-        m.steer.tick(&t).map(|(cap, why)| (old, cap, why))
+    let mut map = monitors.lock().unwrap();
+    let m = map.entry(monitor).or_insert_with(|| fresh(enc, now));
+    if !std::ptr::eq(m.enc.as_ptr(), Arc::as_ptr(enc)) {
+        *m = fresh(enc, now);
+    }
+    let secs = now.saturating_duration_since(m.at).as_secs_f64();
+    if secs < TICK.as_secs_f64() {
+        return;
+    }
+    let output = enc.output();
+    let seen = viewers();
+    let t = Tick {
+        secs,
+        shown: seen.shown,
+        key_out: seen.key_out,
+        decoding: seen.decoding,
+        frames: output.0 - m.output.0,
+        bytes: output.1 - m.output.1,
+        not_encoded: std::mem::take(&mut m.not_encoded),
+        delivered: seen.delivered.map(|b| b * 8.0 / 1000.0),
     };
-    // Outside the lock: the encoder takes the change at its next frame.
-    if let Some((old, cap, why)) = change {
+    (m.at, m.output) = (now, output);
+    let old = m.steer.cap;
+    if let Some((cap, why)) = m.steer.tick(&t) {
         let show = |c: Option<u32>| c.map_or("no limit".into(), |k| format!("{k} kbit/s"));
         tracing::info!(
             "monitor {monitor} bitrate: {} → {} ({why})",
             show(old),
             show(cap)
         );
+        // Under the lock, so a [`forget`] comes before or after it, never between the
+        // controller's change and the encoder's. It only sets a property: the encoder takes the
+        // change at its next frame.
         enc.set_bitrate(cap);
     }
 }
@@ -263,10 +262,12 @@ pub(crate) fn tick(
 /// no viewer pays for the keyframe a change costs. The next viewer may be on another link; a
 /// window that reconnects on the same slow link gets its limit again after [`HOLD`].
 pub(crate) fn forget(monitors: &Monitors, monitor: u32, enc: &Arc<Encoder>) {
-    let Some(m) = monitors.lock().unwrap().remove(&monitor) else { return };
+    let mut map = monitors.lock().unwrap();
+    let Some(m) = map.remove(&monitor) else { return };
     // A newer encoder than the controller's started with no limit.
     if let (Some(k), true) = (m.steer.cap, std::ptr::eq(m.enc.as_ptr(), Arc::as_ptr(enc))) {
         tracing::info!("monitor {monitor} bitrate: {k} kbit/s → no limit (no viewer left)");
+        // Under the lock, as in [`tick`].
         enc.set_bitrate(None);
     }
 }

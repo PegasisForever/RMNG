@@ -34,8 +34,8 @@ export function parseVideoHeader(buf: ArrayBuffer): VideoHeader {
   };
 }
 
-/** One clipboard reply (`wire::browser::encode_clipboard_data`). Empty `bytes` means the owner
- *  could not read them. */
+/** One clipboard reply, put together from its pieces (`wire::browser::encode_clipboard_piece`).
+ *  Empty `bytes` means the owner could not read them. */
 export interface ClipboardBytes {
   serial: number;
   mimeType: string;

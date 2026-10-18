@@ -338,6 +338,8 @@ async fn stats_get(State(app): State<App>) -> Response {
 #[derive(Deserialize)]
 struct ViewerQuery {
     monitor: u32,
+    /// The viewer page's random id, the same on each reconnect of that window.
+    tab: Option<String>,
 }
 
 async fn viewer_ws(
@@ -351,7 +353,7 @@ async fn viewer_ws(
     let cap = wire::socket::chunk::MAX_MESSAGE_BYTES;
     ws.max_message_size(cap)
         .max_frame_size(cap)
-        .on_upgrade(move |socket| async move { crate::webviewer::serve(app, q.monitor, socket) })
+        .on_upgrade(move |socket| async move { crate::webviewer::serve(app, q.monitor, q.tab, socket) })
 }
 
 #[derive(Deserialize)]

@@ -90,13 +90,15 @@ ClipboardOffer  { serial, mime_types: [String] }      # "selection changed; thes
 ClipboardRequest{ serial, mime_type }                  # "give me bytes for this type"
 ClipboardData   { serial, mime_type, bytes }           # the bytes (lazy fetch)
 
-# browser viewer protocol (WebSocket /api/viewer?monitor=<id> on port 9000)
+# browser viewer protocol (WebSocket /api/viewer?monitor=<id>&tab=<page id> on port 9000)
 VideoHeader { monitor_id, seq, key }                   # binary, 10 bytes + Annex-B AU
-encode_clipboard_data / decode_clipboard_data          # binary ClipboardData, both ways
-ToBrowser   (JSON, tag "t"): view_spec(ViewSpec) | cursor(CursorMeta)
-            | clipboard(ClipboardMsg) | term_data(TermData)
+encode_clipboard_piece / decode_clipboard_piece        # binary ClipboardData in 64 KiB pieces, both ways
+ToBrowser   (JSON, tag "t"): version{build_id} | scroll{mode, speed} | view_spec(ViewSpec)
+            | cursor(CursorMeta) | clipboard(ClipboardMsg) | term_data(TermData)
+            | echo{id} | clip_ack{n}
 FromBrowser (JSON, tag "t"): input(InputMsg) | clipboard(ClipboardMsg) | term_input
             | term_resize | term_new_session | request_keyframe{monitor_id}
+            | ack{seq, held_ms, clip, decoding} | echo{id}
 ViewSpec { monitors: [ViewMonitor{id, x, y, width, height, primary}],
            content: desktop | terminal{clone, sessions} }
 

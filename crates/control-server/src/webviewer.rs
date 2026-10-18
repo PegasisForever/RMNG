@@ -1,4 +1,5 @@
-//! The browser viewer's WebSocket (`/api/viewer?monitor=<id>`, protocol in [`wire::browser`]).
+//! The browser viewer's WebSocket (`/api/viewer?monitor=<id>&tab=<page id>`, protocol in
+//! [`wire::browser`]).
 //!
 //! A browser viewer is one entry in the media plane's viewer set: it joins, is primed, gets the
 //! broadcast through its queue ([`Outbox`]: control first, then video, then clipboard pieces),
@@ -40,8 +41,9 @@ const PING_EVERY: Duration = Duration::from_secs(5);
 /// acknowledging what was sent ([`Outbox::stalled`]).
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Serve one browser viewer window showing `monitor`.
-pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
+/// Serve one browser viewer window showing `monitor`. `tab` is the page's id, the same on each
+/// reconnect: a new socket of it replaces the old one ([`mediaplane::join_viewer`]).
+pub(crate) fn serve(app: App, monitor: u32, tab: Option<String>, ws: WebSocket) {
     let Some(plane) = app.media.plane.get().cloned() else {
         return; // media init failed: no video plane to join
     };
@@ -85,7 +87,7 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
         let (mode, speed) = app.config().effective_scroll();
         outbox.push(Queued::of(&ToBrowser::Scroll { mode, speed }));
         let id = mediaplane::next_viewer_id();
-        mediaplane::join_viewer(&app, &plane, id, outbox.clone(), monitor);
+        mediaplane::join_viewer(&app, &plane, id, outbox.clone(), monitor, tab);
         tracing::info!("browser viewer {id} connected (monitor {monitor})");
         // Input follows the selection: what this socket holds in the old clone is released at
         // its next input message (a dashboard switch blurs the window, which releases all) and
@@ -148,7 +150,7 @@ pub(crate) fn serve(app: App, monitor: u32, ws: WebSocket) {
         // A window that closes with a key down (Ctrl+W: Chrome sends Ctrl's press, then
         // closes) never sends the release, so send it here.
         held.follow(&app, None);
-        mediaplane::leave_viewer(&app, &plane, id);
+        mediaplane::leave_viewer(&app, &plane, id, monitor);
         // Also when the registry dropped it already: stops the writer, also inside a send.
         outbox.close();
         tracing::info!("browser viewer {id} left");

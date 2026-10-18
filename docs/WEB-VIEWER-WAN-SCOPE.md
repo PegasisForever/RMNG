@@ -146,7 +146,7 @@ Same as [WEB-VIEWER-SCOPE.md](WEB-VIEWER-SCOPE.md):
 
 | ID | Feature | Proposed | Effort | How | Notes | Decision |
 |---|---|---|---|---|---|---|
-| Q1 | Measure how far each viewer is behind: frames sent and not yet acknowledged (R2), beyond the round-trip floor; plus bytes in our queue and unsent bytes in the kernel (`SIOCOUTQNSD`) as an extra signal | Yes | S | R | Needed by Q3, R1 and D4. Selkies uses the same kernel number. | Yes |
+| Q1 | Measure how far each viewer is behind: frames sent and not yet acknowledged (R2), beyond the round-trip floor; plus bytes in our queue and unsent bytes in the kernel (`SIOCOUTQNSD`) as an extra signal | Yes | S | R | Needed by Q3, R1 and D4. Selkies uses the same kernel number. Built in round 2 from the acknowledgements only: a window is behind by the time its oldest frame that is not acknowledged (in our queue or on the way) has waited, less the floor (the lowest clean round trip). One number for our queue, the kernel's, a proxy's, the path's and the browser's decoder. The kernel queue (`SIOCOUTQNSD`) was not built: behind `tailscale serve` it drains at once, and the acknowledgements see it anyway. The frames in our queue are in the debug log only. | Yes |
 | Q2 | Control messages go before video in the queue (cursor, `view_spec`, clipboard offer, `version`, `scroll`) | Yes | S | K | Today one queue holds everything in order of arrival. A queued frame cannot be taken back once written, so this works only together with L2. | Yes |
 | Q3 | Replace the "128 messages, then close" rule (A1 in the old scope) with a budget in time: when a viewer is more than about 1 s behind, drop its queued frames, keep the socket, and send it a keyframe | Yes | M | R | This changes A1. With R1 in place, this happens only after a sudden drop of the link. The keyframe goes to all viewers of that monitor, because they share one encoder. Limit it to one keyframe per second. Built in round 2, removed in round 4: with R1, at most one or two small deltas wait in our queue, and a resync swapped them for a keyframe many times larger through the same slow socket. The 64 MiB queue limit and Q4 stay. | Yes (removed in round 4) |
 | Q4 | Close a socket only when it makes no progress for 10 s (no acknowledgement from the browser, R2), instead of when one write takes 10 s | Yes | S | R | Selkies reads `tcpi_bytes_acked` from `TCP_INFO`. Today a big clipboard message on a slow link closes a socket that still works. | Yes |
@@ -186,7 +186,7 @@ Same as [WEB-VIEWER-SCOPE.md](WEB-VIEWER-SCOPE.md):
 | ID | Feature | Proposed | Effort | How | Notes | Decision |
 |---|---|---|---|---|---|---|
 | V1 | Send `cursor` messages only to the window of that monitor, and `term_data` only to the window that shows the terminal | Yes | S | K | Today each message goes to every window: with 2 monitors and 120 moves per second, that is 240 messages per second. | Yes |
-| V2 | Clipboard data in pieces of 64 KiB, sent only when the video queue is short. Both directions. | Yes | M | R | Today one message of up to 32 MiB blocks the video. Selkies uses 16 KiB pieces and paces them. A newer copy cancels a transfer that is still running. Built in round 4 with one piece on the way at a time, each acknowledged by the other side: behind a proxy the server's socket never shows a queue, and the browser's `bufferedAmount` does not see the kernel's. | Yes |
+| V2 | Clipboard data in pieces of 64 KiB, sent only when the video queue is short. Both directions. | Yes | M | R | Today one message of up to 32 MiB blocks the video. Selkies uses 16 KiB pieces and paces them. A newer copy cancels a transfer that is still running. Built in round 4 with one piece on the way at a time, each acknowledged by the other side: behind a proxy the server's socket never shows a queue, and the browser's `bufferedAmount` does not see the kernel's. Since round 5 more pieces may be on the way, both directions: as many as the delivered rate carries in one round-trip floor and 100 ms (always one), so a large copy delays the video by about 100 ms and on the LAN goes at the link's speed ([PROTOCOL.md](PROTOCOL.md#browser-viewer-protocol-browser--control-server)). | Yes |
 | V3 | Cursor image as PNG, not raw pixels in base64 JSON | Later | S | K | Usually 3–12 KB, up to about 790 KB for a 384×384 cursor. Sent only when the shape changes. | Later |
 | V4 | Merge pointer moves when the browser socket is backed up (more than 16 KiB unsent: one move per screen refresh, the newest wins) | Later | S | R | Selkies. Helps only when the upload from your side is slow, for example during a file upload. | Later |
 | V5 | Pace file uploads so that they do not delay input | Later | M | R | Selkies `TransferPacer`. Same case as V4. | Later |
@@ -223,7 +223,7 @@ keyframe with our encoder.
 
 ## Implementation rounds
 
-**Status: rounds 1–7 are done.**
+**Status: rounds 1–8 are done.**
 
 Work happens on `main`. Each round is one worker agent, then one reviewer agent that checks correctness and
 over-engineering. The orchestrator commits the worker's result, and the reviewer's findings go into the next
@@ -241,3 +241,4 @@ Each round is measured on the test bench (S1), off the LAN and on the LAN.
 | 5 | **Automatic bitrate.** CBR or VBR with a highest QP, congestion control that acts only after R1 holds the frame rate low. | R4, R5 |
 | 6 | **Fixes from review 5, and a clean round-trip floor.** | R1, R4 |
 | 7 | **Fixes from review 6: no sticky limit, a floor from the first seconds.** | R1, R4 |
+| 8 | **Last fixes from the final review: no limit carried over, a reconnect replaces its old socket, docs.** | R1, R4, V2, Q1 |

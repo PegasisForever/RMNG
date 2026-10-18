@@ -621,6 +621,25 @@ and the next ones directly. If the path stays on DERP, run `tailscale netcheck` 
 machines: `UDP: false` means a firewall blocks UDP; `MappingVariesByDestIP: true` means a hard
 NAT. Let UDP out on both sides, or open UDP port 41641 to the server machine.
 
+### BBR on the host (the host owner's step)
+
+The web port uses BBR congestion control when the kernel has it loaded. CUBIC, the usual
+default, sends much slower after each random loss (Wi-Fi, a phone), so the video off the LAN
+is slower. The server never loads the module itself: it runs privileged, so asking for `bbr`
+would make the host kernel load it, and that is the host owner's decision. On the host (the
+Proxmox host, not the container), load `tcp_bbr` and keep it loaded after a reboot:
+
+```sh
+modprobe tcp_bbr
+echo tcp_bbr > /etc/modules-load.d/tcp_bbr.conf
+cat /proc/sys/net/ipv4/tcp_available_congestion_control   # lists bbr
+```
+
+Then restart the control-server. At start it logs one line with the algorithm it uses:
+`web port TCP congestion control: bbr (available: reno cubic bbr)`. Without the module it says
+`cubic`, and everything works, with less speed on lossy links. The numbers in
+[WAN-BENCH.md](WAN-BENCH.md) were measured with BBR on the web port.
+
 ## Patched gnome-shell
 
 The clone-daemon needs two gnome-shell patches: **shell-01** (hide the screen-sharing pill

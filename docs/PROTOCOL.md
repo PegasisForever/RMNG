@@ -24,8 +24,14 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 ## Browser viewer protocol (browser ⇄ control-server)
 
 Each viewer window opens one WebSocket on the web port, same origin as the page:
-`ws://<host>:9000/api/viewer?monitor=<id>`, or `wss://` when the page is HTTPS. The
-socket carries the video of that one monitor and every control message. Source:
+`ws://<host>:9000/api/viewer?monitor=<id>&tab=<page id>`, or `wss://` when the page is HTTPS.
+The socket carries the video of that one monitor and every control message. `tab` is a random
+id that the page makes once and sends again on each reconnect (`rmng-fps`: one per process);
+it may be left out. A new socket with the `tab` of a socket that is still open replaces it:
+the server closes the old one at once and releases what it held (keys, buttons, its
+clipboard offer). After a network change (Wi-Fi to a hotspot, a laptop that wakes) the old
+socket is often still open on the server, on a link that is gone, and it would hold the
+monitor's frames back until its timeout (below). Source:
 [browser.rs](../crates/wire/src/browser.rs) (types),
 [webviewer.rs](../crates/control-server/src/webviewer.rs) (socket),
 [mediaplane.rs](../crates/control-server/src/mediaplane.rs) (fan-out).
@@ -166,7 +172,8 @@ out keyframes, the deltas sent while a keyframe was out, and deltas sent behind 
 the frame rate falls to what the link carries, and no keyframe is needed: a frame that was
 never encoded is not in the reference chain. The slowest window sets the frame rate for all
 windows of the monitor. A window that stops acknowledging holds the others back until it is
-closed (10 s, below). Keyframes are made whatever the room. Why the rule has its parts:
+closed (10 s, below), or replaced by a new socket of its `tab` (above). Keyframes are made
+whatever the room. Why the rule has its parts:
 [WAN-BENCH.md](WAN-BENCH.md) (rounds 3 and 4).
 
 **Automatic bitrate.** The encoder runs VBR with a QP from 25 to 35. With no limit (50 Mbit/s)
@@ -199,8 +206,9 @@ kbit; a smaller one made more bytes, not fewer ([WAN-BENCH.md](WAN-BENCH.md), ro
 server logs each change at info level (`monitor 1 bitrate: no limit → 1400 kbit/s (…)`). A new
 encoder (a new monitor size, a server restart) starts with no limit. When the last window of a
 monitor closes, its encoder loses the limit at once (the next window may be on the LAN), so
-also a window that reconnects alone starts with no limit, and on a slow link gets one again
-after 5 s.
+also a window that reconnects alone after its old socket closed starts with no limit, and on a
+slow link gets one again after 5 s. A socket that replaces its old one (same `tab`) keeps the
+limit, as does any window while another window of its monitor stays open.
 
 **Timeouts.** A socket with video frames or a clipboard piece on the way and no `ack` that
 moves for 10 s is closed: the browser stopped reading. One send has no time limit. The server

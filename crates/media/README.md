@@ -28,7 +28,8 @@ clone-daemon ──dmabuf────┤                                        
      fences (wait on the render fence before import) to avoid tearing as Mutter recycles
      buffers.
 2. **Encode (viewer)** — import each dmabuf into a VA-API surface, VPP → NV12, H.264
-   low-latency (no B-frames, small/zero GOP, CQP/CBR as tuned in Phase 0),
+   low-latency (no B-frames, small/zero GOP, VBR with a QP from 25 to 35 and no bitrate limit
+   until the control-server's automatic limit sets one, `Encoder::set_bitrate`),
    **force-IDR on demand**. One encoder per monitor of the selected clone. Emit Annex-B
    access units tagged `{monitor_id, idr}` for the browser viewer protocol (`wire::browser`).
    - The stream is `constrained-baseline` with `aud=true`, `key-int-max` at its highest (1024:
