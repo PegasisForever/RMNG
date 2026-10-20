@@ -98,10 +98,11 @@
 //! subagents that were already dead. The transcript is the only record of that interrupt, and
 //! [`ends_interrupted`] is where this module reads one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::RwLock as StdRwLock;
-use std::time::{Duration, Instant};
+use std::sync::{LazyLock, Mutex, RwLock as StdRwLock};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Result, bail};
 use serde::Deserialize;
@@ -804,52 +805,272 @@ pub struct BackgroundTask {
     pub agent_type: Option<String>,
 }
 
-/// Read the WHOLE log, never a tail. A fold over a truncated log is not the fold: it loses
+/// Each clone's hook log as far as it has been read, keyed by the log's path, with when it
+/// was last asked for. See [`read_hook_events`].
+static HOOK_LOGS: LazyLock<Mutex<HashMap<PathBuf, (Instant, HookLog)>>> =
+    LazyLock::new(Default::default);
+
+/// A log nobody asked for in this long belongs to a container that is gone. Its path runs
+/// through `/proc/<pid>/root`, so a restarted clone comes back under a new key.
+const HOOK_LOG_KEEP: Duration = Duration::from_secs(600);
+
+/// What one read step takes from the file. Bounds what the first read of a full 64 MB log
+/// holds at once, since the events are compacted after every step.
+const HOOK_READ_CHUNK: usize = 1 << 20;
+
+/// How many of the newest events stay as they were, for the duplicate check alone. Copies
+/// land within milliseconds of each other, far inside this.
+const DUPLICATE_TAIL: usize = 256;
+
+/// How many bytes before the read offset are kept to recognise the same file next time.
+const SEAM_LEN: u64 = 64;
+
+/// The WHOLE log, never a tail. A fold over a truncated log is not the fold: it loses
 /// the `SubagentStart` of anything long-running, and it invents open sessions whose
 /// `UserPromptSubmit` survived the cut while their `Stop` did not.
+///
+/// Whole does not mean re-read. The log is append-only and reaches 64 MB on a busy clone,
+/// and re-reading it from byte 0 on every 4-second tick, on every clone at once, held a
+/// production control-server at 13 GiB: glibc keeps the freed pages of each pass. So the
+/// log is read once, from where the last read stopped, and nothing at all is read while
+/// its size and mtime stay put. What it returns is the compacted log, which every fold
+/// downstream reads exactly as it reads the whole one ([`compact_hook_events`]).
 ///
 /// Cursor's event names are translated to Claude Code's here, and duplicate copies of one
 /// event are dropped, so that every fold downstream sees one vocabulary and one copy.
 pub fn read_hook_events(root: &Path) -> Vec<HookEvent> {
     let path = root.join("home/rmng/.rmng/agent-events.jsonl");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return Vec::new();
+    // Taken out for the read and put back after, so clones read in parallel.
+    let mut log = {
+        let mut logs = HOOK_LOGS.lock().unwrap_or_else(|e| e.into_inner());
+        logs.retain(|_, (used, _)| used.elapsed() < HOOK_LOG_KEEP);
+        logs.remove(&path).map(|(_, log)| log).unwrap_or_default()
     };
-    let mut out: Vec<HookEvent> = Vec::new();
-    for line in raw.lines().filter(|l| !l.trim().is_empty()) {
-        // A torn final line is normal: the probe appends while this reads. Skip it and
-        // pick it up next tick.
-        let Ok(mut e) = serde_json::from_str::<HookEvent>(line) else {
-            continue;
+    log.advance(&path, true);
+    let events = log.events.clone();
+    HOOK_LOGS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path, (Instant::now(), log));
+    events
+}
+
+/// One clone's hook log, read up to `offset`.
+#[derive(Default)]
+struct HookLog {
+    /// The file the offset is into. Another inode is another file, read from the start.
+    inode: u64,
+    /// Bytes consumed so far, always just after a line break.
+    offset: u64,
+    /// Size and mtime at the last read. Both unchanged means nothing was written since.
+    len: u64,
+    mtime: Option<SystemTime>,
+    /// The bytes just before `offset`. A file rewritten rather than appended to differs here.
+    seam: Vec<u8>,
+    /// Every event read so far that a fold can still need, in log order.
+    events: Vec<HookEvent>,
+    /// The newest events uncompacted, which is what the duplicate check looks back over.
+    recent: VecDeque<HookEvent>,
+}
+
+impl HookLog {
+    /// Take in whatever was appended since the last read. `compact` off keeps every event,
+    /// which only the tests want.
+    fn advance(&mut self, path: &Path, compact: bool) {
+        let Ok(meta) = std::fs::metadata(path) else {
+            *self = Self::default();
+            return;
         };
-        if let Some(claude) = claude_name(&e.hook_event_name) {
-            e.hook_event_name = claude.to_string();
-            e.from_cursor = true;
-            // Cursor sends the field empty rather than omitting it, so both shapes land here.
-            // Named at the door, before any fold has a chance to skip it. See [`CURSOR_UNOWNED`].
-            if e.session_id.as_deref().unwrap_or_default().is_empty() {
-                e.session_id = Some(CURSOR_UNOWNED.to_string());
+        let (len, mtime) = (meta.len(), meta.modified().ok());
+        if meta.ino() == self.inode && len == self.len && mtime == self.mtime {
+            return;
+        }
+        let Ok(file) = std::fs::File::open(path) else {
+            *self = Self::default();
+            return;
+        };
+        if meta.ino() != self.inode || len < self.offset || !self.seam_holds(&file) {
+            *self = Self {
+                inode: meta.ino(),
+                ..Self::default()
+            };
+        }
+        // The size from before the read: anything appended during it is read next tick.
+        self.len = len;
+        self.mtime = mtime;
+
+        let mut buf = vec![0u8; HOOK_READ_CHUNK];
+        let mut have = 0;
+        loop {
+            if have == buf.len() {
+                // One line longer than a whole step. Nothing the probe writes is, but the
+                // fold must see it, so the step grows rather than dropping it.
+                buf.resize(buf.len() * 2, 0);
+            }
+            let read = match file.read_at(&mut buf[have..], self.offset + have as u64) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            have += read;
+            // A torn final line is normal: the probe appends while this reads. It stays
+            // unread until its line break arrives.
+            let Some(last) = buf[..have].iter().rposition(|b| *b == b'\n') else {
+                continue;
+            };
+            self.take_lines(&buf[..=last]);
+            self.offset += last as u64 + 1;
+            buf.copy_within(last + 1..have, 0);
+            have -= last + 1;
+            if compact {
+                self.events = compact_hook_events(std::mem::take(&mut self.events));
             }
         }
-        // The duplicate always lands within milliseconds of its twin, and two genuine events
-        // that agree on session, name AND `tool_use_id` cannot: a tool use id is unique to
-        // one call. Scanning backwards over the tail rather than only the last entry, because
-        // a clone with Cursor and Claude Code both live interleaves the two streams.
-        let dup = out
-            .iter()
-            .rev()
-            .take_while(|p| e.ts - p.ts <= DUPLICATE_WINDOW_S)
-            .any(|p| {
-                p.hook_event_name == e.hook_event_name
-                    && p.session_id == e.session_id
-                    && p.tool_use_id == e.tool_use_id
-                    && p.agent_id == e.agent_id
-            });
-        if !dup {
-            out.push(e);
+        let from = self.offset.saturating_sub(SEAM_LEN);
+        self.seam = vec![0u8; (self.offset - from) as usize];
+        if file.read_exact_at(&mut self.seam, from).is_err() {
+            self.seam.clear();
         }
     }
-    out
+
+    /// Whether the file still holds, just before `offset`, what it held at the last read.
+    fn seam_holds(&self, file: &std::fs::File) -> bool {
+        let mut now = vec![0u8; self.seam.len()];
+        let from = self.offset - self.seam.len() as u64;
+        file.read_exact_at(&mut now, from).is_ok() && now == self.seam
+    }
+
+    fn take_lines(&mut self, bytes: &[u8]) {
+        for line in bytes.split(|b| *b == b'\n') {
+            let Ok(line) = std::str::from_utf8(line) else {
+                continue;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let Ok(mut e) = serde_json::from_str::<HookEvent>(line) else {
+                continue;
+            };
+            if let Some(claude) = claude_name(&e.hook_event_name) {
+                e.hook_event_name = claude.to_string();
+                e.from_cursor = true;
+                // Cursor sends the field empty rather than omitting it, so both shapes land
+                // here. Named at the door, before any fold has a chance to skip it. See
+                // [`CURSOR_UNOWNED`].
+                if e.session_id.as_deref().unwrap_or_default().is_empty() {
+                    e.session_id = Some(CURSOR_UNOWNED.to_string());
+                }
+            }
+            // The duplicate always lands within milliseconds of its twin, and two genuine
+            // events that agree on session, name AND `tool_use_id` cannot: a tool use id is
+            // unique to one call. Scanning backwards over the tail rather than only the last
+            // entry, because a clone with Cursor and Claude Code both live interleaves the
+            // two streams.
+            let dup = self
+                .recent
+                .iter()
+                .rev()
+                .take_while(|p| e.ts - p.ts <= DUPLICATE_WINDOW_S)
+                .any(|p| {
+                    p.hook_event_name == e.hook_event_name
+                        && p.session_id == e.session_id
+                        && p.tool_use_id == e.tool_use_id
+                        && p.agent_id == e.agent_id
+                });
+            if !dup {
+                if self.recent.len() == DUPLICATE_TAIL {
+                    self.recent.pop_front();
+                }
+                self.recent.push_back(e.clone());
+                self.events.push(e);
+            }
+        }
+    }
+}
+
+/// The events of `events` that some fold still needs, in log order. No fold over the hook
+/// log can tell the result from the whole log, and folding more events onto it gives what
+/// folding them onto the whole log would.
+///
+/// Each fold keeps an answer that rests on few events:
+///
+/// - the last event of some kind per session wins in [`latest_live_stop`] (`Stop` or
+///   `UserPromptSubmit`), [`current_api_errors`] (main-agent `Stop` or `StopFailure`) and
+///   [`prompt_ages`] (`UserPromptSubmit`), so that one event is kept per session and fold;
+/// - the newest stamp wins in [`clone_now`] and [`unowned_last_seen`], so that event is kept;
+/// - [`in_flight_tools`] is every `PreToolUse` that nothing after it ended, so the open calls
+///   are kept. A closed call kept by another rule keeps the event that closed it, or it would
+///   read as open again;
+/// - [`read_cursor_sessions`] counts only what came after the current Cursor process started,
+///   which moves, so every Cursor prompt and session end is kept. There is one per prompt.
+///
+/// What is dropped is the bulk: finished tool calls and the events that finished them.
+fn compact_hook_events(events: Vec<HookEvent>) -> Vec<HookEvent> {
+    let mut keep = vec![false; events.len()];
+    {
+        let mut open: Vec<usize> = Vec::new();
+        let mut closed_by: Vec<Option<usize>> = vec![None; events.len()];
+        let mut boundary: HashMap<&str, usize> = HashMap::new();
+        let mut verdict: HashMap<&str, usize> = HashMap::new();
+        let mut prompt: HashMap<&str, usize> = HashMap::new();
+        let mut newest: Option<usize> = None;
+        let mut newest_unowned: Option<usize> = None;
+        let later = |best: Option<usize>, i: usize| match best {
+            Some(b) if events[b].ts >= events[i].ts => Some(b),
+            _ => Some(i),
+        };
+        for (i, e) in events.iter().enumerate() {
+            let name = e.hook_event_name.as_str();
+            if name == "PreToolUse" && e.tool_use_id.is_some() {
+                open.push(i);
+            } else {
+                open.retain(|&j| {
+                    let ends = ends_tool(e, &events[j]);
+                    if ends {
+                        closed_by[j] = Some(i);
+                    }
+                    !ends
+                });
+            }
+            newest = later(newest, i);
+            if let Some(sid) = e.session_id.as_deref() {
+                if sid == CURSOR_UNOWNED {
+                    newest_unowned = later(newest_unowned, i);
+                }
+                if matches!(name, "Stop" | "UserPromptSubmit") {
+                    boundary.insert(sid, i);
+                }
+                if matches!(name, "Stop" | "StopFailure") && e.agent_id.is_none() {
+                    verdict.insert(sid, i);
+                }
+                if name == "UserPromptSubmit" {
+                    prompt.insert(sid, i);
+                }
+            }
+            if e.from_cursor && matches!(name, "UserPromptSubmit" | "SessionEnd") {
+                keep[i] = true;
+            }
+        }
+        let chosen = open
+            .into_iter()
+            .chain(boundary.into_values())
+            .chain(verdict.into_values())
+            .chain(prompt.into_values())
+            .chain(newest)
+            .chain(newest_unowned);
+        for i in chosen {
+            keep[i] = true;
+        }
+        for (i, by) in closed_by.into_iter().enumerate() {
+            if let Some(by) = by.filter(|_| keep[i]) {
+                keep[by] = true;
+            }
+        }
+    }
+    events
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(e, k)| k.then_some(e))
+        .collect()
 }
 
 /// Cursor's main process and the wall-clock instant it claimed the profile, or `None` when
@@ -1312,38 +1533,39 @@ fn still_running(stop: &HookEvent) -> Option<HashSet<&str>> {
 pub fn in_flight_tools(events: &[HookEvent]) -> Vec<&HookEvent> {
     let mut live: Vec<&HookEvent> = Vec::new();
     for e in events {
-        match e.hook_event_name.as_str() {
-            "PreToolUse" if e.tool_use_id.is_some() => live.push(e),
-            "PostToolUse" | "PostToolUseFailure" => {
-                if let Some(tid) = e.tool_use_id.as_deref() {
-                    live.retain(|x| x.tool_use_id.as_deref() != Some(tid));
-                }
-            }
-            // A turn boundary ends that session's MAIN-AGENT calls: the agent cannot be
-            // inside a tool call and have finished its turn. A subagent is not retired by the
-            // boundary itself, because a background agent outlives the turn that launched it.
-            "Stop" | "UserPromptSubmit" | "SessionEnd" if e.agent_id.is_none() => {
-                live.retain(|x| !(x.agent_id.is_none() && x.session_id == e.session_id));
-                // A `Stop` also carries what the agent still has running, and that list is
-                // the only thing that ever reports a subagent which died without firing
-                // `SubagentStop`. Anything of this session's that it does not name is over.
-                if let Some(running) = still_running(e) {
-                    live.retain(|x| match x.agent_id.as_deref() {
-                        Some(aid) if x.session_id == e.session_id => running.contains(aid),
-                        _ => true,
-                    });
-                }
-            }
-            // A subagent's own close ends whatever it was sitting inside.
-            "SubagentStop" | "StopFailure" => {
-                if let Some(aid) = e.agent_id.as_deref() {
-                    live.retain(|x| x.agent_id.as_deref() != Some(aid));
-                }
-            }
-            _ => {}
+        if e.hook_event_name == "PreToolUse" && e.tool_use_id.is_some() {
+            live.push(e);
+        } else {
+            live.retain(|x| !ends_tool(e, x));
         }
     }
     live
+}
+
+/// Whether `e` ends the tool call `call` that came before it: the one rule
+/// [`in_flight_tools`] folds with, and [`compact_hook_events`] keeps evidence by.
+fn ends_tool(e: &HookEvent, call: &HookEvent) -> bool {
+    match e.hook_event_name.as_str() {
+        "PostToolUse" | "PostToolUseFailure" => {
+            e.tool_use_id.is_some() && call.tool_use_id == e.tool_use_id
+        }
+        // A turn boundary ends that session's MAIN-AGENT calls: the agent cannot be inside a
+        // tool call and have finished its turn. A subagent is not retired by the boundary
+        // itself, because a background agent outlives the turn that launched it.
+        "Stop" | "UserPromptSubmit" | "SessionEnd" if e.agent_id.is_none() => {
+            call.session_id == e.session_id
+                && match call.agent_id.as_deref() {
+                    None => true,
+                    // A `Stop` also carries what the agent still has running, and that list
+                    // is the only thing that ever reports a subagent which died without firing
+                    // `SubagentStop`. Anything of this session's that it does not name is over.
+                    Some(aid) => still_running(e).is_some_and(|running| !running.contains(aid)),
+                }
+        }
+        // A subagent's own close ends whatever it was sitting inside.
+        "SubagentStop" | "StopFailure" => e.agent_id.is_some() && call.agent_id == e.agent_id,
+        _ => false,
+    }
 }
 
 /// The newest `Stop` per session, dropped once a later `UserPromptSubmit` supersedes it.
@@ -4405,6 +4627,13 @@ mod tests {
         std::fs::write(dir.join("agent-events.jsonl"), body).unwrap();
     }
 
+    /// The hook log with nothing compacted away, for tests about what each line reads as.
+    fn every_hook_event(root: &Path) -> Vec<HookEvent> {
+        let mut log = HookLog::default();
+        log.advance(&root.join("home/rmng/.rmng/agent-events.jsonl"), false);
+        log.events
+    }
+
     /// Comfortably after the lock file this test just wrote, whose mtime is now.
     fn soon() -> f64 {
         std::time::SystemTime::now()
@@ -4429,7 +4658,7 @@ mod tests {
                        "ts": 4.0}),
             ],
         );
-        let events = read_hook_events(&root);
+        let events = every_hook_event(&root);
         let names: Vec<&str> = events.iter().map(|e| e.hook_event_name.as_str()).collect();
         assert_eq!(
             names,
@@ -4445,6 +4674,208 @@ mod tests {
         // The point of the translation: the existing folds work on Cursor unchanged.
         assert!(in_flight_tools(&events).is_empty());
         assert!(latest_live_stop(&events).contains_key("c1"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A long log of many owners doing everything the folds look at, in a fixed pseudo-random
+    /// order: tool calls opened and closed, subagents, turn boundaries with and without a
+    /// running list, API errors, Cursor's own names, and the work Cursor leaves unnamed.
+    fn busy_log(base: f64, n: usize) -> Vec<Value> {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = |m: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % m
+        };
+        let mut out = Vec::new();
+        for i in 0..n {
+            let ts = base + i as f64 * 0.7;
+            let s = format!("s{}", next(6));
+            let agent = (next(3) == 0).then(|| format!("a{}", next(4)));
+            let tool = format!("t{}", next(40));
+            // Every 500 lines, an unnamed call that a named event closes, then an event no
+            // rule keeps but the newest stamp. The newest unnamed event is then a closed call:
+            // kept for its stamp, and closed all the same.
+            match i % 500 {
+                497 => {
+                    out.push(json!({"hook_event_name": "preToolUse", "session_id": "",
+                                    "tool_use_id": format!("z{i}"), "ts": ts}));
+                    continue;
+                }
+                498 => {
+                    out.push(json!({"hook_event_name": "postToolUse", "session_id": "c1",
+                                    "tool_use_id": format!("z{}", i - 1), "ts": ts}));
+                    continue;
+                }
+                499 => {
+                    out.push(json!({"hook_event_name": "PostToolUse", "session_id": s,
+                                    "tool_use_id": "nothing-open", "ts": ts}));
+                    continue;
+                }
+                _ => {}
+            }
+            out.push(match next(12) {
+                0..=3 => json!({"hook_event_name": "PreToolUse", "session_id": s,
+                                "agent_id": agent, "tool_use_id": tool, "ts": ts}),
+                4..=6 => {
+                    let name = if next(4) == 0 {
+                        "PostToolUseFailure"
+                    } else {
+                        "PostToolUse"
+                    };
+                    json!({"hook_event_name": name, "session_id": s, "agent_id": agent,
+                           "tool_use_id": tool, "ts": ts})
+                }
+                7 => json!({"hook_event_name": "UserPromptSubmit", "session_id": s, "ts": ts}),
+                8 if next(2) == 0 => {
+                    let running: Vec<Value> = (0..next(3))
+                        .map(|_| json!({"id": format!("a{}", next(4)), "type": "subagent"}))
+                        .collect();
+                    json!({"hook_event_name": "Stop", "session_id": s,
+                           "background_tasks": running, "ts": ts})
+                }
+                8 => json!({"hook_event_name": "Stop", "session_id": s, "agent_id": agent,
+                            "ts": ts}),
+                9 => {
+                    let name = ["SubagentStop", "StopFailure", "SessionEnd"][next(3) as usize];
+                    json!({"hook_event_name": name, "session_id": s, "agent_id": agent,
+                           "ts": ts})
+                }
+                10 => {
+                    let names = [
+                        "beforeSubmitPrompt",
+                        "preToolUse",
+                        "postToolUse",
+                        "stop",
+                        "sessionEnd",
+                    ];
+                    let name = names[next(5) as usize];
+                    let c = if next(3) == 0 {
+                        String::new()
+                    } else {
+                        format!("c{}", next(3))
+                    };
+                    json!({"hook_event_name": name, "session_id": c, "tool_use_id": tool,
+                           "ts": ts})
+                }
+                _ => {
+                    let name = if next(2) == 0 {
+                        "preToolUse"
+                    } else {
+                        "postToolUse"
+                    };
+                    json!({"hook_event_name": name, "session_id": "", "tool_use_id": tool,
+                           "ts": ts})
+                }
+            });
+        }
+        out
+    }
+
+    /// Every fold over the hook log, written out so two logs can be compared by what they say.
+    fn folds(root: &Path, events: &[HookEvent], now: f64, started: f64) -> Vec<String> {
+        let keyed = |m: HashMap<&str, &HookEvent>| {
+            let mut v: Vec<String> = m.iter().map(|(k, e)| format!("{k}@{}", e.ts)).collect();
+            v.sort();
+            v.join(" ")
+        };
+        let mut ages: Vec<String> = prompt_ages(events, now)
+            .iter()
+            .map(|(k, a)| format!("{k}:{a}"))
+            .collect();
+        ages.sort();
+        let tools: Vec<String> = in_flight_tools(events)
+            .iter()
+            .map(|e| format!("{:?}/{:?}@{}", e.session_id, e.tool_use_id, e.ts))
+            .collect();
+        vec![
+            tools.join(" "),
+            keyed(latest_live_stop(events)),
+            keyed(current_api_errors(events)),
+            ages.join(" "),
+            format!("{:?}", read_cursor_sessions(root, events, now)),
+            format!("{:?}", unowned_last_seen(events, started)),
+            format!("{:?}", unowned_last_seen(events, f64::NEG_INFINITY)),
+            format!(
+                "{}",
+                events
+                    .iter()
+                    .map(|e| e.ts)
+                    .fold(f64::NEG_INFINITY, f64::max)
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_compacted_log_folds_like_the_whole_one() {
+        let root = fake_clone("compact");
+        write_cursor(&root, 900, &["/usr/share/cursor/cursor"]);
+        let started = cursor_process(&root).unwrap().1;
+        // Half of it from before this Cursor process started, so its cut is exercised too.
+        let lines = busy_log(started - 2000.0, 6000);
+        // Grown over three reads, so kept events are folded onto, not only cut from.
+        for upto in [1500, 4000, 6000] {
+            write_log(&root, &lines[..upto]);
+            let kept = read_hook_events(&root);
+            let whole = every_hook_event(&root);
+            let now = whole.last().unwrap().ts + 1.0;
+            assert_eq!(
+                folds(&root, &kept, now, started),
+                folds(&root, &whole, now, started),
+                "after {upto} lines"
+            );
+            assert!(!in_flight_tools(&whole).is_empty());
+            assert!(
+                kept.len() * 4 < whole.len(),
+                "{} of {}",
+                kept.len(),
+                whole.len()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_hook_log_is_read_from_where_the_last_read_stopped() {
+        let root = fake_clone("hookappend");
+        let path = root.join("home/rmng/.rmng/agent-events.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let prompt = "{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"s\",\"ts\":1.0}\n";
+        let call = "{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"s\",\"tool_use_id\":\"t\",\"ts\":2.0}\n";
+        let (head, tail) = call.split_at(30);
+        std::fs::write(&path, format!("{prompt}{head}")).unwrap();
+        assert_eq!(read_hook_events(&root).len(), 1, "the torn line waits");
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut f, tail.as_bytes()).unwrap();
+        drop(f);
+        assert_eq!(
+            in_flight_tools(&read_hook_events(&root)).len(),
+            1,
+            "and is read whole"
+        );
+
+        // Nothing is read while size and mtime stay put: same-size bytes written in place
+        // with the old mtime put back are not seen.
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let blank = " ".repeat(prompt.len() + call.len() - 1) + "\n";
+        std::fs::write(&path, &blank).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(read_hook_events(&root).len(), 2);
+
+        // A rewrite rather than an append is read again from the start.
+        std::fs::write(&path, format!("{blank}{prompt}")).unwrap();
+        let events = read_hook_events(&root);
+        assert_eq!(events.len(), 1);
+        assert!(in_flight_tools(&events).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 
