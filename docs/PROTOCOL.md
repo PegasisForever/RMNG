@@ -340,6 +340,11 @@ with no sound card that is PipeWire's "Dummy Output") and encodes Opus: 48 kHz s
 packets, VBR 96 kbit/s. The stream asks for `node.latency=512/48000`, so the PipeWire graph
 moves sound in blocks of 10.7 ms and the packets leave evenly (with the 2048-frame blocks that
 `pw-play` asks for, they left in bursts of four, and the browser ran dry between them).
+`pipewiresrc` takes 8 buffers (`min-buffers=8`): with the default of one, PipeWire skipped
+blocks, and a capture that started while Firefox played got only 74 % of the sound for its
+whole run (the operator heard it as broken sound after a switch away and back). At debug
+level (`rmng_clone_daemon::audio`) the daemon logs every 5 s how much of real time came in and
+left its queue.
 `seq` counts every packet from 0 per capture run. When the sound is silent (libopus makes a
 packet of at most 3 bytes) for 10 packets, the daemon sends one empty packet (the quiet marker)
 and then nothing until the sound comes back; a run that starts silent sends the marker at once.

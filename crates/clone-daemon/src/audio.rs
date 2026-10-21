@@ -12,8 +12,13 @@
 //! GStreamer `pipewiresrc`, not the raw `pipewire` crate that video uses: video needs the raw
 //! stream only for the cursor metadata, and sound has no such gap. `pipewiresrc` does the
 //! format negotiation and follows the default sink when it changes.
+//!
+//! At debug level it logs every 5 s how much of real time came in from PipeWire and left the
+//! queue, so a loss shows where it happened.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use gstreamer as gst;
@@ -33,22 +38,50 @@ use crate::transport::Transport;
 ///   graph took the 2048 frames (43 ms) that `pw-play` asks for, the packets left in bursts of
 ///   four, and the browser's buffer ran dry between the bursts (measured: 23 late packets and
 ///   21 dropped in 30 s of beeps).
+/// - `min-buffers=8`: with the default of one buffer, PipeWire skips a block whenever the
+///   streaming thread has not given the buffer back by the next cycle. When the capture started
+///   while Firefox played (it asks for 3600 frames), only 74 % of real time came in, for the
+///   whole run, and the browser played the holes as gaps; with 8 buffers, 98–100 % in each of
+///   13 starts.
 /// - The leaky queue is before `opusenc`: a raw buffer dropped under load is a click, but an
 ///   encoded packet dropped would put the browser's decoder out of step.
 /// - `opusenc audio-type=generic`: desktop sound is music and video as often as voice. VBR at
 ///   96 kbit/s is near transparent for stereo music; silence costs a few bytes per packet.
 fn capture_desc() -> String {
     format!(
-        "pipewiresrc name=src do-timestamp=true keepalive-time=1000 \
+        "pipewiresrc name=src min-buffers=8 do-timestamp=true keepalive-time=1000 \
            client-name=rmng-audio-capture \
            stream-properties=\"p,stream.capture.sink=true,node.name=rmng-audio-capture,\
              node.latency=512/48000\" ! \
          audioconvert ! audioresample ! \
-         audio/x-raw,format=S16LE,rate=48000,channels=2 ! \
-         queue max-size-buffers=0 max-size-bytes=0 max-size-time=200000000 leaky=downstream ! \
+         capsfilter name=raw caps=audio/x-raw,format=S16LE,rate=48000,channels=2 ! \
+         queue name=q max-size-buffers=0 max-size-bytes=0 max-size-time=200000000 leaky=downstream ! \
          opusenc bitrate=96000 frame-size={AUDIO_FRAME_MS} bitrate-type=vbr audio-type=generic ! \
          appsink name=out emit-signals=false max-buffers=32 drop=true sync=false"
     )
+}
+
+/// How often the debug log reports [`Counts`].
+const REPORT_EVERY: Duration = Duration::from_secs(5);
+
+/// Frames (48 kHz stereo) that came into the queue and left it, since the capture started.
+#[derive(Default)]
+struct Counts {
+    into_queue: AtomicU64,
+    out_of_queue: AtomicU64,
+}
+
+/// Count the frames of each buffer that passes `pad` of element `el`.
+fn count_frames(pipeline: &gst::Pipeline, el: &str, pad: &str, n: Arc<Counts>, out: bool) {
+    let Some(pad) = pipeline.by_name(el).and_then(|e| e.static_pad(pad)) else { return };
+    pad.add_probe(gst::PadProbeType::BUFFER, move |_, info| {
+        if let Some(b) = info.buffer() {
+            let c = if out { &n.out_of_queue } else { &n.into_queue };
+            // S16LE stereo: 4 bytes a frame.
+            c.fetch_add(b.size() as u64 / 4, Ordering::Relaxed);
+        }
+        gst::PadProbeReturn::Ok
+    });
 }
 
 /// A running capture. Dropping it stops the pipeline and disconnects from the sink.
@@ -74,6 +107,12 @@ pub fn start(transport: Arc<Transport>) -> Result<Capture> {
         .context("appsink 'out' is missing")?
         .downcast::<AppSink>()
         .map_err(|_| anyhow!("'out' is not an AppSink"))?;
+    let counts = Arc::new(Counts::default());
+    count_frames(&pipeline, "raw", "src", counts.clone(), false);
+    count_frames(&pipeline, "q", "src", counts.clone(), true);
+    let started = Instant::now();
+    let mut report_at = started + REPORT_EVERY;
+    let mut slowest_send = Duration::ZERO;
     let mut seq = 0u32;
     let mut gate = SilenceGate::new();
     sink.set_callbacks(
@@ -94,7 +133,22 @@ pub fn start(transport: Arc<Transport>) -> Result<Capture> {
                 };
                 let msg = DaemonMsg::Audio(AudioPacket { seq: n, opus });
                 // A failed send means the socket is going away; the reader thread owns that.
+                let t = Instant::now();
                 let _ = transport.send(&msg, &[]);
+                slowest_send = slowest_send.max(t.elapsed());
+                if t >= report_at {
+                    report_at = t + REPORT_EVERY;
+                    let frames = (t - started).as_secs_f64() * 48_000.0;
+                    let pct = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 * 100.0 / frames;
+                    tracing::debug!(
+                        "sound: {:.0}% of real time came in, {:.0}% left the queue, {} packets, \
+                         slowest send {:?}",
+                        pct(&counts.into_queue),
+                        pct(&counts.out_of_queue),
+                        n + 1,
+                        std::mem::take(&mut slowest_send),
+                    );
+                }
                 Ok(gst::FlowSuccess::Ok)
             })
             .build(),
@@ -160,6 +214,13 @@ mod tests {
         let desc = capture_desc();
         let q = desc.find("leaky=downstream").expect("the queue is leaky");
         assert!(q < desc.find("opusenc").expect("it encodes"));
+    }
+
+    /// One PipeWire buffer lost a quarter of the sound when the capture started while Firefox
+    /// played; keep the spare buffers.
+    #[test]
+    fn capture_keeps_spare_pipewire_buffers() {
+        assert!(capture_desc().contains("pipewiresrc name=src min-buffers=8 "));
     }
 
     /// A short silence inside sound goes as it is; a long one sends one quiet marker and then
