@@ -1,7 +1,9 @@
 //! One browser viewer's send queue, and what the browser's acknowledgements say about its path.
 //!
 //! - **Lanes.** Control messages (every text message) go first, so a cursor move or an `echo`
-//!   never waits behind queued frames. Then video, then clipboard replies, cut into pieces
+//!   never waits behind queued frames. Then sound (at most [`AUDIO_QUEUED`] packets: a newer
+//!   one drops the oldest, so sound that waits never grows old), then video, then clipboard
+//!   replies, cut into pieces
 //!   ([`wire::browser::CLIPBOARD_PIECE_BYTES`]) as they go: a piece goes only when no video
 //!   waits, the viewer has room as for a frame ([`State::may_send`]), and the bytes on the way
 //!   stay within what the path delivers in one floor and [`CLIP_WINDOW`] (at least one piece),
@@ -77,6 +79,9 @@ const METER_PERIOD: Duration = Duration::from_millis(500);
 const PEAK_PERIOD: Duration = Duration::from_secs(1);
 /// No acknowledgement ended bytes for this long: the delivered rate is not known.
 const METER_STALE: Duration = Duration::from_secs(2);
+/// Most sound packets that wait in the sound lane: 250 ms of 10 ms packets. The browser plays
+/// at most about 80 ms behind, so an older packet would be dropped there anyway.
+const AUDIO_QUEUED: usize = 25;
 
 pub(crate) struct Outbox {
     state: Mutex<State>,
@@ -96,6 +101,8 @@ pub(crate) enum Next {
 
 struct State {
     control: VecDeque<Queued>,
+    /// Sound packets not yet handed to the socket, oldest first.
+    audio: VecDeque<Queued>,
     /// Video not yet handed to the socket, with the time it was queued.
     video: VecDeque<(Queued, Instant)>,
     /// Clipboard replies not yet sent, and how many of each one's bytes went already.
@@ -250,7 +257,7 @@ impl Period {
 
 fn len(msg: &Queued) -> usize {
     match msg {
-        Queued::Video { bytes, .. } | Queued::Binary(bytes) => bytes.len(),
+        Queued::Video { bytes, .. } | Queued::Binary(bytes) | Queued::Audio(bytes) => bytes.len(),
         Queued::Clipboard(d) => d.bytes.len(),
         Queued::Text(t) => t.len(),
     }
@@ -344,6 +351,7 @@ impl Outbox {
         Outbox {
             state: Mutex::new(State {
                 control: VecDeque::new(),
+                audio: VecDeque::new(),
                 video: VecDeque::new(),
                 clip: VecDeque::new(),
                 in_flight: VecDeque::new(),
@@ -390,6 +398,13 @@ impl Outbox {
                 st.video.push_back((msg, now));
             }
             Queued::Clipboard(d) => st.clip.push_back((d, 0)),
+            Queued::Audio(_) => {
+                if st.audio.len() >= AUDIO_QUEUED {
+                    let old = st.audio.pop_front().expect("the lane is full");
+                    st.queued_bytes -= len(&old);
+                }
+                st.audio.push_back(msg);
+            }
             _ => st.control.push_back(msg),
         }
         if st.queued_bytes > MAX_QUEUED_BYTES {
@@ -399,7 +414,7 @@ impl Outbox {
         true
     }
 
-    /// The next message to send: control, then video, then a clipboard piece. Waits up to
+    /// The next message to send: control, then sound, then video, then a clipboard piece. Waits up to
     /// `timeout`, and wakes on its own when a waiting piece has waited [`MAX_HOLD`]. A video
     /// frame or a clipboard piece counts as handed to the socket from here.
     pub(crate) fn next(&self, timeout: Duration) -> Next {
@@ -409,7 +424,7 @@ impl Outbox {
             if st.closed {
                 return Next::Closed;
             }
-            if let Some(msg) = st.control.pop_front() {
+            if let Some(msg) = st.control.pop_front().or_else(|| st.audio.pop_front()) {
                 st.queued_bytes -= len(&msg);
                 return Next::Msg(msg);
             }
@@ -471,6 +486,7 @@ impl Outbox {
         let mut st = self.state.lock().unwrap();
         st.closed = true;
         st.control.clear();
+        st.audio.clear();
         st.video.clear();
         st.clip.clear();
         st.queued_bytes = 0;
@@ -673,6 +689,27 @@ mod tests {
         };
         let (d, last) = wire::browser::decode_clipboard_piece(b).unwrap();
         (d.serial, d.bytes.len(), last)
+    }
+
+    fn audio(n: u8) -> Queued {
+        Queued::Audio(Arc::from(vec![n; 100]))
+    }
+
+    /// Sound goes after control and before video; a full sound lane drops its oldest packet.
+    #[test]
+    fn sound_goes_between_control_and_video_and_never_grows_old() {
+        let o = Outbox::new();
+        assert!(o.push(video(1, true)));
+        for n in 0..AUDIO_QUEUED as u8 + 3 {
+            assert!(o.push(audio(n)));
+        }
+        assert!(o.push(text("cursor")));
+        assert_eq!(take(&o), text("cursor"));
+        for n in 3..AUDIO_QUEUED as u8 + 3 {
+            assert_eq!(take(&o), audio(n));
+        }
+        assert_eq!(seq(&take(&o)), 1);
+        assert_eq!(o.state.lock().unwrap().queued_bytes, 0);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 // The browser viewer's worker: it owns the WebSocket, the H.264 decoder and the canvas, so a
-// busy page thread never delays a frame.
+// busy page thread never delays a frame. With sound on, it also decodes the sound packets
+// (WebCodecs Opus) and sends the samples straight to the page's sound worklet on a port of
+// their own, so a busy page thread never delays the sound either.
 //
 // Display: decoded frames are drawn straight onto the page's canvas, which the page gave to
 // this worker (`transferControlToOffscreen`). That is one GPU copy per frame, and every part of
@@ -13,8 +15,12 @@ import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
 import { type HeldInput, freshInput, holdInput, letterbox } from "./input";
 import {
+  AUDIO_FRAME_MS,
+  AUDIO_HEADER_LEN,
   type ClipboardBytes,
+  KIND_AUDIO,
   KIND_VIDEO,
+  type SoundIn,
   VIDEO_HEADER_LEN,
   type WorkerIn,
   type WorkerOut,
@@ -22,6 +28,7 @@ import {
   clipboardPieces,
   codecFromAnnexB,
   isClipboardPiece,
+  parseAudioHeader,
   parseClipboardPiece,
   parseVideoHeader,
 } from "./protocol";
@@ -92,6 +99,13 @@ let upRate = new RateMeter();
 let upFloor = Infinity;
 /** Input made while the socket is down. */
 let held: HeldInput = [];
+
+/** Sound: whether the page wants it, the port to its worklet, the Opus decoder, and the stream
+ *  the decoder is on (-1: none yet, so the next packet starts one). */
+let soundOn = false;
+let soundPort: MessagePort | null = null;
+let audio: AudioDecoder | null = null;
+let audioStream = -1;
 
 function send(msg: FromBrowser) {
   if (msg.t === "clipboard" && msg.k === "offer") newCopy();
@@ -262,6 +276,59 @@ function newCopy() {
   wanted = new Set();
 }
 
+const toWorklet = (m: SoundIn, transfer: Transferable[] = []) =>
+  soundPort?.postMessage(m, transfer);
+
+/** A new decoder, and nothing stale in the worklet. */
+function resetAudio() {
+  if (audio && audio.state !== "closed") audio.close();
+  audio = new AudioDecoder({
+    output: onPcm,
+    error: (e) => {
+      console.warn("sound decoder error:", e);
+      audioStream = -1; // the next packet starts again
+    },
+  });
+  audio.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 2 });
+  toWorklet({ t: "reset" });
+}
+
+function onAudio(buf: ArrayBuffer) {
+  if (!soundOn || !soundPort) return;
+  const h = parseAudioHeader(buf);
+  if (h.stream !== audioStream || audio?.state !== "configured") {
+    resetAudio();
+    audioStream = h.stream;
+  }
+  if (buf.byteLength === AUDIO_HEADER_LEN) return toWorklet({ t: "quiet" });
+  audio!.decode(
+    new EncodedAudioChunk({
+      type: "key",
+      timestamp: h.seq * AUDIO_FRAME_MS * 1000,
+      data: new Uint8Array(buf, AUDIO_HEADER_LEN),
+    }),
+  );
+}
+
+function onPcm(d: AudioData) {
+  // A packet still in the decoder when the sound went off.
+  if (!soundOn) return d.close();
+  const l = new Float32Array(d.numberOfFrames);
+  const r = new Float32Array(d.numberOfFrames);
+  d.copyTo(l, { planeIndex: 0, format: "f32-planar" });
+  d.copyTo(r, { planeIndex: d.numberOfChannels > 1 ? 1 : 0, format: "f32-planar" });
+  d.close();
+  toWorklet({ t: "pcm", l, r }, [l.buffer, r.buffer]);
+}
+
+function setSound(on: boolean, port?: MessagePort) {
+  if (port) soundPort = port;
+  soundOn = on;
+  audioStream = -1;
+  toWorklet({ t: "reset" });
+  send({ t: "sound", on });
+}
+
 function connect() {
   clipIn = upAcked = 0;
   upOut = [];
@@ -275,6 +342,9 @@ function connect() {
     // the old decoder belong to the old socket, and so does what it decoded until now.
     resetDecoder();
     newest = acked = null;
+    // The server starts each socket with no sound.
+    audioStream = -1;
+    if (soundOn) send({ t: "sound", on: true });
     post({ type: "connected", connected: true });
     const now = performance.now();
     for (const h of freshInput(held, now)) send({ t: "input", ...h.msg });
@@ -294,6 +364,8 @@ function connect() {
       post({ type: "message", msg });
     } else if (new Uint8Array(e.data, 0, 1)[0] === KIND_VIDEO) {
       onVideo(e.data);
+    } else if (new Uint8Array(e.data, 0, 1)[0] === KIND_AUDIO) {
+      onAudio(e.data);
     } else if (isClipboardPiece(e.data)) {
       onClipboardPiece(e.data);
     }
@@ -314,6 +386,10 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   }
   if (m.type === "clipboard") {
     if (ws?.readyState === WebSocket.OPEN) queueUpload(m.data);
+    return;
+  }
+  if (m.type === "sound") {
+    setSound(m.on, m.port);
     return;
   }
   if (m.type === "resize") {

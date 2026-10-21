@@ -47,6 +47,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 - One browser window per monitor. You move and size each window yourself. Each window has a Fullscreen button at the top left; it is hidden in fullscreen. Its fullscreen hides Chrome's address bar (macOS fullscreen does not). Keys in a viewer window: F11 fullscreen, Ctrl+Alt+G lock the pointer, Ctrl+Alt+P release it. On a Mac, Cmd acts as Ctrl in the clone and Ctrl acts as Super, as in the old native viewer.
 - 60fps on local network
 - Multi-monitor
+- Sound of the selected clone, in the monitor 0 window (Opus, about 70–110 ms behind the clone on the LAN), from the first click or key in that window
 - Instant swap between clones
 - Absolute and relative pointer
 - Rich clipboard bridge, remote↔remote and local↔remote

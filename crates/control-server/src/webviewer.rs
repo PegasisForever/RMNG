@@ -223,7 +223,9 @@ impl Held {
 /// The WebSocket message for one queued message.
 fn message(q: Queued) -> Message {
     match q {
-        Queued::Video { bytes, .. } | Queued::Binary(bytes) => Message::Binary(bytes.to_vec()),
+        Queued::Video { bytes, .. } | Queued::Binary(bytes) | Queued::Audio(bytes) => {
+            Message::Binary(bytes.to_vec())
+        }
         Queued::Text(text) => Message::Text(text.to_string()),
         Queued::Clipboard(_) => unreachable!("the outbox sends a clipboard reply in pieces"),
     }

@@ -1,6 +1,6 @@
-// The browser viewer's binary messages (`wire::browser`: video, clipboard pieces), the H.264
-// fact the decoder needs from a video message, and the messages between the viewer page and its
-// worker.
+// The browser viewer's binary messages (`wire::browser`: video, clipboard pieces, sound), the
+// H.264 fact the decoder needs from a video message, and the messages between the viewer page,
+// its worker and its sound worklet.
 //
 // The worker imports this file, so it uses relative imports only: Vite builds the worker
 // without the app's path aliases.
@@ -12,6 +12,7 @@ import type { ToBrowser } from "../lib/wire/ToBrowser";
 export const KIND_VIDEO = 0;
 const KIND_CLIPBOARD_DATA = 1;
 const KIND_CLIPBOARD_PIECE = 2;
+export const KIND_AUDIO = 3;
 /** Most bytes of a clipboard reply in one piece (`wire::browser::CLIPBOARD_PIECE_BYTES`). */
 export const CLIPBOARD_PIECE_BYTES = 64 * 1024;
 
@@ -32,6 +33,25 @@ export function parseVideoHeader(buf: ArrayBuffer): VideoHeader {
     monitorId: v.getUint32(2),
     seq: v.getUint32(6),
   };
+}
+
+export const AUDIO_HEADER_LEN = 9;
+/** The length of one sound packet (`wire::socket::AUDIO_FRAME_MS`), in ms. */
+export const AUDIO_FRAME_MS = 10;
+
+interface AudioHeader {
+  /** A new number when the sound comes from a new capture run: start the decoder again. */
+  stream: number;
+  /** Packet number in its stream. */
+  seq: number;
+}
+
+/** Read the header in front of a sound message (big-endian; layout in `wire::browser`). An
+ *  audio message with nothing after the header is the quiet marker: the clone's sound is
+ *  silent, and it sends nothing until the sound comes back. */
+export function parseAudioHeader(buf: ArrayBuffer): AudioHeader {
+  const v = new DataView(buf);
+  return { stream: v.getUint32(1), seq: v.getUint32(5) };
 }
 
 /** One clipboard reply, put together from its pieces (`wire::browser::encode_clipboard_piece`).
@@ -124,13 +144,30 @@ export function codecFromAnnexB(au: Uint8Array): string | null {
 
 /** Page → worker: first the canvas to draw on and the socket to read (`init`, once), then a
  *  message to send on the socket (`send`: input waits while the socket is down, the rest is
- *  dropped), a clipboard reply to send in pieces (`clipboard`, its bytes transferred), or the
- *  canvas's new size in device pixels (`resize`). */
+ *  dropped), a clipboard reply to send in pieces (`clipboard`, its bytes transferred), the
+ *  canvas's new size in device pixels (`resize`), or sound on or off (`sound`; with `on`, the
+ *  port to the sound worklet the first time). */
 export type WorkerIn =
   | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number }
   | { type: "send"; msg: FromBrowser }
   | { type: "clipboard"; data: ClipboardBytes }
-  | { type: "resize"; width: number; height: number };
+  | { type: "resize"; width: number; height: number }
+  | { type: "sound"; on: boolean; port?: MessagePort };
+
+/** Worker → sound worklet: one decoded packet (`pcm`, its channels transferred), the quiet
+ *  marker, or `reset`: a new stream, or the sound was off, so what waits is stale. */
+export type SoundIn =
+  | { t: "pcm"; l: Float32Array; r: Float32Array }
+  | { t: "quiet" }
+  | { t: "reset" };
+
+/** Sound worklet → page, once a second: the buffer's target (packets), and how many late
+ *  underruns and dropped packets so far. */
+export interface SoundStats {
+  target: number;
+  late: number;
+  dropped: number;
+}
 
 /** Worker → page. */
 export type WorkerOut =

@@ -6,6 +6,7 @@ import {
   clipboardPieces,
   codecFromAnnexB,
   encodeClipboardPiece,
+  parseAudioHeader,
   parseClipboardPiece,
   parseVideoHeader,
 } from "./protocol";
@@ -73,4 +74,10 @@ test("the rate meter gives the rate of the last complete period", () => {
   expect(m.rate).toBe(10);
   m.add(400, 1000);
   expect(m.rate).toBe(1);
+});
+
+test("the audio header reads the bytes the server writes", () => {
+  // The same bytes as `wire::browser::tests::audio_message_layout`.
+  const bytes = new Uint8Array([3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9]);
+  expect(parseAudioHeader(bytes.buffer)).toEqual({ stream: 0x01020304, seq: 0x05060708 });
 });

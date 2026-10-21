@@ -3,7 +3,8 @@
 // this page holds the canvas, the input (`~/viewer/input.ts`), the clipboard
 // (`~/viewer/clipboard.ts`), the cursor and file drop, and is
 // where server messages arrive. For a clone with no desktop, monitor 0's window shows its
-// terminal (`~/viewer/terminal.tsx`) over the canvas.
+// terminal (`~/viewer/terminal.tsx`) over the canvas. Monitor 0's window also plays the selected
+// clone's sound (`~/viewer/sound.ts`), from the first click or key in it.
 import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
@@ -15,11 +16,15 @@ import type { ViewMonitor } from "~/lib/wire/ViewMonitor";
 import { attachClipboard } from "~/viewer/clipboard";
 import { type Input, attachInput, toggleFullscreen } from "~/viewer/input";
 import type { WorkerIn, WorkerOut } from "~/viewer/protocol";
+import { attachSound } from "~/viewer/sound";
 import { TermView } from "~/viewer/terminal";
 
 export function meta() {
   return [{ title: "RMNG viewer" }];
 }
+
+/** Only monitor 0's window plays the sound, so two windows never play it twice. */
+const SOUND_MONITOR = 0;
 
 /** Upload one dropped file into the selected clone's home; resolves to the name it got there. */
 function uploadFile(file: File, onProgress: (fraction: number) => void): Promise<string> {
@@ -91,6 +96,7 @@ export default function Viewer() {
       onResize: (width, height) => post({ type: "resize", width, height }),
     });
     input.current = inp;
+    const snd = monitor === SOUND_MONITOR ? attachSound(post) : null;
 
     /** The build this page belongs to, from the first connection's `version` message. */
     let buildId: string | null = null;
@@ -143,6 +149,7 @@ export default function Viewer() {
       [offscreen],
     );
     return () => {
+      snd?.detach();
       inp.detach();
       clip.detach();
       input.current = null;

@@ -7,6 +7,7 @@
 //!     socket, ship each monitor's dmabuf (FrameMsg + fds via SCM_RIGHTS), and
 //!     relay incoming input to the holder.
 
+mod audio;
 mod capture_pw;
 mod clipboard;
 mod holder;
@@ -310,6 +311,9 @@ async fn run_shipping(
     let mut monitors: Vec<HolderMonitor> = Vec::new();
     let mut wanted = true;
     let mut wake_until: Option<tokio::time::Instant> = None;
+    // The desktop sound follows `wanted` only: a screenshot's wake does not start it. Started
+    // by the server's first `Capture { active: true }`, which a watched clone gets on its Hello.
+    let mut sound: Option<audio::Capture> = None;
     let mut inbox = holder.inbox();
     loop {
         let deadline = wake_until;
@@ -322,7 +326,17 @@ async fn run_shipping(
             },
             cmd = capture_rx.recv() => {
                 match cmd {
-                    Some(mcp::CaptureCmd::SetWanted(active)) => wanted = active,
+                    Some(mcp::CaptureCmd::SetWanted(active)) => {
+                        wanted = active;
+                        if !active {
+                            sound = None; // Drop stops the pipeline.
+                        } else if sound.is_none() {
+                            match audio::start(transport.clone()) {
+                                Ok(c) => sound = Some(c),
+                                Err(e) => tracing::warn!("desktop sound not captured: {e:#}"),
+                            }
+                        }
+                    }
                     Some(mcp::CaptureCmd::Wake) => {
                         wake_until = Some(tokio::time::Instant::now() + WAKE_HOLD);
                     }

@@ -439,6 +439,7 @@ dependencies = [
  "axum",
  "futures",
  "gstreamer",
+ "gstreamer-app",
  "libc",
  "media",
  "nix",

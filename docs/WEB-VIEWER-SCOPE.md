@@ -11,7 +11,7 @@ of the current native viewer. For each one, it gives a proposal, an effort label
 - The viewer becomes part of the RMNG web dashboard on port 9000.
 - The switch happens in one step. There is no period in which the native viewer and the browser viewer both work.
   The native viewers (`crates/viewer`, `crates/viewer-macos`) and port 9001 are deleted in the same change.
-- Audio stays out. RMNG removed it in `59bb9cc`.
+- Audio stays out. RMNG removed it in `59bb9cc`. (Later changed: the viewer plays the selected clone's sound. See C11.)
 - Chrome is the only target browser (Q2).
 - No 4:4:4 colour. The 4:4:4 code is deleted (Q4, X4).
 - Monitor sizes come from the fixed layout presets (Q5).
@@ -124,7 +124,7 @@ Each row that depends on one of these answers names its question ID.
 | C8 | Measure the screen refresh rate and match the stream frame rate to it | Later | S | P | Selkies `display-refresh.js`. | Later |
 | C9 | Stats view: frame rate, end-to-end delay, decode time, hardware or software decoder | No | M | R | Removed after round 9 at the operator's request; `rmng-fps` measures the frame rate. | No |
 | C10 | "Poor connection" indicator | Later | S | R |  | Later |
-| C11 | Audio playback, microphone, webcam | No | — | — | Audio was removed in `59bb9cc`. | No |
+| C11 | Audio playback, microphone, webcam | No | — | — | Audio was removed in `59bb9cc`. Later the operator asked for playback: the monitor 0 window plays the selected clone's sound, with Selkies' ideas (Opus over the same WebSocket, WebCodecs `AudioDecoder` in the worker, an AudioWorklet jitter buffer). Microphone and webcam stay out. | Playback: yes. Microphone, webcam: no |
 
 ## I. Input
 

@@ -50,6 +50,8 @@ pub(crate) struct ViewerConn {
     monitor: u32,
     /// The page's id (`?tab=`), the same on each reconnect of that window.
     tab: Option<String>,
+    /// The window asked for the selected clone's sound ([`FromBrowser::Sound`]).
+    sound: bool,
 }
 
 /// One message in a viewer's queue, already in its WebSocket form. Built once per broadcast
@@ -71,6 +73,9 @@ pub(crate) enum Queued {
     Binary(Arc<[u8]>),
     /// A JSON [`ToBrowser`] text message.
     Text(Arc<str>),
+    /// A binary sound message ([`wire::browser::AudioHeader`] + one Opus packet), only for the
+    /// viewers that asked for sound.
+    Audio(Arc<[u8]>),
 }
 
 impl Queued {
@@ -98,12 +103,14 @@ pub(crate) fn next_viewer_id() -> u64 {
 /// closed, which stops its writer, also inside a send, and tears the viewer down. Never
 /// blocks.
 fn broadcast_queued(viewers: &Viewers, msg: &Queued, monitor: Option<u32>) {
+    broadcast_where(viewers, msg, |v| monitor.is_none_or(|m| m == v.monitor));
+}
+
+/// [`broadcast_queued`] to the viewers for which `to` is true.
+fn broadcast_where(viewers: &Viewers, msg: &Queued, to: impl Fn(&ViewerConn) -> bool) {
     let mut guard = viewers.lock().unwrap();
     let mut dead: Vec<u64> = Vec::new();
-    for v in guard.values() {
-        if monitor.is_some_and(|m| m != v.monitor) {
-            continue;
-        }
+    for v in guard.values().filter(|v| to(v)) {
         if !v.outbox.push(msg.clone()) {
             dead.push(v.id);
         }
@@ -243,9 +250,48 @@ pub struct MediaHandle {
     held: Mutex<HashMap<u32, Instant>>,
     /// monitor_id → its automatic bitrate.
     bitrate: crate::bitrate::Monitors,
+    /// The sound stream the viewers get ([`AudioStream`]).
+    audio: Mutex<AudioStream>,
     /// Set once by [`spawn`]; the browser viewer's WebSocket joins through it. Unset when
     /// media init failed, and then there is no video to watch.
     pub(crate) plane: OnceLock<Arc<Plane>>,
+}
+
+/// Numbers the sound streams for the browser ([`wire::browser::AudioHeader`]): a packet from
+/// another clone, or one whose number went back (the clone started its capture again), starts
+/// a new stream, so the browser starts its decoder again.
+#[derive(Default)]
+struct AudioStream {
+    /// The clone and packet number of the last packet sent on.
+    last: Option<(String, u32)>,
+    stream: u32,
+}
+
+impl AudioStream {
+    /// The header for packet `seq` of `clone`.
+    fn header(&mut self, clone: &str, seq: u32) -> wire::browser::AudioHeader {
+        let follows = self
+            .last
+            .as_ref()
+            .is_some_and(|(c, last)| c == clone && seq > *last);
+        if !follows {
+            self.stream = self.stream.wrapping_add(1);
+        }
+        self.last = Some((clone.to_string(), seq));
+        wire::browser::AudioHeader { stream: self.stream, seq }
+    }
+}
+
+/// Send one sound packet of `clone` to the viewers that asked for sound, while `clone` is the
+/// selected one. Its capture runs only while it is watched, and stops a moment after the
+/// selection moves; the packets of that moment go nowhere.
+fn relay_audio(app: &App, viewers: &Viewers, clone: &str, packet: wire::socket::AudioPacket) {
+    if app.store.selected().as_deref() != Some(clone) {
+        return;
+    }
+    let header = app.media.audio.lock().unwrap().header(clone, packet.seq);
+    let msg = Queued::Audio(header.message(&packet.opus).into());
+    broadcast_where(viewers, &msg, |v| v.sound);
 }
 
 /// What a viewer joins: the viewer set, the encoders and the terminal plane.
@@ -1344,6 +1390,11 @@ fn serve_clone(
             Ok((DaemonMsg::ClipboardData(d), _)) => {
                 broker_data(&handle, &viewers, d);
             }
+            Ok((DaemonMsg::Audio(a), _)) => {
+                if let Some(id) = &clone_id {
+                    relay_audio(&app, &viewers, id, a);
+                }
+            }
             Ok((DaemonMsg::Cursor(c), _)) => {
                 if let Some(id) = clone_id.clone() {
                     // Remember the last cursor *with a shape* to replay on viewer connect.
@@ -1477,6 +1528,7 @@ pub(crate) fn join_viewer(
             outbox,
             monitor,
             tab,
+            sound: false,
         },
     );
     // Somebody is watching now, so the selected clone has to start painting
@@ -1569,6 +1621,11 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
             // An acknowledgement frees room.
             encode_held(app, &plane.encoders, viewers, monitor);
             steer_bitrate(app, &plane.encoders, viewers, monitor);
+        }
+        FromBrowser::Sound { on } => {
+            if let Some(v) = viewers.lock().unwrap().get_mut(&id) {
+                v.sound = on;
+            }
         }
         // Back through this viewer's own queue, ahead of the video waiting there.
         FromBrowser::Echo { id: n } => send_to(viewers, id, Queued::of(&ToBrowser::Echo { id: n })),
@@ -1738,6 +1795,7 @@ mod tests {
                 outbox: Arc::new(Outbox::new()),
                 monitor: 0,
                 tab: None,
+                sound: false,
             },
         );
         update_capture_gates(&app.media, &app, &viewers);
@@ -1783,6 +1841,7 @@ mod tests {
                 outbox: Arc::new(Outbox::new()),
                 monitor: 0,
                 tab: None,
+                sound: false,
             },
         );
 
@@ -1947,6 +2006,7 @@ mod tests {
                 outbox: outbox.clone(),
                 monitor,
                 tab: None,
+                sound: false,
             };
             viewers.lock().unwrap().insert(id, conn);
             outbox
@@ -2009,6 +2069,7 @@ mod tests {
                 outbox: a.clone(),
                 monitor: 0,
                 tab: None,
+                sound: false,
             },
         );
         viewers.lock().unwrap().insert(
@@ -2018,6 +2079,7 @@ mod tests {
                 outbox: b,
                 monitor: 0,
                 tab: None,
+                sound: false,
             },
         );
 
@@ -2047,6 +2109,7 @@ mod tests {
                 outbox: outbox.clone(),
                 monitor: 0,
                 tab: tab.map(String::from),
+                sound: false,
             };
             register(&viewers, conn);
             outbox
@@ -2078,6 +2141,7 @@ mod tests {
                 outbox: outbox.clone(),
                 monitor: 1,
                 tab: None,
+                sound: false,
             },
         );
         let video = |m| video_message(m, &[0, 0, 0, 1, 0x65], true, 1);
@@ -2107,6 +2171,22 @@ mod tests {
     }
 
     /// A video message is the browser header, then the access unit as it came.
+    /// A packet starts a new sound stream when it comes from another clone or its number went
+    /// back (the clone started its capture again); else it continues the stream.
+    #[test]
+    fn a_new_clone_or_a_new_capture_run_starts_a_new_sound_stream() {
+        let mut a = AudioStream::default();
+        let s1 = a.header("x", 0).stream;
+        assert_eq!(a.header("x", 1).stream, s1);
+        // A packet the silence rule held back leaves a gap: still the same stream.
+        assert_eq!(a.header("x", 9).stream, s1);
+        let s2 = a.header("y", 10).stream;
+        assert_ne!(s2, s1);
+        let s3 = a.header("y", 0).stream;
+        assert_ne!(s3, s2);
+        assert_eq!(a.header("y", 1), wire::browser::AudioHeader { stream: s3, seq: 1 });
+    }
+
     #[test]
     fn video_message_is_header_then_au() {
         let au = [0u8, 0, 0, 1, 0x65];

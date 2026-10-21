@@ -49,6 +49,33 @@ All numbers are big-endian.
 | `6..10` | frame sequence number of the monitor's encoder (u32, wraps) |
 | `10..` | the H.264 access unit (Annex-B) |
 
+Sound (kind `3`, server → browser): a 9-byte `AudioHeader`, then one Opus packet of the
+selected clone's desktop sound (10 ms of 48 kHz stereo). The server sends sound only to a
+window that asked for it (`sound` below). A message with nothing after the header is the quiet
+marker: the clone's sound is silent, and the clone sends nothing more until the sound comes
+back.
+
+| Bytes | Field |
+| --- | --- |
+| `0` | kind, always `3` |
+| `1..5` | stream (u32, wraps): a new number when the packets come from another clone, or from a new capture run of the same clone |
+| `5..9` | packet number in its stream, from 0 (u32, wraps). It counts every packet the clone encoded, also the silent ones it did not send, so a jump is that much silence |
+| `9..` | the Opus packet (empty = the quiet marker) |
+
+The window starts its Opus decoder again on a new stream. The viewer page
+([sound.ts](../frontend/app/viewer/sound.ts)) plays the sound only in the monitor 0 window,
+so two windows never play it twice. The worker decodes each packet with WebCodecs
+(`AudioDecoder`, `opus`) and sends the samples on a `MessagePort` straight to an AudioWorklet,
+so the page thread never holds the sound. The worklet's buffer
+([sound-buffer.ts](../frontend/app/viewer/sound-buffer.ts)) follows Selkies' rules: it starts
+to play when 2 packets wait; when the packets run out it ramps the output to 0 over 2 ms and
+waits for its target again, and the target grows by one packet (up to 6) unless the quiet
+marker came; more than the target for 0.67 s, or more than 8 packets, drops one packet with a
+2 ms crossfade; 5.3 s with at least 2 packets always waiting lets the target fall by one. This
+also takes up the drift between the clone's clock and the sound card's. Chrome starts sound
+only after a click or a key in the page, so the sound starts at the first one, and the window
+asks the server for sound only once Chrome plays it. There is no control to turn it off.
+
 Clipboard data (kinds `2` and `1`, both directions): one `ClipboardData` reply, as raw bytes,
 not as base64 in JSON, cut into pieces of at most 64 KiB (`encode_clipboard_piece` /
 `decode_clipboard_piece`). The pieces of one reply go in order; each has kind `2`, except the
@@ -107,6 +134,7 @@ keeps only the pieces of the replies it asked for since then.
 | `request_keyframe` | `RequestKeyframe {monitor_id}` | Re-encode the monitor's last frame as a keyframe: after a decode error. Ignored for a monitor other than the socket's own (`?monitor=`). |
 | `ack` | `{seq, held_ms, clip, decoding}` (u32 each) | The newest video frame the decoder output (`seq` from its header; a frame dropped while the window waits for a keyframe counts when it arrives), how long, in ms, the window held that number before this message, how many clipboard pieces arrived on this socket (`clip`, wraps; 0 when left out), and how many frames wait in the window's decoder (`decoding`, its `decodeQueueSize`; 0 when left out). Sent every 50 ms when `seq` changed, at once when a clipboard piece arrives, and once a second otherwise. Before the first frame (a terminal, or no video yet) `seq` is 0, which the server ignores. Below. |
 | `echo` | `{id}` (u32) | The server answers with `echo` and the same `id`, ahead of the video that waits in this socket's queue. The time to the answer is the round trip plus the wait in the kernel send buffer and in any proxy on the way. `rmng-fps` uses it; the viewer does not send it. |
+| `sound` | `{on}` (bool) | Send the selected clone's sound to this socket (kind `3`), or stop. A socket gets none until it asks; the window asks again on each new socket. |
 
 **Connect.** The server queues the view spec, the last cursor of this monitor and the
 current clipboard offer, then re-encodes the last frame of this monitor as a keyframe. A
@@ -147,8 +175,10 @@ KB on the way, frames queued, the delivered Mbit/s, the clipboard KB sent, and c
 that were never encoded (below). `rmng_control_server::mediaplane` logs each
 `request_keyframe`.
 
-**Queue.** Each socket has one queue with three lanes: control messages (every text message)
-go first, then video, then clipboard pieces (above). A window is **behind** by the time its
+**Queue.** Each socket has one queue with four lanes: control messages (every text message)
+go first, then sound, then video, then clipboard pieces (above). The sound lane holds at most
+25 packets (250 ms); a newer packet drops the oldest, so sound never waits long. Sound bytes do
+not count in the acknowledgements, the floor or the bitrate: about 100 kbit/s. A window is **behind** by the time its
 oldest video frame that is not acknowledged (queued, or on the way) has waited since it was
 queued, less the floor. Nothing in the queue is dropped: the encoder makes no frame for a
 window without room (below), so at most two frames wait in its video lane, plus the keyframes
@@ -289,12 +319,13 @@ a daemon older than it reads as "the holder was already running" and is left alo
 | `cursor` | `CursorMeta` | cursor position (+shape on change, +`warp` if MCP-driven) |
 | `layout` | `{monitors: MonitorPlacement[]}` | the monitors the clone has after it applies a layout (`{id}` each); the server drops the encoders of monitors that are gone |
 | `clipboard_offer` / `clipboard_request` / `clipboard_data` | resp. types | clipboard bridge |
+| `audio` | `{seq, opus /* b64 */}` | one 10 ms Opus packet of the desktop sound (below) |
 
 `ServerMsg` (server → daemon), serde tag `t`: `ack
 {monitor_id, seq}` (flow control — the daemon waits for the ack before the next frame),
 `input(InputMsg)`, the three `clipboard_*` messages, `capture {active}` — start or stop
-the clone's capture (the server keeps it on only for the selected clone while a viewer is
-connected), and `set_monitors {monitors:
+the clone's capture, video and sound (the server keeps it on only for the selected clone while
+a viewer is connected; a screenshot's short wake starts only video), and `set_monitors {monitors:
 MonitorSpec[]}` — apply a layout **live**: the daemon does a make-before-break session swap
 (rebuilds a fresh Mutter session with the desired monitors, switches capture + input to it,
 then stops the old one, so running apps never close). Sent to the selected clone: on its
@@ -302,6 +333,17 @@ then stops the old one, so running apps never close). Sent to the selected clone
 geometry, and on the `POST /api/activate` that brings it on screen. Sent to any clone, watched
 or not, on a `Hello` that carries `fresh_session`, and once to a brand-new clone when its
 daemon first registers. Every other clone keeps the layout it was last viewed with.
+
+**Sound.** While capture is on, the daemon ([audio.rs](../crates/clone-daemon/src/audio.rs))
+records the monitor of the default sink (`pipewiresrc`, `stream.capture.sink=true`; in a clone
+with no sound card that is PipeWire's "Dummy Output") and encodes Opus: 48 kHz stereo, 10 ms
+packets, VBR 96 kbit/s. The stream asks for `node.latency=512/48000`, so the PipeWire graph
+moves sound in blocks of 10.7 ms and the packets leave evenly (with the 2048-frame blocks that
+`pw-play` asks for, they left in bursts of four, and the browser ran dry between them).
+`seq` counts every packet from 0 per capture run. When the sound is silent (libopus makes a
+packet of at most 3 bytes) for 10 packets, the daemon sends one empty packet (the quiet marker)
+and then nothing until the sound comes back; a run that starts silent sends the marker at once.
+The server relays the packets of the selected clone without decoding them.
 
 `FrameMsg`: `monitor_id`, `fourcc` (DRM, e.g. `0x34325241` "AR24"), `modifier` (DRM format
 modifier), `width`, `height`, `planes: [{offset, stride}]`, `seq` (echoed in `ack`).

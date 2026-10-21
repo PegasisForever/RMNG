@@ -6,7 +6,8 @@
 //!   a [`VideoHeader`] ([`VIDEO_HEADER_LEN`] bytes), then one Annex-B access unit. Kinds
 //!   [`KIND_CLIPBOARD_PIECE`] and [`KIND_CLIPBOARD_DATA`] (both directions) carry one clipboard
 //!   reply in pieces ([`encode_clipboard_piece`]), so an image crosses as raw bytes, not base64
-//!   in JSON, and never holds the socket for long.
+//!   in JSON, and never holds the socket for long. Kind [`KIND_AUDIO`] (server → browser) is an
+//!   [`AudioHeader`], then one Opus packet of the selected clone's desktop sound.
 //! - Everything else is a **JSON text** message: [`ToBrowser`] out, [`FromBrowser`] in. Input,
 //!   cursor and clipboard reuse the clone-daemon socket types ([`crate::socket`]). A
 //!   `ClipboardMsg::Data` never travels as JSON here.
@@ -23,6 +24,8 @@ pub const KIND_VIDEO: u8 = 0;
 pub const KIND_CLIPBOARD_DATA: u8 = 1;
 /// Byte 0 of a binary message: a piece of a clipboard reply, and more pieces follow.
 pub const KIND_CLIPBOARD_PIECE: u8 = 2;
+/// Byte 0 of a binary message: one Opus packet of the selected clone's sound ([`AudioHeader`]).
+pub const KIND_AUDIO: u8 = 3;
 /// A clipboard reply crosses in pieces of at most this many bytes, so that video can go
 /// between them.
 pub const CLIPBOARD_PIECE_BYTES: usize = 64 * 1024;
@@ -51,6 +54,37 @@ impl VideoHeader {
         b[1] = self.key as u8;
         b[2..6].copy_from_slice(&self.monitor_id.to_be_bytes());
         b[6..10].copy_from_slice(&self.seq.to_be_bytes());
+        b
+    }
+}
+
+/// Size of [`AudioHeader`] on the wire.
+pub const AUDIO_HEADER_LEN: usize = 9;
+
+/// The header in front of every audio message. Big-endian:
+///
+/// | bytes | field |
+/// |---|---|
+/// | 0 | kind, always 3 (audio) |
+/// | 1..5 | stream: a new number when the sound comes from a new capture run (u32, wraps) |
+/// | 5..9 | packet number in its stream, from 0 (u32, wraps) |
+///
+/// The browser starts its decoder again on a new stream: Opus keeps state from one packet to
+/// the next, and the packets of another clone do not follow on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioHeader {
+    pub stream: u32,
+    pub seq: u32,
+}
+
+impl AudioHeader {
+    /// The whole audio message: this header, then the packet.
+    pub fn message(&self, opus: &[u8]) -> Vec<u8> {
+        let mut b = Vec::with_capacity(AUDIO_HEADER_LEN + opus.len());
+        b.push(KIND_AUDIO);
+        b.extend_from_slice(&self.stream.to_be_bytes());
+        b.extend_from_slice(&self.seq.to_be_bytes());
+        b.extend_from_slice(opus);
         b
     }
 }
@@ -152,6 +186,9 @@ pub enum FromBrowser {
     /// in the kernel send buffer and any proxy on the way. `rmng-fps` measures it; the viewer
     /// does not send it.
     Echo { id: u32 },
+    /// Send the selected clone's sound to this window (`on`), or stop. A window gets none
+    /// until it asks.
+    Sound { on: bool },
 }
 
 /// Browser → server: encode the monitor's next frame as a keyframe.
@@ -249,6 +286,17 @@ mod tests {
         assert_eq!(VideoHeader { key: false, ..h }.encode()[1], 0);
     }
 
+    /// The frontend's `parseAudioHeader` test reads these same bytes; keep the two in step.
+    #[test]
+    fn audio_message_layout() {
+        let h = AudioHeader {
+            stream: 0x0102_0304,
+            seq: 0x0506_0708,
+        };
+        assert_eq!(h.message(&[9, 9]), [3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9]);
+        assert_eq!(h.message(&[]).len(), AUDIO_HEADER_LEN);
+    }
+
     /// The frontend's `parseClipboardPiece` test reads these same bytes; keep the two in step.
     #[test]
     fn clipboard_piece_layout() {
@@ -335,6 +383,8 @@ mod tests {
         let ack: FromBrowser =
             serde_json::from_str(r#"{"t":"ack","seq":9,"held_ms":12}"#).unwrap();
         assert!(matches!(ack, FromBrowser::Ack { clip: 0, decoding: 0, .. }));
+        let sound: FromBrowser = serde_json::from_str(r#"{"t":"sound","on":true}"#).unwrap();
+        assert_eq!(sound, FromBrowser::Sound { on: true });
         let echo: FromBrowser = serde_json::from_str(r#"{"t":"echo","id":7}"#).unwrap();
         assert_eq!(echo, FromBrowser::Echo { id: 7 });
         assert_eq!(

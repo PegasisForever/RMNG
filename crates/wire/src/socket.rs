@@ -158,6 +158,23 @@ pub struct ClipboardData {
     pub bytes: Vec<u8>,
 }
 
+/// One Opus packet ([`AUDIO_FRAME_MS`] of 48 kHz stereo) of the clone's desktop sound. The
+/// daemon encodes it and the server relays the bytes to the browser without decoding them.
+///
+/// `seq` counts the packets of one capture run from 0, also the ones the daemon does not send
+/// because the sound is silent, so a gap in the numbers is that much silence. A new run (capture stopped and started
+/// again, a daemon restart) starts at 0 again, and the browser takes a number that goes back
+/// as the start of a new stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioPacket {
+    pub seq: u32,
+    #[serde(with = "serde_bytes_b64")]
+    pub opus: Vec<u8>,
+}
+
+/// The length of one [`AudioPacket`], in ms.
+pub const AUDIO_FRAME_MS: u32 = 10;
+
 /// daemon → server, first message on connect: identifies the clone (so the server
 /// can route a shared bind-mounted socket by clone id rather than peer address).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +214,9 @@ pub enum DaemonMsg {
     ClipboardRequest(ClipboardRequest),
     /// Bytes for an earlier request (the daemon `SelectionRead` its clone clipboard).
     ClipboardData(ClipboardData),
+    /// One Opus packet of the clone's desktop sound. Sent only while the server keeps this
+    /// clone's capture on (`ServerMsg::Capture`), so only the watched clone sends any.
+    Audio(AudioPacket),
     /// An unrecognized message (a `t` tag this build doesn't know). Kept for **forward
     /// compatibility**: a peer that predates a newer variant deserializes it to `Unknown`
     /// and ignores it, instead of treating the decode as a fatal error and dropping the

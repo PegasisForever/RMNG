@@ -8,7 +8,9 @@ It does host selection, clone orchestration, Claude accounts, chat, notes, and s
 It also holds the **viewer**: `/viewer?monitor=<id>` (`app/routes/viewer.tsx`,
 `app/viewer/*`) opens one browser window per monitor of the selected clone. Each window gets
 its monitor's H.264 over a WebSocket (`/api/viewer`) and decodes it with WebCodecs. The
-protocol is in `../docs/PROTOCOL.md`.
+monitor 0 window also plays the selected clone's sound (Opus, decoded with WebCodecs in the
+worker, played by an AudioWorklet: `app/viewer/sound*.ts`). The protocol is in
+`../docs/PROTOCOL.md`.
 
 ## What's reused (≈99% of the current UI)
 

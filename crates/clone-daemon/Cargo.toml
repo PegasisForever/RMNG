@@ -27,6 +27,8 @@ media.workspace = true
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 # Init only: the MCP screenshot encodes through `media` (GStreamer).
 gstreamer = "0.23"
+# The desktop sound: `pipewiresrc ! opusenc ! appsink` (`audio`).
+gstreamer-app = "0.23"
 # SCM_RIGHTS fd passing on the unix socket to control-server.
 nix = { version = "0.29", features = ["socket", "uio", "fs"] }
 libc = "0.2"
