@@ -32,6 +32,9 @@ const MAC_WHEEL_LINE_PX = 40;
 /** Input made while the socket is down is sent when it is back, unless it is older than this
  *  (a release is always sent). */
 const HOLD_MAX_MS = 2000;
+/** A paste chord's key goes to the clone at most this long after its key press, also when no
+ *  paste event comes (`InputOptions.pasteByEvent`). */
+const PASTE_WAIT_MS = 100;
 
 /** Evdev buttons by `MouseEvent.button`: left, middle, right, back, forward. */
 const BUTTONS = [0x110, 0x112, 0x111, 0x113, 0x114];
@@ -270,16 +273,23 @@ export function holdInput(held: HeldInput, msg: InputMsg, now: number): HeldInpu
   return out;
 }
 
-/** Fullscreen on or off, on the screen the window is on. The page's own fullscreen hides
- *  Chrome's address bar, which macOS fullscreen (the green button) keeps. */
-export function toggleFullscreen() {
-  if (document.fullscreenElement) void document.exitFullscreen();
-  else void document.documentElement.requestFullscreen();
-}
-
 /** Chrome's Keyboard Lock API; not in TypeScript's DOM types. */
 const keyboard = () =>
   (navigator as Navigator & { keyboard?: { lock(): Promise<void>; unlock(): void } }).keyboard;
+
+/** Fullscreen on or off, on the screen the window is on. The page's own fullscreen hides
+ *  the browser's address bar, which macOS fullscreen (the green button) keeps. A browser
+ *  without Keyboard Lock is asked for `keyboardLock: "browser"` (Safari 26.4, Firefox 156): for
+ *  as long as the fullscreen lasts, Esc and the browser's own shortcuts go to the clone, and a
+ *  held Esc leaves, as with Chrome's Keyboard Lock. A browser that does not know the option
+ *  ignores it. */
+export function toggleFullscreen() {
+  if (document.fullscreenElement) void document.exitFullscreen();
+  else {
+    const options = keyboard() ? undefined : { keyboardLock: "browser" };
+    void document.documentElement.requestFullscreen(options as FullscreenOptions | undefined);
+  }
+}
 
 interface InputOptions {
   /** The placeholder canvas: the event target, the CSS cursor host and the pointer lock target. */
@@ -289,9 +299,13 @@ interface InputOptions {
   monitor: number;
   /** Send one event. While the socket is down the worker holds it (`holdInput`). */
   send(msg: InputMsg): void;
-  /** A key press or click: the user activation Chrome wants for some calls (a clipboard
+  /** A key press or click: the user activation the browser wants for some calls (a clipboard
    *  write it refused before). */
   onGesture(): void;
+  /** Whether the local clipboard reaches the page only in the paste event of a paste chord
+   *  (Safari, Firefox: `./clipboard.ts`). Then the chord's key keeps its default action, which
+   *  fires that event, and goes to the clone after it, behind the offer the event makes. */
+  pasteByEvent(): boolean;
   /** The canvas's size in device pixels changed: the worker draws at this size. */
   onResize(width: number, height: number): void;
 }
@@ -327,6 +341,22 @@ export function attachInput(o: InputOptions): Input {
   let scrollMode: ScrollMode = "auto";
   let scrollScale = 1;
   let scrollEnd: ReturnType<typeof setTimeout> | undefined;
+  /** A paste chord's key press, held until the paste event it fires has made its offer. */
+  let heldPaste: { keycode: number; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** Where a paste chord's paste goes. Safari pastes only into something editable, and fires
+   *  no paste event otherwise, so the chord's key press moves the focus here, and the paste
+   *  moves it back. Only for the chord: an editable focus would start an input method (IME)
+   *  on every other key. */
+  const pasteSink = document.createElement("div");
+  pasteSink.contentEditable = "true";
+  pasteSink.tabIndex = -1;
+  pasteSink.ariaHidden = "true";
+  pasteSink.style.cssText = "position:fixed;left:-100px;top:0;width:1px;height:1px;opacity:0";
+  document.body.append(pasteSink);
+  /** The cursor's `image-set` function: older Safari knows only the prefixed one. */
+  const imageSet = CSS.supports("cursor", `image-set(url("data:,") 1x) 0 0, default`)
+    ? "image-set"
+    : "-webkit-image-set";
 
   // The remote cursor: last position (monitor pixels), shape, and what was built from it.
   let cursor = { x: 0, y: 0 };
@@ -340,6 +370,10 @@ export function attachInput(o: InputOptions): Input {
 
   /** Release every key and button the clone holds from this window. */
   function releaseAll() {
+    // A held paste key was never pressed in the clone.
+    if (heldPaste) clearTimeout(heldPaste.timer);
+    heldPaste = null;
+    pasteSink.blur();
     for (const k of keys) send({ kind: "key_code", keycode: k, pressed: false });
     for (const b of buttons) send({ kind: "button", button: b, pressed: false });
     keys.clear();
@@ -349,11 +383,14 @@ export function attachInput(o: InputOptions): Input {
   function requestLock() {
     if (lockPending) return;
     lockPending = true;
-    canvas
-      .requestPointerLock({ unadjustedMovement: true })
+    // Chrome answers with a promise. Safari returns nothing and tells of a refusal with a
+    // `pointerlockerror` event (`onLockError`).
+    const ask = (options?: PointerLockOptions) =>
+      new Promise<void>((resolve) => resolve(canvas.requestPointerLock(options)));
+    ask({ unadjustedMovement: true })
       .catch((e: DOMException) =>
         // Raw motion is not offered on every OS: take the plain lock then.
-        e.name === "NotSupportedError" ? canvas.requestPointerLock() : Promise.reject(e),
+        e.name === "NotSupportedError" ? ask() : Promise.reject(e),
       )
       .catch(() => {
         needGesture = true;
@@ -413,7 +450,7 @@ export function attachInput(o: InputOptions): Input {
     const tooBig = s.width * scale > CSS_CURSOR_MAX || s.height * scale > CSS_CURSOR_MAX;
     canvas.style.cursor = tooBig
       ? "none"
-      : `image-set(url("${url}") ${dpr}x) ${Math.round(s.hotspot_x * scale)} ${Math.round(s.hotspot_y * scale)}, default`;
+      : `${imageSet}(url("${url}") ${dpr}x) ${Math.round(s.hotspot_x * scale)} ${Math.round(s.hotspot_y * scale)}, default`;
     return { key, tooBig };
   }
 
@@ -446,15 +483,39 @@ export function attachInput(o: InputOptions): Input {
     if (isMac && e.code === "CapsLock") return capsTap(e);
     const k = evdevFor(e.code, isMac);
     if (k === undefined) return;
-    e.preventDefault();
+    const paste =
+      e.code === "KeyV" && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey && o.pasteByEvent();
+    if (!paste) e.preventDefault();
     // The clone runs its own key repeat, so the browser's repeats are not sent.
     if (e.repeat) return;
     // Held already: on macOS no keyup comes for a key released while Command is down, so a
     // second Cmd+C is a second press of a C the clone still holds. Release it first.
     if (keys.has(k)) send({ kind: "key_code", keycode: k, pressed: false });
     keys.add(k);
-    send({ kind: "key_code", keycode: k, pressed: true });
+    if (paste) {
+      pasteSink.focus({ preventScroll: true });
+      holdPaste(k);
+    } else send({ kind: "key_code", keycode: k, pressed: true });
   }
+
+  function holdPaste(keycode: number) {
+    flushPaste();
+    heldPaste = { keycode, timer: setTimeout(flushPaste, PASTE_WAIT_MS) };
+  }
+
+  /** Send the held paste key's press. */
+  function flushPaste() {
+    if (!heldPaste) return;
+    pasteSink.blur();
+    clearTimeout(heldPaste.timer);
+    send({ kind: "key_code", keycode: heldPaste.keycode, pressed: true });
+    heldPaste = null;
+  }
+
+  // One task later, so every paste listener has run: the clipboard's sends the offer.
+  const onPaste = () => {
+    if (heldPaste) setTimeout(flushPaste, 0);
+  };
 
   function onKeyUp(e: KeyboardEvent) {
     if (forPage(e) || !size) return;
@@ -462,6 +523,7 @@ export function attachInput(o: InputOptions): Input {
     const k = evdevFor(e.code, isMac);
     if (k === undefined) return;
     e.preventDefault();
+    if (heldPaste?.keycode === k) flushPaste();
     if (!keys.delete(k)) return;
     send({ kind: "key_code", keycode: k, pressed: false });
     // Chrome on macOS fires no keyup for a key released while Command is down (Cmd+C sends
@@ -548,6 +610,9 @@ export function attachInput(o: InputOptions): Input {
   const onVisibility = () => {
     if (document.visibilityState === "hidden") releaseAll();
   };
+  const onLockError = () => {
+    needGesture = true;
+  };
   const onLockChange = () => {
     // The lock ended while the page has focus and the policy still wants it: the user pressed
     // Esc. Treat it as Ctrl+Alt+P, or the next click would lock again.
@@ -575,15 +640,42 @@ export function attachInput(o: InputOptions): Input {
   canvas.addEventListener("contextmenu", noMenu);
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("pointerlockchange", onLockChange);
+  document.addEventListener("pointerlockerror", onLockError);
   document.addEventListener("fullscreenchange", onFullscreen);
+  window.addEventListener("paste", onPaste);
   const timer = setInterval(tick, 50);
   const resize = new ResizeObserver(([entry]) => {
-    const d = entry.devicePixelContentBoxSize[0];
-    box = { w: d.inlineSize, h: d.blockSize };
+    // Safari has no device-pixel box: there it is the CSS box at the device pixel ratio.
+    const d = entry.devicePixelContentBoxSize?.[0];
+    const c = entry.contentBoxSize[0];
+    box = d
+      ? { w: d.inlineSize, h: d.blockSize }
+      : {
+          w: Math.round(c.inlineSize * devicePixelRatio),
+          h: Math.round(c.blockSize * devicePixelRatio),
+        };
     built = null;
     o.onResize(box.w, box.h);
   });
-  resize.observe(canvas, { box: "device-pixel-content-box" });
+  /** Without the device-pixel box, a new device pixel ratio (the window moved to a screen of
+   *  another density) changes no CSS size: observe again then, which reports the size again. */
+  let ratio: MediaQueryList | null = null;
+  const onRatio = () => {
+    resize.unobserve(canvas);
+    resize.observe(canvas);
+    watchRatio();
+  };
+  function watchRatio() {
+    ratio?.removeEventListener("change", onRatio);
+    ratio = matchMedia(`(resolution: ${devicePixelRatio}dppx)`);
+    ratio.addEventListener("change", onRatio);
+  }
+  if ("devicePixelContentBoxSize" in ResizeObserverEntry.prototype) {
+    resize.observe(canvas, { box: "device-pixel-content-box" });
+  } else {
+    resize.observe(canvas);
+    watchRatio();
+  }
 
   return {
     setLayout(monitors) {
@@ -618,6 +710,9 @@ export function attachInput(o: InputOptions): Input {
       clearInterval(timer);
       resize.disconnect();
       clearTimeout(scrollEnd);
+      if (heldPaste) clearTimeout(heldPaste.timer);
+      pasteSink.remove();
+      ratio?.removeEventListener("change", onRatio);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("pointermove", onPointerMove);
@@ -628,7 +723,9 @@ export function attachInput(o: InputOptions): Input {
       canvas.removeEventListener("contextmenu", noMenu);
       document.removeEventListener("visibilitychange", onVisibility);
       document.removeEventListener("pointerlockchange", onLockChange);
+      document.removeEventListener("pointerlockerror", onLockError);
       document.removeEventListener("fullscreenchange", onFullscreen);
+      window.removeEventListener("paste", onPaste);
       if (locked()) document.exitPointerLock();
     },
   };

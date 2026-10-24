@@ -72,9 +72,9 @@ to play when 2 packets wait; when the packets run out it ramps the output to 0 o
 waits for its target again, and the target grows by one packet (up to 6) unless the quiet
 marker came; more than the target for 0.67 s, or more than 8 packets, drops one packet with a
 2 ms crossfade; 5.3 s with at least 2 packets always waiting lets the target fall by one. This
-also takes up the drift between the clone's clock and the sound card's. Chrome starts sound
+also takes up the drift between the clone's clock and the sound card's. The browser starts sound
 only after a click or a key in the page, so the sound starts at the first one, and the window
-asks the server for sound only once Chrome plays it. There is no control to turn it off.
+asks the server for sound only once the browser plays it. There is no control to turn it off.
 
 Clipboard data (kinds `2` and `1`, both directions): one `ClipboardData` reply, as raw bytes,
 not as base64 in JSON, cut into pieces of at most 64 KiB (`encode_clipboard_piece` /
@@ -377,7 +377,9 @@ envelope. The control-server is the **broker**: it tracks the owner, fans each o
 every viewer window + every other clone, routes a paste's request to the owner, and routes
 bytes back to the requester. The clone-daemon bridges via Mutter `RemoteDesktop` selection
 (`SelectionRead`/`SelectionWrite`); the browser viewer via the async clipboard API, which
-Chrome allows only while the window has focus.
+Chrome allows only while the window has focus. Safari reads the clipboard only in the paste
+event of Cmd+V and writes it only inside a key press or click; there the viewer offers on Cmd+V
+and writes on Cmd+C (`frontend/app/viewer/clipboard.ts`).
 
 **An image does not fit in one message, on either hop.** Both had a ceiling sized for text,
 and a pasted screenshot crossed neither.

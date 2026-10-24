@@ -7,8 +7,15 @@
 // this worker (`transferControlToOffscreen`). That is one GPU copy per frame, and every part of
 // it is plain, long-shipped Chrome API. A track generator into a <video> would save the copy,
 // but the track would have to cross from this worker to the page, or the frames would have to
-// go to the page thread first; both are less certain in Chrome than a canvas, so the copy stays
-// until a measurement shows it matters.
+// go to the page thread first; both are less certain in Chrome than a canvas, so in Chrome the
+// copy stays until a measurement shows it matters. Safari draws a VideoFrame on a worker canvas
+// slowly (Selkies measured 5 to 25 ms a frame, at times over 100), so where the page asks for
+// it and the worker has the standard `VideoTrackGenerator` (Safari 18 and later), the frames go
+// into a generator's track instead, which the page shows in a <video> (`./track.ts`).
+//
+// H.264: the server sends Annex B. Safari's decoder takes only avcC framing (a `description`
+// with the SPS and PPS, and length-prefixed NAL units; Selkies found this), which every browser
+// takes, so each access unit is reframed here for all of them.
 //
 // Relative imports only: Vite builds the worker without the app's path aliases.
 import type { FromBrowser } from "../lib/wire/FromBrowser";
@@ -26,12 +33,21 @@ import {
   type WorkerOut,
   RateMeter,
   clipboardPieces,
-  codecFromAnnexB,
+  annexbToAvcc,
+  avcDescription,
+  codecOf,
   isClipboardPiece,
   parseAudioHeader,
   parseClipboardPiece,
   parseVideoHeader,
+  sameBytes,
 } from "./protocol";
+
+/** The standard track generator, a DedicatedWorker global (Safari 18 and later); not in
+ *  TypeScript's DOM types. */
+declare const VideoTrackGenerator:
+  | (new () => { track: MediaStreamTrack; writable: WritableStream<VideoFrame> })
+  | undefined;
 
 const scope = self as unknown as Worker;
 const post = (m: WorkerOut, transfer: Transferable[] = []) => scope.postMessage(m, transfer);
@@ -66,10 +82,19 @@ let ws: WebSocket | null = null;
 let reconnectMs = 0;
 /** The last frame drawn, kept to draw again when the canvas changes size. */
 let last: VideoFrame | null = null;
+/** Where frames go instead of the canvas, when the page shows the video through a track. */
+let track: WritableStreamDefaultWriter<VideoFrame> | null = null;
 
 let decoder: VideoDecoder | null = null;
-/** The codec the decoder is configured for; "" until a keyframe with an SPS arrives. */
+/** The codec the decoder is configured for, and its avcC description; "" and null until a
+ *  keyframe with an SPS and a PPS arrives. */
 let codec = "";
+let description: Uint8Array | null = null;
+/** The last chunk timestamp given. Each chunk gets a new, higher one, also across decoders:
+ *  Safari gives frames wrong timestamps when chunks share one. */
+let stamp = 0;
+/** The chunks in the decoder, oldest first: their timestamp and frame number. */
+let inDecoder: { stamp: number; seq: number }[] = [];
 /** Drop frames until a keyframe: at start, after a reconnect and after a decoder error. */
 let waitKey = true;
 /** Decoder errors in the current run (errors less than ERROR_WINDOW_MS apart). */
@@ -144,6 +169,8 @@ function resetDecoder() {
   if (decoder && decoder.state !== "closed") decoder.close();
   decoder = new VideoDecoder({ output: onFrame, error: onDecoderError });
   codec = "";
+  description = null;
+  inDecoder = [];
   waitKey = true;
 }
 
@@ -158,9 +185,10 @@ function onDecoderError(e: DOMException) {
   requestKeyframe();
 }
 
-function configure(c: string) {
+function configure(d: Uint8Array) {
   const config: VideoDecoderConfig = {
-    codec: c,
+    codec: codecOf(d),
+    description: d,
     optimizeForLatency: true,
     // The 4:2:0 encoder writes BT.709 matrix, limited range, and leaves the desktop's sRGB
     // transfer as it is; the stream carries no colour data. A BT.709 transfer here would make
@@ -169,7 +197,8 @@ function configure(c: string) {
     hardwareAcceleration: software ? "prefer-software" : "no-preference",
   };
   decoder!.configure(config);
-  codec = c;
+  codec = config.codec;
+  description = d;
 }
 
 function onVideo(buf: ArrayBuffer) {
@@ -178,20 +207,36 @@ function onVideo(buf: ArrayBuffer) {
   // A keyframe behind a backlog: drop the backlog, so the picture catches up at once.
   if (h.key && decoder!.decodeQueueSize > KEY_RESET_BACKLOG) resetDecoder();
   if (h.key) {
-    const c = codecFromAnnexB(au);
-    if (c && c !== codec) configure(c);
+    // New parameter sets (a new monitor size, a new encoder) need a new configuration.
+    const d = avcDescription(au);
+    if (d && !sameBytes(d, description)) configure(d);
   }
   // A frame dropped while waiting for a keyframe (or for a keyframe with an SPS) is done when
   // it arrives; a decoded one when the decoder outputs it, so the server sees a slow decoder.
   if ((waitKey && !h.key) || !codec) return done(h.seq);
   waitKey = false;
+  inDecoder.push({ stamp: ++stamp, seq: h.seq });
   decoder!.decode(
-    new EncodedVideoChunk({ type: h.key ? "key" : "delta", timestamp: h.seq, data: au }),
+    new EncodedVideoChunk({
+      type: h.key ? "key" : "delta",
+      timestamp: stamp,
+      data: annexbToAvcc(au),
+    }),
   );
 }
 
+/** The frame number of the chunk a decoded frame came from. The stream has no B-frames, so
+ *  frames come out in the order their chunks went in: a timestamp the browser changed (Safari
+ *  can) still gets the oldest chunk's number. */
+function seqOf(timestamp: number): number | undefined {
+  const i = inDecoder.findIndex((c) => c.stamp === timestamp);
+  return inDecoder.splice(0, i < 0 ? 1 : i + 1).at(-1)?.seq;
+}
+
 function onFrame(frame: VideoFrame) {
-  done(frame.timestamp);
+  const seq = seqOf(frame.timestamp);
+  if (seq !== undefined) done(seq);
+  if (track) return toTrack(frame);
   // A new monitor size leaves parts of the old picture in the bars.
   if (last?.displayWidth !== frame.displayWidth || last.displayHeight !== frame.displayHeight) {
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -199,6 +244,33 @@ function onFrame(frame: VideoFrame) {
   last?.close();
   last = frame;
   draw();
+}
+
+/** Hand a frame to the page's <video>. The track keeps only a few: over that, the frame is
+ *  dropped, as the newest frame replaces the last one on the canvas. A track that fails goes
+ *  back to the canvas. */
+function toTrack(frame: VideoFrame) {
+  const w = track!;
+  if (w.desiredSize !== null && w.desiredSize <= 0) return frame.close();
+  // The write closes the frame, unless it fails.
+  w.write(frame).catch(() => {
+    frame.close();
+    if (track !== w) return;
+    track = null;
+    post({ type: "track", track: null });
+  });
+}
+
+/** Write frames to a track that the page shows, if the worker can make one. */
+function startTrack() {
+  if (typeof VideoTrackGenerator === "undefined") return;
+  try {
+    const gen = new VideoTrackGenerator();
+    post({ type: "track", track: gen.track }, [gen.track]);
+    track = gen.writable.getWriter();
+  } catch (e) {
+    console.warn("video track did not start, the canvas shows the video:", e);
+  }
 }
 
 /** Draw the last frame scaled to fit, at the canvas's device pixels: when the canvas has the
@@ -404,6 +476,7 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   // window with the new one at once, which may still be open on a network that is gone.
   url = `${m.url}&tab=${crypto.randomUUID()}`;
   ctx = m.canvas.getContext("2d")!;
+  if (m.track) startTrack();
   resetDecoder();
   connect();
   setInterval(ack, ACK_MS);

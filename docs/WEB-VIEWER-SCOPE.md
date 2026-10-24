@@ -12,7 +12,7 @@ of the current native viewer. For each one, it gives a proposal, an effort label
 - The switch happens in one step. There is no period in which the native viewer and the browser viewer both work.
   The native viewers (`crates/viewer`, `crates/viewer-macos`) and port 9001 are deleted in the same change.
 - Audio stays out. RMNG removed it in `59bb9cc`. (Later changed: the viewer plays the selected clone's sound. See C11.)
-- Chrome is the only target browser (Q2).
+- Chrome is the only target browser (Q2). (Later changed: Safari too, with Selkies' ideas. See C4, C12, C13, B8, I16.)
 - No 4:4:4 colour. The 4:4:4 code is deleted (Q4, X4).
 - Monitor sizes come from the fixed layout presets (Q5).
 - Selkies is a source of ideas. We write our own code. We copy a Selkies file only when this document says so (see
@@ -25,7 +25,7 @@ Each row that depends on one of these answers names its question ID.
 | ID | Question | Why it matters | Answer |
 |---|---|---|---|
 | Q1 | How do we get HTTPS? Options: `tailscale cert` with rustls in control-server, or `tailscale serve` in front of port 9000. | WebCodecs, the async clipboard and Keyboard Lock work only on HTTPS pages (or `localhost`). `http://<tailscale-ip>:9000` does not work. | Not our concern. Setting up Tailscale is the user's job. Show a warning when the page is not HTTPS. |
-| Q2 | Which browsers must work fully? Chrome only, or also Firefox and Safari? | Window placement on screens (M2) and Keyboard Lock (I4) work only in Chrome. Safari needs extra decoder work (C4). | Chrome only. |
+| Q2 | Which browsers must work fully? Chrome only, or also Firefox and Safari? | Window placement on screens (M2) and Keyboard Lock (I4) work only in Chrome. Safari needs extra decoder work (C4). | Chrome only. Later changed: Chrome and Safari. |
 | Q3 | Port forwarding: drop it, use `ssh -L` through the bastion, or move it into an `rmng forward` CLI command? | A browser cannot open local ports. | Drop it. Give an `ssh` command that the user runs to get port forwarding, like the existing "Copy SSH command". |
 | Q4 | Keep 4:4:4 colour in the browser? | It needs a WebGL shader and probably a CPU copy of each frame. A prototype must show the cost first (C7). | No. |
 | Q5 | Keep fixed layout presets, or resize the remote monitor to the browser window like Selkies does? | Changes how monitors are created and scaled (M4, M6). | Fixed layout presets. |
@@ -117,13 +117,15 @@ Each row that depends on one of these answers names its question ID.
 | C1 | WebSocket and decoder in a dedicated worker, away from the page thread. Reconnect by itself after the connection closes, then ask for a keyframe (T4). | Yes | M | R | A1 depends on the reconnect. | Yes |
 | C2 | WebCodecs `VideoDecoder`: codec string read from the SPS, low-delay mode | Yes | S | R | Selkies `wire-codecs.js` can be copied (P), but we only need H.264. | Yes |
 | C3 | Give the decoder the colour space explicitly (BT.709 limited) | Yes | S | R | Browsers ignore the colour data in the stream. | Yes |
-| C4 | Safari: convert Annex B to avcC, keep chunk timestamps strictly increasing | No | M | R | Q2: Chrome only. | No (Q2) |
+| C4 | Safari: convert Annex B to avcC, keep chunk timestamps strictly increasing | Yes | M | R | Every browser gets avcC (a `description` and length-prefixed NAL units), so Chrome tests the same path. The ack takes the frame number from the order of the chunks, not from the timestamp, which Safari can change. | Yes |
 | C5 | Decoder recovery: on error, reset, drop frames until a keyframe and ask for one (T4). Use the software decoder after repeated crashes. | Yes | S | R |  | Yes |
 | C6 | Show 4:2:0 frames: decoded frame to `<video>` through `VideoTrackGenerator` (no copy), canvas as fallback | Yes | M | R |  | Yes |
 | C7 | Show packed 4:4:4 (AVC444): port the `glunpack.rs` shader to WebGL2 | No | L | R | Q4. See X4 for the code to delete. | No (Q4) |
 | C8 | Measure the screen refresh rate and match the stream frame rate to it | Later | S | P | Selkies `display-refresh.js`. | Later |
 | C9 | Stats view: frame rate, end-to-end delay, decode time, hardware or software decoder | No | M | R | Removed after round 9 at the operator's request; `rmng-fps` measures the frame rate. | No |
 | C10 | "Poor connection" indicator | Later | S | R |  | Later |
+| C12 | Safari: decoded frames go to a worker `VideoTrackGenerator` and a `<video>`, not the worker canvas | Yes | S | R | Selkies measured 5 to 25 ms per canvas draw in Safari. Chrome keeps the canvas (C6 was not done). `?sink=canvas` or `?sink=track` chooses, to compare. Safari can keep the video paused until a click or key. | Yes |
+| C13 | Safari: canvas size from the CSS size and the device pixel ratio, where the device-pixel box is missing | Yes | S | R | Without it the viewer page fails at once in WebKit. | Yes |
 | C11 | Audio playback, microphone, webcam | No | — | — | Audio was removed in `59bb9cc`. Later the operator asked for playback: the monitor 0 window plays the selected clone's sound, with Selkies' ideas (Opus over the same WebSocket, WebCodecs `AudioDecoder` in the worker, an AudioWorklet jitter buffer). Microphone and webcam stay out. | Playback: yes. Microphone, webcam: no |
 
 ## I. Input
@@ -133,7 +135,7 @@ Each row that depends on one of these answers names its question ID.
 | I1 | Keyboard: `KeyboardEvent.code` to Linux keycode (`key_code`) | Yes | M | R | Selkies sends X11 keysyms through the noVNC tables. We do not need them. The remote keyboard layout applies, as in the native viewer. | Yes |
 | I2 | Track held keys. Release all of them when the window loses focus or the tab is hidden. | Yes | S | R | Prevents stuck keys. | Yes |
 | I3 | macOS Command key: same mapping as the native macOS viewer | Yes | S | K | As the native macOS viewer did by default: Cmd sends Ctrl, Ctrl sends Super, and Caps Lock is sent as a tap. Fixed after round 9; the first version sent Cmd as Super. | Yes |
-| I4 | Keyboard Lock in fullscreen, so Chrome passes Ctrl+W, Alt+Tab and Super to the clone | Yes | S | R | Chrome only, which is the only target (Q2). | Yes |
+| I4 | Keyboard Lock in fullscreen, so Chrome passes Ctrl+W, Alt+Tab and Super to the clone | Yes | S | R | Chrome's Keyboard Lock API. Safari 26.4 (and Firefox 156) get `requestFullscreen({ keyboardLock: "browser" })` instead, as in Selkies. | Yes |
 | I5 | IME composition (Chinese, Japanese, Korean input) | No | L | — | The native viewer has no IME either. | No |
 | I6 | Keyboard layout detection | No | — | — | Not needed with Linux keycodes. | No |
 | I7 | Absolute pointer and buttons (with back and forward). Map page pixels to monitor pixels, with device pixel ratio and letterbox. | Yes | S | R |  | Yes |
@@ -145,6 +147,7 @@ Each row that depends on one of these answers names its question ID.
 | I13 | Agent pointer moves: ignore local motion for 0.5 s, draw the cursor for 1 s | Yes | S | K |  | Yes |
 | I14 | Touch, virtual trackpad, on-screen keyboard, soft buttons | No | L | — |  | No |
 | I15 | Gamepads (browser, touch gamepad, uinput) | No | — | — |  | No |
+| I16 | Safari: pointer lock that reports a refusal by event | Yes | S | R | Safari's `requestPointerLock()` returns no promise, and tells of a refusal with `pointerlockerror`; the next lock then waits for a click. The cursor image uses `-webkit-image-set` where `image-set` is unknown. | Yes |
 
 
 ## U. Cursor
@@ -165,6 +168,7 @@ Each row that depends on one of these answers names its question ID.
 | B5 | When the browser refuses a write, try again on the next click or key press | Yes | S | R |  | Yes |
 | B6 | Send clipboard bytes as binary WebSocket messages, not base64 JSON | Yes | S | R |  | Yes |
 | B7 | Clipboard policy (in only, out only, off) and "secret" clipboard | No | — | — |  | No |
+| B8 | Safari (no focus reads): local → clone from the paste event of Cmd+V, whose V waits for the offer; clone → local by a write in the Cmd+C key press, of a text item whose content comes when the clone's text arrives | Yes | M | R | As Selkies. Safari has no `clipboard-read` permission, which tells this mode apart. Safari fires a paste event only into something editable, so Cmd+V moves the focus to a hidden editable element for that key only. HTML and images from the clone wait for the next click or key. | Yes |
 
 ## M. Monitors and windows
 

@@ -10,7 +10,7 @@ Running one agent to develop software is easy. Running a dozen of them is painfu
 
 You need a **separate sandbox** for each agent. RMNG gives each agent a full GNOME desktop, gpu acceleration, seperate network namespace, and seperate filesystem. Agents run real services side by side and never step on each other.
 
-You need to **see and steer** each agent. A coding agent designing a web app or driving a GUI app is invisible from a terminal, and a laggy remote desktop makes supervising several of them miserable. RMNG's viewer runs in Chrome with hardware decode, runs at 60fps on LAN, and switches between clones instantly.
+You need to **see and steer** each agent. A coding agent designing a web app or driving a GUI app is invisible from a terminal, and a laggy remote desktop makes supervising several of them miserable. RMNG's viewer runs in Chrome or Safari with hardware decode, runs at 60fps on LAN, and switches between clones instantly.
 
 You need to **pack** a lot of agents onto one machine. RMNG's custom GPU accelerated remote desktop stack with a patched GNOME encodes only the clone you are watching, and lets you fit far more of them on the same hardware.
 
@@ -43,8 +43,8 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 **Remote Desktop**
 
 - Zero-copy hardware H.264 pipeline (VA-API encode on the server)
-- Browser viewer in Chrome: H.264 over a WebSocket, decoded with WebCodecs
-- One browser window per monitor. You move and size each window yourself. Each window has a Fullscreen button at the top left; it is hidden in fullscreen. Its fullscreen hides Chrome's address bar (macOS fullscreen does not). Keys in a viewer window: F11 fullscreen, Ctrl+Alt+G lock the pointer, Ctrl+Alt+P release it. On a Mac, Cmd acts as Ctrl in the clone and Ctrl acts as Super, as in the old native viewer.
+- Browser viewer in Chrome or Safari: H.264 over a WebSocket, decoded with WebCodecs
+- One browser window per monitor. You move and size each window yourself. Each window has a Fullscreen button at the top left; it is hidden in fullscreen. Its fullscreen hides the browser's address bar (macOS fullscreen does not). Keys in a viewer window: F11 fullscreen, Ctrl+Alt+G lock the pointer, Ctrl+Alt+P release it. On a Mac, Cmd acts as Ctrl in the clone and Ctrl acts as Super, as in the old native viewer.
 - 60fps on local network
 - Multi-monitor
 - Sound of the selected clone, in the monitor 0 window (Opus, about 70–110 ms behind the clone on the LAN), from the first click or key in that window
@@ -106,7 +106,7 @@ of which protected against anyone who was not already the owner. Simpler is corr
 
 ## Quick start
 
-> **Hardware support:** the encode path (control-server, VA-API H.264) has only been tested on an AMD Radeon Pro W6800. Other GPUs may work but are untested. The viewer needs Chrome.
+> **Hardware support:** the encode path (control-server, VA-API H.264) has only been tested on an AMD Radeon Pro W6800. Other GPUs may work but are untested. The viewer needs Chrome, or Safari 18 or later (26 or later for sound, 26.4 or later for Esc and Cmd+W in fullscreen).
 
 Needs a Linux host with Docker, a GPU render node (`/dev/dri/renderD128`), and a ZFS dataset mounted at `/srv/rmng-homes` to hold the clone homes (one child dataset per clone). Pull the published image (or `docker build -t rmng:latest .` from a checkout), then run the hub:
 
@@ -122,4 +122,4 @@ Ports: `9000` web UI/API and the browser viewer · `445` SMB, serving both the c
 
 Open `http://<host>:9000`. The **first-run setup wizard** walks through the environment checklist, server settings, and setup completion. There is no template download step: a clone's system image is built from its preset's Dockerfile, lazily, the first time a create needs it. Full flow, image build, template publishing, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).
 
-**The viewer needs HTTPS.** Chrome allows WebCodecs, the async clipboard and Keyboard Lock only on a secure page (HTTPS or `localhost`). `http://<tailscale-ip>:9000` is not enough. Open the dashboard itself over HTTPS, because the viewer windows use the dashboard's address. With Tailscale: on the machine that publishes port 9000, run `tailscale serve --bg 9000` (the tailnet must have HTTPS certificates enabled), then open `https://<machine>.<tailnet>.ts.net/`. If Tailscale runs on a different machine, run `tailscale serve --bg http://<ip>:9000` there. Use the `ts.net` name, not an IP: the certificate is for the name, so `https://<ip>/` fails. Without HTTPS the dashboard works, and the viewer window shows a warning instead of video.
+**The viewer needs HTTPS.** Browsers allow WebCodecs, the async clipboard and Keyboard Lock only on a secure page (HTTPS or `localhost`). `http://<tailscale-ip>:9000` is not enough. Open the dashboard itself over HTTPS, because the viewer windows use the dashboard's address. With Tailscale: on the machine that publishes port 9000, run `tailscale serve --bg 9000` (the tailnet must have HTTPS certificates enabled), then open `https://<machine>.<tailnet>.ts.net/`. If Tailscale runs on a different machine, run `tailscale serve --bg http://<ip>:9000` there. Use the `ts.net` name, not an IP: the certificate is for the name, so `https://<ip>/` fails. Without HTTPS the dashboard works, and the viewer window shows a warning instead of video.

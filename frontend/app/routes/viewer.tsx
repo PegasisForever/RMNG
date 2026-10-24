@@ -1,5 +1,6 @@
 // The browser viewer: one window per monitor, `/viewer?monitor=<id>`, opened from the
-// dashboard. The worker (`~/viewer/worker.ts`) does the socket, the decode and the drawing;
+// dashboard. The worker (`~/viewer/worker.ts`) does the socket, the decode and the drawing
+// (in Safari, into a track that this page shows in a <video>: `~/viewer/track.ts`);
 // this page holds the canvas, the input (`~/viewer/input.ts`), the clipboard
 // (`~/viewer/clipboard.ts`), the cursor and file drop, and is
 // where server messages arrive. For a clone with no desktop, monitor 0's window shows its
@@ -18,6 +19,7 @@ import { type Input, attachInput, toggleFullscreen } from "~/viewer/input";
 import type { WorkerIn, WorkerOut } from "~/viewer/protocol";
 import { attachSound } from "~/viewer/sound";
 import { TermView } from "~/viewer/terminal";
+import { type TrackView, showTrack } from "~/viewer/track";
 
 export function meta() {
   return [{ title: "RMNG viewer" }];
@@ -25,6 +27,14 @@ export function meta() {
 
 /** Only monitor 0's window plays the sound, so two windows never play it twice. */
 const SOUND_MONITOR = 0;
+
+/** Whether the worker shows the video through a track (`~/viewer/track.ts`) where it can.
+ *  Chrome keeps the canvas, which works well there; the track generator Chrome has instead is
+ *  its own one, `MediaStreamTrackGenerator`, which tells Chrome apart. `?sink=canvas` or
+ *  `?sink=track` chooses, to compare the two. */
+function wantTrack(sink: string | null): boolean {
+  return sink ? sink === "track" : !("MediaStreamTrackGenerator" in window);
+}
 
 /** Upload one dropped file into the selected clone's home; resolves to the name it got there. */
 function uploadFile(file: File, onProgress: (fraction: number) => void): Promise<string> {
@@ -44,6 +54,7 @@ function uploadFile(file: File, onProgress: (fraction: number) => void): Promise
 export default function Viewer() {
   const [params] = useSearchParams();
   const monitor = Number(params.get("monitor") ?? 0);
+  const sink = params.get("sink");
   const box = useRef<HTMLDivElement>(null);
   const overlay = useRef<HTMLImageElement>(null);
   const input = useRef<Input | null>(null);
@@ -75,13 +86,17 @@ export default function Viewer() {
     // A fresh canvas per run: a canvas can hand its drawing to a worker only once. The
     // placeholder stays in the page and takes the input.
     const canvas = document.createElement("canvas");
-    canvas.className = "block h-full w-full";
+    // Over the <video> of a track, which the page puts in front of it in the box.
+    canvas.className = "relative block h-full w-full";
     box.current.append(canvas);
     const offscreen = canvas.transferControlToOffscreen();
     const worker = new Worker(new URL("../viewer/worker.ts", import.meta.url), {
       type: "module",
     });
     const post = (m: WorkerIn, transfer: Transferable[] = []) => worker.postMessage(m, transfer);
+    let trackView: TrackView | null = null;
+    /** The canvas's size in device pixels, for a track view that starts later. */
+    let size: [number, number] | null = null;
     sendRef.current = (msg) => post({ type: "send", msg });
     const clip = attachClipboard({
       send: (msg) => post({ type: "send", msg: { t: "clipboard", ...msg } }),
@@ -93,10 +108,17 @@ export default function Viewer() {
       monitor,
       send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
       onGesture: () => clip.onGesture(),
-      onResize: (width, height) => post({ type: "resize", width, height }),
+      pasteByEvent: () => clip.pasteByEvent(),
+      onResize: (width, height) => {
+        size = [width, height];
+        trackView?.setBox(width, height);
+        post({ type: "resize", width, height });
+      },
     });
     input.current = inp;
-    const snd = monitor === SOUND_MONITOR ? attachSound(post) : null;
+    // The worker decodes the sound with WebCodecs' AudioDecoder: Safari has it from 26.
+    const snd =
+      monitor === SOUND_MONITOR && typeof AudioDecoder !== "undefined" ? attachSound(post) : null;
 
     /** The build this page belongs to, from the first connection's `version` message. */
     let buildId: string | null = null;
@@ -133,7 +155,11 @@ export default function Viewer() {
       const m = e.data;
       if (m.type === "message") onServerMessage(m.msg);
       else if (m.type === "clipboard") clip.onData(m.data);
-      else {
+      else if (m.type === "track") {
+        trackView?.detach();
+        trackView = m.track ? showTrack(box.current!, canvas, m.track) : null;
+        if (size) trackView?.setBox(...size);
+      } else {
         setConnected(m.connected);
         clip.setConnected(m.connected);
       }
@@ -145,10 +171,12 @@ export default function Viewer() {
         canvas: offscreen,
         url: `${scheme}//${location.host}/api/viewer?monitor=${monitor}`,
         monitor,
+        track: wantTrack(sink),
       },
       [offscreen],
     );
     return () => {
+      trackView?.detach();
       snd?.detach();
       inp.detach();
       clip.detach();
@@ -157,7 +185,7 @@ export default function Viewer() {
       worker.terminate();
       canvas.remove();
     };
-  }, [secure, monitor]);
+  }, [secure, monitor, sink]);
 
   if (secure === false) {
     return (
@@ -165,7 +193,7 @@ export default function Viewer() {
         <div className="max-w-lg space-y-3 text-sm">
           <h1 className="text-lg font-semibold text-amber-400">This page is not HTTPS</h1>
           <p>
-            The viewer decodes video with WebCodecs, and Chrome allows WebCodecs only on HTTPS
+            The viewer decodes video with WebCodecs, and browsers allow WebCodecs only on HTTPS
             pages. Open the dashboard at its HTTPS address (for example through Tailscale HTTPS)
             and open the viewer from there.
           </p>
@@ -200,7 +228,7 @@ export default function Viewer() {
 
   return (
     <main className="fixed inset-0 select-none bg-black" onDragOver={onDragOver} onDrop={onDrop}>
-      <div ref={box} className="h-full w-full" />
+      <div ref={box} className="relative h-full w-full" />
       <img
         ref={overlay}
         alt=""

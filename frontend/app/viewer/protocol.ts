@@ -1,5 +1,5 @@
 // The browser viewer's binary messages (`wire::browser`: video, clipboard pieces, sound), the
-// H.264 fact the decoder needs from a video message, and the messages between the viewer page,
+// H.264 reframing the decoder needs for a video message (Annex B to avcC), and the messages between the viewer page,
 // its worker and its sound worklet.
 //
 // The worker imports this file, so it uses relative imports only: Vite builds the worker
@@ -125,30 +125,82 @@ export function parseClipboardPiece(buf: ArrayBuffer): ClipboardBytes & { last: 
 
 const hex = (b: number) => b.toString(16).padStart(2, "0");
 
-/** The WebCodecs codec string (`avc1.PPCCLL`: profile, constraint flags, level) from the SPS in
- *  an Annex-B access unit, or null when the unit has no SPS. Stops at the first slice, because
- *  the SPS comes before it, so a large frame is not scanned to its end. */
-export function codecFromAnnexB(au: Uint8Array): string | null {
-  for (let i = 0; i + 3 < au.length; i++) {
-    // A 4-byte start code ends in the same three bytes as a 3-byte one.
+/** The NAL units of an Annex-B access unit, each without its start code. The zero byte in front
+ *  of a 4-byte start code is not part of the unit before it. */
+export function annexbNals(au: Uint8Array): Uint8Array[] {
+  const out: Uint8Array[] = [];
+  let start = -1;
+  for (let i = 0; i + 2 < au.length; i++) {
     if (au[i] !== 0 || au[i + 1] !== 0 || au[i + 2] !== 1) continue;
-    const type = au[i + 3] & 0x1f;
-    if (type === 7 && i + 6 < au.length) {
-      return `avc1.${hex(au[i + 4])}${hex(au[i + 5])}${hex(au[i + 6])}`;
+    if (start >= 0) {
+      let end = i;
+      while (end > start && au[end - 1] === 0) end--;
+      if (end > start) out.push(au.subarray(start, end));
     }
-    if (type === 1 || type === 5) return null;
-    i += 3;
+    start = i + 3;
+    i += 2;
   }
-  return null;
+  if (start >= 0 && start < au.length) out.push(au.subarray(start));
+  return out;
 }
 
-/** Page → worker: first the canvas to draw on and the socket to read (`init`, once), then a
+const nalType = (nal: Uint8Array) => nal[0] & 0x1f;
+const NAL_SPS = 7;
+const NAL_PPS = 8;
+const NAL_AUD = 9;
+
+/** The `avcC` record (ISO 14496-15) of the first SPS and PPS in an access unit: the decoder's
+ *  `description`, with 4-byte NAL lengths. Null when the unit has no SPS or no PPS. */
+export function avcDescription(au: Uint8Array): Uint8Array | null {
+  const nals = annexbNals(au);
+  const sps = nals.find((n) => nalType(n) === NAL_SPS);
+  const pps = nals.find((n) => nalType(n) === NAL_PPS);
+  if (!sps || !pps || sps.length < 4) return null;
+  const out = new Uint8Array(11 + sps.length + pps.length);
+  // Version 1, profile, constraint flags, level, 0xff (4-byte lengths), 0xe1 (one SPS).
+  out.set([1, sps[1], sps[2], sps[3], 0xff, 0xe1, sps.length >> 8, sps.length & 0xff]);
+  out.set(sps, 8);
+  out.set([1, pps.length >> 8, pps.length & 0xff], 8 + sps.length);
+  out.set(pps, 11 + sps.length);
+  return out;
+}
+
+/** The WebCodecs codec string (`avc1.PPCCLL`: profile, constraint flags, level) of an `avcC`
+ *  record. Safari refuses a stream whose real profile or level is above the configured one, so
+ *  it comes from the stream's SPS and is never guessed. */
+export const codecOf = (description: Uint8Array) =>
+  `avc1.${hex(description[1])}${hex(description[2])}${hex(description[3])}`;
+
+/** An Annex-B access unit as 4-byte-length-prefixed NAL units, the framing an `avcC`
+ *  description implies, without its SPS, PPS (they are in the description) and delimiter.
+ *  Every browser decodes this form; Safari decodes no other. */
+export function annexbToAvcc(au: Uint8Array): Uint8Array<ArrayBuffer> {
+  const nals = annexbNals(au).filter((n) => ![NAL_SPS, NAL_PPS, NAL_AUD].includes(nalType(n)));
+  const out = new Uint8Array(nals.reduce((n, nal) => n + 4 + nal.length, 0));
+  const v = new DataView(out.buffer);
+  let at = 0;
+  for (const nal of nals) {
+    v.setUint32(at, nal.length);
+    out.set(nal, at + 4);
+    at += 4 + nal.length;
+  }
+  return out;
+}
+
+/** Whether two byte arrays (or two nulls) are equal. */
+export function sameBytes(a: Uint8Array | null, b: Uint8Array | null): boolean {
+  if (!a || !b) return a === b;
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+/** Page → worker: first the canvas to draw on, the socket to read and whether to show the
+ *  video through a track instead of the canvas where the worker can (`init`, once), then a
  *  message to send on the socket (`send`: input waits while the socket is down, the rest is
  *  dropped), a clipboard reply to send in pieces (`clipboard`, its bytes transferred), the
  *  canvas's new size in device pixels (`resize`), or sound on or off (`sound`; with `on`, the
  *  port to the sound worklet the first time). */
 export type WorkerIn =
-  | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number }
+  | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number; track: boolean }
   | { type: "send"; msg: FromBrowser }
   | { type: "clipboard"; data: ClipboardBytes }
   | { type: "resize"; width: number; height: number }
@@ -174,4 +226,7 @@ export type WorkerOut =
   | { type: "message"; msg: ToBrowser }
   /** A clipboard reply, put together from its pieces, its bytes transferred. */
   | { type: "clipboard"; data: ClipboardBytes }
-  | { type: "connected"; connected: boolean };
+  | { type: "connected"; connected: boolean }
+  /** The video track to show in a <video> (`./track.ts`), transferred; null when the worker
+   *  stopped writing to it and draws on the canvas again. */
+  | { type: "track"; track: MediaStreamTrack | null };

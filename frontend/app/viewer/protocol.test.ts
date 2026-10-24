@@ -3,12 +3,16 @@ import { expect, test } from "bun:test";
 import {
   CLIPBOARD_PIECE_BYTES,
   RateMeter,
+  annexbNals,
+  annexbToAvcc,
+  avcDescription,
   clipboardPieces,
-  codecFromAnnexB,
+  codecOf,
   encodeClipboardPiece,
   parseAudioHeader,
   parseClipboardPiece,
   parseVideoHeader,
+  sameBytes,
 } from "./protocol";
 
 test("the video header reads the bytes the server writes", () => {
@@ -22,17 +26,44 @@ test("the video header reads the bytes the server writes", () => {
   expect(parseVideoHeader(bytes.buffer).key).toBe(false);
 });
 
-test("the codec string comes from the SPS, after the access unit delimiter", () => {
-  // AUD, then an SPS for constrained baseline (66, flags 0xc0) level 4.0 (40), then an IDR slice.
-  const au = new Uint8Array([
-    0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0x67, 66, 0xc0, 40, 0x8c, 0, 0, 1, 0x65, 0x88,
+// An IDR access unit as the encoder writes it: AUD (3-byte start code), SPS for constrained
+// baseline (66, flags 0xc0) level 4.0 (40), PPS, then the IDR slice, each with a 4-byte start code.
+const IDR = new Uint8Array([
+  0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0x67, 66, 0xc0, 40, 0x8c, 0, 0, 0, 1, 0x68, 0xce, 0x3c, 0x80,
+  0, 0, 0, 1, 0x65, 0x88, 0x84,
+]);
+
+test("the NAL units of an access unit, without start codes or the zero in front of one", () => {
+  expect(annexbNals(IDR).map((n) => [...n])).toEqual([
+    [0x09, 0xf0],
+    [0x67, 66, 0xc0, 40, 0x8c],
+    [0x68, 0xce, 0x3c, 0x80],
+    [0x65, 0x88, 0x84],
   ]);
-  expect(codecFromAnnexB(au)).toBe("avc1.42c028");
+  expect(annexbNals(new Uint8Array([]))).toEqual([]);
 });
 
-test("a frame without an SPS has no codec string", () => {
-  expect(codecFromAnnexB(new Uint8Array([0, 0, 0, 1, 0x41, 0x9a, 0, 0, 1, 0x67, 66, 0, 40]))).toBeNull();
-  expect(codecFromAnnexB(new Uint8Array([]))).toBeNull();
+test("the avcC description holds the SPS and PPS, and names the codec", () => {
+  const d = avcDescription(IDR)!;
+  expect([...d]).toEqual([
+    1, 66, 0xc0, 40, 0xff, 0xe1, 0, 5, 0x67, 66, 0xc0, 40, 0x8c, 1, 0, 4, 0x68, 0xce, 0x3c, 0x80,
+  ]);
+  expect(codecOf(d)).toBe("avc1.42c028");
+  // A delta frame has no SPS.
+  expect(avcDescription(new Uint8Array([0, 0, 0, 1, 0x41, 0x9a]))).toBeNull();
+});
+
+test("an access unit as length-prefixed NAL units keeps only the slices", () => {
+  expect([...annexbToAvcc(IDR)]).toEqual([0, 0, 0, 3, 0x65, 0x88, 0x84]);
+  const delta = new Uint8Array([0, 0, 0, 1, 0x09, 0xf0, 0, 0, 0, 1, 0x41, 0x9a, 0, 0, 1, 0x41, 7]);
+  expect([...annexbToAvcc(delta)]).toEqual([0, 0, 0, 2, 0x41, 0x9a, 0, 0, 0, 2, 0x41, 7]);
+});
+
+test("byte arrays compare by content", () => {
+  expect(sameBytes(new Uint8Array([1, 2]), new Uint8Array([1, 2]))).toBe(true);
+  expect(sameBytes(new Uint8Array([1, 2]), new Uint8Array([1, 3]))).toBe(false);
+  expect(sameBytes(new Uint8Array([1]), null)).toBe(false);
+  expect(sameBytes(null, null)).toBe(true);
 });
 
 test("a clipboard piece matches the server's binary layout, both ways", () => {
