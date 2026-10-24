@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ChatView, localInputToEpochMs } from "~/components/ChatView";
 import { getDraft, setDraft } from "~/lib/chatDrafts";
 import { browserLocale } from "~/lib/format";
+import { openLiveEvents } from "~/lib/liveEvents";
 import { serverErrorText } from "~/lib/serverError";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
@@ -68,16 +69,15 @@ export default function ChatContainer({
   const [scheduled, setScheduled] = useState<ScheduledMessage[]>([]);
   const [scheduleAt, setScheduleAt] = useState(""); // "" ⇒ the picker is closed
 
-  // Live thread + turn state over SSE. EventSource auto-reconnects, so a refresh
-  // (or a transient drop) re-syncs from the server's snapshot — including an
-  // in-flight turn started by a previous page load.
+  // Live thread + turn state over SSE. Each connection starts with the server's snapshot, so a
+  // refresh, a drop or a sleep (after which `openLiveEvents` rebuilds the stream) re-syncs —
+  // including an in-flight turn started by a previous page load.
   useEffect(() => {
     setLoading(true);
     setError(null);
-    const es = new EventSource(`/api/chat/${cloneId}/events`);
-    es.onmessage = (e) => {
+    const onSnapshot = (data: string) => {
       try {
-        const snap = JSON.parse(e.data) as ChatSnapshot;
+        const snap = JSON.parse(data) as ChatSnapshot;
         setMessages(Array.isArray(snap.messages) ? snap.messages : []);
         setBusy(!!snap.busy);
         if (!snap.busy) setStopping(false); // turn ended — reset the Stop button
@@ -88,7 +88,7 @@ export default function ChatContainer({
         // ignore malformed frame
       }
     };
-    return () => es.close();
+    return openLiveEvents(`/api/chat/${cloneId}/events`, { message: onSnapshot });
   }, [cloneId]);
 
   // Fire-and-forget: the POST starts a turn, or steers the one in flight (pi-web queues the

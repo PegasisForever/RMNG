@@ -285,19 +285,6 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     let version_stream =
         futures::stream::once(async move { Ok(Event::default().event("version").data(build_id)) });
 
-    // Observable heartbeat: a named `ping` event every 15s. Unlike the low-level keep-alive
-    // *comment* below (which `EventSource` swallows silently), the client can see this — so
-    // its watchdog can tell a wedged/half-open socket (pings stop arriving → reconnect)
-    // apart from a merely idle fleet (pings keep arriving → stay put). First tick at 15s;
-    // the initial snapshots above already prove liveness on connect.
-    let heartbeat = futures::stream::unfold((), |()| async {
-        tokio::time::sleep(Duration::from_secs(15)).await;
-        Some((
-            Ok::<Event, Infallible>(Event::default().event("ping").data("{}")),
-            (),
-        ))
-    });
-
     Sse::new(futures::stream::select(
         state_stream,
         futures::stream::select(
@@ -305,7 +292,7 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
                 futures::stream::select(stats_stream, lxc_stream),
                 version_stream,
             ),
-            heartbeat,
+            sse_heartbeat(),
         ),
     ))
     .keep_alive(
@@ -313,6 +300,21 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
             .interval(Duration::from_secs(20))
             .text("ping"),
     )
+}
+
+/// Observable heartbeat: a named `ping` event every 15s. Unlike the low-level keep-alive
+/// *comment* (which `EventSource` swallows silently), the client can see this — so its
+/// watchdog (`frontend/app/lib/liveEvents.ts`) can tell a wedged/half-open socket (pings stop
+/// arriving → reconnect) apart from a merely idle stream (pings keep arriving → stay put).
+/// First tick at 15s; each stream's initial snapshot already proves liveness on connect.
+fn sse_heartbeat() -> impl Stream<Item = Result<Event, Infallible>> {
+    futures::stream::unfold((), |()| async {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        Some((
+            Ok::<Event, Infallible>(Event::default().event("ping").data("{}")),
+            (),
+        ))
+    })
 }
 
 /// `GET /api/state` — the current [`ControlState`] as a single-shot snapshot (the same
@@ -1968,7 +1970,8 @@ async fn chat_send(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// `GET /api/chat/:id/events` — per-clone chat SSE (snapshot + on change).
+/// `GET /api/chat/:id/events` — per-clone chat SSE (snapshot + on change), plus the same
+/// named `ping` heartbeat as `/events` ([`sse_heartbeat`]).
 async fn chat_events(
     State(app): State<App>,
     AxPath(id): AxPath<String>,
@@ -1981,7 +1984,11 @@ async fn chat_events(
     let initial = futures::stream::once(async move { Ok(Event::default().data(snapshot)) });
     let updates = BroadcastStream::new(rx)
         .filter_map(|r| async move { r.ok().map(|json| Ok(Event::default().data(json))) });
-    Sse::new(initial.chain(updates)).keep_alive(
+    Sse::new(futures::stream::select(
+        initial.chain(updates),
+        sse_heartbeat(),
+    ))
+    .keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(20))
             .text("ping"),
