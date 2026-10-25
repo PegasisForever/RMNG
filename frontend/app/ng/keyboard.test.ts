@@ -22,7 +22,9 @@ describe("keyRows", () => {
 
   test("the symbols beside the letters and the numbers have a row of their own, on top", () => {
     const rows = keyRows(false);
-    expect(rows[0].map((k) => k.label).join(" ")).toBe("` [ ] \\ ; ' , . / - =");
+    expect(rows[0].map((k) => k.label).join(" ")).toBe("` [ ] \\ ; ' , . / - = PrtSc");
+    expect(rows[0].length).toBe(rows[1].length);
+    expect(rows[0].at(-1)!.code).toBe(99); // KEY_SYSRQ, the evdev code of Print Screen
     for (const row of rows.slice(2, 5)) expect(row.every((k) => k.letter || k.label.length > 1)).toBe(true);
   });
 

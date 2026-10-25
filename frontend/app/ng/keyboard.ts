@@ -64,6 +64,8 @@ const SYMBOL_ROW = even([
   shifted("Slash", "/", "?"),
   shifted("Minus", "-", "_"),
   shifted("Equal", "=", "+"),
+  // GNOME's screenshot key; it makes the row as long as the number row under it
+  key("PrintScreen", "PrtSc"),
 ]);
 
 const LETTER_ROWS = [
