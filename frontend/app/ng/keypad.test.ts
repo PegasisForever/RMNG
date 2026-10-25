@@ -1,12 +1,23 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import { HOLD_MS, type KeypadOut, Keypad, PAD_LINGER_MS, TAP_MS, TAP_WAIT_MS } from "./keypad";
+import {
+  ARROW_STEP_X,
+  ARROW_STEP_Y,
+  HOLD_MS,
+  type KeypadOut,
+  Keypad,
+  PAD_LINGER_MS,
+  SLOP_PX,
+  TAP_MS,
+  TAP_WAIT_MS,
+} from "./keypad";
 import { keyRows } from "./keyboard";
 
 const find = (id: string) => keyRows(false).flat().find((k) => k.id === id)!;
 const A = find("KeyA");
 const S = find("KeyS");
 const CTRL = find("ControlLeft");
+const SPACE_KEY = find("Space");
 
 /** A timer run by hand: `advance` fires what is due. */
 function handTimer() {
@@ -281,5 +292,41 @@ describe("Keypad trackpad mode", () => {
       clock.advance(1);
       expect(modes()).toEqual([true, false]);
     });
+  });
+
+  describe("a drag on Space", () => {
+    test("types an arrow key for each step sideways or up and down, and the keys stay keys", () => {
+      pad.down(1, SPACE_KEY, 100, 100, 0);
+      pad.move(1, 100 + SLOP_PX, 100, 50); // the first arrow comes as the drag starts
+      pad.move(1, 100 + 3 * ARROW_STEP_X + 1, 100, 100);
+      pad.move(1, 100 + 2 * ARROW_STEP_X, 100 - ARROW_STEP_Y, 150); // back one, and up one
+      pad.up(1, 200);
+      expect(said()).toEqual(["tap ArrowRight", "tap ArrowRight", "tap ArrowRight", "tap ArrowLeft", "tap ArrowUp"]);
+      expect(out.some((o) => o.t === "pad" || o.t === "move")).toBe(false);
+    });
+
+    test("held still, Space is not held down; it types one space when the finger lifts", () => {
+      pad.down(1, SPACE_KEY, 100, 100, 0);
+      clock.advance(HOLD_MS * 4);
+      pad.up(1, 1000);
+      expect(said()).toEqual(["tap Space"]);
+    });
+
+    test("in trackpad mode, a drag that starts on Space moves the cursor as anywhere else", () => {
+      pad.down(9, A, 100, 100, 0);
+      pad.move(9, 160, 100, 20);
+      pad.up(9, 40);
+      out = [];
+      pad.down(1, SPACE_KEY, 100, 100, 100);
+      pad.move(1, 160, 100, 150);
+      expect(said()).toEqual(["move"]);
+    });
+  });
+
+  test("a finger that moves less than the threshold still types its key", () => {
+    pad.down(1, A, 100, 100, 0);
+    pad.move(1, 100 + SLOP_PX - 1, 100, 50);
+    pad.up(1, 100);
+    expect(said()).toEqual(["tap KeyA"]);
   });
 });

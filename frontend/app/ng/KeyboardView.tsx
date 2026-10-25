@@ -26,7 +26,8 @@ type Props = {
   mods: ReadonlyMap<number, ModState>;
   /** Caps Lock is on (only the labels follow it). */
   caps: boolean;
-  /** A finger on the keys: its id, the key it went down on (null between keys), and where it
+  /** A finger on the keys: its id, the key it went down on (the nearest one for a touch between
+   *  keys; null only for an area with no keys), and where it
    *  is (CSS px, page coordinates). The container tells a tap from a hold or a pointer
    *  gesture (`./keypad.ts`). */
   onKeyTouch: (kind: TouchKind, id: number, key: Key | null, x: number, y: number) => void;
@@ -128,8 +129,20 @@ function capture(e: PointerEvent<HTMLElement>) {
   if (e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
 }
 
-/** The key area's touches: which key each finger went down on (by `data-key`; none between
- *  keys), and which keys show as pressed. */
+/** The key in `area` nearest to the point (page coordinates), or null when it has none. */
+function nearestKey(area: HTMLElement, x: number, y: number): HTMLElement | null {
+  let best: HTMLElement | null = null;
+  let bestD = Infinity;
+  for (const el of area.querySelectorAll<HTMLElement>("[data-key]")) {
+    const r = el.getBoundingClientRect();
+    const d = Math.hypot(Math.max(r.left - x, 0, x - r.right), Math.max(r.top - y, 0, y - r.bottom));
+    if (d < bestD) [best, bestD] = [el, d];
+  }
+  return best;
+}
+
+/** The key area's touches: which key each finger went down on (by `data-key`, or the nearest
+ *  key for a touch between keys), and which keys show as pressed. */
 function useKeysTouch(rows: Key[][], onKeyTouch: Props["onKeyTouch"]) {
   const [pressed, setPressed] = useState<ReadonlySet<string>>(new Set());
   /** Each finger: its key, where it went down, and whether it moved off as a drag. */
@@ -146,7 +159,9 @@ function useKeysTouch(rows: Key[][], onKeyTouch: Props["onKeyTouch"]) {
     pressed,
     down(e: PointerEvent<HTMLDivElement>) {
       capture(e);
-      const el = (e.target as HTMLElement).closest<HTMLElement>("[data-key]");
+      // A finger between two keys (or in the free half unit after "p") types the nearest one
+      const el =
+        (e.target as HTMLElement).closest<HTMLElement>("[data-key]") ?? nearestKey(e.currentTarget, e.clientX, e.clientY);
       const key = (el && byId.get(el.dataset.key!)) ?? null;
       fingers.current.set(e.pointerId, { key, x: e.clientX, y: e.clientY, dragged: false });
       if (key) show(key.id, true);

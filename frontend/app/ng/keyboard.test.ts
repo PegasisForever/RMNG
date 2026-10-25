@@ -20,12 +20,12 @@ describe("keyRows", () => {
   }
 
   test("the number row, second, reads Esc 1 … 0 ⌫", () => {
-    expect(keyRows(false)[1].map((k) => k.label).join(" ")).toBe("Esc 1 2 3 4 5 6 7 8 9 0 ⌫");
+    expect(keyRows(false)[1].map((k) => k.label).join(" ")).toBe("` 1 2 3 4 5 6 7 8 9 0 ⌫");
   });
 
   test("the symbols beside the letters and the numbers have a row of their own, on top", () => {
     const rows = keyRows(false);
-    expect(rows[0].map((k) => k.label).join(" ")).toBe("` [ ] \\ ; ' , . / - = PrtSc");
+    expect(rows[0].map((k) => k.label).join(" ")).toBe("Esc [ ] \\ ; ' , . / - = PrtSc");
     expect(rows[0].length).toBe(rows[1].length);
     expect(rows[0].at(-1)!.code).toBe(99); // KEY_SYSRQ, the evdev code of Print Screen
     // No symbol among the letters: only letters and named keys (⌫ is Backspace)
@@ -36,7 +36,7 @@ describe("keyRows", () => {
 
   test("Fn swaps the number row for F1 to F12 and the arrows for Home PgUp PgDn End", () => {
     const [, top, , , , bottom] = keyRows(true);
-    expect(top.map((k) => k.label).join(" ")).toBe("Esc F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 Del ⌫");
+    expect(top.map((k) => k.label).join(" ")).toBe("` F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 ⌫");
     expect(bottom.slice(-4).map((k) => k.label)).toEqual(["Home", "PgUp", "PgDn", "End"]);
   });
 

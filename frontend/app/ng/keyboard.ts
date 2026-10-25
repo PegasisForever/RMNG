@@ -1,6 +1,6 @@
 // The /ng on-screen keyboard: a full Linux (US) keyboard in six rows of ROW_UNITS each. The
-// symbols that sit beside the letters on a real keyboard have a row of their own, so the
-// letters get the width. Every
+// symbols that sit beside the letters on a real keyboard have a row of their own (with Esc
+// first), so the letters get the width. Every
 // key sends its evdev code (`~/viewer/keycodes.ts`), so the clone's own keyboard layout
 // applies, as with a real keyboard. The labels follow the latched Shift and Caps Lock.
 import { CODE_TO_EVDEV } from "~/viewer/keycodes";
@@ -47,17 +47,19 @@ const DIGITS = [...")!@#$%^&*("].map((shift, i) => shifted(`Digit${i}`, String(i
 /** A row of keys that share its width evenly (the number row, the symbol row). */
 const even = (keys: Key[]) => keys.map((k) => ({ ...k, units: ROW_UNITS / keys.length }));
 
-const NUMBER_ROW = even([key("Escape", "Esc"), ...DIGITS.slice(1), DIGITS[0], key("Backspace", "⌫")]);
+const BACKQUOTE = shifted("Backquote", "`", "~");
 
+const NUMBER_ROW = even([BACKQUOTE, ...DIGITS.slice(1), DIGITS[0], key("Backspace", "⌫")]);
+
+/** The number row under Fn. Forward Delete is on the key after "m" then, so not here too. */
 const F_ROW = even([
-  key("Escape", "Esc"),
+  BACKQUOTE,
   ...Array.from({ length: 12 }, (_, i) => key(`F${i + 1}`, `F${i + 1}`)),
-  key("Delete", "Del"),
   key("Backspace", "⌫"),
 ]);
 
 const SYMBOL_ROW = even([
-  shifted("Backquote", "`", "~"),
+  key("Escape", "Esc"),
   shifted("BracketLeft", "[", "{"),
   shifted("BracketRight", "]", "}"),
   shifted("Backslash", "\\", "|"),
@@ -115,6 +117,11 @@ function spaceRow(fn: boolean): Key[] {
 export function keyRows(fn: boolean): Key[][] {
   return [SYMBOL_ROW, fn ? F_ROW : NUMBER_ROW, ...letterRows(fn), spaceRow(fn)];
 }
+
+/** The arrow keys a drag on Space types (`./keypad.ts`), whatever Fn puts on the arrows. */
+export const ARROW_KEYS = { left: ARROWS[0], up: ARROWS[1], down: ARROWS[2], right: ARROWS[3] };
+/** The evdev code of Space. */
+export const SPACE = CODE_TO_EVDEV.Space;
 
 /** The evdev codes of the Shift keys. */
 export const SHIFTS: readonly number[] = [CODE_TO_EVDEV.ShiftLeft, CODE_TO_EVDEV.ShiftRight];

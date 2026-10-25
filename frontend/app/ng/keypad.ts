@@ -19,11 +19,15 @@
 // time starts the wait for the keys again. The mouse buttons show only in trackpad mode, and
 // one held down keeps the mode on (`button`), so they do not go while in use.
 //
+// A drag that starts on Space is no pointer gesture: as on the iPhone keyboard, it moves the
+// text cursor, one arrow key for each ARROW_STEP_X (sideways) or ARROW_STEP_Y (up and down)
+// the finger goes, and the keys stay keys. Space types on the lift only, never held.
+//
 // Fingers that roll from one key to the next (the next one down before the last is up) are
-// still two taps, as neither moved. A touch that starts between keys has no key: it only ever
-// moves the pointer. Pure: touches go in with their time, and what to do comes
+// still two taps, as neither moved. A touch between keys is given the nearest key by the
+// view. Pure: touches go in with their time, and what to do comes
 // out through `out`; the hold wait runs on the `Timer` given, so tests can run it by hand.
-import type { Key } from "./keyboard";
+import { ARROW_KEYS, type Key, SPACE } from "./keyboard";
 
 /** After the last finger of a pointer gesture lifts, the keys stay a trackpad this long. */
 export const PAD_LINGER_MS = 1000;
@@ -34,9 +38,12 @@ export const TAP_MS = 250;
 export const TAP_WAIT_MS = 250;
 /** A finger that stays on a key this long without moving holds it down. */
 export const HOLD_MS = 250;
-/** A finger that moves this far (CSS px) before it lifts or holds is a pointer gesture. Larger
- *  than a fingertip rolls on a tap. */
-export const SLOP_PX = 10;
+/** A finger that moves this far (CSS px) before it lifts or holds is a pointer gesture. Well
+ *  over what a fingertip rolls on a tap (a key is about 54 px). */
+export const SLOP_PX = 20;
+/** A drag on Space types an arrow key for each this far (CSS px) sideways, and up or down. */
+export const ARROW_STEP_X = 12;
+export const ARROW_STEP_Y = 28;
 
 export type KeypadOut =
   /** A finger came down on `key` while the keys are keys (the key's click sound plays). */
@@ -73,8 +80,12 @@ type Touch = {
   t: number;
   sx: number;
   sy: number;
-  /** Not decided yet, holding its key, moving the cursor, or scrolling. */
-  is: "new" | "hold" | "point" | "scroll";
+  /** Not decided yet, holding its key, moving the cursor, scrolling, or (a drag on Space)
+   *  typing arrow keys. */
+  is: "new" | "hold" | "point" | "scroll" | "arrows";
+  /** For the arrows: where the finger was at the last arrow key. */
+  ax: number;
+  ay: number;
   cancelHold: () => void;
   /** It came down in trackpad mode: it never types, and its modifier was not told down. */
   pad: boolean;
@@ -116,6 +127,8 @@ export class Keypad {
       t0: t,
       afterTap: false,
       dragging: false,
+      ax: x,
+      ay: y,
     };
     if (pad) {
       this.cancelLinger();
@@ -129,7 +142,7 @@ export class Keypad {
     } else if (key) {
       this.out({ t: "press", key });
       if (key.mod) this.out({ t: "mod", key, down: true });
-      else if (!key.fn) {
+      else if (!key.fn && key.code !== SPACE) {
         touch.cancelHold = this.timer.after(HOLD_MS, () => {
           if (touch.is !== "new") return;
           touch.is = "hold";
@@ -144,9 +157,14 @@ export class Keypad {
   move(id: number, x: number, y: number, t: number) {
     const p = this.touches.get(id);
     if (!p || p.is === "hold") return;
+    if (p.is === "arrows") return this.arrows(p, x, y);
     if (p.is === "new") {
       if (Math.hypot(x - p.sx, y - p.sy) < SLOP_PX) return;
       p.cancelHold();
+      if (!p.pad && p.key?.code === SPACE) {
+        p.is = "arrows";
+        return this.arrows(p, x, y);
+      }
       if (p.key?.mod && !p.pad) this.out({ t: "mod", key: p.key, down: false, dragged: true });
       const others = [...this.touches.values()].filter(
         (o) => o !== p && (o.is === "new" || o.is === "point" || o.is === "scroll"),
@@ -218,6 +236,16 @@ export class Keypad {
     if (!this.pad) return;
     if (pressed) this.cancelLinger();
     else if (this.touches.size === 0 && this.buttons === 0) this.linger();
+  }
+
+  /** The arrow keys for how far a drag on Space went since its last one. */
+  private arrows(p: Touch, x: number, y: number) {
+    const step = (d: number, size: number, less: Key, more: Key, at: "ax" | "ay") => {
+      for (; d >= size; d -= size, p[at] += size) this.out({ t: "tap", key: more });
+      for (; d <= -size; d += size, p[at] -= size) this.out({ t: "tap", key: less });
+    };
+    step(x - p.ax, ARROW_STEP_X, ARROW_KEYS.left, ARROW_KEYS.right, "ax");
+    step(y - p.ay, ARROW_STEP_Y, ARROW_KEYS.up, ARROW_KEYS.down, "ay");
   }
 
   /** The keys stay a trackpad PAD_LINGER_MS more, unless a finger comes down again. */
