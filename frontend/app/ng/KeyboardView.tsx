@@ -76,7 +76,8 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
           </div>
         ))}
       </div>
-      <div className="absolute flex" style={{ ...k.buttons, paddingBottom: p.bottom }}>
+      {/* Down to the bottom edge, home bar included: a tap there is a tap */}
+      <div className="absolute flex" style={k.buttons}>
         <MouseButton label="Left" button={BTN_LEFT} onButton={p.onButton} />
         <MouseButton label="Middle" button={BTN_MIDDLE} onButton={p.onButton} divider />
         <MouseButton label="Right" button={BTN_RIGHT} onButton={p.onButton} divider />

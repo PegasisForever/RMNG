@@ -57,13 +57,18 @@ export default function Ng() {
 
     const update = () => probe.current && setPage(measure(probe.current));
     update();
+    // iOS can settle the viewport of a first open after the page loaded, with no resize event
+    const settle = [100, 500, 1500].map((ms) => setTimeout(update, ms));
     window.addEventListener("resize", update);
     window.addEventListener("orientationchange", update);
+    window.visualViewport?.addEventListener("resize", update);
     const detach = attachPwa();
     return () => {
       detach();
+      settle.forEach(clearTimeout);
       window.removeEventListener("resize", update);
       window.removeEventListener("orientationchange", update);
+      window.visualViewport?.removeEventListener("resize", update);
       if (meta && before !== undefined) meta.content = before;
       html.style.background = body.style.background = "";
       html.style.minHeight = "";
