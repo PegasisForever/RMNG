@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import { HOLD_MS, type KeypadOut, Keypad } from "./keypad";
+import { HOLD_MS, type KeypadOut, Keypad, PAD_LINGER_MS, TAP_MS, TAP_WAIT_MS } from "./keypad";
 import { keyRows } from "./keyboard";
 
 const find = (id: string) => keyRows(false).flat().find((k) => k.id === id)!;
@@ -40,8 +40,10 @@ beforeEach(() => {
   pad = new Keypad((o) => out.push(o), clock.timer);
 });
 
+/** What came out, the trackpad mode changes left out (their own tests have them). */
+const keys = () => out.filter((o) => o.t !== "pad");
 const said = () =>
-  out.map((o) =>
+  keys().map((o) =>
     o.t === "tap" ? `tap ${o.key.id}` : o.t === "hold" ? `${o.key.id}${o.pressed ? "↓" : "↑"}` : o.t,
   );
 
@@ -50,7 +52,7 @@ describe("Keypad", () => {
     pad.down(1, A, 100, 100, 0);
     pad.move(1, 103, 102, 30); // a fingertip rolls a little
     clock.advance(100);
-    pad.up(1);
+    pad.up(1, 0);
     expect(said()).toEqual(["tap KeyA"]);
   });
 
@@ -58,14 +60,14 @@ describe("Keypad", () => {
     pad.down(1, A, 100, 100, 0);
     clock.advance(HOLD_MS);
     pad.move(1, 140, 100, 400); // a held key ignores the finger moving
-    pad.up(1);
+    pad.up(1, 0);
     expect(said()).toEqual(["KeyA↓", "KeyA↑"]);
   });
 
   test("a modifier is told down when the finger comes down and up when it lifts", () => {
     pad.down(1, CTRL, 100, 100, 0);
     clock.advance(HOLD_MS * 4);
-    pad.up(1);
+    pad.up(1, 0);
     expect(out).toEqual([
       { t: "mod", key: CTRL, down: true },
       { t: "mod", key: CTRL, down: false },
@@ -75,9 +77,9 @@ describe("Keypad", () => {
   test("a touch on a modifier that moves is a drag: the modifier is told up at once", () => {
     pad.down(1, CTRL, 100, 100, 0);
     pad.move(1, 130, 100, 20);
-    pad.up(1);
+    pad.up(1, 0);
     expect(said()).toEqual(["mod", "mod", "move"]);
-    expect(out[1]).toEqual({ t: "mod", key: CTRL, down: false, dragged: true });
+    expect(keys()[1]).toEqual({ t: "mod", key: CTRL, down: false, dragged: true });
   });
 
   test("a finger that moves moves the cursor and types nothing", () => {
@@ -85,8 +87,8 @@ describe("Keypad", () => {
     pad.move(1, 120, 100, 20);
     pad.move(1, 130, 105, 30);
     clock.advance(HOLD_MS);
-    pad.up(1);
-    expect(out).toEqual([
+    pad.up(1, 0);
+    expect(keys()).toEqual([
       { t: "move", dx: 20, dy: 0, ms: 20 },
       { t: "move", dx: 10, dy: 5, ms: 10 },
     ]);
@@ -97,10 +99,10 @@ describe("Keypad", () => {
     pad.down(2, S, 150, 100, 0);
     pad.move(1, 100, 80, 20);
     pad.move(2, 150, 80, 20);
-    pad.up(1);
-    pad.up(2);
+    pad.up(1, 0);
+    pad.up(2, 0);
     clock.advance(HOLD_MS);
-    expect(out).toEqual([
+    expect(keys()).toEqual([
       { t: "scroll", dx: 0, dy: -10 },
       { t: "scroll", dx: 0, dy: -10 },
       { t: "scroll_end" },
@@ -111,9 +113,9 @@ describe("Keypad", () => {
     pad.down(1, A, 100, 100, 0);
     clock.advance(60);
     pad.down(2, S, 150, 100, 60);
-    pad.up(1);
+    pad.up(1, 0);
     clock.advance(60);
-    pad.up(2);
+    pad.up(2, 0);
     expect(said()).toEqual(["tap KeyA", "tap KeyS"]);
   });
 
@@ -122,18 +124,18 @@ describe("Keypad", () => {
     clock.advance(HOLD_MS);
     pad.down(2, S, 200, 100, 300);
     pad.move(2, 230, 100, 320);
-    pad.up(2);
-    pad.up(1);
+    pad.up(2, 0);
+    pad.up(1, 0);
     expect(said()).toEqual(["KeyA↓", "move", "KeyA↑"]);
   });
 
   test("a touch that starts between keys moves the cursor, and never types", () => {
     pad.down(1, null, 100, 100, 0);
     clock.advance(HOLD_MS);
-    pad.up(1);
+    pad.up(1, 0);
     pad.down(2, null, 100, 100, 400);
     pad.move(2, 120, 100, 420);
-    pad.up(2);
+    pad.up(2, 0);
     expect(said()).toEqual(["move"]);
   });
 
@@ -147,3 +149,96 @@ describe("Keypad", () => {
   });
 });
 
+describe("Keypad trackpad mode", () => {
+  /** A finger drags on the keys, then lifts at `t`. */
+  const drag = (id: number, t: number) => {
+    pad.down(id, A, 100, 100, t - 50);
+    pad.move(id, 130, 100, t - 20);
+    pad.up(id, t);
+  };
+  const pads = () => out.filter((o) => o.t === "pad").map((o) => (o as { on: boolean }).on);
+
+  test("a drag turns the keys into a trackpad until PAD_LINGER_MS after the last finger lifts", () => {
+    drag(1, 100);
+    expect(pads()).toEqual([true]);
+    clock.advance(PAD_LINGER_MS - 1);
+    expect(pads()).toEqual([true]);
+    clock.advance(1);
+    expect(pads()).toEqual([true, false]);
+  });
+
+  test("meanwhile a quick tap on a key clicks, once no second touch comes, and starts the wait again", () => {
+    drag(1, 100);
+    clock.advance(500);
+    pad.down(2, A, 100, 100, 600);
+    clock.advance(HOLD_MS * 2); // no hold in trackpad mode
+    pad.up(2, 600 + TAP_MS - 10);
+    expect(said()).toEqual(["move"]);
+    clock.advance(TAP_WAIT_MS);
+    expect(said()).toEqual(["move", "click"]);
+    // the wait for the keys runs from the lift, not from the click
+    clock.advance(PAD_LINGER_MS - TAP_WAIT_MS - 1);
+    expect(pads()).toEqual([true]);
+    clock.advance(1);
+    expect(pads()).toEqual([true, false]);
+    // keys again: a tap types
+    pad.down(3, A, 100, 100, 5000);
+    pad.up(3, 5050);
+    expect(said().at(-1)).toBe("tap KeyA");
+  });
+
+  test("a slow touch in trackpad mode clicks nothing", () => {
+    drag(1, 100);
+    pad.down(2, A, 100, 100, 200);
+    pad.up(2, 200 + TAP_MS + 50);
+    expect(said()).toEqual(["move"]);
+  });
+
+  test("a touch on a modifier in trackpad mode clicks, and the modifier stays as it was", () => {
+    drag(1, 100);
+    pad.down(2, CTRL, 100, 100, 200);
+    pad.up(2, 250);
+    clock.advance(TAP_WAIT_MS);
+    expect(said()).toEqual(["move", "click"]);
+  });
+
+  test("a tap, then a touch that moves, drags with the left button down until it lifts", () => {
+    drag(1, 100);
+    pad.down(2, A, 100, 100, 200);
+    pad.up(2, 250);
+    clock.advance(100);
+    pad.down(3, S, 100, 100, 350);
+    pad.move(3, 140, 100, 380);
+    pad.move(3, 170, 100, 400);
+    pad.up(3, 600);
+    clock.advance(TAP_WAIT_MS);
+    expect(keys().map((o) => (o.t === "drag" ? `drag${o.pressed ? "↓" : "↑"}` : o.t))).toEqual([
+      "move",
+      "drag↓",
+      "move",
+      "move",
+      "drag↑",
+    ]);
+  });
+
+  test("two quick taps double-click", () => {
+    drag(1, 100);
+    pad.down(2, A, 100, 100, 200);
+    pad.up(2, 250);
+    clock.advance(100);
+    pad.down(3, A, 100, 100, 350);
+    pad.up(3, 400);
+    clock.advance(TAP_WAIT_MS);
+    expect(said()).toEqual(["move", "click", "click"]);
+  });
+
+  test("the mode holds while a finger is still down", () => {
+    pad.down(1, A, 100, 100, 0);
+    pad.move(1, 130, 100, 20);
+    clock.advance(PAD_LINGER_MS * 3);
+    expect(pads()).toEqual([true]);
+    pad.up(1, 4000);
+    clock.advance(PAD_LINGER_MS);
+    expect(pads()).toEqual([true, false]);
+  });
+});

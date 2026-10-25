@@ -13,7 +13,7 @@ import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 
 import { Cursor } from "./Cursor";
-import { KeyboardView, type TouchKind } from "./KeyboardView";
+import { BTN_LEFT, KeyboardView, type TouchKind } from "./KeyboardView";
 import { screenFit } from "./geometry";
 import { CAPS_LOCK, type Key, isShift } from "./keyboard";
 import { Keypad, type KeypadOut } from "./keypad";
@@ -60,6 +60,8 @@ export function Desk({ width, height, bottom }: Props) {
   const [mods, setMods] = useState<ReadonlyMap<number, ModState>>(new Map());
   /** The open tool-row tab; null shows the keyboard. */
   const [tab, setTab] = useState<NgTab | null>(null);
+  /** The keys show as a trackpad (`./keypad.ts`: after a pointer gesture, for a while). */
+  const [padMode, setPadMode] = useState(false);
   const [lxc, setLxc] = useState<LxcStats | null>(null);
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
@@ -165,6 +167,22 @@ export function Desk({ width, height, bottom }: Props) {
             keyCode(o.key.code, false);
           }
           break;
+        case "pad":
+          setPadMode(o.on);
+          break;
+        case "click":
+          // A click, as from the Left button: a tapped modifier makes it a Ctrl-click
+          modifiers.current!.keyDown();
+          send({ kind: "button", button: BTN_LEFT, pressed: true });
+          send({ kind: "button", button: BTN_LEFT, pressed: false });
+          withMods((m) => m.keyDone());
+          break;
+        case "drag":
+          // Tap, then touch and move: the left button is down until the finger lifts
+          if (o.pressed) modifiers.current!.keyDown();
+          send({ kind: "button", button: BTN_LEFT, pressed: o.pressed });
+          if (!o.pressed) withMods((m) => m.keyDone());
+          break;
         case "mod": {
           const { code } = o.key;
           const t = performance.now();
@@ -211,7 +229,7 @@ export function Desk({ width, height, bottom }: Props) {
     const pad = keypad.current!;
     if (kind === "down") pad.down(id, key, x, y, performance.now());
     else if (kind === "move") pad.move(id, x, y, performance.now());
-    else if (kind === "up") pad.up(id);
+    else if (kind === "up") pad.up(id, performance.now());
     else pad.cancel(id);
   }, []);
   // A tab opens its page in the keyboard's place; tapped again, the keyboard comes back
@@ -304,6 +322,7 @@ export function Desk({ width, height, bottom }: Props) {
         usage={usage}
         tab={tab}
         onTab={onTab}
+        pad={padMode}
       />
     </div>
   );

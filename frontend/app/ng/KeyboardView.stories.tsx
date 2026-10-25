@@ -15,6 +15,7 @@ function Frame(args: {
   mods: [number, ModState][];
   caps: boolean;
   tab: NgTab | null;
+  pad: boolean;
 }) {
   const [tab, setTab] = useState(args.tab);
   return (
@@ -30,6 +31,7 @@ function Frame(args: {
       usage={{ cpu: "23%", mem: "41.2GB", disk: "812.4GB" }}
       tab={tab}
       onTab={(t) => setTab((open) => (open === t ? null : t))}
+      pad={args.pad}
     />
   );
 }
@@ -38,7 +40,7 @@ const meta = {
   title: "ng/KeyboardView",
   component: Frame,
   parameters: { layout: "centered" },
-  args: { height: 412, fn: false, mods: [], caps: false, tab: null },
+  args: { height: 412, fn: false, mods: [], caps: false, tab: null, pad: false },
 } satisfies Meta<typeof Frame>;
 
 export default meta;
@@ -60,6 +62,9 @@ export const CapsOn: Story = { args: { caps: true } };
 
 /** Fn: F1–F12 on the number row, Home/PgUp/PgDn/End on the arrows. */
 export const FnOn: Story = { args: { fn: true } };
+
+/** The keys in use as a trackpad: faded to a trackpad's outline. */
+export const Trackpad: Story = { args: { pad: true } };
 
 /** The Usage tab open: its page in the keyboard's place (a placeholder for now). */
 export const UsageTab: Story = { args: { tab: "usage" } };

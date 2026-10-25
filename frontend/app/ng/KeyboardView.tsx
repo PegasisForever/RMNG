@@ -39,6 +39,8 @@ type Props = {
    *  keyboard. */
   tab: NgTab | null;
   onTab: (tab: NgTab) => void;
+  /** The keys are in use as a trackpad: they fade to a trackpad's outline, and back. */
+  pad: boolean;
 };
 
 /** The /ng keyboard area: a tool row under the screen (`./ToolRow.tsx`), a full keyboard of
@@ -56,8 +58,13 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
       <ToolRow box={k.tools} usage={p.usage} tab={p.tab} onTab={p.onTab} />
       {p.tab ? <TabPage tab={p.tab} box={k.page} /> : null}
       {/* One handler for the whole key area, gaps too: a drag may start between keys */}
+      {/* The trackpad the keys fade into: four corners of an outline. Touches go through it
+          to the keys, which are the trackpad. */}
+      <PadOutline box={k.keys} shown={p.pad && !p.tab} />
       <div
-        className={`absolute flex flex-col ${p.tab ? "hidden" : ""}`}
+        className={`absolute flex flex-col transition-opacity duration-200 ${p.tab ? "hidden" : ""} ${
+          p.pad ? "opacity-0" : "opacity-100"
+        }`}
         style={{ ...k.keys, gap: GAP }}
         onPointerDown={touch.down}
         onPointerMove={touch.move}
@@ -221,6 +228,26 @@ function WinLogo({ size }: { size: number }) {
     </svg>
   );
 }
+
+/** The trackpad's outline: an L at each corner of the key area. It fades in and out. */
+function PadOutline({ box, shown }: { box: KeysLayoutBox; shown: boolean }) {
+  const corner = "absolute h-6 w-6 border-neutral-500";
+  return (
+    <div
+      aria-hidden
+      data-pad={shown}
+      className={`pointer-events-none absolute transition-opacity duration-200 ${shown ? "opacity-100" : "opacity-0"}`}
+      style={box}
+    >
+      <div className={`${corner} left-0 top-0 rounded-tl-xl border-l-2 border-t-2`} />
+      <div className={`${corner} right-0 top-0 rounded-tr-xl border-r-2 border-t-2`} />
+      <div className={`${corner} bottom-0 left-0 rounded-bl-xl border-b-2 border-l-2`} />
+      <div className={`${corner} bottom-0 right-0 rounded-br-xl border-b-2 border-r-2`} />
+    </div>
+  );
+}
+
+type KeysLayoutBox = ReturnType<typeof keysLayout>["keys"];
 
 /** A mouse button: down while the finger is on it. No background; a thin line divides it from
  *  the one on its left. */
