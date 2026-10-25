@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Desk } from "~/ng/Desk";
 import { attachPwa } from "~/ng/pwa";
+import { isTyping } from "~/ng/systemKeyboard";
 
 export function meta() {
   return [{ title: "RMNG" }];
@@ -55,13 +56,17 @@ export default function Ng() {
     // from frappe-ui#1284). A document as tall as the screen gets the whole screen.
     html.style.minHeight = "min(100lvh, calc(100% + env(safe-area-inset-top)))";
 
-    const update = () => probe.current && setPage(measure(probe.current));
+    // The phone's keyboard can make the page shorter: while it is up the page stays as it was
+    const update = () => probe.current && !isTyping() && setPage(measure(probe.current));
     update();
     // iOS can settle the viewport of a first open after the page loaded, with no resize event
     const settle = [100, 500, 1500].map((ms) => setTimeout(update, ms));
     window.addEventListener("resize", update);
     window.addEventListener("orientationchange", update);
     window.visualViewport?.addEventListener("resize", update);
+    // and is measured again once the keyboard went down
+    const onFocusOut = () => setTimeout(update, 600);
+    document.addEventListener("focusout", onFocusOut);
     const detach = attachPwa();
     return () => {
       detach();
@@ -69,6 +74,7 @@ export default function Ng() {
       window.removeEventListener("resize", update);
       window.removeEventListener("orientationchange", update);
       window.visualViewport?.removeEventListener("resize", update);
+      document.removeEventListener("focusout", onFocusOut);
       if (meta && before !== undefined) meta.content = before;
       html.style.background = body.style.background = "";
       html.style.minHeight = "";

@@ -20,6 +20,7 @@ import { Keypad, type KeypadOut } from "./keypad";
 import { type ModState, Modifiers } from "./modifiers";
 import { SCROLL_GAIN, clampTo, pointerGain } from "./pointer";
 import { MONITOR, type Session, openSession } from "./session";
+import { isTyping, useLift } from "./systemKeyboard";
 import type { NgTab } from "./ToolRow";
 
 /** The iPhone Duo layout's one monitor, in pixels (`wire::iphone_duo_layout`). */
@@ -241,6 +242,17 @@ export function Desk({ width, height, bottom }: Props) {
     if (!pressed) withMods((m) => m.keyDone());
   }, []);
 
+  // While the phone's keyboard is up for a text box on a tab page, the whole screen moves up
+  // so that page is all above the keyboard (its bottom edge is the home bar's top)
+  const lift = useLift(height - bottom);
+  // A touch outside the page puts the phone's keyboard away
+  const onDownCapture = (e: PointerEvent<HTMLDivElement>) => {
+    claim();
+    if (isTyping() && !(e.target as Element).closest("[role=tabpanel]")) {
+      (document.activeElement as HTMLElement).blur();
+    }
+  };
+
   const terminal = spec?.content.mode === "terminal";
   const note = !connected
     ? "Connecting…"
@@ -284,7 +296,11 @@ export function Desk({ width, height, bottom }: Props) {
   };
 
   return (
-    <div className="absolute inset-0 bg-black" onPointerDownCapture={claim}>
+    <div
+      className="absolute inset-0 bg-black transition-transform duration-300 ease-out"
+      style={{ transform: `translateY(${-lift}px)` }}
+      onPointerDownCapture={onDownCapture}
+    >
       <div className="relative overflow-hidden" style={{ height: height - KEYS_HEIGHT }}>
         {/* The session puts the video in here, and touches on it go to the clone; the cursor
             and the note come after it, on top, and let touches through */}

@@ -2,6 +2,7 @@ import { Settings } from "lucide-react";
 import { type PointerEvent, type ReactNode } from "react";
 
 import { Haptic } from "./Haptic";
+import { SettingsPage } from "./SettingsPage";
 import { GAP } from "./geometry";
 
 /** The pages the tool row opens, in place of the keyboard. */
@@ -94,17 +95,16 @@ function TabButton({
   );
 }
 
-/** A tab's page, for now: its name in the middle. */
+/** A tab's page. Those not made yet show their name in the middle. */
 export function TabPage({ tab, box }: { tab: NgTab; box: Props["box"] }) {
   const page = TABS.find((t) => t.tab === tab)!.page;
   return (
-    <div
-      role="tabpanel"
-      aria-label={page}
-      className="absolute flex items-center justify-center text-sm text-neutral-500"
-      style={box}
-    >
-      {page}
+    <div role="tabpanel" aria-label={page} className="absolute" style={box}>
+      {tab === "settings" ? (
+        <SettingsPage />
+      ) : (
+        <div className="flex h-full items-center justify-center text-sm text-neutral-500">{page}</div>
+      )}
     </div>
   );
 }
