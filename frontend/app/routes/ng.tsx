@@ -1,10 +1,13 @@
 // `/ng`: the installed phone app (Add to Home Screen; `public/manifest.webmanifest` opens it
 // here). It is made for one device, the folding iPhone, unfolded and held upright, and shows
-// nothing on any other screen. For now it has no function: it shows the sizes it gets, so
-// the layout can be made for them. The update rules are in `~/ng/pwa.ts`.
+// nothing on any other screen. A line the user drags divides the clone screen (above) from
+// the keyboard and controls (below): `~/ng/SplitView.tsx`. The update rules are in
+// `~/ng/pwa.ts`.
 import { useEffect, useRef, useState } from "react";
 
+import { SplitView } from "~/ng/SplitView";
 import { attachPwa } from "~/ng/pwa";
+import { type Bounds, clampSplit, defaultSplit } from "~/ng/split";
 
 export function meta() {
   return [{ title: "RMNG" }];
@@ -22,75 +25,46 @@ const PAGE_HEIGHTS = [930, SCREEN.height];
 const VIEWPORT =
   "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover";
 
-type Insets = { top: number; right: number; bottom: number; left: number };
+/** Where the line was left, kept on this phone only. */
+const SPLIT_KEY = "ng-split";
 
-type Sizes = {
-  inner: [number, number];
-  visual: [number, number] | null;
-  /** The heights of 100lvh, 100svh and 100dvh. */
-  units: [number, number, number];
-  insets: Insets;
-  display: string;
-  fullscreenApi: boolean;
-};
+type Page = { size: [number, number]; top: number; bottom: number };
 
-function displayMode(): string {
-  for (const mode of ["fullscreen", "standalone", "minimal-ui"])
-    if (window.matchMedia(`(display-mode: ${mode})`).matches) return mode;
-  // iOS reports the home-screen app here, not always through the media query
-  return (navigator as { standalone?: boolean }).standalone ? "standalone (iOS)" : "browser";
-}
-
-type Webkit = {
-  webkitFullscreenEnabled?: boolean;
-  webkitRequestFullscreen?: () => Promise<void> | void;
-};
-
-function measure(probe: HTMLElement, units: HTMLElement): Sizes {
+function measure(probe: HTMLElement): Page {
   const css = getComputedStyle(probe);
   const px = (v: string) => Math.round(parseFloat(v) || 0);
-  const vv = window.visualViewport;
-  const [lvh, svh, dvh] = Array.from(units.children, (c) => (c as HTMLElement).offsetHeight);
   return {
-    inner: [window.innerWidth, window.innerHeight],
-    visual: vv ? [Math.round(vv.width), Math.round(vv.height)] : null,
-    units: [lvh ?? 0, svh ?? 0, dvh ?? 0],
-    insets: {
-      top: px(css.paddingTop),
-      right: px(css.paddingRight),
-      bottom: px(css.paddingBottom),
-      left: px(css.paddingLeft),
-    },
-    display: displayMode(),
-    fullscreenApi: Boolean(
-      document.fullscreenEnabled || (document as Document & Webkit).webkitFullscreenEnabled,
-    ),
+    size: [window.innerWidth, window.innerHeight],
+    top: px(css.paddingTop),
+    bottom: px(css.paddingBottom),
   };
 }
 
 /** Whether the page is the unfolded screen held upright. */
 const fits = ([w, h]: [number, number]) => w === SCREEN.width && PAGE_HEIGHTS.includes(h);
 
-/** Asks for the Fullscreen API, to learn if it hides the clock bar; resolves to the outcome. */
-async function tryFullscreen(): Promise<string> {
-  const el = document.documentElement as HTMLElement & Webkit;
-  const request = el.requestFullscreen?.bind(el) ?? el.webkitRequestFullscreen?.bind(el);
-  if (!request) return "no Fullscreen API";
+function savedSplit(b: Bounds): number {
   try {
-    await request();
-    return document.fullscreenElement ? "on" : "asked, no change";
-  } catch (e) {
-    return `refused: ${e instanceof Error ? e.message : String(e)}`;
+    const y = Number(localStorage.getItem(SPLIT_KEY));
+    if (y > 0) return clampSplit(y, b);
+  } catch {
+    // no storage: start from the default
+  }
+  return defaultSplit(b);
+}
+
+function saveSplit(y: number) {
+  try {
+    localStorage.setItem(SPLIT_KEY, String(y));
+  } catch {
+    // no storage: the line goes back to the default next time
   }
 }
 
-const size = ([w, h]: [number, number]) => `${w} × ${h}`;
-
 export default function Ng() {
   const probe = useRef<HTMLDivElement>(null);
-  const units = useRef<HTMLDivElement>(null);
-  const [sizes, setSizes] = useState<Sizes | null>(null);
-  const [fullscreen, setFullscreen] = useState<string | null>(null);
+  const [page, setPage] = useState<Page | null>(null);
+  const [split, setSplit] = useState<number | null>(null);
 
   useEffect(() => {
     const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
@@ -105,20 +79,15 @@ export default function Ng() {
     // from frappe-ui#1284). A document as tall as the screen gets the whole screen.
     html.style.minHeight = "min(100lvh, calc(100% + env(safe-area-inset-top)))";
 
-    const update = () =>
-      probe.current && units.current && setSizes(measure(probe.current, units.current));
+    const update = () => probe.current && setPage(measure(probe.current));
     update();
     window.addEventListener("resize", update);
     window.addEventListener("orientationchange", update);
-    window.visualViewport?.addEventListener("resize", update);
-    document.addEventListener("fullscreenchange", update);
     const detach = attachPwa();
     return () => {
       detach();
       window.removeEventListener("resize", update);
       window.removeEventListener("orientationchange", update);
-      window.visualViewport?.removeEventListener("resize", update);
-      document.removeEventListener("fullscreenchange", update);
       if (meta && before !== undefined) meta.content = before;
       html.style.background = body.style.background = "";
       html.style.minHeight = "";
@@ -126,70 +95,43 @@ export default function Ng() {
     };
   }, []);
 
-  const ok = sizes !== null && fits(sizes.inner);
-  const safe: [number, number] | null = sizes && [
-    SCREEN.width - sizes.insets.left - sizes.insets.right,
-    SCREEN.height - sizes.insets.top - sizes.insets.bottom,
-  ];
+  const ok = page !== null && fits(page.size);
+  const bounds: Bounds | null = page && { height: SCREEN.height, top: page.top, bottom: page.bottom };
+  // The safe area is known only after the first measure, so the line is placed then
+  useEffect(() => {
+    if (ok && page && split === null)
+      setSplit(savedSplit({ height: SCREEN.height, top: page.top, bottom: page.bottom }));
+  }, [ok, page, split]);
 
   return (
-    // The frame is the whole screen by its known size, not by the page size, so it reaches
-    // the bottom. The red line is its edge; the green dashed line is the safe area inside it.
+    // Sized to the screen, not to the page: the page can be 21 px short (PAGE_HEIGHTS)
     <div
-      className={`fixed left-0 top-0 touch-none select-none overflow-hidden bg-black text-white ${ok ? "outline outline-2 -outline-offset-2 outline-red-500" : "h-full w-full"}`}
-      style={ok ? { width: SCREEN.width, height: SCREEN.height } : undefined}
+      className="fixed left-0 top-0 touch-none select-none overflow-hidden bg-black text-white"
+      style={ok ? SCREEN : { width: "100%", height: "100%" }}
     >
-      <div ref={units} className="pointer-events-none invisible absolute left-0 top-0 flex">
-        <div className="h-lvh w-px" />
-        <div className="h-svh w-px" />
-        <div className="h-dvh w-px" />
-      </div>
       <div
         ref={probe}
-        className="pointer-events-none absolute inset-0 pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]"
-      >
-        {ok ? <div className="h-full w-full border-2 border-dashed border-green-500" /> : null}
-      </div>
-      {sizes && !ok ? (
+        className="pointer-events-none absolute inset-0 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
+      />
+      {page && !ok ? (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-8 text-center text-slate-500">
           <div>Unfold the phone and hold it upright.</div>
-          <div className="font-mono text-sm">page {size(sizes.inner)}</div>
+          <div className="font-mono text-sm">
+            page {page.size[0]} × {page.size[1]}
+          </div>
         </div>
       ) : null}
-      {sizes && ok && safe ? (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 p-8 text-center">
-          <div className="text-3xl font-semibold text-green-400">Unfolded, vertical</div>
-          <div>
-            <div className="text-sm text-slate-400">Screen (CSS px)</div>
-            <div className="font-mono text-6xl font-bold">{size([SCREEN.width, SCREEN.height])}</div>
-          </div>
-          <dl className="grid grid-cols-[auto_auto] gap-x-6 gap-y-1 text-left font-mono text-lg">
-            <dt className="text-slate-400">Inside safe area</dt>
-            <dd>{size(safe)}</dd>
-            <dt className="text-slate-400">Safe area T R B L</dt>
-            <dd>
-              {sizes.insets.top} {sizes.insets.right} {sizes.insets.bottom} {sizes.insets.left}
-            </dd>
-            <dt className="text-slate-400">Page</dt>
-            <dd>{size(sizes.inner)}</dd>
-            <dt className="text-slate-400">Visual viewport</dt>
-            <dd>{sizes.visual ? size(sizes.visual) : "none"}</dd>
-            <dt className="text-slate-400">lvh svh dvh</dt>
-            <dd>{sizes.units.join(" ")}</dd>
-            <dt className="text-slate-400">Display mode</dt>
-            <dd>{sizes.display}</dd>
-            <dt className="text-slate-400">Fullscreen API</dt>
-            <dd>{sizes.fullscreenApi ? "yes" : "no"}</dd>
-          </dl>
-          <button
-            type="button"
-            className="rounded-lg border border-slate-600 px-4 py-2 text-lg"
-            onClick={() => void tryFullscreen().then(setFullscreen)}
-          >
-            Try to hide the clock bar
-          </button>
-          {fullscreen ? <div className="font-mono text-sm text-slate-400">{fullscreen}</div> : null}
-        </div>
+      {ok && bounds && split !== null ? (
+        <SplitView
+          width={SCREEN.width}
+          {...bounds}
+          split={split}
+          onSplit={setSplit}
+          onSplitEnd={(y) => {
+            setSplit(y);
+            saveSplit(y);
+          }}
+        />
       ) : null}
     </div>
   );
