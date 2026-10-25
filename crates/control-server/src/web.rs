@@ -68,6 +68,7 @@ pub fn router(app: App) -> Router {
         .route("/api/fork", post(fork))
         .route("/api/hosts/:id/rebase", post(rebase))
         .route("/api/layout/activate", post(layout_activate))
+        .route("/api/layout/device", post(layout_device))
         .route("/api/delete", post(delete))
         .route("/api/notes/:id", get(notes_get).put(notes_save))
         .route("/api/upload", post(upload))
@@ -1137,7 +1138,7 @@ async fn layout_activate(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // 1. Validate + persist the active_layout.
     let mut cfg = app.config();
-    if !cfg.has_layout(&req.name) {
+    if !cfg.layout_presets.iter().any(|p| p.name == req.name) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!("unknown layout preset '{}'", req.name),
@@ -1146,12 +1147,14 @@ async fn layout_activate(
     cfg.active_layout = req.name.clone();
     crate::config::save(&cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     *app.cfg.write().unwrap() = cfg.clone();
+    // Picking a layout on the desktop takes the clones back from the phone.
+    app.set_phone(false);
 
     // 2. Mirror into ControlState for the sidebar (SSE broadcast).
     mirror_layout_to_state(&app);
 
     // 3. Live-apply to the clone the operator is watching, and to that one only.
-    let monitors = cfg.effective_monitors();
+    let monitors = app.effective_monitors();
     let mut applied = Vec::new();
     let mut errors = Vec::new();
     if let Some(id) = app.store.selected() {
@@ -1167,6 +1170,41 @@ async fn layout_activate(
     Ok(Json(
         serde_json::json!({ "ok": true, "applied": applied, "errors": errors }),
     ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum LayoutDevice {
+    Phone,
+    Desktop,
+}
+
+#[derive(Deserialize)]
+struct LayoutDeviceReq {
+    device: LayoutDevice,
+}
+
+/// `POST /api/layout/device`: the device the operator uses now takes the clones' layout.
+/// `phone` puts the built-in iPhone Duo layout in force (`/ng`), `desktop` the active preset,
+/// which the phone never changes. Each device asks on a real action on it (opening or
+/// touching the phone, a click or a key in a desktop viewer window), never because it sees
+/// the other device's layout, so the two never take turns by themselves. A device that has
+/// the layout already changes nothing; the reply says whether this one did.
+async fn layout_device(
+    State(app): State<App>,
+    Json(req): Json<LayoutDeviceReq>,
+) -> Json<serde_json::Value> {
+    let changed = app.set_phone(matches!(req.device, LayoutDevice::Phone));
+    if changed {
+        // The state change makes the media plane send every window its new window set.
+        mirror_layout_to_state(&app);
+        if let Some(id) = app.store.selected() {
+            if app.media.is_connected(&id) {
+                crate::mediaplane::apply_active_layout(&app, &id);
+            }
+        }
+    }
+    Json(serde_json::json!({ "ok": true, "changed": changed }))
 }
 
 // --- notes + uploads (side stores, not in ControlState) --------------------
@@ -1697,16 +1735,19 @@ async fn uploads_serve(State(app): State<App>, AxPath(file): AxPath<String>) -> 
 
 // --- config API (redacted read / validated write / live-apply) -------------
 
-/// Copy the config's active layout + preset names into ControlState so the sidebar
-/// switcher renders + highlights over the live `/events` SSE. Idempotent; call after any
-/// change to `layout_presets` / `active_layout` and once at boot.
+/// Copy the config's active layout + preset names, and whether the phone has the clones, into
+/// ControlState so the sidebar switcher renders + highlights over the live `/events` SSE.
+/// Idempotent; call after any change to `layout_presets` / `active_layout` / the phone, and
+/// once at boot.
 pub(crate) fn mirror_layout_to_state(app: &App) {
     let cfg = app.config();
     let active = cfg.active_layout.clone();
     let names: Vec<String> = cfg.layout_presets.iter().map(|p| p.name.clone()).collect();
+    let phone = app.phone();
     app.store.mutate(|s| {
         s.active_layout = active.clone();
         s.layout_preset_names = names.clone();
+        s.phone_layout = phone;
     });
 }
 
@@ -3730,6 +3771,27 @@ PLAIN=plainvalue
             seen.contains("\"buildId\":\"boot-"),
             "build identity should fall back to a boot id with no image label: {buf:?}"
         );
+    }
+
+    /// The phone and the desktop each take the layout on an action of their own, and asking
+    /// for a layout a device has already changes nothing, so the two cannot take turns.
+    #[tokio::test]
+    async fn the_phone_takes_the_layout_and_the_desktop_takes_it_back() {
+        let app = test_app();
+        let ask = |device| layout_device(State(app.clone()), Json(LayoutDeviceReq { device }));
+        let desktop = app.config().effective_monitors();
+
+        assert_eq!(ask(LayoutDevice::Phone).await.0["changed"], true);
+        assert!(app.store.get().phone_layout);
+        assert_eq!(app.effective_monitors(), wire::iphone_duo_layout().monitors);
+        assert_eq!(ask(LayoutDevice::Phone).await.0["changed"], false);
+
+        assert_eq!(ask(LayoutDevice::Desktop).await.0["changed"], true);
+        assert!(!app.store.get().phone_layout);
+        assert_eq!(app.effective_monitors(), desktop);
+        assert_eq!(ask(LayoutDevice::Desktop).await.0["changed"], false);
+        // The phone never touched the operator's own choice.
+        assert_eq!(app.config().active_layout, "");
     }
 
     /// Pages go back to the server on each load, so the installed /ng app opens the newest

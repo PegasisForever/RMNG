@@ -1662,7 +1662,7 @@ async fn ensure_payload_current(app: &App, clone_id: &str, headless: bool) -> Re
     exec_ok(
         app,
         clone_id,
-        &restart_clone_daemon_script(&monitors_csv(&app.config().effective_monitors())),
+        &restart_clone_daemon_script(&monitors_csv(&app.effective_monitors())),
         "restart rmng-clone-daemon",
     )
     .await?;

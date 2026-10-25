@@ -506,20 +506,20 @@ pub fn spawn(app: App) {
             // Track the configured window set so a layout-preset change re-broadcasts a fresh
             // ViewSpec even when the *selection* is unchanged (the window set follows the layout,
             // not the daemon's report). Seeded to the current layout so the first tick is quiet.
-            let mut last_monitors = configured_monitors(&app.config());
-            let mut last_scroll = app.config().effective_scroll();
+            let mut last_monitors = configured_monitors(&app);
+            let mut last_scroll = app.effective_scroll();
             loop {
                 match rx.blocking_recv() {
                     // Any state mutation (or a lag) → re-check selection + layout; act on a change.
                     Ok(_) | Err(RecvError::Lagged(_)) => {
                         let state = app.store.get();
                         let sel = app.store.selected();
-                        let monitors = configured_monitors(&app.config());
+                        let monitors = configured_monitors(&app);
                         let monitors_changed = monitors != last_monitors;
                         last_monitors = monitors;
                         // The layout's scroll settings apply in every window as soon as they
                         // change, whatever else did.
-                        let scroll = app.config().effective_scroll();
+                        let scroll = app.effective_scroll();
                         if scroll != last_scroll {
                             last_scroll = scroll;
                             let (mode, speed) = scroll;
@@ -549,7 +549,7 @@ pub fn spawn(app: App) {
                             Some(s) if is_headless(&state, s) => termplane.on_viewers_changed(),
                             Some(_) => broadcast(
                                 &viewers,
-                                &ToBrowser::ViewSpec(desktop_view_spec(&app.config())),
+                                &ToBrowser::ViewSpec(desktop_view_spec(&app)),
                             ),
                             None => {}
                         }
@@ -791,8 +791,8 @@ fn encoder_for(
 /// (`AppConfig::effective_monitors`). Fleet-wide and always known — independent of any live
 /// video — so the window set is identical across every clone. `id` is the layout slot index,
 /// matching the daemon's `monitor_id` convention.
-pub(crate) fn configured_monitors(cfg: &wire::AppConfig) -> Vec<ViewMonitor> {
-    cfg.effective_monitors()
+pub(crate) fn configured_monitors(app: &App) -> Vec<ViewMonitor> {
+    app.effective_monitors()
         .iter()
         .enumerate()
         .map(|(i, m)| ViewMonitor {
@@ -817,7 +817,7 @@ pub(crate) fn configured_monitors(cfg: &wire::AppConfig) -> Vec<ViewMonitor> {
 /// daemon, and a booting one gets the layout from the `Hello` push instead. Cheap to repeat,
 /// because the clone's session holder ignores a layout it already holds.
 pub(crate) fn apply_active_layout(app: &App, clone: &str) {
-    let monitors = app.config().effective_monitors();
+    let monitors = app.effective_monitors();
     if let Err(e) = app.media.set_monitors(clone, &monitors) {
         tracing::debug!("no layout push to '{clone}': {e}");
     }
@@ -907,9 +907,9 @@ pub(crate) fn recv_now(fd: &OwnedFd) -> Option<Vec<u8>> {
 /// The `ViewSpec` for a selection: a `Desktop` view of the configured monitors for a headed
 /// clone, an empty view when nothing is selected. Headless clones are **not** described here —
 /// termplane owns their `Terminal` `ViewSpec` (it carries the live tmux session list).
-fn desktop_view_spec(cfg: &wire::AppConfig) -> ViewSpec {
+fn desktop_view_spec(app: &App) -> ViewSpec {
     ViewSpec {
-        monitors: configured_monitors(cfg),
+        monitors: configured_monitors(app),
         content: ViewContent::Desktop,
     }
 }
@@ -939,7 +939,7 @@ fn prime_viewer_metadata(
     monitor: u32,
     selected: Option<String>,
     state: &wire::ControlState,
-    cfg: &wire::AppConfig,
+    app: &App,
 ) {
     let send = |msg: ToBrowser| {
         outbox.push(Queued::of(&msg));
@@ -951,7 +951,7 @@ fn prime_viewer_metadata(
     };
     // Headed clone → send the Desktop view spec now (headless is left to termplane).
     if !is_headless(state, &sel) {
-        send(ToBrowser::ViewSpec(desktop_view_spec(cfg)));
+        send(ToBrowser::ViewSpec(desktop_view_spec(app)));
     }
     // Last cursor shape of its monitor + current clipboard offer, targeted to this viewer.
     for c in cached_cursors(handle, &sel) {
@@ -1254,7 +1254,7 @@ fn reprime_all(
     // Headed clone → broadcast the Desktop view spec. Headless is owned by termplane: its
     // Terminal spec is broadcast from `on_viewers_changed` on the same selection flip.
     if !is_headless(&app.store.get(), &sel) {
-        broadcast(viewers, &ToBrowser::ViewSpec(desktop_view_spec(&app.config())));
+        broadcast(viewers, &ToBrowser::ViewSpec(desktop_view_spec(app)));
     }
     for c in cached_cursors(handle, &sel) {
         send_to_monitor(viewers, c.monitor_id, &ToBrowser::Cursor(c));
@@ -1302,7 +1302,7 @@ fn serve_clone(
                 // restart does not rebuild every Mutter session at once.
                 let selected = app.store.selected();
                 if push_layout_on_hello(selected.as_deref(), &h.clone_id, h.fresh_session) {
-                    let mons = app.config().effective_monitors();
+                    let mons = app.effective_monitors();
                     if let Err(e) = conn.send(&ServerMsg::SetMonitors { monitors: mons }) {
                         tracing::warn!("SetMonitors on Hello for '{}' failed: {e}", h.clone_id);
                     }
@@ -1515,10 +1515,9 @@ pub(crate) fn join_viewer(
 ) {
     let handle = &app.media;
     let state = app.store.get();
-    let cfg = app.config();
     let selected = app.store.selected();
     // Queue the metadata straight into this viewer's queue.
-    prime_viewer_metadata(handle, &outbox, monitor, selected.clone(), &state, &cfg);
+    prime_viewer_metadata(handle, &outbox, monitor, selected.clone(), &state, app);
     // Register BEFORE the video re-encode so the keyframe reliably fans to this viewer
     // (independent of encode latency).
     register(

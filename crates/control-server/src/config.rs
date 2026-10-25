@@ -25,6 +25,12 @@ pub fn load() -> Result<AppConfig> {
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
+    let mut cfg = cfg;
+    // A build of 2026-10-24 saved the phone's layout as the active one. The phone's layout is
+    // no preset (see `App::phone`), so the operator's layout is the first preset again.
+    if cfg.active_layout == wire::IPHONE_DUO_LAYOUT {
+        cfg.active_layout = cfg.layout_presets.first().map(|p| p.name.clone()).unwrap_or_default();
+    }
     Ok(cfg)
 }
 
@@ -465,9 +471,13 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
             }
         }
     }
-    // Keep active_layout valid after preset edits: if it no longer names a preset (or the
-    // built-in iPhone Duo layout), point it at the first (or clear it when there are none).
-    if !merged.has_layout(&merged.active_layout) {
+    // Keep active_layout valid after preset edits: if it no longer names a preset,
+    // point it at the first (or clear it when there are none).
+    if !merged
+        .layout_presets
+        .iter()
+        .any(|p| p.name == merged.active_layout)
+    {
         merged.active_layout = merged
             .layout_presets
             .first()

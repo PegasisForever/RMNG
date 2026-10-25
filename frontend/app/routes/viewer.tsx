@@ -9,6 +9,7 @@
 import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
+import { layoutClaimer } from "~/lib/layoutClaim";
 import type { FromBrowser } from "~/lib/wire/FromBrowser";
 import type { TermData } from "~/lib/wire/TermData";
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
@@ -80,6 +81,17 @@ export default function Viewer() {
     document.addEventListener("fullscreenchange", onFs);
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, [monitor]);
+
+  // A click or a key here takes the clones' layout back from the phone, if it has it
+  useEffect(() => {
+    const claim = layoutClaimer("desktop");
+    window.addEventListener("pointerdown", claim, true);
+    window.addEventListener("keydown", claim, true);
+    return () => {
+      window.removeEventListener("pointerdown", claim, true);
+      window.removeEventListener("keydown", claim, true);
+    };
+  }, []);
 
   useEffect(() => {
     if (!secure || !box.current || !overlay.current) return;

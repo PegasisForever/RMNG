@@ -24,7 +24,12 @@ activeLayout: string,
 /**
  * Names of all layout presets, in config order — the sidebar's segmented buttons.
  */
-layoutPresetNames: Array<string>, hosts: Array<Clone>, 
+layoutPresetNames: Array<string>, 
+/**
+ * The phone (`/ng` on the iPhone Duo) has the clones: the built-in iPhone Duo layout is
+ * in force, not `active_layout`, until a desktop viewer window takes them back.
+ */
+phoneLayout: boolean, hosts: Array<Clone>, 
 /**
  * The board's columns, left to right. Empty until the operator makes one, in which
  * case the frontend draws a single default column so no clone is ever hidden.

@@ -758,6 +758,7 @@ export function DashboardContainer({
           operations: state.operations,
           presetNames: state.layoutPresetNames ?? [],
           activeLayout: state.activeLayout ?? "",
+          phoneLayout: state.phoneLayout ?? false,
           onActivateLayout: (name) => run(activateLayout(name)),
           onOpenViewer: () => run(openViewerWindows()),
           onOpenSettings: () => setSettingsOpen(true),

@@ -1,6 +1,7 @@
 //! Shared application state handed to every request handler and background job:
 //! the state store, the live config, and the shared HTTP client.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use wire::AppConfig;
@@ -75,6 +76,11 @@ pub struct App {
     /// connect, and a page that sees it change reloads itself, so an upgraded server never
     /// leaves an old bundle talking to it.
     build_id: Arc<RwLock<String>>,
+    /// The phone (`/ng` on the iPhone Duo) is using the clones: the built-in iPhone Duo layout
+    /// is in force in place of the operator's active preset, which stays as it is, until a
+    /// desktop viewer window takes them back (`POST /api/layout/device`). In memory only: a
+    /// restart gives them back to the desktop.
+    phone: Arc<AtomicBool>,
 }
 
 /// A value unique to this process. Used until (and instead of) the image revision, so a dev
@@ -129,6 +135,7 @@ impl App {
             logins: Arc::new(crate::oauth::Logins::new()),
             views: Arc::new(crate::monitor::ViewTracker::new()),
             build_id: Arc::new(RwLock::new(boot_id())),
+            phone: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -151,6 +158,36 @@ impl App {
     /// A cheap snapshot of the current config.
     pub fn config(&self) -> AppConfig {
         self.cfg.read().unwrap().clone()
+    }
+
+    /// Whether the phone has the clones (see the field).
+    pub fn phone(&self) -> bool {
+        self.phone.load(Ordering::Relaxed)
+    }
+
+    /// Give the clones to the phone or back to the desktop; whether that changed anything.
+    pub fn set_phone(&self, phone: bool) -> bool {
+        self.phone.swap(phone, Ordering::Relaxed) != phone
+    }
+
+    /// The monitors in force: the iPhone Duo layout's while the phone has the clones, else
+    /// the active preset's ([`AppConfig::effective_monitors`]).
+    pub fn effective_monitors(&self) -> Vec<wire::MonitorSpec> {
+        if self.phone() {
+            wire::iphone_duo_layout().monitors.clone()
+        } else {
+            self.config().effective_monitors()
+        }
+    }
+
+    /// The scroll mode and speed in force, from the same layout as [`Self::effective_monitors`].
+    pub fn effective_scroll(&self) -> (wire::ScrollMode, f64) {
+        if self.phone() {
+            let p = wire::iphone_duo_layout();
+            (p.scroll_mode, p.scroll_speed)
+        } else {
+            self.config().effective_scroll()
+        }
     }
 
     /// The filesystem root for state-adjacent files (see the field docs).

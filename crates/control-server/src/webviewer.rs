@@ -84,7 +84,7 @@ pub(crate) fn serve(app: App, monitor: u32, tab: Option<String>, ws: WebSocket) 
 
         // First on the socket, so the page knows the build before anything else arrives.
         outbox.push(Queued::of(&ToBrowser::Version { build_id: app.build_id() }));
-        let (mode, speed) = app.config().effective_scroll();
+        let (mode, speed) = app.effective_scroll();
         outbox.push(Queued::of(&ToBrowser::Scroll { mode, speed }));
         let id = mediaplane::next_viewer_id();
         mediaplane::join_viewer(&app, &plane, id, outbox.clone(), monitor, tab);

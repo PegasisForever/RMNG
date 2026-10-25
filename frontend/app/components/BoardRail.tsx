@@ -62,6 +62,9 @@ export interface BoardRailProps {
     presetNames: string[];
     /** The active preset name. */
     activeLayout: string;
+    /** The iPhone Duo has the clones, with its own layout (`/ng`); a click or a key in a
+     *  viewer window takes them back. */
+    phoneLayout?: boolean;
     onActivateLayout: (name: string) => void;
     /** Open the browser viewer: one window per monitor of the active layout. */
     onOpenViewer: () => void;
@@ -84,6 +87,7 @@ export function BoardRail({
     operations,
     presetNames,
     activeLayout,
+    phoneLayout = false,
     onActivateLayout,
     onOpenViewer,
     onOpenSettings,
@@ -148,6 +152,12 @@ export function BoardRail({
                             />
                         </div>
                     </div>
+                ) : null}
+                {phoneLayout ? (
+                    <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                        The iPhone Duo is using the clones. Click or type in a viewer window to
+                        take them back.
+                    </p>
                 ) : null}
 
                 {lxcUsage ? (

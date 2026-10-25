@@ -3,7 +3,7 @@
 // modifiers, Fn, Caps Lock) and the red dot's cursor motion, and turns them into input.
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { activateLayout } from "~/lib/api";
+import { layoutClaimer } from "~/lib/layoutClaim";
 import type { CursorShape } from "~/lib/wire/CursorShape";
 import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
@@ -14,8 +14,6 @@ import { CAPS_LOCK } from "./keyboard";
 import { clampTo, dotVelocity } from "./pointer";
 import { MONITOR, type Session, openSession } from "./session";
 
-/** The built-in layout of the iPhone Duo (`wire::IPHONE_DUO_LAYOUT`). */
-const DUO_LAYOUT = "iPhone Duo";
 /** Its one monitor, in pixels (`wire::iphone_duo_layout`). */
 export const DUO_MONITOR = { width: 1002, height: 810 };
 /** Screen (device) pixels per monitor pixel, each way: text is twice its 1:1 size. */
@@ -60,17 +58,8 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
 
   useEffect(() => {
     if (!box.current) return;
-    let asked = false;
     session.current = openSession(box.current, BOX, {
-      onSpec(s) {
-        setSpec(s);
-        // This page needs the iPhone Duo layout; ask once per open, and only when another is
-        // active (activating re-applies the layout to the clone).
-        if (!asked && !isDuoSpec(s)) {
-          asked = true;
-          activateLayout(DUO_LAYOUT).catch(() => {});
-        }
-      },
+      onSpec: setSpec,
       onCursor(c) {
         if (c.hidden) setHidden(true);
         else if (c.shape) {
@@ -89,6 +78,16 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
       session.current = null;
     };
   }, []);
+
+  // The phone takes the clones' layout when it opens, comes to the front, or is touched; a
+  // click or a key in a desktop viewer window takes it back (`~/lib/layoutClaim.ts`)
+  const claim = useRef(layoutClaimer("phone")).current;
+  useEffect(() => {
+    claim();
+    const onVisible = () => document.visibilityState === "visible" && claim();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [claim]);
 
   /** Moves the cursor while a finger pushes the red dot, once per screen frame. */
   const runDot = (last: number) => (t: number) => {
@@ -144,11 +143,11 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
       : terminal
         ? "This clone has no desktop."
         : spec && !isDuoSpec(spec)
-          ? "Switching to the iPhone Duo layout…"
+          ? "In use on the desktop. Touch to use it here."
           : null;
 
   return (
-    <div className="absolute inset-0 bg-black">
+    <div className="absolute inset-0 bg-black" onPointerDownCapture={claim}>
       <div className="relative overflow-hidden" style={{ height: screenHeight }}>
         {/* The session puts the video in here; the cursor and the note come after it, on top */}
         <div ref={box} className="absolute inset-0" />

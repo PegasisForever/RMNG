@@ -173,6 +173,9 @@ export interface ControlState {
  activeLayout: string;
  /** Layout preset names in config order — powers the sidebar switcher. */
  layoutPresetNames: string[];
+ /** The phone (`/ng` on the iPhone Duo) has the clones: its own layout is in force, not
+  *  `activeLayout`, until a desktop viewer window takes them back. */
+ phoneLayout?: boolean;
  /** The single configured account-pool list, mirrored from config over the live
   *  state — the sidebar usage list groups by this, so pool edits regroup the live
   *  accounts on the next frame with no page reload. */

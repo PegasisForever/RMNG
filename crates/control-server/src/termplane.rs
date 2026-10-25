@@ -297,7 +297,7 @@ async fn run_manager(
 /// different headless clone (session names alone can't distinguish two clones' `main` sessions).
 fn broadcast_view_spec(app: &App, viewers: &Viewers, clone_id: &str, sessions: Vec<String>) {
     let spec = ViewSpec {
-        monitors: configured_monitors(&app.config()),
+        monitors: configured_monitors(app),
         content: ViewContent::Terminal {
             clone: clone_id.to_string(),
             sessions,

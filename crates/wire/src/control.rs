@@ -26,7 +26,7 @@ pub struct MonitorSpec {
 
 /// The name of the built-in layout for the `/ng` phone page on the folding iPhone (see
 /// [`iphone_duo_layout`]). It is in no config and in no layout list, so the operator does not
-/// see it; the page activates it by this name.
+/// see it: it is in force while the phone has the clones (`POST /api/layout/device`).
 pub const IPHONE_DUO_LAYOUT: &str = "iPhone Duo";
 
 /// The built-in layout for the `/ng` page: one monitor that fills the screen area above the
@@ -538,6 +538,10 @@ pub struct ControlState {
     /// Names of all layout presets, in config order — the sidebar's segmented buttons.
     #[serde(default)]
     pub layout_preset_names: Vec<String>,
+    /// The phone (`/ng` on the iPhone Duo) has the clones: the built-in iPhone Duo layout is
+    /// in force, not `active_layout`, until a desktop viewer window takes them back.
+    #[serde(default)]
+    pub phone_layout: bool,
     #[serde(default)]
     pub hosts: Vec<RmngClone>,
     /// The board's columns, left to right. Empty until the operator makes one, in which

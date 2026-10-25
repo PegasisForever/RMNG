@@ -330,6 +330,12 @@ export const ActiveJobs: Story = {
   },
 };
 
+/** The iPhone Duo has the clones with its own layout: the rail says so under the layout
+ *  picker, which keeps the operator's own choice. */
+export const PhoneHasTheClones: Story = {
+  args: { rail: { ...makeRail(), phoneLayout: true }, board: makeBoard() },
+};
+
 /** A ticket has the side panel, as one card instead of two. The clone stays selected
  *  underneath and keeps its stream, so the ticket card takes the board's highlight and the
  *  clone's card gives it up. */
