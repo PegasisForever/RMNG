@@ -257,8 +257,14 @@ export function Desk({ width, height, bottom }: Props) {
         }
         case "swipe":
           // Up or down: the Win key (GNOME's overview); left or right: Ctrl+Alt+arrow (the
-          // workspace beside). Chords of their own, past the page's modifier keys.
-          chord(o.dir === "up" || o.dir === "down" ? ["MetaLeft"] : ["ControlLeft", "AltLeft", o.dir === "left" ? "ArrowLeft" : "ArrowRight"]);
+          // workspace beside), the other way, as the content follows the fingers: a swipe to
+          // the left brings in the workspace on the right. Chords of their own, past the page's
+          // modifier keys.
+          chord(
+            o.dir === "up" || o.dir === "down"
+              ? ["MetaLeft"]
+              : ["ControlLeft", "AltLeft", o.dir === "left" ? "ArrowRight" : "ArrowLeft"],
+          );
           break;
         case "scroll_end":
           send({ kind: "axis_continuous", dx: 0, dy: 0, flags: AXIS_FINGER | AXIS_FINISH });
