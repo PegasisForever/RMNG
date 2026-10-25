@@ -108,27 +108,24 @@ function letterRows(fn: boolean): Key[][] {
   ];
 }
 
-/** Fn, on the left of Space, under the thumb. */
+/** Fn, last on the space row. */
 const FN: Key = { id: "Fn", code: 0, label: "Fn", units: 1, fn: true };
 
-/** A second comma and period at the end of the space row, near the thumb, as on the iPhone
- *  keyboard. Their ids are their own, so a touch on one does not light the symbol row's. */
-const NEAR_PUNCTUATION: Key[] = [
-  { ...shifted("Comma", ",", "<"), id: "CommaRight" },
-  { ...shifted("Period", ".", ">"), id: "PeriodRight" },
-];
+/** A second comma after Space, near the thumb, as on the iPhone keyboard. Its id is its own,
+ *  so a touch on it does not light the symbol row's. */
+const NEAR_COMMA: Key = { ...shifted("Comma", ",", "<"), id: "CommaRight" };
 
-/** Dictation, the last key of the space row. */
+/** Dictation, between the comma and Fn. */
 const DICTATE: Key = { id: "Dictate", code: 0, label: "Dictate", units: 1, dictate: true, icon: "mic" };
 
 const SPACE_ROW: Key[] = [
   mod("ControlLeft", "Ctrl", 1),
   mod("MetaLeft", "Win", 1, { icon: "win" }),
   mod("AltLeft", "Alt", 1),
-  FN,
-  key("Space", "", 4.5),
-  ...NEAR_PUNCTUATION,
+  key("Space", "", 5.5),
+  NEAR_COMMA,
   DICTATE,
+  FN,
 ];
 
 /** The six rows, top first: symbols, numbers, three of letters, space. `fn` puts F1–F12 in

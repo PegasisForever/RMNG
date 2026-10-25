@@ -43,12 +43,12 @@ describe("keyRows", () => {
     expect(bottom).toEqual(keyRows(false)[5]);
   });
 
-  test("the space row ends in a second comma and period, then the dictation key", () => {
+  test("after Space: a second comma, dictation, then Fn", () => {
     const row = keyRows(false)[5];
-    expect(row.map((k) => k.label).slice(-3)).toEqual([",", ".", "Dictate"]);
-    expect(row.slice(-3, -1).map((k) => k.code)).toEqual([find(false, "Comma").code, find(false, "Period").code]);
-    expect(row.at(-1)).toMatchObject({ dictate: true, code: 0, units: 1 });
-    expect(find(false, "Space").units).toBe(4.5);
+    expect(row.map((k) => k.id)).toEqual(["ControlLeft", "MetaLeft", "AltLeft", "Space", "CommaRight", "Dictate", "Fn"]);
+    expect(row[4].code).toBe(find(false, "Comma").code);
+    expect(row[5]).toMatchObject({ dictate: true, code: 0, units: 1 });
+    expect(find(false, "Space").units).toBe(5.5);
   });
 
   test("keys send their evdev codes", () => {
@@ -62,11 +62,10 @@ describe("keyRows", () => {
     expect(mods.sort()).toEqual(["AltLeft", "ControlLeft", "MetaLeft", "ShiftLeft"].sort());
   });
 
-  test("Fn is on the left of Space, in both modes, and sends nothing", () => {
+  test("Fn is last on the space row, in both modes, and sends nothing", () => {
     for (const fn of [false, true]) {
-      const row = keyRows(fn)[5];
-      expect(row.map((k) => k.id).slice(0, 5)).toEqual(["ControlLeft", "MetaLeft", "AltLeft", "Fn", "Space"]);
-      expect(row[3].code).toBe(0);
+      const last = keyRows(fn)[5].at(-1)!;
+      expect([last.id, last.code]).toEqual(["Fn", 0]);
     }
   });
 });

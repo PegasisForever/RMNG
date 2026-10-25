@@ -66,7 +66,7 @@ export const CapsOn: Story = { args: { caps: true } };
 /** Fn: F1–F12 on the symbol row; Home, PgUp, PgDn, End and the arrows on the number row. */
 export const FnOn: Story = { args: { fn: true } };
 
-/** Dictation listening: its key, last on the space row, is red. */
+/** Dictation listening: its key, between the comma and Fn, is red. */
 export const Dictating: Story = { args: { dictation: "listening" } };
 
 /** The keys in use as a trackpad: faded to a trackpad's outline. */
