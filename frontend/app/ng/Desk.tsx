@@ -12,6 +12,7 @@ import type { CursorShape } from "~/lib/wire/CursorShape";
 import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 import { CODE_TO_EVDEV } from "~/viewer/keycodes";
+import type { SoundReport } from "~/viewer/protocol";
 
 import { Cursor } from "./Cursor";
 import { Dictation, type DictationState, textToKeysyms } from "./dictation";
@@ -71,6 +72,8 @@ export function Desk({ width, height, bottom }: Props) {
   const live = useLiveState(useRef(emptyState()).current);
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
+  /** How the clone's sound plays here, for the Usage page. */
+  const [soundReport, setSoundReport] = useState<SoundReport | null>(null);
   /** The layout's scroll speed, percent: the server says it when the socket opens. */
   const scrollSpeed = useRef(DUO_SCROLL_SPEED);
   /** The cursor where this page last put it, and when. */
@@ -100,6 +103,7 @@ export function Desk({ width, height, bottom }: Props) {
       },
       onConnected: setConnected,
       onScrollSpeed: (speed) => (scrollSpeed.current = speed),
+      onSoundReport: setSoundReport,
     });
     return () => {
       session.current?.detach();
@@ -403,7 +407,7 @@ export function Desk({ width, height, bottom }: Props) {
         className={`absolute ${tab ? "" : "hidden"}`}
         style={{ ...pageBox, top: height - KEYS_HEIGHT + pageBox.top }}
       >
-        <NgPagesContainer tab={tab} onTab={setTab} state={live.state} stats={live.stats} />
+        <NgPagesContainer tab={tab} onTab={setTab} state={live.state} stats={live.stats} sound={soundReport} />
       </div>
     </div>
   );

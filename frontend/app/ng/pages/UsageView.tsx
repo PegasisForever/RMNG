@@ -22,6 +22,7 @@ import { type AcctOrder, orderedWithinBuckets } from "~/lib/accountOrder";
 import { until } from "~/lib/format";
 import type { ClaudeUsage, ClaudeUsageWindow, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import type { SoundReport } from "~/viewer/protocol";
 
 import { EmptyLine, HeaderButton, Page, PageHeader } from "./ui";
 
@@ -36,6 +37,8 @@ export interface UsageViewProps {
   now: number | null;
   /** All operations; the running ones show at the top. */
   operations: Operation[];
+  /** How the clone's sound plays on this phone (the line at the bottom); null before it plays. */
+  sound?: SoundReport | null;
   onRefresh: () => void | Promise<void>;
   /** Sign in to an account that takes over from this dead one. */
   onReplaceAccount: (account: ClaudeUsage) => void;
@@ -47,6 +50,7 @@ export function UsageView({
   groups,
   now,
   operations,
+  sound = null,
   onRefresh,
   onReplaceAccount,
 }: UsageViewProps) {
@@ -114,6 +118,7 @@ export function UsageView({
             );
           })
         )}
+        {sound ? <SoundLine r={sound} /> : null}
       </div>
     </Page>
   );
@@ -201,5 +206,18 @@ function UsageBar({
         {reset == null || Number.isNaN(reset) ? "" : reset <= (now ?? 0) ? "reset" : `in ${until(reset - (now ?? 0))}`}
       </span>
     </div>
+  );
+}
+
+/** How the clone's sound plays here: the buffer's depth now, the gaps (packets that came too
+ *  late, each one a short break in the sound) and the packets dropped since the sound started,
+ *  and the phone's audio settings. To tell crackles from the network from those of the phone. */
+function SoundLine({ r }: { r: SoundReport }) {
+  const ms = (s: number) => `${Math.round(s * 1000)} ms`;
+  return (
+    <p className="px-1 pt-1 text-[11px] tabular-nums text-neutral-500">
+      Sound here: buffer {r.target * 10} ms · {r.late} late · {r.dropped} dropped · {r.sampleRate} Hz · output{" "}
+      {ms(r.baseLatency + r.outputLatency)}
+    </p>
   );
 }

@@ -200,3 +200,21 @@ test("a reset drops what waits", () => {
   b.reset();
   expect(play(b, 4).every((v) => v === 0)).toBe(true);
 });
+
+test("wider limits (the phone's): it starts at their minimum, grows to their maximum, and drops past it", () => {
+  const b = new SoundBuffer({ min: 4, max: 15 });
+  expect(b.target).toBe(4);
+  for (let i = 0; i < 3; i++) b.push(packet(0.5));
+  expect(play(b, 1).every((v) => v === 0)).toBe(true); // 3 of 4 wait: not yet
+  // Late underruns, one after another, deepen it up to the maximum and no further
+  for (let i = 0; i < 20; i++) {
+    for (let k = 0; k < b.target; k++) b.push(packet(0.5));
+    play(b, 100); // until it runs dry: a late underrun each time
+
+  }
+  expect(b.target).toBe(15);
+  // The ceiling is as far above the maximum as the default one is above its own
+  const d = new SoundBuffer({ min: 4, max: 15 });
+  for (let i = 0; i < 15 + MAX_PACKETS - TARGET_MAX + 1; i++) d.push(packet(0.5));
+  expect(d.dropped).toBe(1);
+});

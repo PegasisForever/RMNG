@@ -75,6 +75,7 @@ import type { ClaudeUsage, Clone, ControlState } from "~/lib/types";
 import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
+import type { SoundReport } from "~/viewer/protocol";
 
 import { type NgTab, TABS as TAB_INFO } from "../ToolRow";
 import { ClonesView } from "./ClonesView";
@@ -110,6 +111,7 @@ export function NgPagesContainer({
   onTab,
   state,
   stats,
+  sound,
 }: {
   /** The page that shows; null while the keyboard shows. */
   tab: NgTab | null;
@@ -117,6 +119,8 @@ export function NgPagesContainer({
   onTab: (tab: NgTab | null) => void;
   state: ControlState;
   stats: Record<string, ContainerStats>;
+  /** How the clone's sound plays on this phone; null before it plays. */
+  sound: SoundReport | null;
 }) {
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => p.then(() => setError(null)).catch((e: Error) => setError(e.message));
@@ -466,6 +470,7 @@ export function NgPagesContainer({
             groups={state.groups}
             now={now}
             operations={state.operations}
+            sound={sound}
             onRefresh={() => refreshUsage().catch((e: Error) => setError(e.message))}
             onReplaceAccount={(a) => open({ kind: "import", replacing: a })}
           />

@@ -7,7 +7,7 @@
 //   in front of it. `target` starts at TARGET_MIN.
 // - When the packets run out (an underrun), fade out and wait for `target` packets again. An
 //   underrun after the quiet marker is the end of a sound; any other one means a packet came
-//   late, and `target` grows by one, up to TARGET_MAX.
+//   late, and `target` grows by one, up to TARGET_MAX (or the limits given).
 // - More than `target` packets for TRIM_BLOCKS in a row, or more than MAX_PACKETS at all: drop
 //   one packet, with a crossfade over it. This also takes up the clock drift when the clone's
 //   clock runs faster than the sound card's; when it runs slower, the drift is an underrun.
@@ -28,6 +28,13 @@ export const PACKET_FRAMES = 480;
 export const TARGET_MIN = 2;
 export const TARGET_MAX = 6;
 export const MAX_PACKETS = TARGET_MAX + 2;
+
+/** The range `target` moves in, in packets; the defaults are the ones above. A phone on Wi-Fi
+ *  gets a wider one (`~/ng/session.ts`), as its packets come less evenly. */
+export interface BufferLimits {
+  min: number;
+  max: number;
+}
 /** About 0.67 s of 128-frame blocks. */
 export const TRIM_BLOCKS = 250;
 /** About 5.3 s of 128-frame blocks. */
@@ -43,7 +50,9 @@ export class SoundBuffer {
   /** Packets to play, oldest first, and the frames of the first one played already. */
   private queue: Packet[] = [];
   private off = 0;
-  target = TARGET_MIN;
+  private readonly min: number;
+  private readonly max: number;
+  target: number;
   private playing = false;
   /** The quiet marker came, and no packet since: the packets that do not come are silence. */
   private quiet = false;
@@ -65,10 +74,16 @@ export class SoundBuffer {
   late = 0;
   dropped = 0;
 
+  constructor(limits: BufferLimits = { min: TARGET_MIN, max: TARGET_MAX }) {
+    this.min = limits.min;
+    this.max = limits.max;
+    this.target = this.min;
+  }
+
   push(p: Packet) {
     this.quiet = false;
     this.queue.push(p);
-    if (this.queue.length > MAX_PACKETS) this.drop();
+    if (this.queue.length > this.max + MAX_PACKETS - TARGET_MAX) this.drop();
   }
 
   /** The quiet marker: the clone stopped sending because its sound is silent. */
@@ -171,7 +186,7 @@ export class SoundBuffer {
     }
     this.fewest = Math.min(this.fewest, this.avail());
     if (++this.clean >= DECAY_BLOCKS) {
-      if (this.target > TARGET_MIN && this.fewest >= 2 * PACKET_FRAMES) this.target--;
+      if (this.target > this.min && this.fewest >= 2 * PACKET_FRAMES) this.target--;
       this.clean = 0;
       this.fewest = Infinity;
     }
@@ -184,7 +199,7 @@ export class SoundBuffer {
     this.tail = FADE_FRAMES;
     if (this.quiet) return;
     this.late++;
-    this.target = Math.min(TARGET_MAX, this.target + 1);
+    this.target = Math.min(this.max, this.target + 1);
     this.clean = 0;
     this.fewest = Infinity;
   }

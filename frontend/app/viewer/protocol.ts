@@ -221,6 +221,14 @@ export interface SoundStats {
   dropped: number;
 }
 
+/** What the page tells about its sound (`~/viewer/sound.ts`): the worklet's last report, and the
+ *  AudioContext's rate and latencies (s). */
+export interface SoundReport extends SoundStats {
+  sampleRate: number;
+  baseLatency: number;
+  outputLatency: number;
+}
+
 /** Worker → page. */
 export type WorkerOut =
   | { type: "message"; msg: ToBrowser }

@@ -8,7 +8,7 @@ import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { TouchMsg } from "~/lib/wire/TouchMsg";
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
-import type { WorkerIn, WorkerOut } from "~/viewer/protocol";
+import type { SoundReport, WorkerIn, WorkerOut } from "~/viewer/protocol";
 import { attachSound } from "~/viewer/sound";
 
 export interface Session {
@@ -24,9 +24,15 @@ export interface SessionEvents {
   onSpec(spec: ViewSpec): void;
   onCursor(c: CursorMeta): void;
   onConnected(connected: boolean): void;
+  /** The sound's report, once a second while it plays (`~/viewer/sound.ts`). */
+  onSoundReport(r: SoundReport): void;
   /** The active layout's scroll speed, percent (the server's `scroll` message). */
   onScrollSpeed(speed: number): void;
 }
+
+/** The phone's sound buffer range, in 10 ms packets. */
+const PHONE_SOUND_MIN = 4;
+const PHONE_SOUND_MAX = 15;
 
 /** The monitor shown, and the only one input goes to. */
 export const MONITOR = 0;
@@ -78,8 +84,14 @@ export function openSession(box: HTMLElement, events: SessionEvents): Session {
     },
     [offscreen],
   );
-  // The only monitor, so the only window: it plays the clone's sound
-  const sound = attachSound(post);
+  // The only monitor, so the only window: it plays the clone's sound. Over the phone's Wi-Fi
+  // packets come less evenly than to a desktop, and the phone also decodes the video: a deeper
+  // jitter buffer (40 to 150 ms) and iOS's longer output buffer, so the sound does not crack.
+  const sound = attachSound(post, {
+    latencyHint: "playback",
+    limits: { min: PHONE_SOUND_MIN, max: PHONE_SOUND_MAX },
+    onReport: events.onSoundReport,
+  });
 
   return {
     send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),

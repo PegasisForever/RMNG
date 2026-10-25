@@ -35,5 +35,12 @@ export const NoPools: Story = { args: { groups: [] } };
 /** Jobs running on the server show at the top. */
 export const RunningJobs: Story = { args: { operations: [cloneOperation, deleteOperation] } };
 
+/** The clone's sound plays: its line at the bottom. */
+export const WithSound: Story = {
+  args: {
+    sound: { target: 6, late: 3, dropped: 1, sampleRate: 48000, baseLatency: 0.005, outputLatency: 0.012 },
+  },
+};
+
 /** No accounts imported yet. */
 export const NoAccounts: Story = { args: { accounts: [] } };

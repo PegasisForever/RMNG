@@ -5,23 +5,27 @@
 //
 // Relative imports only: Vite builds the worklet (`?worker&url`) without the app's path aliases.
 import type { SoundIn } from "./protocol";
-import { SoundBuffer } from "./sound-buffer";
+import { type BufferLimits, SoundBuffer } from "./sound-buffer";
 
 // The AudioWorklet scope; TypeScript's DOM library does not declare it.
 declare class AudioWorkletProcessor {
   readonly port: MessagePort;
 }
-declare function registerProcessor(name: string, ctor: new () => AudioWorkletProcessor): void;
+declare function registerProcessor(
+  name: string,
+  ctor: new (options?: { processorOptions?: { limits?: BufferLimits } }) => AudioWorkletProcessor,
+): void;
 
 /** How often the processor tells the page how the buffer does (`SoundStats`). */
 const STATS_MS = 1000;
 
 class SoundProcessor extends AudioWorkletProcessor {
-  private buf = new SoundBuffer();
+  private buf: SoundBuffer;
   private statsAt = 0;
 
-  constructor() {
+  constructor(options?: { processorOptions?: { limits?: BufferLimits } }) {
     super();
+    this.buf = new SoundBuffer(options?.processorOptions?.limits);
     // The page sends the worker's port once; the samples come on it.
     this.port.onmessage = (e: MessageEvent<MessagePort>) => {
       e.data.onmessage = (m: MessageEvent<SoundIn>) => this.onSound(m.data);
