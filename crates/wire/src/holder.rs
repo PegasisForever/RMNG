@@ -48,7 +48,10 @@ use crate::socket::{
 /// Version 4 carries the clipboard read timeout: a running holder kept its one-at-a-time read
 /// gate held forever after one stuck transfer, so every later clipboard read from that clone
 /// hung until the holder restarted.
-pub const PROTO_VERSION: u32 = 4;
+///
+/// Version 5 carries [`ToHolder::Touch`], the touch screen of `/ng`: a running holder ignores
+/// it (it decodes to `Unknown`), so touch would wait for each clone's next restart.
+pub const PROTO_VERSION: u32 = 5;
 
 /// Where the holder binds and the daemon connects.
 ///
