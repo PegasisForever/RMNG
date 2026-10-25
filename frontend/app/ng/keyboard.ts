@@ -25,7 +25,8 @@ export type Key = {
   icon?: "tab" | "enter" | "shift" | "win";
 };
 
-/** Every row is this many units wide: ten letters and a Tab. */
+/** The rows are this many units wide: ten letters and a Shift's worth more. The Tab row is
+ *  half a unit shorter (a 1-unit Tab, as on a real keyboard), left aligned. */
 export const ROW_UNITS = 11.5;
 /** The keyboard's rows. */
 export const ROWS = 6;
@@ -72,7 +73,7 @@ const SYMBOL_ROW = even([
 ]);
 
 const LETTER_ROWS = [
-  [key("Tab", "Tab", 1.5, { icon: "tab" }), ...letters("qwertyuiop")],
+  [key("Tab", "Tab", 1, { icon: "tab" }), ...letters("qwertyuiop")],
   [
     key("CapsLock", "Caps", 1.25),
     ...letters("asdfghjkl"),

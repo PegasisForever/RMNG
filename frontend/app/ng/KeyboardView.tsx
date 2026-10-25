@@ -186,7 +186,11 @@ function KeyButton({
       className={`${KEY} ${tone(down, state !== undefined)}`}
       style={{ width, height: size, fontSize: size * (label.length > 1 ? 0.25 : 0.38) }}
     >
-      {k.icon ? <KeyIcon icon={k.icon} size={size * 0.42} locked={state === "locked"} /> : label}
+      {k.icon ? (
+        <KeyIcon icon={k.icon} size={size * (k.icon === "tab" ? 0.34 : 0.42)} locked={state === "locked"} />
+      ) : (
+        label
+      )}
       <Haptic />
     </div>
   );

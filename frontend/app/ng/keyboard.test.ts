@@ -6,8 +6,11 @@ const find = (fn: boolean, id: string) => keyRows(fn).flat().find((k) => k.id ==
 
 describe("keyRows", () => {
   for (const fn of [false, true]) {
-    test(`every row is ${ROW_UNITS} units wide (fn ${fn})`, () => {
-      for (const row of keyRows(fn)) expect(row.reduce((s, k) => s + k.units, 0)).toBeCloseTo(ROW_UNITS, 9);
+    test(`every row is ${ROW_UNITS} units wide but the Tab row (fn ${fn})`, () => {
+      const widths = keyRows(fn).map((row) => row.reduce((s, k) => s + k.units, 0));
+      // The Tab row (the third) is half a unit short: its Tab is one unit
+      expect(widths[2]).toBe(ROW_UNITS - 0.5);
+      for (const w of [...widths.slice(0, 2), ...widths.slice(3)]) expect(w).toBeCloseTo(ROW_UNITS, 9);
     });
 
     test(`no key is in a row set twice (fn ${fn})`, () => {
