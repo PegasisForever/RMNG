@@ -7,7 +7,7 @@ const find = (fn: boolean, id: string) => keyRows(fn).flat().find((k) => k.id ==
 describe("keyRows", () => {
   for (const fn of [false, true]) {
     test(`every row is ${ROW_UNITS} units wide (fn ${fn})`, () => {
-      for (const row of keyRows(fn)) expect(row.reduce((s, k) => s + k.units, 0)).toBe(ROW_UNITS);
+      for (const row of keyRows(fn)) expect(row.reduce((s, k) => s + k.units, 0)).toBeCloseTo(ROW_UNITS, 9);
     });
 
     test(`no key is in a row set twice (fn ${fn})`, () => {
@@ -20,8 +20,14 @@ describe("keyRows", () => {
     expect(keyRows(false)[0].map((k) => k.label).join(" ")).toBe("Esc ` 1 2 3 4 5 6 7 8 9 0 - = ⌫");
   });
 
+  test("the symbols beside the letters have a row of their own; the letter rows have none", () => {
+    const rows = keyRows(false);
+    expect(rows[1].map((k) => k.label).join(" ")).toBe("[ ] \\ ; ' , . /");
+    for (const row of rows.slice(2, 5)) expect(row.every((k) => k.letter || k.label.length > 1)).toBe(true);
+  });
+
   test("Fn swaps the number row for F1 to F12 and the arrows for Home PgUp PgDn End", () => {
-    const [top, , , , bottom] = keyRows(true);
+    const [top, , , , , bottom] = keyRows(true);
     expect(top.map((k) => k.label).join(" ")).toBe("Esc F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 Del ⌫");
     expect(bottom.slice(-4).map((k) => k.label)).toEqual(["Home", "PgUp", "PgDn", "End"]);
   });
@@ -39,7 +45,7 @@ describe("keyRows", () => {
 
   test("Fn is where the right Alt and Ctrl were, in both modes, and sends nothing", () => {
     for (const fn of [false, true]) {
-      const row = keyRows(fn)[4];
+      const row = keyRows(fn)[5];
       expect(row.map((k) => k.id).slice(0, 5)).toEqual(["ControlLeft", "MetaLeft", "AltLeft", "Space", "Fn"]);
       expect(row[4].code).toBe(0);
     }

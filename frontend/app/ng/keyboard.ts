@@ -1,4 +1,6 @@
-// The /ng on-screen keyboard: a full Linux (US) keyboard in five rows of 15 units each. Every
+// The /ng on-screen keyboard: a full Linux (US) keyboard in six rows of ROW_UNITS each. The
+// symbols that sit beside the letters on a real keyboard have a row of their own, so the
+// letters get the width. Every
 // key sends its evdev code (`~/viewer/keycodes.ts`), so the clone's own keyboard layout
 // applies, as with a real keyboard. The labels follow the latched Shift and Caps Lock.
 import { CODE_TO_EVDEV } from "~/viewer/keycodes";
@@ -21,10 +23,10 @@ export type Key = {
   fn?: boolean;
 };
 
-/** Every row is this many units wide. */
-export const ROW_UNITS = 15;
+/** Every row is this many units wide: ten letters and a Tab. */
+export const ROW_UNITS = 11.5;
 /** The keyboard's rows. */
-export const ROWS = 5;
+export const ROWS = 6;
 
 function key(id: string, label: string, units = 1, extra: Partial<Key> = {}): Key {
   const code = CODE_TO_EVDEV[id];
@@ -38,7 +40,10 @@ const mod = (id: string, label: string, units: number) => key(id, label, units, 
 
 const DIGITS = [...")!@#$%^&*("].map((shift, i) => shifted(`Digit${i}`, String(i), shift));
 
-const NUMBER_ROW = [
+/** A row of keys that share its width evenly (the number row, the symbol row). */
+const even = (keys: Key[]) => keys.map((k) => ({ ...k, units: ROW_UNITS / keys.length }));
+
+const NUMBER_ROW = even([
   key("Escape", "Esc"),
   shifted("Backquote", "`", "~"),
   ...DIGITS.slice(1),
@@ -46,38 +51,30 @@ const NUMBER_ROW = [
   shifted("Minus", "-", "_"),
   shifted("Equal", "=", "+"),
   key("Backspace", "⌫"),
-];
+]);
 
-const F_ROW = [
+const F_ROW = even([
   key("Escape", "Esc"),
   ...Array.from({ length: 12 }, (_, i) => key(`F${i + 1}`, `F${i + 1}`)),
   key("Delete", "Del"),
   key("Backspace", "⌫"),
-];
+]);
+
+const SYMBOL_ROW = even([
+  shifted("BracketLeft", "[", "{"),
+  shifted("BracketRight", "]", "}"),
+  shifted("Backslash", "\\", "|"),
+  shifted("Semicolon", ";", ":"),
+  shifted("Quote", "'", '"'),
+  shifted("Comma", ",", "<"),
+  shifted("Period", ".", ">"),
+  shifted("Slash", "/", "?"),
+]);
 
 const LETTER_ROWS = [
-  [
-    key("Tab", "Tab", 1.5),
-    ...letters("qwertyuiop"),
-    shifted("BracketLeft", "[", "{"),
-    shifted("BracketRight", "]", "}"),
-    key("Backslash", "\\", 1.5, { shift: "|" }),
-  ],
-  [
-    key("CapsLock", "Caps", 1.75),
-    ...letters("asdfghjkl"),
-    shifted("Semicolon", ";", ":"),
-    shifted("Quote", "'", '"'),
-    key("Enter", "Enter", 2.25),
-  ],
-  [
-    mod("ShiftLeft", "Shift", 2.25),
-    ...letters("zxcvbnm"),
-    shifted("Comma", ",", "<"),
-    shifted("Period", ".", ">"),
-    shifted("Slash", "/", "?"),
-    mod("ShiftRight", "Shift", 2.75),
-  ],
+  [key("Tab", "Tab", 1.5), ...letters("qwertyuiop")],
+  [key("CapsLock", "Caps", 1.25), ...letters("asdfghjkl"), key("Enter", "Enter", 1.25)],
+  [mod("ShiftLeft", "Shift", 2.25), ...letters("zxcvbnm"), mod("ShiftRight", "Shift", 2.25)],
 ];
 
 const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown", "↓"), key("ArrowRight", "→")];
@@ -85,23 +82,23 @@ const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown",
 const FN_ARROWS = [key("Home", "Home"), key("PageUp", "PgUp"), key("PageDown", "PgDn"), key("End", "End")];
 
 /** Fn, where a laptop has the right Alt and Ctrl. */
-const FN: Key = { id: "Fn", code: 0, label: "Fn", units: 1.25, fn: true };
+const FN: Key = { id: "Fn", code: 0, label: "Fn", units: 1, fn: true };
 
 function spaceRow(fn: boolean): Key[] {
   return [
-    mod("ControlLeft", "Ctrl", 1.25),
-    mod("MetaLeft", "Win", 1.25),
-    mod("AltLeft", "Alt", 1.25),
-    key("Space", "", 6),
+    mod("ControlLeft", "Ctrl", 1),
+    mod("MetaLeft", "Win", 1),
+    mod("AltLeft", "Alt", 1),
+    key("Space", "", 3.5),
     FN,
     ...(fn ? FN_ARROWS : ARROWS),
   ];
 }
 
-/** The five rows, top first. `fn` puts F1–F12 in place of the number row and Home, PgUp,
- *  PgDn, End in place of the arrows. */
+/** The six rows, top first: numbers, symbols, three of letters, space. `fn` puts F1–F12 in
+ *  place of the number row and Home, PgUp, PgDn, End in place of the arrows. */
 export function keyRows(fn: boolean): Key[][] {
-  return [fn ? F_ROW : NUMBER_ROW, ...LETTER_ROWS, spaceRow(fn)];
+  return [fn ? F_ROW : NUMBER_ROW, SYMBOL_ROW, ...LETTER_ROWS, spaceRow(fn)];
 }
 
 /** The evdev codes of the Shift keys. */

@@ -1,13 +1,14 @@
 import { type PointerEvent, type ReactNode, memo, useState } from "react";
 
-import { GAP, TOOL_H, keysLayout } from "./geometry";
+import { Haptic } from "./Haptic";
+import { GAP, keysLayout } from "./geometry";
 import { type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 
 /** What the key area is: the keys, or a trackpad. */
 export type PadMode = "keys" | "trackpad";
 
 /** Spare buttons kept free in the tool row for later. */
-const SPARE_BUTTONS = 3;
+const SPARE_BUTTONS = 4;
 
 type Props = {
   /** The keyboard area, CSS px, and the space kept clear at its bottom for the home bar. */
@@ -30,23 +31,18 @@ type Props = {
   onTrackpadButton: (down: boolean) => void;
   /** A finger on the trackpad: its id and where it is (CSS px, page coordinates). */
   onPad: (kind: "down" | "move" | "up", id: number, x: number, y: number) => void;
-  /** Open the keyboard / screen split dialog. */
-  onSplit: () => void;
 };
 
-/** The /ng keyboard area: a tool row over a full keyboard with square keys, at the bottom of
- *  the area. In trackpad mode the keys' place is a trackpad; the tool row stays. Each finger
- *  works on its own, so the Trackpad button can be held while other fingers use the pad. */
+/** The /ng keyboard area: a tool row at its top, under the screen, and a full keyboard at its
+ *  bottom, its keys 1.3 times as tall as wide. In trackpad mode a trackpad takes all the space
+ *  under the tool row. Each finger works on its own, so the Trackpad button can be held while
+ *  other fingers use the pad. A tap on a key or a button gives a haptic tick on iOS. */
 export const KeyboardView = memo(function KeyboardView(p: Props) {
   const k = keysLayout(p.width, p.height, p.bottom);
   const shift = SHIFTS.some((c) => p.latched.has(c));
-  const keyH = k.pitch - GAP;
   return (
     <div className="relative touch-none select-none bg-black" style={{ width: p.width, height: p.height }}>
-      <div
-        className="absolute flex"
-        style={{ left: k.left, top: k.top - GAP - TOOL_H, width: k.width, height: TOOL_H, gap: GAP }}
-      >
+      <div className="absolute flex" style={{ ...k.tools, gap: GAP }}>
         <Tool
           grow={2}
           active={p.mode === "trackpad"}
@@ -55,23 +51,22 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
         >
           Trackpad
         </Tool>
-        <Tool onDown={p.onSplit}>Split</Tool>
         {Array.from({ length: SPARE_BUTTONS }, (_, i) => (
           <Tool key={i} />
         ))}
       </div>
       {p.mode === "trackpad" ? (
-        <TrackpadSurface box={k} onPad={p.onPad} />
+        <TrackpadSurface box={k.pad} onPad={p.onPad} />
       ) : (
-        <div className="absolute flex flex-col" style={{ left: k.left, top: k.top, width: k.width, gap: GAP }}>
+        <div className="absolute flex flex-col" style={{ left: k.keys.left, top: k.keys.top, width: k.keys.width, gap: GAP }}>
           {keyRows(p.fn).map((row, i) => (
-            <div key={i} className="flex" style={{ gap: GAP, height: keyH }}>
+            <div key={i} className="flex" style={{ gap: GAP, height: k.keyHeight }}>
               {row.map((key) => (
                 <KeyButton
                   key={key.id}
                   k={key}
                   width={key.units * k.pitch - GAP}
-                  size={keyH}
+                  size={k.keyHeight}
                   label={keyLabel(key, shift, p.caps)}
                   latched={key.fn ? p.fn : p.latched.has(key.code)}
                   onKey={p.onKey}
@@ -87,7 +82,13 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
   );
 });
 
-const KEY = "flex shrink-0 items-center justify-center rounded-md leading-none";
+const KEY = "relative flex shrink-0 items-center justify-center rounded-md leading-none";
+
+/** Touch keeps each finger on what it touched first (the key's haptic switch), and the tap
+ *  that toggles the switch needs that, so only a mouse is captured. */
+function capture(e: PointerEvent<HTMLElement>) {
+  if (e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
+}
 
 function tone(down: boolean, active = false) {
   if (active) return "bg-neutral-200 text-black";
@@ -116,8 +117,7 @@ function KeyButton({
 }) {
   const [down, setDown] = useState(false);
   const press = (e: PointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.currentTarget.setPointerCapture(e.pointerId);
+    capture(e);
     setDown(true);
     if (k.fn) onFn();
     else if (k.mod) onModifier(k.code);
@@ -134,12 +134,13 @@ function KeyButton({
       aria-label={k.id}
       aria-pressed={k.mod || k.fn ? latched : undefined}
       className={`${KEY} ${tone(down, latched)}`}
-      style={{ width, height: size, fontSize: size * (label.length > 1 ? 0.3 : 0.45) }}
+      style={{ width, height: size, fontSize: size * (label.length > 1 ? 0.25 : 0.38) }}
       onPointerDown={press}
       onPointerUp={lift}
       onPointerCancel={lift}
     >
       {label}
+      <Haptic />
     </div>
   );
 }
@@ -172,9 +173,8 @@ function Tool({
       className={`${KEY} text-sm ${onDown ? tone(down, active) : "bg-neutral-900"}`}
       style={{ flex: `${grow} ${grow} 0` }}
       onPointerDown={(e) => {
-        e.preventDefault();
         if (!onDown) return;
-        e.currentTarget.setPointerCapture(e.pointerId);
+        capture(e);
         setDown(true);
         onDown();
       }}
@@ -182,6 +182,7 @@ function Tool({
       onPointerCancel={lift}
     >
       {children}
+      {onDown ? <Haptic /> : null}
     </div>
   );
 }

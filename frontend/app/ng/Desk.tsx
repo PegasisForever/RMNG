@@ -1,7 +1,7 @@
 // The /ng page on the iPhone Duo: the selected clone's screen on top, the keyboard below. This
 // is the container: it holds the connection (`./session.ts`), the keyboard's state (held
-// modifiers, Fn, Caps Lock, keys or trackpad), the trackpad's gestures (`./trackpad.ts`) and
-// the split between the two areas, and turns them into input.
+// modifiers, Fn, Caps Lock, keys or trackpad) and the trackpad's gestures (`./trackpad.ts`),
+// and turns them into input.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { layoutClaimer } from "~/lib/layoutClaim";
@@ -11,26 +11,23 @@ import type { ViewSpec } from "~/lib/wire/ViewSpec";
 
 import { Cursor } from "./Cursor";
 import { KeyboardView, type PadMode } from "./KeyboardView";
-import { SplitDialog } from "./SplitDialog";
-import { naturalKeysHeight, screenFit } from "./geometry";
+import { screenFit } from "./geometry";
 import { CAPS_LOCK } from "./keyboard";
 import { SCROLL_GAIN, clampTo, pointerGain } from "./pointer";
 import { MONITOR, type Session, openSession } from "./session";
 import { type PadOut, Trackpad } from "./trackpad";
 
 /** The iPhone Duo layout's one monitor, in pixels (`wire::iphone_duo_layout`). */
-export const DUO_MONITOR = { width: 1002, height: 810 };
+export const DUO_MONITOR = { width: 1002, height: 760 };
+/** The keyboard area at the bottom of the screen, CSS px; the clone's screen has the rest
+ *  (507 px on the Duo, the layout's monitor at 2×). */
+const KEYS_HEIGHT = 444;
 /** After this page moved the cursor, the clone's own cursor reports are this far behind (ms),
  *  so they do not pull the drawn cursor back. */
 const OWN_MOVES_MS = 400;
 /** A press of the Trackpad button shorter than this switches mode; a longer one is a hold:
  *  trackpad while it is down, keys again when it lifts. */
 const HOLD_MS = 300;
-/** Where the split was left (the keyboard area's height), kept on this phone only. */
-const SPLIT_KEY = "ng-keys-height";
-/** The split dialog's range: the least keyboard area, and the least screen. */
-const MIN_KEYS = 150;
-const MIN_SCREEN = 200;
 /** Mutter axis flags: a finger scroll, and its end. */
 const AXIS_FINGER = 4;
 const AXIS_FINISH = 1;
@@ -39,16 +36,6 @@ const isDuoSpec = (s: ViewSpec) =>
   s.monitors.length === 1 &&
   s.monitors[0].width === DUO_MONITOR.width &&
   s.monitors[0].height === DUO_MONITOR.height;
-
-function savedKeysHeight(fallback: number): number {
-  try {
-    const v = Number(localStorage.getItem(SPLIT_KEY));
-    if (v > 0) return v;
-  } catch {
-    // no storage: the default
-  }
-  return fallback;
-}
 
 type Props = {
   /** The whole screen, CSS px, and the home bar's safe-area inset. */
@@ -69,14 +56,11 @@ export function Desk({ width, height, bottom }: Props) {
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
   const [mode, setMode] = useState<PadMode>("keys");
-  const natural = naturalKeysHeight(width, bottom);
-  const [keysHeight, setKeysHeight] = useState(() => savedKeysHeight(natural));
-  const [splitOpen, setSplitOpen] = useState(false);
   /** The cursor where this page last put it, and when. */
   const cursor = useRef({ ...pos, movedAt: -Infinity });
 
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
-  const fit = screenFit(width, height - keysHeight, DUO_MONITOR.width, DUO_MONITOR.height, dpr);
+  const fit = screenFit(width, height - KEYS_HEIGHT, DUO_MONITOR.width, DUO_MONITOR.height, dpr);
   /** Device px per monitor px now, for the trackpad's moves. */
   const scale = useRef(fit.scale);
   scale.current = fit.scale;
@@ -105,7 +89,7 @@ export function Desk({ width, height, bottom }: Props) {
     };
   }, []);
 
-  // The video's box in device pixels follows the split
+  // The video's box in device pixels
   useEffect(() => {
     session.current?.resize(
       Math.round(DUO_MONITOR.width * fit.scale),
@@ -201,15 +185,6 @@ export function Desk({ width, height, bottom }: Props) {
     if (next === "keys") pad.current!.cancel();
     setMode(next);
   }, []);
-  const onSplit = useCallback(() => setSplitOpen(true), []);
-  const onSplitChange = (v: number) => {
-    setKeysHeight(v);
-    try {
-      localStorage.setItem(SPLIT_KEY, String(v));
-    } catch {
-      // no storage: back to the default next time
-    }
-  };
 
   const terminal = spec?.content.mode === "terminal";
   const note = !connected
@@ -225,7 +200,7 @@ export function Desk({ width, height, bottom }: Props) {
 
   return (
     <div className="absolute inset-0 bg-black" onPointerDownCapture={claim}>
-      <div className="relative overflow-hidden" style={{ height: height - keysHeight }}>
+      <div className="relative overflow-hidden" style={{ height: height - KEYS_HEIGHT }}>
         {/* The session puts the video in here; the cursor and the note come after it, on top */}
         <div ref={box} className="absolute" style={place} />
         <div className="pointer-events-none absolute" style={place}>
@@ -241,7 +216,7 @@ export function Desk({ width, height, bottom }: Props) {
       </div>
       <KeyboardView
         width={width}
-        height={keysHeight}
+        height={KEYS_HEIGHT}
         bottom={bottom}
         fn={fn}
         latched={latched}
@@ -252,19 +227,7 @@ export function Desk({ width, height, bottom }: Props) {
         onFn={onFn}
         onTrackpadButton={onTrackpadButton}
         onPad={onPad}
-        onSplit={onSplit}
       />
-      {splitOpen ? (
-        <SplitDialog
-          value={keysHeight}
-          min={MIN_KEYS}
-          max={height - MIN_SCREEN}
-          total={height}
-          natural={natural}
-          onChange={onSplitChange}
-          onClose={() => setSplitOpen(false)}
-        />
-      ) : null}
     </div>
   );
 }

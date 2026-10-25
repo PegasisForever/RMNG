@@ -7,35 +7,44 @@ export const GAP = 4;
 const PAD = 4;
 /** The tool row's height, CSS px. */
 export const TOOL_H = 36;
+/** A key is at most this many times as tall as a 1-unit key is wide. */
+export const KEY_ASPECT = 1.3;
+
+type Box = { left: number; top: number; width: number; height: number };
 
 export type KeysLayout = {
-  /** One key unit plus the gap after it: a 1-unit key is `pitch - GAP` wide and tall. */
+  /** One key unit plus the gap after it: a 1-unit key is `pitch - GAP` wide. */
   pitch: number;
-  /** The keys' box (CSS px, from the area's top left): as wide as the area allows, its keys
-   *  square, and at the bottom of the area, above the home bar. */
-  left: number;
-  top: number;
-  width: number;
-  height: number;
+  /** A key's height: KEY_ASPECT × a 1-unit key's width, or less where the rows do not fit. */
+  keyHeight: number;
+  /** The tool row: at the top of the area, under the screen. */
+  tools: Box;
+  /** The keys: at the bottom of the area, above the home bar. */
+  keys: Box;
+  /** The trackpad: all the space under the tool row, down to where the keys end. */
+  pad: Box;
 };
 
-/** The pitch the area's width allows. */
-const widthPitch = (width: number) => (width - 2 * PAD + GAP) / ROW_UNITS;
-
-/** Where the keys go in a keyboard area `width`×`height` with `bottom` kept for the home bar.
- *  Keys are square; an area too short for that makes them smaller (the keys then stand in
- *  the middle), and a taller one leaves the space above the tool row empty. */
+/** Where things go in a keyboard area `width`×`height` with `bottom` kept for the home bar.
+ *  The keys take the whole width, and are KEY_ASPECT times as tall as wide where the area has
+ *  room for that; where it has not, they are as tall as the rows can be. */
 export function keysLayout(width: number, height: number, bottom: number): KeysLayout {
   const room = height - PAD - TOOL_H - GAP - bottom;
-  const pitch = Math.max(Math.min(widthPitch(width), (room + GAP) / ROWS), 1);
+  const pitch = (width - 2 * PAD + GAP) / ROW_UNITS;
+  const keyHeight = Math.max(Math.min((pitch - GAP) * KEY_ASPECT, (room - (ROWS - 1) * GAP) / ROWS), 1);
   const w = ROW_UNITS * pitch - GAP;
-  const h = ROWS * pitch - GAP;
-  return { pitch, left: (width - w) / 2, top: height - bottom - h, width: w, height: h };
-}
-
-/** The height a keyboard area needs for square keys across the whole width. */
-export function naturalKeysHeight(width: number, bottom: number): number {
-  return Math.ceil(PAD + TOOL_H + GAP + ROWS * widthPitch(width) - GAP + bottom);
+  const h = ROWS * keyHeight + (ROWS - 1) * GAP;
+  const left = PAD;
+  const tools = { left: PAD, top: PAD, width: width - 2 * PAD, height: TOOL_H };
+  const keysTop = height - bottom - h;
+  const padTop = PAD + TOOL_H + GAP;
+  return {
+    pitch,
+    keyHeight,
+    tools,
+    keys: { left, top: keysTop, width: w, height: h },
+    pad: { left: PAD, top: padTop, width: width - 2 * PAD, height: height - bottom - padTop },
+  };
 }
 
 export type ScreenFit = {

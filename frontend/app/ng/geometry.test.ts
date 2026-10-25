@@ -1,58 +1,71 @@
 import { describe, expect, test } from "bun:test";
 
-import { GAP, TOOL_H, keysLayout, naturalKeysHeight, screenFit } from "./geometry";
+import { GAP, KEY_ASPECT, TOOL_H, keysLayout, screenFit } from "./geometry";
 
-// The unfolded iPhone Duo, upright: 669 px wide, a 34 px home bar.
+// The unfolded iPhone Duo, upright: 669 px wide, a 444 px keyboard area, a 34 px home bar.
 const W = 669;
+const H = 444;
 const BOTTOM = 34;
 
 describe("keysLayout", () => {
-  test("at the natural height the keys are square and as wide as the screen allows", () => {
-    const k = keysLayout(W, naturalKeysHeight(W, BOTTOM), BOTTOM);
-    expect(k.width).toBeCloseTo(W - 8, 0);
-    expect(k.height).toBeCloseTo((k.pitch * 5 - GAP), 5);
-    expect(k.top + k.height).toBeCloseTo(naturalKeysHeight(W, BOTTOM) - BOTTOM, 5);
+  const k = keysLayout(W, H, BOTTOM);
+
+  test("on the Duo the keys take the width, and the rows fill the room under the tool row", () => {
+    expect(k.keys.width).toBeCloseTo(W - 8, 5);
+    expect(k.pitch - GAP).toBeGreaterThan(53);
+    expect(k.keyHeight).toBeLessThanOrEqual((k.pitch - GAP) * KEY_ASPECT);
+    expect(k.keys.top).toBeCloseTo(4 + TOOL_H + GAP, 9);
   });
 
-  test("a taller area keeps the keys' size and puts them at the bottom", () => {
-    const natural = keysLayout(W, naturalKeysHeight(W, BOTTOM), BOTTOM);
-    const tall = keysLayout(W, 500, BOTTOM);
-    expect(tall.pitch).toBeCloseTo(natural.pitch, 5);
-    expect(tall.top + tall.height).toBe(500 - BOTTOM);
+  test("a tall area makes keys 1.3 times as tall as wide, no taller", () => {
+    const t = keysLayout(W, 700, BOTTOM);
+    expect(t.keyHeight).toBeCloseTo((t.pitch - GAP) * KEY_ASPECT, 9);
+    expect(t.keys.top + t.keys.height).toBeCloseTo(700 - BOTTOM, 9);
   });
 
-  test("a shorter area makes the keys smaller, still square, in the middle", () => {
-    const k = keysLayout(W, 200, BOTTOM);
-    expect(k.width).toBeLessThan(W - 8);
-    expect(k.left).toBeCloseTo((W - k.width) / 2, 5);
-    expect(k.top).toBeGreaterThanOrEqual(4 + TOOL_H + GAP - 0.001);
+  test("the tool row is at the top, the keys at the bottom above the home bar", () => {
+    expect(k.tools.top).toBe(4);
+    expect(k.keys.top + k.keys.height).toBeCloseTo(H - BOTTOM, 9);
+    expect(k.keys.top).toBeGreaterThanOrEqual(k.tools.top + TOOL_H);
+  });
+
+  test("the trackpad takes everything under the tool row, down to the keys' bottom", () => {
+    expect(k.pad.top).toBe(4 + TOOL_H + GAP);
+    expect(k.pad.top + k.pad.height).toBeCloseTo(H - BOTTOM, 9);
+    expect(k.pad.width).toBe(W - 8);
+  });
+
+  test("a short area makes the keys shorter, still the whole width", () => {
+    const s = keysLayout(W, 250, BOTTOM);
+    expect(s.keys.width).toBeCloseTo(W - 8, 5);
+    expect(s.keyHeight).toBeLessThan(k.keyHeight);
+    expect(s.keys.top).toBeCloseTo(4 + TOOL_H + GAP, 9);
   });
 });
 
 describe("screenFit", () => {
   test("the screen area of the iPhone Duo layout shows the monitor at exactly 2×", () => {
-    const f = screenFit(669, 541, 1002, 810, 3);
+    const f = screenFit(669, 507, 1002, 760, 3);
     expect(f.scale).toBe(2);
     expect(f.width).toBeCloseTo(668, 5);
-    expect(f.height).toBe(540);
+    expect(f.height).toBeCloseTo(506.667, 2);
   });
 
-  test("a taller area letterboxes: full width, bars above and below", () => {
-    const f = screenFit(669, 655, 1002, 810, 3);
+  test("a taller area letterboxes: bars above and below", () => {
+    const f = screenFit(669, 600, 1002, 760, 3);
     expect(f.scale).toBe(2);
-    expect(f.top).toBeCloseTo((655 - 540) / 2, 5);
+    expect(f.top).toBeCloseTo((600 - 760 * 2 / 3) / 2, 5);
   });
 
   test("a shorter area scales the monitor down to fit, in the middle", () => {
-    const f = screenFit(669, 400, 1002, 810, 3);
+    const f = screenFit(669, 400, 1002, 760, 3);
     expect(f.height).toBeCloseTo(400, 5);
-    expect(f.width).toBeLessThan(669);
     expect(f.left).toBeCloseTo((669 - f.width) / 2, 5);
   });
 
   test("never larger than the area", () => {
-    for (const h of [300, 539, 541, 600, 800]) {
-      const f = screenFit(669, h, 1002, 810, 3);
+    for (const h of [300, 505, 507, 600, 800]) {
+      const f = screenFit(669, h, 1002, 760, 3);
       expect(f.width).toBeLessThanOrEqual(669 + 1e-9);
       expect(f.height).toBeLessThanOrEqual(h + 1e-9);
     }
