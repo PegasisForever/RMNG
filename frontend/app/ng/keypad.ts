@@ -150,7 +150,8 @@ export class Keypad {
     } else if (key) {
       this.out({ t: "press", key });
       if (key.mod) this.out({ t: "mod", key, down: true });
-      else if (!key.fn && key.code !== SPACE) {
+      // Fn and dictation send nothing, and Space only types on the lift: none is held
+      else if (key.code !== 0 && key.code !== SPACE) {
         touch.cancelHold = this.timer.after(HOLD_MS, () => {
           if (touch.is !== "new") return;
           touch.is = "hold";

@@ -4,6 +4,7 @@ import { fn } from "storybook/test";
 
 import { KeyboardView } from "./KeyboardView";
 import { SHIFTS } from "./keyboard";
+import type { DictationState } from "./dictation";
 import type { NgTab } from "./ToolRow";
 import type { ModState } from "./modifiers";
 
@@ -16,6 +17,7 @@ function Frame(args: {
   caps: boolean;
   tab: NgTab | null;
   pad: boolean;
+  dictation: DictationState;
 }) {
   const [tab, setTab] = useState(args.tab);
   return (
@@ -32,6 +34,7 @@ function Frame(args: {
       tab={tab}
       onTab={(t) => setTab((open) => (open === t ? null : t))}
       pad={args.pad}
+      dictation={args.dictation}
     />
   );
 }
@@ -40,7 +43,7 @@ const meta = {
   title: "ng/KeyboardView",
   component: Frame,
   parameters: { layout: "centered" },
-  args: { height: 412, fn: false, mods: [], caps: false, tab: null, pad: false },
+  args: { height: 412, fn: false, mods: [], caps: false, tab: null, pad: false, dictation: "off" },
 } satisfies Meta<typeof Frame>;
 
 export default meta;
@@ -62,6 +65,9 @@ export const CapsOn: Story = { args: { caps: true } };
 
 /** Fn: F1–F12 on the symbol row; Home, PgUp, PgDn, End and the arrows on the number row. */
 export const FnOn: Story = { args: { fn: true } };
+
+/** Dictation listening: its key, last on the space row, is red. */
+export const Dictating: Story = { args: { dictation: "listening" } };
 
 /** The keys in use as a trackpad: faded to a trackpad's outline. */
 export const Trackpad: Story = { args: { pad: true } };

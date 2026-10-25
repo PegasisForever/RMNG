@@ -1,6 +1,7 @@
-import { ArrowBigUp, ArrowBigUpDash, ArrowRightToLine, CornerDownLeft } from "lucide-react";
+import { ArrowBigUp, ArrowBigUpDash, ArrowRightToLine, CornerDownLeft, Mic, MicOff } from "lucide-react";
 import { type PointerEvent, type ReactNode, memo, useRef, useState } from "react";
 
+import type { DictationState } from "./dictation";
 import { GAP, keysLayout } from "./geometry";
 import { CAPS_LOCK, type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SLOP_PX } from "./keypad";
@@ -43,6 +44,9 @@ type Props = {
   badges?: Partial<Record<NgTab, number>>;
   /** The keys are in use as a trackpad: they fade to a trackpad's outline, and back. */
   pad: boolean;
+  /** What the dictation key shows: off, starting, listening (red), a fault, or no dictation in
+   *  this browser (dim). */
+  dictation: DictationState;
 };
 
 /** The /ng keyboard area: a tool row under the screen (`./ToolRow.tsx`), a full keyboard of
@@ -85,6 +89,7 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
                 label={keyLabel(key, shift, p.caps)}
                 state={keyState(key, p)}
                 down={touch.pressed.has(key.id)}
+                dictation={key.dictate ? p.dictation : undefined}
               />
             ))}
           </div>
@@ -194,6 +199,7 @@ function KeyButton({
   label,
   state,
   down,
+  dictation,
 }: {
   k: Key;
   width: number;
@@ -203,24 +209,47 @@ function KeyButton({
   /** A modifier's (or Fn's) state; undefined when it is up. */
   state: ModState | undefined;
   down: boolean;
+  /** The dictation key's state; undefined for every other key. */
+  dictation?: DictationState;
 }) {
+  const iconSize = size * (k.icon === "tab" ? 0.34 : 0.42);
   return (
     <div
       role="button"
       aria-label={k.id}
-      aria-pressed={k.mod || k.fn || k.code === CAPS_LOCK ? state !== undefined : undefined}
+      aria-pressed={
+        k.mod || k.fn || k.code === CAPS_LOCK ? state !== undefined : dictation ? dictation === "listening" : undefined
+      }
       data-key={k.id}
-      data-state={state}
-      className={`${KEY} ${tone(down, state !== undefined)}`}
+      data-state={state ?? dictation}
+      className={`${KEY} ${dictation ? DICTATION_TONE[dictation] : tone(down, state !== undefined)}`}
       style={{ width, height: size, fontSize: size * (label.length > 1 ? 0.25 : 0.38) }}
     >
-      {k.icon ? (
-        <KeyIcon icon={k.icon} size={size * (k.icon === "tab" ? 0.34 : 0.42)} locked={state === "locked"} />
+      {dictation ? (
+        <DictationIcon state={dictation} size={iconSize} />
+      ) : k.icon ? (
+        <KeyIcon icon={k.icon} size={iconSize} locked={state === "locked"} />
       ) : (
         label
       )}
     </div>
   );
+}
+
+/** The dictation key in each state: red while it listens, darker red while it starts, a red
+ *  struck-out mic for a fault, dim where the browser has no dictation. */
+const DICTATION_TONE: Record<DictationState, string> = {
+  off: "bg-neutral-800 text-neutral-100",
+  starting: "bg-rose-900 text-rose-100",
+  listening: "bg-rose-600 text-white",
+  error: "bg-neutral-800 text-rose-400",
+  unsupported: "bg-neutral-900 text-neutral-600",
+};
+
+function DictationIcon({ state, size }: { state: DictationState; size: number }) {
+  const p = { size, strokeWidth: 1.75, "aria-hidden": true };
+  if (state === "error" || state === "unsupported") return <MicOff {...p} />;
+  return <Mic {...p} className={state === "listening" ? "animate-pulse" : undefined} />;
 }
 
 /** The icon a key shows in place of its label. A locked Shift shows the Caps Lock arrow. */
@@ -231,6 +260,7 @@ function KeyIcon({ icon, size, locked }: { icon: NonNullable<Key["icon"]>; size:
     enter: <CornerDownLeft {...p} />,
     shift: locked ? <ArrowBigUpDash {...p} /> : <ArrowBigUp {...p} />,
     win: <WinLogo size={size * 0.8} />,
+    mic: <Mic {...p} />,
   };
   return icons[icon];
 }

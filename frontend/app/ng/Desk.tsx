@@ -13,6 +13,7 @@ import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 
 import { Cursor } from "./Cursor";
+import { Dictation, type DictationState, textToKeysyms } from "./dictation";
 import { BTN_LEFT, KeyboardView, type TouchKind } from "./KeyboardView";
 import { keysLayout, screenFit } from "./geometry";
 import { CAPS_LOCK, type Key, isShift } from "./keyboard";
@@ -160,6 +161,28 @@ export function Desk({ width, height, bottom }: Props) {
     };
   }, [sounds]);
 
+  /** Dictation (`./dictation.ts`): its key's state, the words still being recognized (shown
+   *  over the screen), and the text it is sure of, typed into the clone. */
+  const [dictation, setDictation] = useState<DictationState>("off");
+  const [heard, setHeard] = useState("");
+  const dictate = useRef<Dictation | null>(null);
+  if (!dictate.current) {
+    dictate.current = new Dictation({
+      state: setDictation,
+      interim: setHeard,
+      final: (text) => {
+        for (const keysym of textToKeysyms(text)) {
+          send({ kind: "key", keysym, pressed: true });
+          send({ kind: "key", keysym, pressed: false });
+        }
+      },
+    });
+  }
+  useEffect(() => {
+    setDictation(dictate.current!.current);
+    return () => dictate.current?.stop();
+  }, []);
+
   /** The keys' touches, made once: taps and holds type, the rest moves the pointer. */
   const keypad = useRef<Keypad | null>(null);
   if (!keypad.current) {
@@ -170,6 +193,7 @@ export function Desk({ width, height, bottom }: Props) {
           break;
         case "tap":
           if (o.key.fn) setFn((f) => !f);
+          else if (o.key.dictate) dictate.current!.toggle();
           else {
             keyCode(o.key.code, true);
             keyCode(o.key.code, false);
@@ -330,6 +354,13 @@ export function Desk({ width, height, bottom }: Props) {
             <Cursor shape={shape} x={pos.x} y={pos.y} scale={fit.scale} />
           ) : null}
         </div>
+        {dictation === "listening" || heard ? (
+          <p className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-6">
+            <span className="max-w-full truncate rounded-full bg-black/60 px-4 py-2 text-sm text-neutral-100 backdrop-blur-md">
+              {heard || "Listening…"}
+            </span>
+          </p>
+        ) : null}
         {note ? (
           <p className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
             <span className="rounded-full bg-black/50 px-4 py-2 text-center text-sm text-neutral-100 backdrop-blur-md">
@@ -352,6 +383,7 @@ export function Desk({ width, height, bottom }: Props) {
         onTab={onTab}
         badges={unread ? { clones: unread } : undefined}
         pad={padMode}
+        dictation={dictation}
       />
       {/* Mounted from the start, so the pages' data is there when one opens */}
       <div

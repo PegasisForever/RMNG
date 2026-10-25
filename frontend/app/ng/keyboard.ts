@@ -21,8 +21,11 @@ export type Key = {
   mod?: boolean;
   /** The Fn key: it switches the keys, and sends nothing itself (`code` is 0). */
   fn?: boolean;
+  /** The dictation key: it starts and stops dictation (`./dictation.ts`), and sends nothing
+   *  itself (`code` is 0). */
+  dictate?: boolean;
   /** Drawn as this icon in place of its label. */
-  icon?: "tab" | "enter" | "shift" | "win";
+  icon?: "tab" | "enter" | "shift" | "win" | "mic";
 };
 
 /** The rows are this many units wide: ten letters and a Shift's worth more. The Tab row is
@@ -115,13 +118,17 @@ const NEAR_PUNCTUATION: Key[] = [
   { ...shifted("Period", ".", ">"), id: "PeriodRight" },
 ];
 
+/** Dictation, the last key of the space row. */
+const DICTATE: Key = { id: "Dictate", code: 0, label: "Dictate", units: 1, dictate: true, icon: "mic" };
+
 const SPACE_ROW: Key[] = [
   mod("ControlLeft", "Ctrl", 1),
   mod("MetaLeft", "Win", 1, { icon: "win" }),
   mod("AltLeft", "Alt", 1),
   FN,
-  key("Space", "", 5.5),
+  key("Space", "", 4.5),
   ...NEAR_PUNCTUATION,
+  DICTATE,
 ];
 
 /** The six rows, top first: symbols, numbers, three of letters, space. `fn` puts F1–F12 in

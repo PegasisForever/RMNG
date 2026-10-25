@@ -43,11 +43,12 @@ describe("keyRows", () => {
     expect(bottom).toEqual(keyRows(false)[5]);
   });
 
-  test("the space row ends in a second comma and period, where the arrows were", () => {
+  test("the space row ends in a second comma and period, then the dictation key", () => {
     const row = keyRows(false)[5];
-    expect(row.map((k) => k.label).slice(-2)).toEqual([",", "."]);
-    expect(row.slice(-2).map((k) => k.code)).toEqual([find(false, "Comma").code, find(false, "Period").code]);
-    expect(find(false, "Space").units).toBe(5.5);
+    expect(row.map((k) => k.label).slice(-3)).toEqual([",", ".", "Dictate"]);
+    expect(row.slice(-3, -1).map((k) => k.code)).toEqual([find(false, "Comma").code, find(false, "Period").code]);
+    expect(row.at(-1)).toMatchObject({ dictate: true, code: 0, units: 1 });
+    expect(find(false, "Space").units).toBe(4.5);
   });
 
   test("keys send their evdev codes", () => {
