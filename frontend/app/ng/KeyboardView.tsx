@@ -1,8 +1,9 @@
-import { type PointerEvent, memo, useState } from "react";
+import { type PointerEvent, memo, useRef, useState } from "react";
 
 import { Haptic } from "./Haptic";
 import { GAP, keysLayout } from "./geometry";
 import { type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
+import { SLOP_PX } from "./keypad";
 
 /** Evdev mouse buttons. */
 export const BTN_LEFT = 0x110;
@@ -25,10 +26,10 @@ type Props = {
   latched: ReadonlySet<number>;
   /** Caps Lock is on (only the labels follow it). */
   caps: boolean;
-  /** A finger on a key: its id, the key it went down on, and where it is (CSS px, page
-   *  coordinates). The container tells a tap from a hold or a pointer gesture
-   *  (`./keypad.ts`). */
-  onKeyTouch: (kind: TouchKind, id: number, key: Key, x: number, y: number) => void;
+  /** A finger on the keys: its id, the key it went down on (null between keys), and where it
+   *  is (CSS px, page coordinates). The container tells a tap from a hold or a pointer
+   *  gesture (`./keypad.ts`). */
+  onKeyTouch: (kind: TouchKind, id: number, key: Key | null, x: number, y: number) => void;
   /** A mouse button goes down or up (evdev code). */
   onButton: (button: number, pressed: boolean) => void;
 };
@@ -41,6 +42,8 @@ type Props = {
 export const KeyboardView = memo(function KeyboardView(p: Props) {
   const k = keysLayout(p.width, p.height, p.bottom);
   const shift = SHIFTS.some((c) => p.latched.has(c));
+  const rows = keyRows(p.fn);
+  const touch = useKeysTouch(rows, p.onKeyTouch);
   return (
     <div className="relative touch-none select-none bg-black" style={{ width: p.width, height: p.height }}>
       <div className="absolute flex" style={{ ...k.tools, gap: GAP }}>
@@ -48,11 +51,16 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
           <div key={i} className="flex-1 rounded-md bg-neutral-900" />
         ))}
       </div>
+      {/* One handler for the whole key area, gaps too: a drag may start between keys */}
       <div
         className="absolute flex flex-col"
-        style={{ left: k.keys.left, top: k.keys.top, width: k.keys.width, gap: GAP }}
+        style={{ ...k.keys, gap: GAP }}
+        onPointerDown={touch.down}
+        onPointerMove={touch.move}
+        onPointerUp={touch.up("up")}
+        onPointerCancel={touch.up("cancel")}
       >
-        {keyRows(p.fn).map((row, i) => (
+        {rows.map((row, i) => (
           <div key={i} className="flex" style={{ gap: GAP, height: k.keyHeight }}>
             {row.map((key) => (
               <KeyButton
@@ -62,7 +70,7 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
                 size={k.keyHeight}
                 label={keyLabel(key, shift, p.caps)}
                 latched={key.fn ? p.fn : p.latched.has(key.code)}
-                onKeyTouch={p.onKeyTouch}
+                down={touch.pressed.has(key.id)}
               />
             ))}
           </div>
@@ -90,13 +98,62 @@ function capture(e: PointerEvent<HTMLElement>) {
   if (e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
 }
 
+/** The key area's touches: which key each finger went down on (by `data-key`; none between
+ *  keys), which keys show as pressed, and the haptic switch of a finger that drags. */
+function useKeysTouch(rows: Key[][], onKeyTouch: Props["onKeyTouch"]) {
+  const [pressed, setPressed] = useState<ReadonlySet<string>>(new Set());
+  /** Each finger: its key, where it went down, and its key's switch. */
+  const fingers = useRef(new Map<number, { key: Key | null; x: number; y: number; sw: HTMLInputElement | null }>());
+  const byId = new Map(rows.flat().map((k) => [k.id, k]));
+  const show = (id: string, on: boolean) =>
+    setPressed((s) => {
+      const next = new Set(s);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  return {
+    pressed,
+    down(e: PointerEvent<HTMLDivElement>) {
+      capture(e);
+      const el = (e.target as HTMLElement).closest<HTMLElement>("[data-key]");
+      const key = (el && byId.get(el.dataset.key!)) ?? null;
+      const sw = el?.querySelector<HTMLInputElement>("input[switch]") ?? null;
+      fingers.current.set(e.pointerId, { key, x: e.clientX, y: e.clientY, sw });
+      if (key) show(key.id, true);
+      onKeyTouch("down", e.pointerId, key, e.clientX, e.clientY);
+    },
+    move(e: PointerEvent<HTMLDivElement>) {
+      const f = fingers.current.get(e.pointerId);
+      if (!f) return;
+      // A finger that drags is no tap: its key stops looking pressed, and its switch stops
+      // working, as a switch toggles (and ticks) when a finger slides across it
+      if (f.sw && !f.sw.disabled && Math.hypot(e.clientX - f.x, e.clientY - f.y) >= SLOP_PX) {
+        f.sw.disabled = true;
+        if (f.key) show(f.key.id, false);
+      }
+      onKeyTouch("move", e.pointerId, f.key, e.clientX, e.clientY);
+    },
+    up: (kind: "up" | "cancel") => (e: PointerEvent<HTMLDivElement>) => {
+      const f = fingers.current.get(e.pointerId);
+      if (!f) return;
+      fingers.current.delete(e.pointerId);
+      if (f.key) show(f.key.id, false);
+      // On again once the click that ends this touch has gone by
+      const sw = f.sw;
+      if (sw?.disabled) setTimeout(() => (sw.disabled = false), 100);
+      onKeyTouch(kind, e.pointerId, f.key, e.clientX, e.clientY);
+    },
+  };
+}
+
 function KeyButton({
   k,
   width,
   size,
   label,
   latched,
-  onKeyTouch,
+  down,
 }: {
   k: Key;
   width: number;
@@ -104,27 +161,16 @@ function KeyButton({
   size: number;
   label: string;
   latched: boolean;
-  onKeyTouch: Props["onKeyTouch"];
+  down: boolean;
 }) {
-  const [down, setDown] = useState(false);
-  const report = (kind: TouchKind) => (e: PointerEvent<HTMLDivElement>) => {
-    if (kind === "down") {
-      capture(e);
-      setDown(true);
-    } else if (kind !== "move") setDown(false);
-    onKeyTouch(kind, e.pointerId, k, e.clientX, e.clientY);
-  };
   return (
     <div
       role="button"
       aria-label={k.id}
       aria-pressed={k.mod || k.fn ? latched : undefined}
+      data-key={k.id}
       className={`${KEY} ${tone(down, latched)}`}
       style={{ width, height: size, fontSize: size * (label.length > 1 ? 0.25 : 0.38) }}
-      onPointerDown={report("down")}
-      onPointerMove={report("move")}
-      onPointerUp={report("up")}
-      onPointerCancel={report("cancel")}
     >
       {label}
       <Haptic />

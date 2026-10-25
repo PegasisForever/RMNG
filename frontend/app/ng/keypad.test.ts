@@ -116,6 +116,16 @@ describe("Keypad", () => {
     expect(said()).toEqual(["KeyA↓", "move", "KeyA↑"]);
   });
 
+  test("a touch that starts between keys moves the cursor, and never types", () => {
+    pad.down(1, null, 100, 100, 0);
+    clock.advance(HOLD_MS);
+    pad.up(1);
+    pad.down(2, null, 100, 100, 400);
+    pad.move(2, 120, 100, 420);
+    pad.up(2);
+    expect(said()).toEqual(["move"]);
+  });
+
   test("a touch the system cancels types nothing and lets a held key go", () => {
     pad.down(1, A, 100, 100, 0);
     pad.cancel(1);

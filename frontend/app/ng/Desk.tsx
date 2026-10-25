@@ -168,7 +168,7 @@ export function Desk({ width, height, bottom }: Props) {
   }
 
   // Stable, so the keyboard does not render again each time the cursor moves
-  const onKeyTouch = useCallback((kind: TouchKind, id: number, key: Key, x: number, y: number) => {
+  const onKeyTouch = useCallback((kind: TouchKind, id: number, key: Key | null, x: number, y: number) => {
     const pad = keypad.current!;
     if (kind === "down") pad.down(id, key, x, y, performance.now());
     else if (kind === "move") pad.move(id, x, y, performance.now());

@@ -8,7 +8,8 @@
 //   fingers down that have not typed either, they scroll together.
 //
 // Fingers that roll from one key to the next (the next one down before the last is up) are
-// still two taps, as neither moved. Pure: touches go in with their time, and what to do comes
+// still two taps, as neither moved. A touch that starts between keys has no key: it only ever
+// moves the pointer. Pure: touches go in with their time, and what to do comes
 // out through `out`; the hold wait runs on the `Timer` given, so tests can run it by hand.
 import type { Key } from "./keyboard";
 
@@ -36,7 +37,7 @@ export interface Timer {
 }
 
 type Touch = {
-  key: Key;
+  key: Key | null;
   x: number;
   y: number;
   t: number;
@@ -55,10 +56,10 @@ export class Keypad {
     private timer: Timer,
   ) {}
 
-  down(id: number, key: Key, x: number, y: number, t: number) {
+  down(id: number, key: Key | null, x: number, y: number, t: number) {
     const touch: Touch = { key, x, y, t, sx: x, sy: y, is: "new", cancelHold: () => {} };
     // A modifier or Fn is only ever tapped: it holds itself down (see `Key.mod`)
-    if (!key.mod && !key.fn) {
+    if (key && !key.mod && !key.fn) {
       touch.cancelHold = this.timer.after(HOLD_MS, () => {
         if (touch.is !== "new") return;
         touch.is = "hold";
@@ -103,8 +104,9 @@ export class Keypad {
     if (!p) return;
     this.touches.delete(id);
     p.cancelHold();
-    if (p.is === "new") this.out({ t: "tap", key: p.key });
-    else if (p.is === "hold") this.out({ t: "hold", key: p.key, pressed: false });
+    if (p.is === "new") {
+      if (p.key) this.out({ t: "tap", key: p.key });
+    } else if (p.is === "hold" && p.key) this.out({ t: "hold", key: p.key, pressed: false });
     else if (p.is === "scroll" && ![...this.touches.values()].some((o) => o.is === "scroll")) {
       this.out({ t: "scroll_end" });
     }

@@ -14,8 +14,9 @@ export function pointerGain(d: number, ms: number): number {
 }
 
 /** Scroll distance (the clone's surface px) per CSS px of two-finger motion. The content
- *  follows the fingers, as Windows does by default: fingers up scroll down. */
-export const SCROLL_GAIN = -2;
+ *  follows the fingers, as Windows does by default: fingers up scroll down. 2 was four times
+ *  too fast on the Duo. */
+export const SCROLL_GAIN = -0.5;
 
 /** `v` held to the pixels of an axis `size` pixels long. */
 export function clampTo(v: number, size: number): number {
