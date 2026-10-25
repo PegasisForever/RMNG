@@ -17,12 +17,15 @@ type Pages = {
   "/viewer": {
     params: {};
   };
+  "/ng": {
+    params: {};
+  };
 };
 
 type RouteFiles = {
   "root.tsx": {
     id: "root";
-    page: "/" | "/viewer";
+    page: "/" | "/viewer" | "/ng";
   };
   "routes/_index.tsx": {
     id: "routes/_index";
@@ -32,10 +35,15 @@ type RouteFiles = {
     id: "routes/viewer";
     page: "/viewer";
   };
+  "routes/ng.tsx": {
+    id: "routes/ng";
+    page: "/ng";
+  };
 };
 
 type RouteModules = {
   "root": typeof import("./app/root.tsx");
   "routes/_index": typeof import("./app/routes/_index.tsx");
   "routes/viewer": typeof import("./app/routes/viewer.tsx");
+  "routes/ng": typeof import("./app/routes/ng.tsx");
 };

@@ -22,6 +22,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeader;
 use tower_http::trace::TraceLayer;
 
 /// 404 hint when no frontend dir resolves anywhere (image install missing AND no dev
@@ -125,12 +126,24 @@ pub fn router(app: App) -> Router {
             let index = ServeFile::new(dir.join("index.html"))
                 .precompressed_br()
                 .precompressed_gzip();
-            routes.fallback_service(
-                ServeDir::new(&dir)
-                    .precompressed_br()
-                    .precompressed_gzip()
-                    .fallback(index),
-            )
+            // Pages are checked with the server on each load, so an open always gets the newest
+            // build (the installed /ng app depends on it, see `frontend/app/ng/pwa.ts`). The
+            // code files they name change their names with each build, so they keep the
+            // browser's usual caching.
+            let files = ServeDir::new(&dir)
+                .precompressed_br()
+                .precompressed_gzip()
+                .fallback(index);
+            routes.fallback_service(SetResponseHeader::overriding(
+                files,
+                header::CACHE_CONTROL,
+                |res: &Response<_>| {
+                    res.headers()
+                        .get(header::CONTENT_TYPE)
+                        .is_some_and(|t| t.as_bytes().starts_with(b"text/html"))
+                        .then(|| header::HeaderValue::from_static("no-cache"))
+                },
+            ))
         }
         None => {
             tracing::warn!(
@@ -3717,6 +3730,35 @@ PLAIN=plainvalue
             seen.contains("\"buildId\":\"boot-"),
             "build identity should fall back to a boot id with no image label: {buf:?}"
         );
+    }
+
+    /// Pages go back to the server on each load, so the installed /ng app opens the newest
+    /// build; code files keep normal caching. Needs a frontend build, so it passes without one.
+    #[tokio::test]
+    async fn pages_are_not_cached_and_code_files_are() {
+        let Some(dir) = crate::assets::static_dir() else {
+            return;
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
+        let cache = |path: String| async move {
+            let resp = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
+            assert!(resp.status().is_success(), "{path}: {}", resp.status());
+            resp.headers()
+                .get(header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_string())
+        };
+
+        for page in ["/", "/ng", "/viewer?monitor=0", "/index.html"] {
+            assert_eq!(cache(page.into()).await.as_deref(), Some("no-cache"), "{page}");
+        }
+        let code = std::fs::read_dir(dir.join("assets"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .find(|n| n.ends_with(".js"))
+            .unwrap();
+        assert_eq!(cache(format!("/assets/{code}")).await, None);
     }
 
     #[test]

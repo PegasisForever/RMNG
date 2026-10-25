@@ -13,12 +13,41 @@ export function meta() {
   return [{ title: "RMNG" }];
 }
 
+// Safety net for the installed /ng app: no page 8 s after opening means its kept code files do
+// not match. Remove the worker and its copies and load once more from the network (once per
+// open, so it cannot loop). `routes/ng.tsx` sets `__ngReady` when it shows.
+const NG_SAFETY_NET = `
+if (location.pathname === "/ng" || location.pathname.indexOf("/ng/") === 0) setTimeout(function () {
+  if (window.__ngReady) return;
+  try {
+    if (sessionStorage.getItem("ng-healed")) return;
+    sessionStorage.setItem("ng-healed", "1");
+  } catch (e) {}
+  var jobs = [];
+  if ("serviceWorker" in navigator)
+    jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
+      return Promise.all(rs.map(function (r) { return r.unregister(); }));
+    }));
+  if (window.caches) jobs.push(caches.delete("ng-code"));
+  Promise.all(jobs).then(function () { location.reload(); }, function () { location.reload(); });
+}, 8000);
+`;
+
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        {/* The installed app (Add to Home Screen) opens `/ng` full screen, whatever page it was
+            added from. The page draws under the iOS clock bar (`routes/ng.tsx`). */}
+        <link rel="manifest" href="/manifest.webmanifest" />
+        <link rel="apple-touch-icon" href="/icons/icon-180.png" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="RMNG" />
+        <script dangerouslySetInnerHTML={{ __html: NG_SAFETY_NET }} />
         <Meta />
         <Links />
       </head>

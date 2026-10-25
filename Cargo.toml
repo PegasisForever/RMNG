@@ -37,6 +37,6 @@ futures = "0.3"
 # async / server
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
-tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "set-header", "trace"] }
 notify = "6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
