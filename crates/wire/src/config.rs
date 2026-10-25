@@ -544,12 +544,22 @@ pub fn default_global_prompt() -> String {
 }
 
 impl AppConfig {
-    /// The active preset, else the first one; None when no presets exist.
+    /// The active preset, else the first one; None when no presets exist. The active one can
+    /// be the built-in [`crate::control::iphone_duo_layout`], which is in no list.
     pub fn effective_preset(&self) -> Option<&LayoutPreset> {
         self.layout_presets
             .iter()
             .find(|p| p.name == self.active_layout)
+            .or_else(|| {
+                (self.active_layout == crate::control::IPHONE_DUO_LAYOUT)
+                    .then(crate::control::iphone_duo_layout)
+            })
             .or(self.layout_presets.first())
+    }
+
+    /// Whether `name` is a layout that can be active: a preset, or the built-in one.
+    pub fn has_layout(&self, name: &str) -> bool {
+        name == crate::control::IPHONE_DUO_LAYOUT || self.layout_presets.iter().any(|p| p.name == name)
     }
 
     /// The active preset's scroll mode and speed (percent); auto at 100 without presets.
@@ -952,6 +962,25 @@ mod tests {
         let c = AppConfig::default();
         assert_eq!(c.effective_monitors().len(), 2);
         assert!(c.effective_monitors()[0].primary);
+    }
+
+    /// The iPhone Duo layout can be active with no preset of that name, and stays out of the
+    /// preset list.
+    #[test]
+    fn the_built_in_iphone_duo_layout_can_be_active() {
+        let mut c = AppConfig::default();
+        c.layout_presets = vec![LayoutPreset {
+            name: "A".into(),
+            monitors: vec![MonitorSpec { width: 1920, height: 1080, x: 0, y: 0, primary: true }],
+            scroll_mode: ScrollMode::Auto,
+            scroll_speed: 100.0,
+        }];
+        assert!(c.has_layout(crate::control::IPHONE_DUO_LAYOUT));
+        assert!(!c.has_layout("B"));
+        c.active_layout = crate::control::IPHONE_DUO_LAYOUT.into();
+        let m = c.effective_monitors();
+        assert_eq!((m.len(), m[0].width, m[0].height), (1, 2006, 1622));
+        assert_eq!(c.layout_presets.len(), 1);
     }
 
     #[test]

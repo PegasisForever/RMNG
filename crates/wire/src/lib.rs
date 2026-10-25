@@ -37,7 +37,8 @@ pub use config::{
 };
 pub use control::{
     BoardColumn, Chat, ChatMessage, ChatRole, ClaudeSpend, ClaudeUsage, ClaudeUsageWindow,
-    CloneRequest, CloneTokens, CodexResetMark, ContainerStats, ControlState, LayoutPreset, ScrollMode,
+    CloneRequest, CloneTokens, CodexResetMark, ContainerStats, ControlState, IPHONE_DUO_LAYOUT,
+    LayoutPreset, ScrollMode, iphone_duo_layout,
     LinearMeta, LxcStats, MonitorSpec, MonitorState, Operation, OperationKind, OperationStatus,
     Provider, RmngClone, ScheduledMessage, UpdateStatus,
 };

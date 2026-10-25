@@ -159,7 +159,7 @@ export default function Viewer() {
         trackView?.detach();
         trackView = m.track ? showTrack(box.current!, canvas, m.track) : null;
         if (size) trackView?.setBox(...size);
-      } else {
+      } else if (m.type === "connected") {
         setConnected(m.connected);
         clip.setConnected(m.connected);
       }

@@ -124,6 +124,11 @@ let upRate = new RateMeter();
 let upFloor = Infinity;
 /** Input made while the socket is down. */
 let held: HeldInput = [];
+/** This second's shown frames, the time they took to show, and the frames the track dropped;
+ *  sent as `stats` when the page asked. */
+let shown = 0;
+let showMs = 0;
+let dropped = 0;
 
 /** Sound: whether the page wants it, the port to its worklet, the Opus decoder, and the stream
  *  the decoder is on (-1: none yet, so the next packet starts one). */
@@ -251,9 +256,16 @@ function onFrame(frame: VideoFrame) {
  *  back to the canvas. */
 function toTrack(frame: VideoFrame) {
   const w = track!;
-  if (w.desiredSize !== null && w.desiredSize <= 0) return frame.close();
+  if (w.desiredSize !== null && w.desiredSize <= 0) {
+    dropped++;
+    return frame.close();
+  }
+  const at = performance.now();
   // The write closes the frame, unless it fails.
-  w.write(frame).catch(() => {
+  w.write(frame).then(() => {
+    shown++;
+    showMs += performance.now() - at;
+  }, () => {
     frame.close();
     if (track !== w) return;
     track = null;
@@ -280,7 +292,18 @@ function draw() {
   const w = last.displayWidth;
   const h = last.displayHeight;
   const { scale, offX, offY } = letterbox(ctx.canvas.width, ctx.canvas.height, w, h);
+  const at = performance.now();
   ctx.drawImage(last, offX, offY, w * scale, h * scale);
+  shown++;
+  showMs += performance.now() - at;
+}
+
+function sendStats() {
+  post({
+    type: "stats",
+    stats: { mode: track ? "track" : "canvas", fps: shown, showMs: shown ? showMs / shown : 0, dropped },
+  });
+  shown = showMs = dropped = 0;
 }
 
 /** One piece of a clipboard reply from the server. Acknowledged at once: the server keeps only
@@ -480,4 +503,5 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   resetDecoder();
   connect();
   setInterval(ack, ACK_MS);
+  if (m.stats) setInterval(sendStats, 1000);
 };

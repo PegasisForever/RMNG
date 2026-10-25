@@ -24,6 +24,31 @@ pub struct MonitorSpec {
     pub primary: bool,
 }
 
+/// The name of the built-in layout for the `/ng` phone page on the folding iPhone (see
+/// [`iphone_duo_layout`]). It is in no config and in no layout list, so the operator does not
+/// see it; the page activates it by this name.
+pub const IPHONE_DUO_LAYOUT: &str = "iPhone Duo";
+
+/// The built-in layout for the `/ng` page: one monitor that fills the screen area above the
+/// page's keyboard, pixel for pixel. The phone's screen is 2007 device px wide and the area is
+/// 1623 tall (669 × 541 CSS px at 3×); the encoder takes even sizes only (4:2:0 chroma), so
+/// the monitor is one pixel less each way and the page leaves that pixel black.
+pub fn iphone_duo_layout() -> &'static LayoutPreset {
+    static DUO: std::sync::LazyLock<LayoutPreset> = std::sync::LazyLock::new(|| LayoutPreset {
+        name: IPHONE_DUO_LAYOUT.to_string(),
+        monitors: vec![MonitorSpec {
+            width: 2006,
+            height: 1622,
+            x: 0,
+            y: 0,
+            primary: true,
+        }],
+        scroll_mode: ScrollMode::Auto,
+        scroll_speed: default_scroll_speed(),
+    });
+    &DUO
+}
+
 /// A named monitor-layout preset: a full arrangement the operator can switch to.
 /// Distinct from clone-provisioning `Preset` (env/Linear) — this is display geometry only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

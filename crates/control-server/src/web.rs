@@ -1137,7 +1137,7 @@ async fn layout_activate(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // 1. Validate + persist the active_layout.
     let mut cfg = app.config();
-    if !cfg.layout_presets.iter().any(|p| p.name == req.name) {
+    if !cfg.has_layout(&req.name) {
         return Err((
             StatusCode::BAD_REQUEST,
             format!("unknown layout preset '{}'", req.name),

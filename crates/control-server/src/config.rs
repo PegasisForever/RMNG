@@ -465,13 +465,9 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
             }
         }
     }
-    // Keep active_layout valid after preset edits: if it no longer names a preset,
-    // point it at the first (or clear it when there are none).
-    if !merged
-        .layout_presets
-        .iter()
-        .any(|p| p.name == merged.active_layout)
-    {
+    // Keep active_layout valid after preset edits: if it no longer names a preset (or the
+    // built-in iPhone Duo layout), point it at the first (or clear it when there are none).
+    if !merged.has_layout(&merged.active_layout) {
         merged.active_layout = merged
             .layout_presets
             .first()
