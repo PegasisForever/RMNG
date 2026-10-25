@@ -11,6 +11,7 @@ import { useLiveState } from "~/lib/useLiveState";
 import type { CursorShape } from "~/lib/wire/CursorShape";
 import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
+import { CODE_TO_EVDEV } from "~/viewer/keycodes";
 
 import { Cursor } from "./Cursor";
 import { Dictation, type DictationState, textToKeysyms } from "./dictation";
@@ -186,6 +187,13 @@ export function Desk({ width, height, bottom }: Props) {
     return () => dictate.current?.stop();
   }, []);
 
+  /** Press the keys `codes` (DOM codes) in order, then let them go in the other order. */
+  const chord = (codes: string[]) => {
+    const keys = codes.map((c) => CODE_TO_EVDEV[c]);
+    for (const keycode of keys) send({ kind: "key_code", keycode, pressed: true });
+    for (const keycode of [...keys].reverse()) send({ kind: "key_code", keycode, pressed: false });
+  };
+
   /** The keys' touches, made once: taps and holds type, the rest moves the pointer. */
   const keypad = useRef<Keypad | null>(null);
   if (!keypad.current) {
@@ -243,6 +251,11 @@ export function Desk({ width, height, bottom }: Props) {
           send({ kind: "axis_continuous", dx: o.dx * gain, dy: o.dy * gain, flags: AXIS_FINGER });
           break;
         }
+        case "swipe":
+          // Up or down: the Win key (GNOME's overview); left or right: Ctrl+Alt+arrow (the
+          // workspace beside). Chords of their own, past the page's modifier keys.
+          chord(o.dir === "up" || o.dir === "down" ? ["MetaLeft"] : ["ControlLeft", "AltLeft", o.dir === "left" ? "ArrowLeft" : "ArrowRight"]);
+          break;
         case "scroll_end":
           send({ kind: "axis_continuous", dx: 0, dy: 0, flags: AXIS_FINGER | AXIS_FINISH });
           break;

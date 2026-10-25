@@ -8,6 +8,7 @@ import {
   Keypad,
   PAD_LINGER_MS,
   SLOP_PX,
+  SWIPE_PX,
   TAP_MS,
   TAP_SLOP_PX,
   TAP_WAIT_MS,
@@ -382,6 +383,51 @@ describe("Keypad trackpad mode", () => {
       pad.move(4, 100 + TAP_SLOP_PX, 100, 520);
       pad.up(4, 900);
       expect(out.filter((o) => o.t === "drag").map((o) => o.t === "drag" && o.pressed)).toEqual([true, false]);
+    });
+  });
+
+  describe("three-finger swipes", () => {
+    const swipes = () => out.flatMap((o) => (o.t === "swipe" ? [o.dir] : []));
+    /** Three fingers down on the keys, then all moved by (dx, dy) in `steps` steps. */
+    const three = (dx: number, dy: number, steps = 4) => {
+      const at = [100, 160, 220];
+      at.forEach((x, i) => pad.down(i + 1, S, x, 100, 0));
+      for (let s = 1; s <= steps; s++) {
+        at.forEach((x, i) => pad.move(i + 1, x + (dx * s) / steps, 100 + (dy * s) / steps, s * 20));
+      }
+      at.forEach((_, i) => pad.up(i + 1, 500));
+    };
+
+    test("each way makes its gesture, once per swipe, and types nothing", () => {
+      for (const [dx, dy] of [[0, -60], [0, 60], [-60, 0], [60, 0]]) three(dx, dy);
+      expect(swipes()).toEqual(["up", "down", "left", "right"]);
+      expect(out.some((o) => o.t === "tap" || o.t === "hold" || o.t === "scroll")).toBe(false);
+    });
+
+    test("a long swipe is still one gesture", () => {
+      three(0, -SWIPE_PX * 6, 12);
+      expect(swipes()).toEqual(["up"]);
+    });
+
+    test("less than the swipe distance makes none", () => {
+      three(0, -(SWIPE_PX - 5) - SLOP_PX * 0);
+      expect(swipes()).toEqual([]);
+    });
+
+    test("two fingers still scroll; a third that joins ends the scroll and swipes", () => {
+      pad.down(1, S, 100, 100, 0);
+      pad.down(2, S, 160, 100, 0);
+      pad.move(1, 100, 130, 20);
+      pad.move(2, 160, 130, 20);
+      expect(out.some((o) => o.t === "scroll")).toBe(true);
+      pad.down(3, S, 220, 100, 40);
+      // The third one's move makes it a swipe; from there on the three go right together
+      pad.move(3, 220 + SLOP_PX, 100, 60);
+      expect(out.filter((o) => o.t === "scroll_end").length).toBe(1);
+      for (const [id, x, y] of [[1, 100, 130], [2, 160, 130], [3, 220 + SLOP_PX, 100]] as const) {
+        pad.move(id, x + 2 * SWIPE_PX, y, 80);
+      }
+      expect(swipes()).toEqual(["right"]);
     });
   });
 });

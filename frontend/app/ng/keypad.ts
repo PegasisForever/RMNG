@@ -20,6 +20,9 @@
 // time starts the wait for the keys again. The mouse buttons show only in trackpad mode, and
 // one held down keeps the mode on (`button`), so they do not go while in use.
 //
+// Three fingers that move together are a swipe, as on a laptop touchpad: one gesture each
+// time they go SWIPE_PX one way (`swipe`; the container sends its keys).
+//
 // A drag that starts on Space is no pointer gesture: as on the iPhone keyboard, it moves the
 // text cursor, one arrow key for each ARROW_STEP_X (sideways) or ARROW_STEP_Y (up and down)
 // the finger goes, and the keys stay keys. Space types on the lift only, never held.
@@ -49,6 +52,8 @@ export const TAP_SLOP_PX = 10;
 /** A drag on Space types an arrow key for each this far (CSS px) sideways, and up or down. */
 export const ARROW_STEP_X = 12;
 export const ARROW_STEP_Y = 28;
+/** Three fingers that go this far together (CSS px, their mean) make a swipe. */
+export const SWIPE_PX = 30;
 
 export type KeypadOut =
   /** A finger came down on `key` while the keys are keys (the key's click sound plays). */
@@ -68,6 +73,8 @@ export type KeypadOut =
   | { t: "scroll_end" }
   /** The keys became a trackpad, or keys again. */
   | { t: "pad"; on: boolean }
+  /** Three fingers swiped this way together (once per swipe). */
+  | { t: "swipe"; dir: "up" | "down" | "left" | "right" }
   /** A tap in trackpad mode: a left click. */
   | { t: "click" }
   /** A drag in trackpad mode: the left button goes down, or up. */
@@ -87,10 +94,13 @@ type Touch = {
   sy: number;
   /** Not decided yet, holding its key, moving the cursor, scrolling, or (a drag on Space)
    *  typing arrow keys. */
-  is: "new" | "hold" | "point" | "scroll" | "arrows";
+  is: "new" | "hold" | "point" | "scroll" | "arrows" | "swipe";
   /** For the arrows: where the finger was at the last arrow key. */
   ax: number;
   ay: number;
+  /** For a three-finger swipe: where the finger was when the swipe began. */
+  gx: number;
+  gy: number;
   cancelHold: () => void;
   /** It came down in trackpad mode: it never types, and its modifier was not told down. */
   pad: boolean;
@@ -113,6 +123,8 @@ export class Keypad {
   private waitingClick: (() => void) | null = null;
   /** Mouse buttons held down now. */
   private buttons = 0;
+  /** The three-finger swipe now on has made its gesture: no second one until the fingers lift. */
+  private swiped = false;
 
   constructor(
     private out: (o: KeypadOut) => void,
@@ -137,6 +149,8 @@ export class Keypad {
       far: 0,
       ax: x,
       ay: y,
+      gx: x,
+      gy: y,
     };
     if (pad) {
       this.cancelLinger();
@@ -179,24 +193,31 @@ export class Keypad {
       }
       if (p.key?.mod && !p.pad) this.out({ t: "mod", key: p.key, down: false, dragged: true });
       const others = [...this.touches.values()].filter(
-        (o) => o !== p && (o.is === "new" || o.is === "point" || o.is === "scroll"),
+        (o) => o !== p && (o.is === "new" || o.is === "point" || o.is === "scroll" || o.is === "swipe"),
       );
-      if (others.length) {
-        // Two (or more) fingers: they all scroll, none of them types
-        for (const o of others) {
-          o.cancelHold();
-          if (o.is === "new" && o.key?.mod && !o.pad) {
-            this.out({ t: "mod", key: o.key, down: false, dragged: true });
-          }
-          o.is = "scroll";
+      // Three (or more) fingers swipe; two scroll; none of them types
+      const next = others.length >= 2 ? "swipe" : others.length ? "scroll" : "point";
+      if (next === "swipe" && others.some((o) => o.is === "scroll")) this.out({ t: "scroll_end" });
+      for (const o of next === "point" ? [] : others) {
+        o.cancelHold();
+        if (o.is === "new" && o.key?.mod && !o.pad) {
+          this.out({ t: "mod", key: o.key, down: false, dragged: true });
         }
-        p.is = "scroll";
-      } else p.is = "point";
+        if (o.dragging) {
+          o.dragging = false;
+          this.out({ t: "drag", pressed: false });
+        }
+        if (next === "swipe" && o.is !== "swipe") Object.assign(o, { gx: o.x, gy: o.y });
+        o.is = next;
+      }
+      p.is = next;
+      if (next === "swipe") Object.assign(p, { gx: x, gy: y });
       if (!this.pad) {
         this.pad = true;
         this.out({ t: "pad", on: true });
       }
     }
+    if (p.is === "swipe") return this.swipe(p, x, y);
     if (p.afterTap && p.is === "point" && !p.dragging && p.far >= TAP_SLOP_PX) {
       p.dragging = true;
       this.out({ t: "drag", pressed: true });
@@ -219,7 +240,7 @@ export class Keypad {
     p.cancelHold();
     const quick = t - p.t0 < TAP_MS && p.far < TAP_SLOP_PX;
     if (p.dragging) this.out({ t: "drag", pressed: false });
-    else if (p.afterTap && p.is !== "scroll") {
+    else if (p.afterTap && p.is !== "scroll" && p.is !== "swipe") {
       // The first tap's click, and this one's when it was a tap too: a double click
       this.out({ t: "click" });
       if (quick) this.out({ t: "click" });
@@ -239,7 +260,22 @@ export class Keypad {
     else if (p.is === "scroll" && ![...this.touches.values()].some((o) => o.is === "scroll")) {
       this.out({ t: "scroll_end" });
     }
+    if (![...this.touches.values()].some((o) => o.is === "swipe")) this.swiped = false;
     if (this.pad && this.touches.size === 0 && this.buttons === 0) this.linger();
+  }
+
+  /** A three-finger swipe: once the fingers' mean has gone SWIPE_PX one way, that way's
+   *  gesture, and no other until they lift. */
+  private swipe(p: Touch, x: number, y: number) {
+    Object.assign(p, { x, y });
+    if (this.swiped) return;
+    const fingers = [...this.touches.values()].filter((o) => o.is === "swipe");
+    const mx = fingers.reduce((a, o) => a + o.x - o.gx, 0) / fingers.length;
+    const my = fingers.reduce((a, o) => a + o.y - o.gy, 0) / fingers.length;
+    if (Math.max(Math.abs(mx), Math.abs(my)) < SWIPE_PX) return;
+    this.swiped = true;
+    const dir = Math.abs(mx) > Math.abs(my) ? (mx > 0 ? "right" : "left") : my > 0 ? "down" : "up";
+    this.out({ t: "swipe", dir });
   }
 
   /** A mouse button went down or up. While one is held the keys stay a trackpad, and after the
