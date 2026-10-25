@@ -34,10 +34,20 @@ describe("keyRows", () => {
     }
   });
 
-  test("Fn swaps the number row for F1 to F12 and the arrows for Home PgUp PgDn End", () => {
-    const [, top, , , , bottom] = keyRows(true);
-    expect(top.map((k) => k.label).join(" ")).toBe("` F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 ⌫");
-    expect(bottom.slice(-4).map((k) => k.label)).toEqual(["Home", "PgUp", "PgDn", "End"]);
+  test("Fn puts F1 to F12 on the symbol row, and Home PgUp PgDn End and the arrows on number keys", () => {
+    const [top, numbers, , , , bottom] = keyRows(true);
+    expect(top.map((k) => k.label).join(" ")).toBe("F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12");
+    expect(numbers.map((k) => k.label).join(" ")).toBe("` Home PgUp PgDn End 5 6 ← ↑ ↓ → ⌫");
+    // The keys stay where they are: the same count in each row as without Fn
+    expect(keyRows(true).map((r) => r.length)).toEqual(keyRows(false).map((r) => r.length));
+    expect(bottom).toEqual(keyRows(false)[5]);
+  });
+
+  test("the space row ends in a second comma and period, where the arrows were", () => {
+    const row = keyRows(false)[5];
+    expect(row.map((k) => k.label).slice(-2)).toEqual([",", "."]);
+    expect(row.slice(-2).map((k) => k.code)).toEqual([find(false, "Comma").code, find(false, "Period").code]);
+    expect(find(false, "Space").units).toBe(5.5);
   });
 
   test("keys send their evdev codes", () => {
@@ -51,11 +61,11 @@ describe("keyRows", () => {
     expect(mods.sort()).toEqual(["AltLeft", "ControlLeft", "MetaLeft", "ShiftLeft"].sort());
   });
 
-  test("Fn is where the right Alt and Ctrl were, in both modes, and sends nothing", () => {
+  test("Fn is on the left of Space, in both modes, and sends nothing", () => {
     for (const fn of [false, true]) {
       const row = keyRows(fn)[5];
-      expect(row.map((k) => k.id).slice(0, 5)).toEqual(["ControlLeft", "MetaLeft", "AltLeft", "Space", "Fn"]);
-      expect(row[4].code).toBe(0);
+      expect(row.map((k) => k.id).slice(0, 5)).toEqual(["ControlLeft", "MetaLeft", "AltLeft", "Fn", "Space"]);
+      expect(row[3].code).toBe(0);
     }
   });
 });

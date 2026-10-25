@@ -51,12 +51,23 @@ const BACKQUOTE = shifted("Backquote", "`", "~");
 
 const NUMBER_ROW = even([BACKQUOTE, ...DIGITS.slice(1), DIGITS[0], key("Backspace", "⌫")]);
 
-/** The number row under Fn. Forward Delete is on the key after "m" then, so not here too. */
-const F_ROW = even([
+const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown", "↓"), key("ArrowRight", "→")];
+
+/** The number row under Fn: Home, PgUp, PgDn and End on 1 to 4, the arrows on 7 to 0. */
+const FN_NUMBER_ROW = even([
   BACKQUOTE,
-  ...Array.from({ length: 12 }, (_, i) => key(`F${i + 1}`, `F${i + 1}`)),
+  key("Home", "Home"),
+  key("PageUp", "PgUp"),
+  key("PageDown", "PgDn"),
+  key("End", "End"),
+  DIGITS[5],
+  DIGITS[6],
+  ...ARROWS,
   key("Backspace", "⌫"),
 ]);
+
+/** The symbol row under Fn: F1 to F12, one on each key. */
+const F_ROW = even(Array.from({ length: 12 }, (_, i) => key(`F${i + 1}`, `F${i + 1}`)));
 
 const SYMBOL_ROW = even([
   key("Escape", "Esc"),
@@ -94,31 +105,32 @@ function letterRows(fn: boolean): Key[][] {
   ];
 }
 
-const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown", "↓"), key("ArrowRight", "→")];
-/** With Fn, the arrows are the keys a laptop puts on them. */
-const FN_ARROWS = [key("Home", "Home"), key("PageUp", "PgUp"), key("PageDown", "PgDn"), key("End", "End")];
-
-/** Fn, where a laptop has the right Alt and Ctrl. */
+/** Fn, on the left of Space, under the thumb. */
 const FN: Key = { id: "Fn", code: 0, label: "Fn", units: 1, fn: true };
 
-function spaceRow(fn: boolean): Key[] {
-  return [
-    mod("ControlLeft", "Ctrl", 1),
-    mod("MetaLeft", "Win", 1, { icon: "win" }),
-    mod("AltLeft", "Alt", 1),
-    key("Space", "", 3.5),
-    FN,
-    ...(fn ? FN_ARROWS : ARROWS),
-  ];
-}
+/** A second comma and period at the end of the space row, near the thumb, as on the iPhone
+ *  keyboard. Their ids are their own, so a touch on one does not light the symbol row's. */
+const NEAR_PUNCTUATION: Key[] = [
+  { ...shifted("Comma", ",", "<"), id: "CommaRight" },
+  { ...shifted("Period", ".", ">"), id: "PeriodRight" },
+];
+
+const SPACE_ROW: Key[] = [
+  mod("ControlLeft", "Ctrl", 1),
+  mod("MetaLeft", "Win", 1, { icon: "win" }),
+  mod("AltLeft", "Alt", 1),
+  FN,
+  key("Space", "", 5.5),
+  ...NEAR_PUNCTUATION,
+];
 
 /** The six rows, top first: symbols, numbers, three of letters, space. `fn` puts F1–F12 in
- *  place of the number row and Home, PgUp, PgDn, End in place of the arrows. */
+ *  place of the symbol row, and Home, PgUp, PgDn, End and the arrows on number keys. */
 export function keyRows(fn: boolean): Key[][] {
-  return [SYMBOL_ROW, fn ? F_ROW : NUMBER_ROW, ...letterRows(fn), spaceRow(fn)];
+  return [fn ? F_ROW : SYMBOL_ROW, fn ? FN_NUMBER_ROW : NUMBER_ROW, ...letterRows(fn), SPACE_ROW];
 }
 
-/** The arrow keys a drag on Space types (`./keypad.ts`), whatever Fn puts on the arrows. */
+/** The arrow keys a drag on Space types (`./keypad.ts`). */
 export const ARROW_KEYS = { left: ARROWS[0], up: ARROWS[1], down: ARROWS[2], right: ARROWS[3] };
 /** The evdev code of Space. */
 export const SPACE = CODE_TO_EVDEV.Space;

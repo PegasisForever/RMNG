@@ -60,7 +60,7 @@ export const CtrlAltDown: Story = { args: { mods: [[29, "held"], [56, "latched"]
 /** Caps Lock on: Caps is lit and the letters are upper case. */
 export const CapsOn: Story = { args: { caps: true } };
 
-/** Fn: F1–F12 on the number row, Home/PgUp/PgDn/End on the arrows. */
+/** Fn: F1–F12 on the symbol row; Home, PgUp, PgDn, End and the arrows on the number row. */
 export const FnOn: Story = { args: { fn: true } };
 
 /** The keys in use as a trackpad: faded to a trackpad's outline. */
