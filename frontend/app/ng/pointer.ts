@@ -14,9 +14,10 @@ export function pointerGain(d: number, ms: number): number {
 }
 
 /** Scroll distance (the clone's surface px) per CSS px of two-finger motion. The content
- *  follows the fingers, as Windows does by default: fingers up scroll down. 2 was four times
- *  too fast on the Duo. */
-export const SCROLL_GAIN = -0.5;
+ *  follows the fingers, as Windows does by default: fingers up scroll down. Ten times slower
+ *  than the first value (2), which was much too fast on the Duo. It goes out as touchpad
+ *  scroll (finger source, see `~/ng/Desk.tsx`), not as wheel notches. */
+export const SCROLL_GAIN = -0.2;
 
 /** `v` held to the pixels of an axis `size` pixels long. */
 export function clampTo(v: number, size: number): number {
