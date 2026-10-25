@@ -7,20 +7,26 @@
 // plays with no delay. iOS only starts audio inside a tap, so the first touches unlock it
 // (`unlock`). The audio session is "ambient", as the iOS keyboard's is: the ring/silent
 // switch mutes it, and it does not stop music that plays.
+//
+// Every click must sound the same. Two things made fast taps sound unlike slow ones: iOS turns
+// the audio output off after a moment of silence and fades it in again on the next sound, and
+// two clicks close together added up. So an inaudible signal keeps the output on while the
+// page has audio, and a new click cuts the one before it (a 2 ms fade, so no pop).
 import type { Key } from "./keyboard";
 
 export type ClickKind = "key" | "delete" | "modifier";
 
 /** What each kind is made of: the tick's band centre (Hz), the body's pitch (Hz), how fast
  *  each dies away (ms), how loud the body is against the tick, and the level. */
-const VOICE: Record<ClickKind, { band: number; body: number; tick: number; ring: number; mix: number; level: number }> = {
-  key: { band: 4200, body: 1250, tick: 2.2, ring: 5, mix: 0.35, level: 0.55 },
-  delete: { band: 3300, body: 950, tick: 2.6, ring: 6, mix: 0.45, level: 0.6 },
-  modifier: { band: 2400, body: 640, tick: 3.2, ring: 8, mix: 0.55, level: 0.6 },
+export const VOICE: Record<ClickKind, { band: number; body: number; tick: number; ring: number; mix: number; level: number }> = {
+  key: { band: 2300, body: 700, tick: 2.6, ring: 6, mix: 0.5, level: 0.28 },
+  delete: { band: 1900, body: 580, tick: 3, ring: 7, mix: 0.55, level: 0.3 },
+  modifier: { band: 1400, body: 420, tick: 3.6, ring: 9, mix: 0.65, level: 0.3 },
 };
 
-/** The sound's length; everything is silent well before it ends. */
-const LENGTH_MS = 45;
+/** The sound's length, and the fade to silence at its end (so the end is no pop either). */
+const LENGTH_MS = 60;
+const FADE_MS = 15;
 
 /** Backspace, and Delete under Fn (evdev). */
 const DELETE_CODES = new Set([14, 111]);
@@ -58,6 +64,7 @@ export function renderClick(kind: ClickKind, rate: number): Float32Array<ArrayBu
     return ((seed >>> 0) / 0xffffffff) * 2 - 1;
   };
   const attack = Math.round(rate * 0.0004);
+  const fade = Math.round((rate * FADE_MS) / 1000);
   for (let i = 0; i < n; i++) {
     const t = i / rate;
     const x = noise() * Math.exp(-t / (v.tick / 1000));
@@ -68,7 +75,7 @@ export function renderClick(kind: ClickKind, rate: number): Float32Array<ArrayBu
     y1 = y;
     const body = Math.sin(2 * Math.PI * v.body * t) * Math.exp(-t / (v.ring / 1000)) * v.mix;
     // A fraction of a millisecond of fade-in, so the first sample is no pop
-    out[i] = (y + body) * Math.min(1, i / Math.max(1, attack));
+    out[i] = (y + body) * Math.min(1, i / Math.max(1, attack), (n - 1 - i) / fade);
   }
   let peak = 0;
   for (const s of out) peak = Math.max(peak, Math.abs(s));
@@ -79,9 +86,14 @@ export function renderClick(kind: ClickKind, rate: number): Float32Array<ArrayBu
 /** The phone's audio session (Safari 16.4+), not in TypeScript's DOM types yet. */
 type WithAudioSession = Navigator & { audioSession?: { type: string } };
 
+/** How fast a click that is still sounding fades out when the next one starts, s. */
+const CUT_S = 0.002;
+
 export class KeySounds {
   private ctx: AudioContext | null = null;
   private buffers = new Map<ClickKind, AudioBuffer>();
+  /** The click that sounds now, to cut when the next one starts. */
+  private last: { src: AudioBufferSourceNode; gain: GainNode } | null = null;
 
   /** Start the audio: call it from inside a touch (iOS starts audio only in a user gesture).
    *  Safe to call on every touch. */
@@ -97,6 +109,7 @@ export class KeySounds {
         buffer.copyToChannel(samples, 0);
         this.buffers.set(kind, buffer);
       }
+      this.keepAwake(this.ctx);
     }
     // Suspended until a gesture, and "interrupted" again after the app was in the background
     if (this.ctx.state !== "running") {
@@ -114,8 +127,33 @@ export class KeySounds {
     const ctx = this.ctx;
     const buffer = this.buffers.get(clickKind(key));
     if (!ctx || !buffer || ctx.state !== "running") return;
+    const now = ctx.currentTime;
+    if (this.last) {
+      const { src, gain } = this.last;
+      gain.gain.setValueAtTime(gain.gain.value, now);
+      gain.gain.linearRampToValueAtTime(0, now + CUT_S);
+      src.stop(now + CUT_S);
+    }
+    const src = ctx.createBufferSource();
+    const gain = ctx.createGain();
+    src.buffer = buffer;
+    src.connect(gain).connect(ctx.destination);
+    src.start(now);
+    const last = { src, gain };
+    this.last = last;
+    src.onended = () => {
+      if (this.last === last) this.last = null;
+    };
+  }
+
+  /** A signal far below hearing (±1e-5, at half the sample rate), looped for as long as the
+   *  page lives, so the phone never turns the output off between clicks. */
+  private keepAwake(ctx: AudioContext) {
+    const buffer = ctx.createBuffer(1, 2, ctx.sampleRate);
+    buffer.copyToChannel(new Float32Array([1e-5, -1e-5]), 0);
     const src = ctx.createBufferSource();
     src.buffer = buffer;
+    src.loop = true;
     src.connect(ctx.destination);
     src.start();
   }

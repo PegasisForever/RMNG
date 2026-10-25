@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { keyRows } from "./keyboard";
-import { clickKind, renderClick } from "./keySound";
+import { clickKind, renderClick, VOICE } from "./keySound";
 
 const find = (id: string) => [...keyRows(false), ...keyRows(true)].flat().find((k) => k.id === id)!;
 
@@ -16,15 +16,18 @@ describe("clickKind", () => {
 });
 
 describe("renderClick", () => {
-  test("a short click: loud at the start, silent by the end, no pop on the first sample", () => {
+  test("a short click: at its level at the start, silent by the end, no pop on the first sample", () => {
     for (const kind of ["key", "delete", "modifier"] as const) {
       const s = renderClick(kind, 48000);
       const peak = Math.max(...s.map(Math.abs));
-      expect(peak).toBeGreaterThan(0.5);
-      expect(peak).toBeLessThanOrEqual(0.6 + 1e-6);
-      expect(Math.abs(s[0])).toBeLessThan(0.01);
+      expect(peak).toBeCloseTo(VOICE[kind].level, 5);
+      expect(Math.abs(s[0])).toBeLessThan(0.005);
       const tail = s.slice(-480);
-      expect(Math.max(...tail.map(Math.abs))).toBeLessThan(0.01);
+      expect(Math.max(...tail.map(Math.abs))).toBeLessThan(0.005);
     }
+  });
+
+  test("the same kind always gives the same samples", () => {
+    expect(renderClick("key", 48000)).toEqual(renderClick("key", 48000));
   });
 });
