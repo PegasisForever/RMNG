@@ -3,7 +3,7 @@ import { type PointerEvent, type ReactNode, memo, useRef, useState } from "react
 
 import { Haptic } from "./Haptic";
 import { GAP, keysLayout } from "./geometry";
-import { type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
+import { CAPS_LOCK, type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SLOP_PX } from "./keypad";
 import type { ModState } from "./modifiers";
 
@@ -13,7 +13,7 @@ export const BTN_RIGHT = 0x111;
 export const BTN_MIDDLE = 0x112;
 
 /** Buttons kept free in the tool row for later. */
-const SPARE_TOOLS = 4;
+const SPARE_TOOLS = 5;
 
 export type TouchKind = "down" | "move" | "up" | "cancel";
 
@@ -34,11 +34,9 @@ type Props = {
   onKeyTouch: (kind: TouchKind, id: number, key: Key | null, x: number, y: number) => void;
   /** A mouse button goes down or up (evdev code). */
   onButton: (button: number, pressed: boolean) => void;
-  /** Open the dialog that tries other heights for the keyboard area (for now). */
-  onSplit: () => void;
 };
 
-/** The /ng keyboard area: a tool row (Split, and spares for now) under the screen, a full keyboard of
+/** The /ng keyboard area: a tool row (spares for now) under the screen, a full keyboard of
  *  square keys under it, and the left, middle and right mouse buttons in the space below the
  *  keys. The keys are a touchpad too: a finger that moves on them moves the cursor, two
  *  scroll. Each finger works on its own, so a mouse button can stay down while another finger
@@ -51,17 +49,6 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
   return (
     <div className="relative touch-none select-none bg-black" style={{ width: p.width, height: p.height }}>
       <div className="absolute flex" style={{ ...k.tools, gap: GAP }}>
-        <div
-          role="button"
-          className={`${KEY} flex-1 text-sm ${tone(false)}`}
-          onPointerDown={(e) => {
-            capture(e);
-            p.onSplit();
-          }}
-        >
-          Split
-          <Haptic />
-        </div>
         {Array.from({ length: SPARE_TOOLS }, (_, i) => (
           <div key={i} className="flex-1 rounded-md bg-neutral-900" />
         ))}
@@ -76,15 +63,15 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
         onPointerCancel={touch.up("cancel")}
       >
         {rows.map((row, i) => (
-          <div key={i} className="flex" style={{ gap: GAP, height: k.keyHeight }}>
+          <div key={i} className="flex" style={{ gap: GAP, height: k.rowHeights[i] }}>
             {row.map((key) => (
               <KeyButton
                 key={key.id}
                 k={key}
                 width={key.units * k.pitch - GAP}
-                size={k.keyHeight}
+                size={Math.min(k.rowHeights[i], k.pitch - GAP)}
                 label={keyLabel(key, shift, p.caps)}
-                state={key.fn ? (p.fn ? "latched" : undefined) : p.mods.get(key.code)}
+                state={keyState(key, p)}
                 down={touch.pressed.has(key.id)}
               />
             ))}
@@ -102,6 +89,15 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
 });
 
 const KEY = "relative flex shrink-0 items-center justify-center rounded-md leading-none";
+
+/** What a key shows it is: a modifier's state, Fn on, or Caps Lock on (lit like a Shift that is
+ *  down). Caps Lock's state is the page's count of its presses, so a clone that turns it on or
+ *  off by itself goes unseen. */
+function keyState(key: Key, p: Props): ModState | undefined {
+  if (key.fn) return p.fn ? "latched" : undefined;
+  if (key.code === CAPS_LOCK) return p.caps ? "latched" : undefined;
+  return p.mods.get(key.code);
+}
 
 function tone(down: boolean, active = false) {
   if (active) return "bg-neutral-200 text-black";
@@ -184,7 +180,7 @@ function KeyButton({
     <div
       role="button"
       aria-label={k.id}
-      aria-pressed={k.mod || k.fn ? state !== undefined : undefined}
+      aria-pressed={k.mod || k.fn || k.code === CAPS_LOCK ? state !== undefined : undefined}
       data-key={k.id}
       data-state={state}
       className={`${KEY} ${tone(down, state !== undefined)}`}

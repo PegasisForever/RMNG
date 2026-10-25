@@ -31,15 +31,15 @@ pub const IPHONE_DUO_LAYOUT: &str = "iPhone Duo";
 
 /// The built-in layout for the `/ng` page: one monitor that fills the screen area above the
 /// page's keyboard, each monitor pixel 2 × 2 screen pixels, so text is twice the size it would
-/// be at the screen's own pixels. The area is 2007 × 1521 device px (669 × 507 CSS px at 3×),
-/// half of it 1003.5 × 760.5; the encoder takes even sizes only (4:2:0 chroma), so the monitor
-/// is 1002 × 760 and the page leaves a strip of 3 pixels at the right and 1 at the bottom.
+/// be at the screen's own pixels. The area is 2007 × 1617 device px (669 × 539 CSS px at 3×),
+/// half of it 1003.5 × 808.5; the encoder takes even sizes only (4:2:0 chroma), so the monitor
+/// is 1002 × 808 and the page leaves a strip of 3 pixels at the right and 1 at the bottom.
 pub fn iphone_duo_layout() -> &'static LayoutPreset {
     static DUO: std::sync::LazyLock<LayoutPreset> = std::sync::LazyLock::new(|| LayoutPreset {
         name: IPHONE_DUO_LAYOUT.to_string(),
         monitors: vec![MonitorSpec {
             width: 1002,
-            height: 760,
+            height: 808,
             x: 0,
             y: 0,
             primary: true,

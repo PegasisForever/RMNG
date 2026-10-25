@@ -5,7 +5,7 @@ import { KeyboardView } from "./KeyboardView";
 import { SHIFTS } from "./keyboard";
 import type { ModState } from "./modifiers";
 
-/** The keyboard area on the unfolded iPhone Duo: 669 × 444, a 34 px home bar. The container
+/** The keyboard area on the unfolded iPhone Duo: 669 × 412, a 34 px home bar. The container
  *  tells taps from pointer gestures, so here a key only shows that it is touched. */
 function Frame(args: { height: number; fn: boolean; mods: [number, ModState][]; caps: boolean }) {
   return (
@@ -18,7 +18,6 @@ function Frame(args: { height: number; fn: boolean; mods: [number, ModState][]; 
       caps={args.caps}
       onKeyTouch={fn()}
       onButton={fn()}
-      onSplit={fn()}
     />
   );
 }
@@ -27,7 +26,7 @@ const meta = {
   title: "ng/KeyboardView",
   component: Frame,
   parameters: { layout: "centered" },
-  args: { height: 444, fn: false, mods: [], caps: false },
+  args: { height: 412, fn: false, mods: [], caps: false },
 } satisfies Meta<typeof Frame>;
 
 export default meta;
@@ -43,6 +42,9 @@ export const ShiftLocked: Story = { args: { mods: [[SHIFTS[0], "locked"]] } };
 
 /** Ctrl held by a finger, Alt tapped. */
 export const CtrlAltDown: Story = { args: { mods: [[29, "held"], [56, "latched"]] } };
+
+/** Caps Lock on: Caps is lit and the letters are upper case. */
+export const CapsOn: Story = { args: { caps: true } };
 
 /** Fn: F1–F12 on the number row, Home/PgUp/PgDn/End on the arrows. */
 export const FnOn: Story = { args: { fn: true } };

@@ -9,14 +9,23 @@ const PAD = 4;
 export const TOOL_H = 36;
 /** A key is at most this many times as tall as a 1-unit key is wide: square. */
 export const KEY_ASPECT = 1;
+/** The mouse buttons under the keys keep at least this height (with the home bar's, if
+ *  that is more): the least touch target Apple gives. */
+export const MIN_BUTTONS_H = 44;
+/** The two top rows (symbols, numbers) give way first where the keys do not fit; they keep at
+ *  least this height before the other rows give way too. */
+const MIN_TOP_ROW = 24;
+/** How many rows, from the top, give way first. */
+const TOP_ROWS = 2;
 
 type Box = { left: number; top: number; width: number; height: number };
 
 export type KeysLayout = {
   /** One key unit plus the gap after it: a 1-unit key is `pitch - GAP` wide. */
   pitch: number;
-  /** A key's height: KEY_ASPECT × a 1-unit key's width, or less where the rows do not fit. */
-  keyHeight: number;
+  /** Each row's height, top first: KEY_ASPECT × a 1-unit key's width, or less where the
+   *  rows do not fit, the two top rows first. */
+  rowHeights: number[];
   /** The tool row: at the top of the area, under the screen. */
   tools: Box;
   /** The keys: right under the tool row; what is left of the area stays empty below them. */
@@ -26,23 +35,28 @@ export type KeysLayout = {
 };
 
 /** Where things go in a keyboard area `width`×`height` with `bottom` kept for the home bar.
- *  The keys take the whole width, and are KEY_ASPECT times as tall as wide where the area has
- *  room for that; where it has not, they are as tall as the rows can be. */
+ *  The keys take the whole width and are square where the area has room for that. Where it
+ *  has not, the symbol and number rows get shorter and the four rows under them stay square;
+ *  only when the two are down to MIN_TOP_ROW do those get shorter too. */
 export function keysLayout(width: number, height: number, bottom: number): KeysLayout {
-  const room = height - PAD - TOOL_H - GAP - bottom;
+  const room = height - PAD - TOOL_H - GAP - GAP - Math.max(bottom, MIN_BUTTONS_H);
   const pitch = (width - 2 * PAD + GAP) / ROW_UNITS;
-  const keyHeight = Math.max(Math.min((pitch - GAP) * KEY_ASPECT, (room - (ROWS - 1) * GAP) / ROWS), 1);
+  const full = (pitch - GAP) * KEY_ASPECT;
+  const rowsRoom = room - (ROWS - 1) * GAP;
+  const low = ROWS - TOP_ROWS;
+  const top = Math.min(full, Math.max((rowsRoom - low * full) / TOP_ROWS, MIN_TOP_ROW));
+  const lower = Math.max(Math.min(full, (rowsRoom - TOP_ROWS * top) / low), 1);
+  const rowHeights = Array.from({ length: ROWS }, (_, i) => (i < TOP_ROWS ? top : lower));
   const w = ROW_UNITS * pitch - GAP;
-  const h = ROWS * keyHeight + (ROWS - 1) * GAP;
-  const left = PAD;
+  const h = rowHeights.reduce((a, b) => a + b, 0) + (ROWS - 1) * GAP;
   const tools = { left: PAD, top: PAD, width: width - 2 * PAD, height: TOOL_H };
   const keysTop = PAD + TOOL_H + GAP;
   const buttonsTop = keysTop + h + GAP;
   return {
     pitch,
-    keyHeight,
+    rowHeights,
     tools,
-    keys: { left, top: keysTop, width: w, height: h },
+    keys: { left: PAD, top: keysTop, width: w, height: h },
     buttons: { left: PAD, top: buttonsTop, width: width - 2 * PAD, height: height - buttonsTop },
   };
 }

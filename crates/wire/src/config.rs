@@ -958,7 +958,7 @@ mod tests {
     #[test]
     fn the_built_in_iphone_duo_layout_has_one_even_sized_monitor() {
         let m = &crate::control::iphone_duo_layout().monitors;
-        assert_eq!((m.len(), m[0].width, m[0].height, m[0].primary), (1, 1002, 760, true));
+        assert_eq!((m.len(), m[0].width, m[0].height, m[0].primary), (1, 1002, 808, true));
         assert_eq!((m[0].width % 2, m[0].height % 2), (0, 0));
     }
 
