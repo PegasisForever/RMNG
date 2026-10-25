@@ -10,23 +10,17 @@ const BOTTOM = 34;
 describe("keysLayout", () => {
   const k = keysLayout(W, H, BOTTOM);
 
-  test("on the Duo the keys take the width, and the rows fill the room under the tool row", () => {
+  test("on the Duo the keys take the width and are square", () => {
     expect(k.keys.width).toBeCloseTo(W - 8, 5);
     expect(k.pitch - GAP).toBeGreaterThan(53);
-    expect(k.keyHeight).toBeLessThanOrEqual((k.pitch - GAP) * KEY_ASPECT);
-    expect(k.keys.top).toBeCloseTo(4 + TOOL_H + GAP, 9);
+    expect(k.keyHeight).toBeCloseTo((k.pitch - GAP) * KEY_ASPECT, 9);
+    expect(KEY_ASPECT).toBe(1);
   });
 
-  test("a tall area makes keys 1.3 times as tall as wide, no taller", () => {
-    const t = keysLayout(W, 700, BOTTOM);
-    expect(t.keyHeight).toBeCloseTo((t.pitch - GAP) * KEY_ASPECT, 9);
-    expect(t.keys.top + t.keys.height).toBeCloseTo(700 - BOTTOM, 9);
-  });
-
-  test("the tool row is at the top, the keys at the bottom above the home bar", () => {
+  test("the tool row is at the top, the keys right under it, the space left at the bottom", () => {
     expect(k.tools.top).toBe(4);
-    expect(k.keys.top + k.keys.height).toBeCloseTo(H - BOTTOM, 9);
-    expect(k.keys.top).toBeGreaterThanOrEqual(k.tools.top + TOOL_H);
+    expect(k.keys.top).toBe(4 + TOOL_H + GAP);
+    expect(k.keys.top + k.keys.height).toBeLessThan(H - BOTTOM);
   });
 
   test("the trackpad takes everything under the tool row, down to the keys' bottom", () => {

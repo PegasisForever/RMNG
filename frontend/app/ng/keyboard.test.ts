@@ -16,18 +16,18 @@ describe("keyRows", () => {
     });
   }
 
-  test("the number row reads Esc ` 1 … 0 - = ⌫", () => {
-    expect(keyRows(false)[0].map((k) => k.label).join(" ")).toBe("Esc ` 1 2 3 4 5 6 7 8 9 0 - = ⌫");
+  test("the number row, second, reads Esc 1 … 0 ⌫", () => {
+    expect(keyRows(false)[1].map((k) => k.label).join(" ")).toBe("Esc 1 2 3 4 5 6 7 8 9 0 ⌫");
   });
 
-  test("the symbols beside the letters have a row of their own; the letter rows have none", () => {
+  test("the symbols beside the letters and the numbers have a row of their own, on top", () => {
     const rows = keyRows(false);
-    expect(rows[1].map((k) => k.label).join(" ")).toBe("[ ] \\ ; ' , . /");
+    expect(rows[0].map((k) => k.label).join(" ")).toBe("` [ ] \\ ; ' , . / - =");
     for (const row of rows.slice(2, 5)) expect(row.every((k) => k.letter || k.label.length > 1)).toBe(true);
   });
 
   test("Fn swaps the number row for F1 to F12 and the arrows for Home PgUp PgDn End", () => {
-    const [top, , , , , bottom] = keyRows(true);
+    const [, top, , , , bottom] = keyRows(true);
     expect(top.map((k) => k.label).join(" ")).toBe("Esc F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 Del ⌫");
     expect(bottom.slice(-4).map((k) => k.label)).toEqual(["Home", "PgUp", "PgDn", "End"]);
   });

@@ -43,15 +43,7 @@ const DIGITS = [...")!@#$%^&*("].map((shift, i) => shifted(`Digit${i}`, String(i
 /** A row of keys that share its width evenly (the number row, the symbol row). */
 const even = (keys: Key[]) => keys.map((k) => ({ ...k, units: ROW_UNITS / keys.length }));
 
-const NUMBER_ROW = even([
-  key("Escape", "Esc"),
-  shifted("Backquote", "`", "~"),
-  ...DIGITS.slice(1),
-  DIGITS[0],
-  shifted("Minus", "-", "_"),
-  shifted("Equal", "=", "+"),
-  key("Backspace", "⌫"),
-]);
+const NUMBER_ROW = even([key("Escape", "Esc"), ...DIGITS.slice(1), DIGITS[0], key("Backspace", "⌫")]);
 
 const F_ROW = even([
   key("Escape", "Esc"),
@@ -61,6 +53,7 @@ const F_ROW = even([
 ]);
 
 const SYMBOL_ROW = even([
+  shifted("Backquote", "`", "~"),
   shifted("BracketLeft", "[", "{"),
   shifted("BracketRight", "]", "}"),
   shifted("Backslash", "\\", "|"),
@@ -69,6 +62,8 @@ const SYMBOL_ROW = even([
   shifted("Comma", ",", "<"),
   shifted("Period", ".", ">"),
   shifted("Slash", "/", "?"),
+  shifted("Minus", "-", "_"),
+  shifted("Equal", "=", "+"),
 ]);
 
 const LETTER_ROWS = [
@@ -95,10 +90,10 @@ function spaceRow(fn: boolean): Key[] {
   ];
 }
 
-/** The six rows, top first: numbers, symbols, three of letters, space. `fn` puts F1–F12 in
+/** The six rows, top first: symbols, numbers, three of letters, space. `fn` puts F1–F12 in
  *  place of the number row and Home, PgUp, PgDn, End in place of the arrows. */
 export function keyRows(fn: boolean): Key[][] {
-  return [fn ? F_ROW : NUMBER_ROW, SYMBOL_ROW, ...LETTER_ROWS, spaceRow(fn)];
+  return [SYMBOL_ROW, fn ? F_ROW : NUMBER_ROW, ...LETTER_ROWS, spaceRow(fn)];
 }
 
 /** The evdev codes of the Shift keys. */

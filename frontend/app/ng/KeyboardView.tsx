@@ -33,8 +33,8 @@ type Props = {
   onPad: (kind: "down" | "move" | "up", id: number, x: number, y: number) => void;
 };
 
-/** The /ng keyboard area: a tool row at its top, under the screen, and a full keyboard at its
- *  bottom, its keys 1.3 times as tall as wide. In trackpad mode a trackpad takes all the space
+/** The /ng keyboard area: a tool row at its top, under the screen, and a full keyboard of
+ *  square keys right under it; the space left stays empty at the bottom. In trackpad mode a trackpad takes all the space
  *  under the tool row. Each finger works on its own, so the Trackpad button can be held while
  *  other fingers use the pad. A tap on a key or a button gives a haptic tick on iOS. */
 export const KeyboardView = memo(function KeyboardView(p: Props) {

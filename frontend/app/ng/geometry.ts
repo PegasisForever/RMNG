@@ -7,8 +7,8 @@ export const GAP = 4;
 const PAD = 4;
 /** The tool row's height, CSS px. */
 export const TOOL_H = 36;
-/** A key is at most this many times as tall as a 1-unit key is wide. */
-export const KEY_ASPECT = 1.3;
+/** A key is at most this many times as tall as a 1-unit key is wide: square. */
+export const KEY_ASPECT = 1;
 
 type Box = { left: number; top: number; width: number; height: number };
 
@@ -19,7 +19,7 @@ export type KeysLayout = {
   keyHeight: number;
   /** The tool row: at the top of the area, under the screen. */
   tools: Box;
-  /** The keys: at the bottom of the area, above the home bar. */
+  /** The keys: right under the tool row; what is left of the area stays empty below them. */
   keys: Box;
   /** The trackpad: all the space under the tool row, down to where the keys end. */
   pad: Box;
@@ -36,8 +36,8 @@ export function keysLayout(width: number, height: number, bottom: number): KeysL
   const h = ROWS * keyHeight + (ROWS - 1) * GAP;
   const left = PAD;
   const tools = { left: PAD, top: PAD, width: width - 2 * PAD, height: TOOL_H };
-  const keysTop = height - bottom - h;
   const padTop = PAD + TOOL_H + GAP;
+  const keysTop = padTop;
   return {
     pitch,
     keyHeight,
