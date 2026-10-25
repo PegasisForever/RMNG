@@ -12,8 +12,9 @@ import type { ViewSpec } from "~/lib/wire/ViewSpec";
 import { Cursor } from "./Cursor";
 import { KeyboardView, type TouchKind } from "./KeyboardView";
 import { screenFit } from "./geometry";
-import { CAPS_LOCK, type Key } from "./keyboard";
+import { CAPS_LOCK, type Key, isShift } from "./keyboard";
 import { Keypad, type KeypadOut } from "./keypad";
+import { type ModState, Modifiers } from "./modifiers";
 import { SCROLL_GAIN, clampTo, pointerGain } from "./pointer";
 import { MONITOR, type Session, openSession } from "./session";
 
@@ -49,7 +50,7 @@ export function Desk({ width, height, bottom }: Props) {
   const [shape, setShape] = useState<CursorShape | null>(null);
   const [hidden, setHidden] = useState(false);
   const [pos, setPos] = useState({ x: DUO_MONITOR.width / 2, y: DUO_MONITOR.height / 2 });
-  const [latched, setLatched] = useState<ReadonlySet<number>>(new Set());
+  const [mods, setMods] = useState<ReadonlyMap<number, ModState>>(new Map());
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
   /** The cursor where this page last put it, and when. */
@@ -103,20 +104,27 @@ export function Desk({ width, height, bottom }: Props) {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [claim]);
 
-  const latchedRef = useRef(latched);
-  latchedRef.current = latched;
-  /** A modifier was tapped: it goes down, or up when it was down. */
-  const toggleModifier = (code: number) => {
-    const down = !latchedRef.current.has(code);
-    send({ kind: "key_code", keycode: code, pressed: down });
-    const next = new Set(latchedRef.current);
-    if (down) next.add(code);
-    else next.delete(code);
-    setLatched(next);
+  /** The modifiers, made once (`./modifiers.ts`): what they decide goes to the clone. */
+  const modifiers = useRef<Modifiers | null>(null);
+  if (!modifiers.current) {
+    modifiers.current = new Modifiers(
+      (code, pressed) => send({ kind: "key_code", keycode: code, pressed }),
+      isShift,
+    );
+  }
+  /** Run a change to the modifiers, then show their new states. */
+  const withMods = (f: (m: Modifiers) => void) => {
+    f(modifiers.current!);
+    setMods(modifiers.current!.states());
   };
+  /** A key that is no modifier goes down or up; a tapped modifier has done its key after it. */
   const keyCode = (code: number, pressed: boolean) => {
-    if (code === CAPS_LOCK && pressed) setCaps((c) => !c);
+    if (pressed) {
+      if (code === CAPS_LOCK) setCaps((c) => !c);
+      modifiers.current!.keyDown();
+    }
     send({ kind: "key_code", keycode: code, pressed });
+    if (!pressed) withMods((m) => m.keyDone());
   };
 
   /** The keys' touches, made once: taps and holds type, the rest moves the pointer. */
@@ -126,12 +134,17 @@ export function Desk({ width, height, bottom }: Props) {
       switch (o.t) {
         case "tap":
           if (o.key.fn) setFn((f) => !f);
-          else if (o.key.mod) toggleModifier(o.key.code);
           else {
             keyCode(o.key.code, true);
             keyCode(o.key.code, false);
           }
           break;
+        case "mod": {
+          const { code } = o.key;
+          const t = performance.now();
+          withMods((m) => (o.down ? m.down(code, t) : m.up(code, o.dragged ?? false, t)));
+          break;
+        }
         case "hold":
           keyCode(o.key.code, o.pressed);
           break;
@@ -175,10 +188,12 @@ export function Desk({ width, height, bottom }: Props) {
     else if (kind === "up") pad.up(id);
     else pad.cancel(id);
   }, []);
-  const onButton = useCallback(
-    (button: number, pressed: boolean) => send({ kind: "button", button, pressed }),
-    [],
-  );
+  // A click is a key to the modifiers: Ctrl, then a click, is a Ctrl-click
+  const onButton = useCallback((button: number, pressed: boolean) => {
+    if (pressed) modifiers.current!.keyDown();
+    send({ kind: "button", button, pressed });
+    if (!pressed) withMods((m) => m.keyDone());
+  }, []);
 
   const terminal = spec?.content.mode === "terminal";
   const note = !connected
@@ -213,7 +228,7 @@ export function Desk({ width, height, bottom }: Props) {
         height={KEYS_HEIGHT}
         bottom={bottom}
         fn={fn}
-        latched={latched}
+        mods={mods}
         caps={caps}
         onKeyTouch={onKeyTouch}
         onButton={onButton}

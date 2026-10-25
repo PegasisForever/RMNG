@@ -62,11 +62,22 @@ describe("Keypad", () => {
     expect(said()).toEqual(["KeyA↓", "KeyA↑"]);
   });
 
-  test("a modifier is only tapped, also after a long touch", () => {
+  test("a modifier is told down when the finger comes down and up when it lifts", () => {
     pad.down(1, CTRL, 100, 100, 0);
     clock.advance(HOLD_MS * 4);
     pad.up(1);
-    expect(said()).toEqual(["tap ControlLeft"]);
+    expect(out).toEqual([
+      { t: "mod", key: CTRL, down: true },
+      { t: "mod", key: CTRL, down: false },
+    ]);
+  });
+
+  test("a touch on a modifier that moves is a drag: the modifier is told up at once", () => {
+    pad.down(1, CTRL, 100, 100, 0);
+    pad.move(1, 130, 100, 20);
+    pad.up(1);
+    expect(said()).toEqual(["mod", "mod", "move"]);
+    expect(out[1]).toEqual({ t: "mod", key: CTRL, down: false, dragged: true });
   });
 
   test("a finger that moves moves the cursor and types nothing", () => {

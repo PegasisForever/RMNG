@@ -21,6 +21,8 @@ export type Key = {
   mod?: boolean;
   /** The Fn key: it switches the keys, and sends nothing itself (`code` is 0). */
   fn?: boolean;
+  /** Drawn as this icon in place of its label. */
+  icon?: "tab" | "enter" | "shift" | "win";
 };
 
 /** Every row is this many units wide: ten letters and a Tab. */
@@ -36,7 +38,8 @@ function key(id: string, label: string, units = 1, extra: Partial<Key> = {}): Ke
 
 const shifted = (id: string, label: string, shift: string) => key(id, label, 1, { shift });
 const letters = (s: string) => [...s].map((c) => key(`Key${c.toUpperCase()}`, c, 1, { letter: true }));
-const mod = (id: string, label: string, units: number) => key(id, label, units, { mod: true });
+const mod = (id: string, label: string, units: number, extra: Partial<Key> = {}) =>
+  key(id, label, units, { mod: true, ...extra });
 
 const DIGITS = [...")!@#$%^&*("].map((shift, i) => shifted(`Digit${i}`, String(i), shift));
 
@@ -69,9 +72,17 @@ const SYMBOL_ROW = even([
 ]);
 
 const LETTER_ROWS = [
-  [key("Tab", "Tab", 1.5), ...letters("qwertyuiop")],
-  [key("CapsLock", "Caps", 1.25), ...letters("asdfghjkl"), key("Enter", "Enter", 1.25)],
-  [mod("ShiftLeft", "Shift", 2.25), ...letters("zxcvbnm"), mod("ShiftRight", "Shift", 2.25)],
+  [key("Tab", "Tab", 1.5, { icon: "tab" }), ...letters("qwertyuiop")],
+  [
+    key("CapsLock", "Caps", 1.25),
+    ...letters("asdfghjkl"),
+    key("Enter", "Enter", 1.25, { icon: "enter" }),
+  ],
+  [
+    mod("ShiftLeft", "Shift", 2.25, { icon: "shift" }),
+    ...letters("zxcvbnm"),
+    mod("ShiftRight", "Shift", 2.25, { icon: "shift" }),
+  ],
 ];
 
 const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown", "↓"), key("ArrowRight", "→")];
@@ -84,7 +95,7 @@ const FN: Key = { id: "Fn", code: 0, label: "Fn", units: 1, fn: true };
 function spaceRow(fn: boolean): Key[] {
   return [
     mod("ControlLeft", "Ctrl", 1),
-    mod("MetaLeft", "Win", 1),
+    mod("MetaLeft", "Win", 1, { icon: "win" }),
     mod("AltLeft", "Alt", 1),
     key("Space", "", 3.5),
     FN,
@@ -100,6 +111,8 @@ export function keyRows(fn: boolean): Key[][] {
 
 /** The evdev codes of the Shift keys. */
 export const SHIFTS: readonly number[] = [CODE_TO_EVDEV.ShiftLeft, CODE_TO_EVDEV.ShiftRight];
+/** Whether a modifier locks on a double tap (`./modifiers.ts`): the Shift keys. */
+export const isShift = (code: number) => SHIFTS.includes(code);
 /** The evdev code of Caps Lock. */
 export const CAPS_LOCK = CODE_TO_EVDEV.CapsLock;
 

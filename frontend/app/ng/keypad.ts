@@ -7,6 +7,10 @@
 // - It moves past SLOP_PX first: it types nothing. Alone, it moves the cursor; with other
 //   fingers down that have not typed either, they scroll together.
 //
+// A modifier is told as it goes: down when the finger comes down, up when it lifts or when
+// its touch turns into a pointer gesture (`./modifiers.ts` decides what that means). Fn is
+// tapped, as any other key.
+//
 // Fingers that roll from one key to the next (the next one down before the last is up) are
 // still two taps, as neither moved. A touch that starts between keys has no key: it only ever
 // moves the pointer. Pure: touches go in with their time, and what to do comes
@@ -24,6 +28,9 @@ export type KeypadOut =
   | { t: "tap"; key: Key }
   /** A finger holds `key` down (`pressed`), or lifted after holding it. */
   | { t: "hold"; key: Key; pressed: boolean }
+  /** A finger came down on the modifier `key`, or left it: it lifted, or its touch became a
+   *  pointer gesture (`dragged`). */
+  | { t: "mod"; key: Key; down: boolean; dragged?: boolean }
   /** One-finger motion since the last one, CSS px, and the time it took, ms. */
   | { t: "move"; dx: number; dy: number; ms: number }
   /** Motion of fingers that scroll together since the last one, CSS px (their mean). */
@@ -58,8 +65,8 @@ export class Keypad {
 
   down(id: number, key: Key | null, x: number, y: number, t: number) {
     const touch: Touch = { key, x, y, t, sx: x, sy: y, is: "new", cancelHold: () => {} };
-    // A modifier or Fn is only ever tapped: it holds itself down (see `Key.mod`)
-    if (key && !key.mod && !key.fn) {
+    if (key?.mod) this.out({ t: "mod", key, down: true });
+    else if (key && !key.fn) {
       touch.cancelHold = this.timer.after(HOLD_MS, () => {
         if (touch.is !== "new") return;
         touch.is = "hold";
@@ -76,6 +83,7 @@ export class Keypad {
     if (p.is === "new") {
       if (Math.hypot(x - p.sx, y - p.sy) < SLOP_PX) return;
       p.cancelHold();
+      if (p.key?.mod) this.out({ t: "mod", key: p.key, down: false, dragged: true });
       const others = [...this.touches.values()].filter(
         (o) => o !== p && (o.is === "new" || o.is === "point" || o.is === "scroll"),
       );
@@ -83,6 +91,7 @@ export class Keypad {
         // Two (or more) fingers: they all scroll, none of them types
         for (const o of others) {
           o.cancelHold();
+          if (o.is === "new" && o.key?.mod) this.out({ t: "mod", key: o.key, down: false, dragged: true });
           o.is = "scroll";
         }
         p.is = "scroll";
@@ -105,7 +114,8 @@ export class Keypad {
     this.touches.delete(id);
     p.cancelHold();
     if (p.is === "new") {
-      if (p.key) this.out({ t: "tap", key: p.key });
+      if (p.key?.mod) this.out({ t: "mod", key: p.key, down: false });
+      else if (p.key) this.out({ t: "tap", key: p.key });
     } else if (p.is === "hold" && p.key) this.out({ t: "hold", key: p.key, pressed: false });
     else if (p.is === "scroll" && ![...this.touches.values()].some((o) => o.is === "scroll")) {
       this.out({ t: "scroll_end" });
@@ -117,7 +127,10 @@ export class Keypad {
   cancel(id: number) {
     const p = this.touches.get(id);
     if (!p) return;
-    if (p.is === "new") p.is = "point";
+    if (p.is === "new") {
+      if (p.key?.mod) this.out({ t: "mod", key: p.key, down: false, dragged: true });
+      p.is = "point";
+    }
     this.up(id);
   }
 }

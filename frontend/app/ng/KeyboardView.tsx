@@ -1,9 +1,11 @@
-import { type PointerEvent, memo, useRef, useState } from "react";
+import { ArrowBigUp, ArrowBigUpDash, ArrowRightToLine, CornerDownLeft } from "lucide-react";
+import { type PointerEvent, type ReactNode, memo, useRef, useState } from "react";
 
 import { Haptic } from "./Haptic";
 import { GAP, keysLayout } from "./geometry";
 import { type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SLOP_PX } from "./keypad";
+import type { ModState } from "./modifiers";
 
 /** Evdev mouse buttons. */
 export const BTN_LEFT = 0x110;
@@ -22,8 +24,8 @@ type Props = {
   bottom: number;
   /** Fn: F1–F12 in place of the number row, Home/PgUp/PgDn/End on the arrows. */
   fn: boolean;
-  /** The modifiers held down (evdev codes). */
-  latched: ReadonlySet<number>;
+  /** The modifiers that are down (evdev code → held, tapped, or locked). */
+  mods: ReadonlyMap<number, ModState>;
   /** Caps Lock is on (only the labels follow it). */
   caps: boolean;
   /** A finger on the keys: its id, the key it went down on (null between keys), and where it
@@ -41,7 +43,7 @@ type Props = {
  *  moves the cursor on the keys (a drag). A tap gives a haptic tick on iOS. */
 export const KeyboardView = memo(function KeyboardView(p: Props) {
   const k = keysLayout(p.width, p.height, p.bottom);
-  const shift = SHIFTS.some((c) => p.latched.has(c));
+  const shift = SHIFTS.some((c) => p.mods.has(c));
   const rows = keyRows(p.fn);
   const touch = useKeysTouch(rows, p.onKeyTouch);
   return (
@@ -69,7 +71,7 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
                 width={key.units * k.pitch - GAP}
                 size={k.keyHeight}
                 label={keyLabel(key, shift, p.caps)}
-                latched={key.fn ? p.fn : p.latched.has(key.code)}
+                state={key.fn ? (p.fn ? "latched" : undefined) : p.mods.get(key.code)}
                 down={touch.pressed.has(key.id)}
               />
             ))}
@@ -153,7 +155,7 @@ function KeyButton({
   width,
   size,
   label,
-  latched,
+  state,
   down,
 }: {
   k: Key;
@@ -161,21 +163,47 @@ function KeyButton({
   /** The key's height, CSS px; the label scales with it. */
   size: number;
   label: string;
-  latched: boolean;
+  /** A modifier's (or Fn's) state; undefined when it is up. */
+  state: ModState | undefined;
   down: boolean;
 }) {
   return (
     <div
       role="button"
       aria-label={k.id}
-      aria-pressed={k.mod || k.fn ? latched : undefined}
+      aria-pressed={k.mod || k.fn ? state !== undefined : undefined}
       data-key={k.id}
-      className={`${KEY} ${tone(down, latched)}`}
+      data-state={state}
+      className={`${KEY} ${tone(down, state !== undefined)}`}
       style={{ width, height: size, fontSize: size * (label.length > 1 ? 0.25 : 0.38) }}
     >
-      {label}
+      {k.icon ? <KeyIcon icon={k.icon} size={size * 0.42} locked={state === "locked"} /> : label}
       <Haptic />
     </div>
+  );
+}
+
+/** The icon a key shows in place of its label. A locked Shift shows the Caps Lock arrow. */
+function KeyIcon({ icon, size, locked }: { icon: NonNullable<Key["icon"]>; size: number; locked: boolean }) {
+  const p = { size, strokeWidth: 1.75, "aria-hidden": true };
+  const icons: Record<NonNullable<Key["icon"]>, ReactNode> = {
+    tab: <ArrowRightToLine {...p} />,
+    enter: <CornerDownLeft {...p} />,
+    shift: locked ? <ArrowBigUpDash {...p} /> : <ArrowBigUp {...p} />,
+    win: <WinLogo size={size * 0.8} />,
+  };
+  return icons[icon];
+}
+
+/** The four panes of the Win key. */
+function WinLogo({ size }: { size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="currentColor" aria-hidden>
+      <rect x="0" y="0" width="7.4" height="7.4" />
+      <rect x="8.6" y="0" width="7.4" height="7.4" />
+      <rect x="0" y="8.6" width="7.4" height="7.4" />
+      <rect x="8.6" y="8.6" width="7.4" height="7.4" />
+    </svg>
   );
 }
 
