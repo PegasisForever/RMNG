@@ -5,7 +5,7 @@ import { Haptic } from "./Haptic";
 import { GAP, keysLayout } from "./geometry";
 import { CAPS_LOCK, type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SLOP_PX } from "./keypad";
-import { type NgTab, type ServerUsage, TabPage, ToolRow } from "./ToolRow";
+import { type NgTab, type ServerUsage, ToolRow } from "./ToolRow";
 import type { ModState } from "./modifiers";
 
 /** Evdev mouse buttons. */
@@ -39,6 +39,8 @@ type Props = {
    *  keyboard. */
   tab: NgTab | null;
   onTab: (tab: NgTab) => void;
+  /** A count on a tab (clones that stopped working unseen). */
+  badges?: Partial<Record<NgTab, number>>;
   /** The keys are in use as a trackpad: they fade to a trackpad's outline, and back. */
   pad: boolean;
 };
@@ -55,8 +57,8 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
   const touch = useKeysTouch(rows, p.onKeyTouch);
   return (
     <div className="relative touch-none select-none bg-black" style={{ width: p.width, height: p.height }}>
-      <ToolRow box={k.tools} usage={p.usage} tab={p.tab} onTab={p.onTab} />
-      {p.tab ? <TabPage tab={p.tab} box={k.page} /> : null}
+      <ToolRow box={k.tools} usage={p.usage} tab={p.tab} onTab={p.onTab} badges={p.badges} />
+      {/* An open tab's page is the container's, over the space the keys leave (`k.page`) */}
       {/* One handler for the whole key area, gaps too: a drag may start between keys */}
       {/* The trackpad the keys fade into: four corners of an outline. Touches go through it
           to the keys, which are the trackpad. */}

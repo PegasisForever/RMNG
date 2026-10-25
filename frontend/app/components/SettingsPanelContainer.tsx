@@ -9,7 +9,10 @@
 import { useEffect, useState } from "react";
 
 import type { SettingsCategory } from "~/components/SettingsNav";
-import { SettingsPanelView } from "~/components/SettingsPanelView";
+import {
+  SettingsPanelView,
+  type SettingsPanelViewProps,
+} from "~/components/SettingsPanelView";
 import { useAccountOrder } from "~/lib/accountOrder";
 import type { BoardColumn } from "~/lib/board";
 import {
@@ -73,8 +76,17 @@ export interface SettingsPanelContainerProps {
 }
 
 export function SettingsPanelContainer({
-  accounts,
   onClose,
+  ...props
+}: SettingsPanelContainerProps) {
+  return <SettingsPanelView {...useSettingsPanel(props)} onClose={onClose} />;
+}
+
+/** Everything the settings form needs but cannot do itself, for any view of it: the panel
+ *  here, and the phone app's Settings page (`~/ng/pages`), which lays the same panes out its
+ *  own way. */
+export function useSettingsPanel({
+  accounts,
   getConfig,
   putConfig,
   testConfig,
@@ -91,7 +103,7 @@ export function SettingsPanelContainer({
   onSetBoardColumnArchive,
   onDeleteBoardColumn,
   onReorderBoardColumns,
-}: SettingsPanelContainerProps) {
+}: Omit<SettingsPanelContainerProps, "onClose">): Omit<SettingsPanelViewProps, "onClose"> {
   // Which category the rail is on. Resets to the top every time the panel opens, which is the
   // right default: the panel is closed by the operator, and the next open is a new errand.
   const [category, setCategory] = useState<SettingsCategory>("board");
@@ -235,37 +247,34 @@ export function SettingsPanelContainer({
     }
   }
 
-  return (
-    <SettingsPanelView
-      draft={draft}
-      onDraftChange={updateDraft}
-      category={category}
-      onCategoryChange={setCategory}
-      accounts={accounts}
-      accountOrder={acctOrder}
-      onImportAccount={onImportAccount}
-      forkSources={forkSources}
-      error={error}
-      saving={saving}
-      saved={saved}
-      onSave={save}
-      onClose={onClose}
-      serverStatus={serverStatus}
-      serverMessage={serverMsg}
-      updateOperation={update.op ?? null}
-      updateDisabled={!serverStatus?.available || update.busy}
-      onCheckUpdate={checkUpdate}
-      onUpdateServer={doUpdate}
-      onRestartServer={doRestart}
-      judgeTestMessage={judgeTestMsg}
-      onTestJudge={runJudgeTest}
-      boardColumns={boardColumns}
-      boardColumnCounts={boardColumnCounts}
-      onAddBoardColumn={onAddBoardColumn}
-      onRenameBoardColumn={onRenameBoardColumn}
-      onSetBoardColumnArchive={onSetBoardColumnArchive}
-      onDeleteBoardColumn={onDeleteBoardColumn}
-      onReorderBoardColumns={onReorderBoardColumns}
-    />
-  );
+  return {
+    draft,
+    onDraftChange: updateDraft,
+    category,
+    onCategoryChange: setCategory,
+    accounts,
+    accountOrder: acctOrder,
+    onImportAccount,
+    forkSources,
+    error,
+    saving,
+    saved,
+    onSave: save,
+    serverStatus,
+    serverMessage: serverMsg,
+    updateOperation: update.op ?? null,
+    updateDisabled: !serverStatus?.available || update.busy,
+    onCheckUpdate: checkUpdate,
+    onUpdateServer: doUpdate,
+    onRestartServer: doRestart,
+    judgeTestMessage: judgeTestMsg,
+    onTestJudge: runJudgeTest,
+    boardColumns,
+    boardColumnCounts,
+    onAddBoardColumn,
+    onRenameBoardColumn,
+    onSetBoardColumnArchive,
+    onDeleteBoardColumn,
+    onReorderBoardColumns,
+  };
 }

@@ -2,7 +2,6 @@ import { Settings } from "lucide-react";
 import { type PointerEvent, type ReactNode } from "react";
 
 import { Haptic } from "./Haptic";
-import { SettingsPage } from "./SettingsPage";
 import { GAP } from "./geometry";
 
 /** The pages the tool row opens, in place of the keyboard. */
@@ -28,11 +27,13 @@ type Props = {
   tab: NgTab | null;
   /** A tab was tapped: the container opens it, or closes it when it is open. */
   onTab: (tab: NgTab) => void;
+  /** A count on a tab's button. */
+  badges?: Partial<Record<NgTab, number>>;
 };
 
 /** The /ng tool row, under the screen: the server's CPU, memory and disk, then tabs that act
  *  as tabs do. One is open at most, and its page takes the keyboard's place. */
-export function ToolRow({ box, usage, tab, onTab }: Props) {
+export function ToolRow({ box, usage, tab, onTab, badges }: Props) {
   return (
     <div className="absolute flex" style={{ ...box, gap: GAP }}>
       <Stat label="CPU" value={usage?.cpu} />
@@ -47,6 +48,11 @@ export function ToolRow({ box, usage, tab, onTab }: Props) {
           onTap={() => onTab(t.tab)}
         >
           {t.tab === "settings" ? <Settings size={18} strokeWidth={1.75} aria-hidden /> : t.label}
+          {badges?.[t.tab] ? (
+            <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-semibold leading-none text-white">
+              {badges[t.tab]}
+            </span>
+          ) : null}
         </TabButton>
       ))}
     </div>
@@ -91,20 +97,6 @@ function TabButton({
     >
       {children}
       <Haptic />
-    </div>
-  );
-}
-
-/** A tab's page. Those not made yet show their name in the middle. */
-export function TabPage({ tab, box }: { tab: NgTab; box: Props["box"] }) {
-  const page = TABS.find((t) => t.tab === tab)!.page;
-  return (
-    <div role="tabpanel" aria-label={page} className="absolute" style={box}>
-      {tab === "settings" ? (
-        <SettingsPage />
-      ) : (
-        <div className="flex h-full items-center justify-center text-sm text-neutral-500">{page}</div>
-      )}
     </div>
   );
 }

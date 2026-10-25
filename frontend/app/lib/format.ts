@@ -64,7 +64,7 @@ export function relativeAge(iso: string, now: number): string {
 }
 
 /** Coarse "time until" a future instant, e.g. `2h 15m`, `3d 4h`, `5m`. */
-function until(ms: number): string {
+export function until(ms: number): string {
   if (ms <= 0) return "now";
   const mins = Math.round(ms / 60_000);
   if (mins < 60) return `${mins}m`;

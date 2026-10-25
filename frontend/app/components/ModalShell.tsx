@@ -14,7 +14,7 @@
 // button that both acts and closes (Apply, Save) needs to keep the frames. `open` is the same
 // door from outside, for the dialogs that close because an operation settled rather than
 // because anybody clicked.
-import { useCallback, useEffect, useRef, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 
 import { useModalEscape } from "~/lib/useModalEscape";
 import { useModalExit } from "~/lib/useModalExit";
@@ -70,6 +70,34 @@ const PANEL: Record<ModalSize, string> = {
 const PANEL_CHROME =
   "rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800";
 
+/** Where a dialog goes. `window`: over the whole page, on a dimmed backdrop. `inline`: it
+ *  fills the nearest positioned box instead, with no backdrop and no frame. The phone app
+ *  (`/ng`) shows its pages in the space of its keyboard, and a dialog opened from one of them
+ *  takes that same space, so the clone's screen above stays in view. */
+export type ModalPlacement = "window" | "inline";
+
+const PlacementContext = createContext<ModalPlacement>("window");
+
+/** Every dialog inside this opens `inline` (see `ModalPlacement`). */
+export const ModalPlacementProvider = PlacementContext.Provider;
+
+const INLINE_PANEL: Record<ModalSize, string> = {
+  sm: "overflow-y-auto p-3",
+  md: "overflow-y-auto p-3",
+  lg: "p-3",
+  panel: "overflow-hidden",
+};
+
+/** The inline frame: the box's whole space, on the page's own black. */
+export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boolean) {
+  return {
+    backdrop: `absolute inset-0 ${LAYER[layer]} flex flex-col bg-black ${
+      closing ? MODAL_ANIMATION.backdrop.exit : MODAL_ANIMATION.backdrop.enter
+    }`,
+    panel: `flex min-h-0 w-full flex-1 flex-col ${INLINE_PANEL[size]}`,
+  };
+}
+
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
 export function backdropClass(layer: ModalLayer, closing: boolean): string {
   return (
@@ -115,6 +143,7 @@ export function ModalShell({
   children,
 }: ModalShellProps) {
   const { closing, beginExit } = useModalExit();
+  const placement = useContext(PlacementContext);
 
   // Read the current `onExited` through a ref so `close` keeps one identity for the life of
   // the dialog. `useModalEscape` re-registers on a new callback, and re-registering means
@@ -140,6 +169,15 @@ export function ModalShell({
   // panel would never fire. The stack in `useModalEscape` is what keeps two open dialogs from
   // both closing on one press.
   useModalEscape(close, dismissible);
+
+  if (placement === "inline") {
+    const inline = inlineClasses(size, layer, closing);
+    return (
+      <div role="dialog" className={inline.backdrop}>
+        <div className={inline.panel}>{children(close)}</div>
+      </div>
+    );
+  }
 
   return (
     <div className={backdropClass(layer, closing)}>

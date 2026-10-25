@@ -49,6 +49,23 @@ body {
   }
 }
 
+/* /ng (the phone app) is black and grey, with no blue in its greys. Its pages reuse the
+   dashboard's parts, which are drawn in slate; under `.ng-theme` (on <html> while /ng is open)
+   each slate shade is the neutral shade of the same lightness. */
+.ng-theme {
+  --color-slate-50: oklch(98.5% 0 0);
+  --color-slate-100: oklch(97% 0 0);
+  --color-slate-200: oklch(92.2% 0 0);
+  --color-slate-300: oklch(87% 0 0);
+  --color-slate-400: oklch(70.8% 0 0);
+  --color-slate-500: oklch(55.6% 0 0);
+  --color-slate-600: oklch(43.9% 0 0);
+  --color-slate-700: oklch(37.1% 0 0);
+  --color-slate-800: oklch(26.9% 0 0);
+  --color-slate-900: oklch(20.5% 0 0);
+  --color-slate-950: oklch(14.5% 0 0);
+}
+
 /* Notes: links are disabled (see HostEditor.tsx). New ones can't be created, but
    the link mark stays in the schema so old notes still load — render any legacy
    link as plain text instead of a clickable-looking anchor. */

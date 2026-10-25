@@ -14,17 +14,17 @@ import { resetTooltip } from "~/lib/format";
 import type { ClaudeSpend, ClaudeUsage, ClaudeUsageWindow } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
-const FIVE_H_MS = 5 * 60 * 60 * 1000;
-const SEVEN_D_MS = 7 * 24 * 60 * 60 * 1000;
+export const FIVE_H_MS = 5 * 60 * 60 * 1000;
+export const SEVEN_D_MS = 7 * 24 * 60 * 60 * 1000;
 
-function barColor(pct: number): string {
+export function barColor(pct: number): string {
   if (pct >= 90) return "bg-rose-500";
   if (pct >= 70) return "bg-amber-500";
   return "bg-emerald-500";
 }
 
 /** Utilization expected at `now` if the window's quota were spent uniformly. */
-function pacePct(
+export function pacePct(
   resetsAt: string | null,
   windowMs: number,
   now: number,
@@ -36,7 +36,7 @@ function pacePct(
   return Math.min(100, Math.max(0, (elapsed / windowMs) * 100));
 }
 
-function spendLine(spend: ClaudeSpend): string {
+export function spendLine(spend: ClaudeSpend): string {
   const cur = spend.currency === "USD" ? "$" : `${spend.currency} `;
   const used = `${cur}${(spend.usedCents / 100).toFixed(2)}`;
   if (spend.limitCents == null) return used;

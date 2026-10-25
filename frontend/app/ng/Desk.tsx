@@ -6,19 +6,20 @@ import { type PointerEvent, useCallback, useEffect, useRef, useState } from "rea
 
 import { formatLxcUsage } from "~/components/BoardRail";
 import { layoutClaimer } from "~/lib/layoutClaim";
-import { openLiveEvents } from "~/lib/liveEvents";
+import { emptyState } from "~/lib/types";
+import { useLiveState } from "~/lib/useLiveState";
 import type { CursorShape } from "~/lib/wire/CursorShape";
 import type { InputMsg } from "~/lib/wire/InputMsg";
-import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 
 import { Cursor } from "./Cursor";
 import { BTN_LEFT, KeyboardView, type TouchKind } from "./KeyboardView";
-import { screenFit } from "./geometry";
+import { keysLayout, screenFit } from "./geometry";
 import { CAPS_LOCK, type Key, isShift } from "./keyboard";
 import { Keypad, type KeypadOut } from "./keypad";
 import { type ModState, Modifiers } from "./modifiers";
 import { SCROLL_GAIN, clampTo, pointerGain } from "./pointer";
+import { NgPagesContainer } from "./pages/NgPagesContainer";
 import { MONITOR, type Session, openSession } from "./session";
 import { isTyping, useLift } from "./systemKeyboard";
 import type { NgTab } from "./ToolRow";
@@ -63,7 +64,8 @@ export function Desk({ width, height, bottom }: Props) {
   const [tab, setTab] = useState<NgTab | null>(null);
   /** The keys show as a trackpad (`./keypad.ts`: after a pointer gesture, for a while). */
   const [padMode, setPadMode] = useState(false);
-  const [lxc, setLxc] = useState<LxcStats | null>(null);
+  // The server's state, kept live: the tool row's numbers and everything the pages show
+  const live = useLiveState(useRef(emptyState()).current);
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
   /** The cursor where this page last put it, and when. */
@@ -99,21 +101,9 @@ export function Desk({ width, height, bottom }: Props) {
     };
   }, []);
 
-  // The server's CPU, memory and disk for the tool row, from the dashboard's live stream
-  useEffect(
-    () =>
-      openLiveEvents("/events", {
-        lxcStats: (data) => {
-          try {
-            setLxc(JSON.parse(data));
-          } catch {
-            // a malformed frame: keep the last numbers
-          }
-        },
-      }),
-    [],
-  );
-  const usage = formatLxcUsage(lxc);
+  const usage = formatLxcUsage(live.lxcStats);
+  /** Clones that stopped working and nobody has looked at yet: a count on the Clones tab. */
+  const unread = live.state.hosts.filter((h) => h.unread && !h.archived && h.id !== live.state.selected).length;
 
   // The video's box in device pixels
   useEffect(() => {
@@ -235,6 +225,8 @@ export function Desk({ width, height, bottom }: Props) {
   }, []);
   // A tab opens its page in the keyboard's place; tapped again, the keyboard comes back
   const onTab = useCallback((t: NgTab) => setTab((open) => (open === t ? null : t)), []);
+  /** Where an open tab's page goes: the keys' and the mouse buttons' place. */
+  const pageBox = keysLayout(width, KEYS_HEIGHT, bottom).page;
   // A click is a key to the modifiers: Ctrl, then a click, is a Ctrl-click
   const onButton = useCallback((button: number, pressed: boolean) => {
     if (pressed) modifiers.current!.keyDown();
@@ -338,8 +330,16 @@ export function Desk({ width, height, bottom }: Props) {
         usage={usage}
         tab={tab}
         onTab={onTab}
+        badges={unread ? { clones: unread } : undefined}
         pad={padMode}
       />
+      {/* Mounted from the start, so the pages' data is there when one opens */}
+      <div
+        className={`absolute ${tab ? "" : "hidden"}`}
+        style={{ ...pageBox, top: height - KEYS_HEIGHT + pageBox.top }}
+      >
+        <NgPagesContainer tab={tab} onTab={setTab} state={live.state} stats={live.stats} />
+      </div>
     </div>
   );
 }

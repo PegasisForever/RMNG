@@ -50,6 +50,9 @@ export default function Ng() {
     // Black under the page too: iOS shows the strip below the page size
     const { documentElement: html, body } = document;
     html.style.background = body.style.background = "#000";
+    // Dark, in /ng's greys (app.css): the dashboard parts on the pages follow both
+    html.classList.add("dark", "ng-theme");
+    html.style.colorScheme = "dark";
     body.style.overflow = "hidden";
     // iOS 26+ gives an installed app a page shorter than the screen while the document is
     // shorter than the screen, and paints nothing below that edge (WebKit bug 301108; the fix
@@ -77,6 +80,8 @@ export default function Ng() {
       document.removeEventListener("focusout", onFocusOut);
       if (meta && before !== undefined) meta.content = before;
       html.style.background = body.style.background = "";
+      html.classList.remove("dark", "ng-theme");
+      html.style.colorScheme = "";
       html.style.minHeight = "";
       body.style.overflow = "";
     };

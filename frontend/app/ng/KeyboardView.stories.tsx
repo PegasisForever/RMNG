@@ -66,11 +66,9 @@ export const FnOn: Story = { args: { fn: true } };
 /** The keys in use as a trackpad: faded to a trackpad's outline. */
 export const Trackpad: Story = { args: { pad: true } };
 
-/** The Usage tab open: its page in the keyboard's place (a placeholder for now). */
+/** The Usage tab open: the keys and the mouse buttons make way. The page that takes their
+ *  place is the container's; the pages have their own stories (ng/Pages). */
 export const UsageTab: Story = { args: { tab: "usage" } };
-
-/** The Settings tab open: a text box to try the phone's keyboard with (a placeholder). */
-export const SettingsTab: Story = { args: { tab: "settings" } };
 
 /** A shorter area: the keys get shorter, the mouse buttons keep what is left. */
 export const Short: Story = { args: { height: 330 } };

@@ -101,23 +101,24 @@ export interface SettingsPanelViewProps {
   onReorderBoardColumns?: (columnIds: string[]) => void;
 }
 
-/** Per-category panes render in `renderPane` below, which assembles each pane's narrow props. */
+/** The categories on offer: Board only on a page with a board. */
+export function settingsCategories(boardColumns: BoardColumn[] | undefined) {
+  return SETTINGS_CATEGORIES.filter((c) => c.id !== "board" || !!boardColumns);
+}
 
-export function SettingsPanelView(props: SettingsPanelViewProps) {
+/** One category's pane of sections, for any layout of the settings form: this panel, and the
+ *  phone app's Settings page. A category not on offer falls back to the first one. */
+export function SettingsPane(
+  props: Omit<SettingsPanelViewProps, "draft" | "onClose"> & { draft: SettingsDraft },
+) {
   const {
     draft,
     onDraftChange,
     category,
-    onCategoryChange,
     accounts,
     accountOrder,
     onImportAccount,
     forkSources,
-    error,
-    saving,
-    saved,
-    onSave,
-    onClose,
     serverStatus,
     serverMessage,
     updateOperation,
@@ -137,65 +138,81 @@ export function SettingsPanelView(props: SettingsPanelViewProps) {
   } = props;
 
   // Board columns are optional, so the rail offers that category only when there are some.
-  const categories = SETTINGS_CATEGORIES.filter(
-    (c) => c.id !== "board" || !!boardColumns,
-  );
+  const categories = settingsCategories(boardColumns);
   const active = categories.find((c) => c.id === category) ?? categories[0];
 
   // Each pane declares only the fields it renders; this switch assembles each pane's props from the panel's. Adding a field used by one pane touches the container, one branch here, and that pane — not all five panes. Adding a category is a branch here and a line in `SETTINGS_CATEGORIES`.
-  function renderPane(loaded: SettingsDraft) {
-    switch (active.id) {
-      case "board":
-        return (
-          <BoardPane
-            draft={loaded}
-            onDraftChange={onDraftChange}
-            boardColumns={boardColumns}
-            boardColumnCounts={boardColumnCounts}
-            onAddBoardColumn={onAddBoardColumn}
-            onRenameBoardColumn={onRenameBoardColumn}
-            onSetBoardColumnArchive={onSetBoardColumnArchive}
-            onDeleteBoardColumn={onDeleteBoardColumn}
-            onReorderBoardColumns={onReorderBoardColumns}
-          />
-        );
-      case "layout":
-        return <LayoutPane draft={loaded} onDraftChange={onDraftChange} />;
-      case "presets":
-        return (
-          <PresetsPane
-            draft={loaded}
-            onDraftChange={onDraftChange}
-            forkSources={forkSources}
-          />
-        );
-      case "llm":
-        return (
-          <LlmPane
-            draft={loaded}
-            onDraftChange={onDraftChange}
-            rows={orderedAccounts(accounts, accountOrder)}
-            onImportAccount={onImportAccount}
-            onTestJudge={onTestJudge}
-            judgeTestMessage={judgeTestMessage}
-          />
-        );
-      case "server":
-        return (
-          <ServerPane
-            draft={loaded}
-            onDraftChange={onDraftChange}
-            serverStatus={serverStatus}
-            serverMessage={serverMessage}
-            updateOperation={updateOperation}
-            updateDisabled={updateDisabled}
-            onCheckUpdate={onCheckUpdate}
-            onUpdateServer={onUpdateServer}
-            onRestartServer={onRestartServer}
-          />
-        );
-    }
+  const loaded = draft;
+  switch (active.id) {
+    case "board":
+      return (
+        <BoardPane
+          draft={loaded}
+          onDraftChange={onDraftChange}
+          boardColumns={boardColumns}
+          boardColumnCounts={boardColumnCounts}
+          onAddBoardColumn={onAddBoardColumn}
+          onRenameBoardColumn={onRenameBoardColumn}
+          onSetBoardColumnArchive={onSetBoardColumnArchive}
+          onDeleteBoardColumn={onDeleteBoardColumn}
+          onReorderBoardColumns={onReorderBoardColumns}
+        />
+      );
+    case "layout":
+      return <LayoutPane draft={loaded} onDraftChange={onDraftChange} />;
+    case "presets":
+      return (
+        <PresetsPane
+          draft={loaded}
+          onDraftChange={onDraftChange}
+          forkSources={forkSources}
+        />
+      );
+    case "llm":
+      return (
+        <LlmPane
+          draft={loaded}
+          onDraftChange={onDraftChange}
+          rows={orderedAccounts(accounts, accountOrder)}
+          onImportAccount={onImportAccount}
+          onTestJudge={onTestJudge}
+          judgeTestMessage={judgeTestMessage}
+        />
+      );
+    case "server":
+      return (
+        <ServerPane
+          draft={loaded}
+          onDraftChange={onDraftChange}
+          serverStatus={serverStatus}
+          serverMessage={serverMessage}
+          updateOperation={updateOperation}
+          updateDisabled={updateDisabled}
+          onCheckUpdate={onCheckUpdate}
+          onUpdateServer={onUpdateServer}
+          onRestartServer={onRestartServer}
+        />
+      );
   }
+}
+
+export function SettingsPanelView(props: SettingsPanelViewProps) {
+  const {
+    draft,
+    category,
+    onCategoryChange,
+    error,
+    saving,
+    saved,
+    onSave,
+    onClose,
+    boardColumns,
+  } = props;
+  const categories = settingsCategories(boardColumns);
+  const active = categories.find((c) => c.id === category) ?? categories[0];
+  const renderPane = (loaded: SettingsDraft) => (
+    <SettingsPane {...props} draft={loaded} category={active.id} />
+  );
 
   return (
     // The sign-in dialog opens ON TOP of this panel, on the `over` rung. The Escape stack is

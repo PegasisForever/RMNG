@@ -1,0 +1,248 @@
+// The parts every /ng page is made of. A page has the keyboard's space (on the Duo 661 × 334
+// CSS px), so each one is a 36 px header over a body that scrolls, and every control is a
+// finger's size: nothing here waits for a hover, and a menu is a sheet of large tiles over the
+// page (`ActionSheet`), not a small list at a pointer.
+import { ChevronLeft, type LucideIcon, X } from "lucide-react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
+
+/** A page: its header, an error line when there is one, and the body. The body scrolls unless
+ *  `fill` (the page lays out its own scrolling, as the chat does). */
+export function Page({
+  header,
+  error,
+  onDismissError,
+  fill = false,
+  children,
+}: {
+  header?: ReactNode;
+  error?: string | null;
+  onDismissError?: () => void;
+  fill?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {header}
+      {error ? <ErrorLine message={error} onDismiss={onDismissError} /> : null}
+      <div
+        className={`min-h-0 flex-1 ${fill ? "flex flex-col overflow-hidden" : "overflow-y-auto overscroll-contain"}`}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** The header row: a back button when there is somewhere to go back to, the title (with a
+ *  second line in grey), and the page's buttons on the right. */
+export function PageHeader({
+  title,
+  sub,
+  onBack,
+  children,
+}: {
+  title: ReactNode;
+  sub?: ReactNode;
+  onBack?: () => void;
+  /** The page's buttons. */
+  children?: ReactNode;
+}) {
+  return (
+    <div className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 pr-1">
+      {onBack ? (
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="Back"
+          className="flex h-9 w-9 shrink-0 items-center justify-center text-neutral-300 active:bg-neutral-800"
+        >
+          <ChevronLeft aria-hidden className="size-5" />
+        </button>
+      ) : (
+        <span className="w-2 shrink-0" />
+      )}
+      <div className="flex min-w-0 flex-1 items-baseline gap-2">
+        <h2 className="truncate text-sm font-semibold text-neutral-100">{title}</h2>
+        {sub ? <span className="min-w-0 truncate text-xs text-neutral-500">{sub}</span> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** A button in a header, or anywhere a small one goes: an icon, a label, or both. */
+export function HeaderButton({
+  icon: Icon,
+  label,
+  showLabel = false,
+  primary = false,
+  disabled = false,
+  onClick,
+}: {
+  icon?: LucideIcon;
+  label: string;
+  /** The label shows beside the icon; otherwise it is only for screen readers. */
+  showLabel?: boolean;
+  primary?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      className={`flex h-7 min-w-8 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium disabled:opacity-40 ${
+        primary
+          ? "bg-neutral-100 text-black active:bg-neutral-300"
+          : "bg-neutral-800 text-neutral-100 active:bg-neutral-700"
+      }`}
+    >
+      {Icon ? <Icon aria-hidden className="size-4" /> : null}
+      {showLabel || !Icon ? <span>{label}</span> : null}
+    </button>
+  );
+}
+
+/** The last action that failed, in a red line under the header. */
+export function ErrorLine({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
+  return (
+    <p
+      role="alert"
+      className="flex shrink-0 items-start gap-2 bg-rose-950 px-3 py-1.5 text-xs text-rose-200"
+    >
+      <span className="min-w-0 flex-1 break-words">{message}</span>
+      {onDismiss ? (
+        <button type="button" onClick={onDismiss} aria-label="Dismiss" className="-my-1 p-1">
+          <X aria-hidden className="size-3.5" />
+        </button>
+      ) : null}
+    </p>
+  );
+}
+
+/** A grey line where a list has nothing to show. */
+export function EmptyLine({ children }: { children: ReactNode }) {
+  return <p className="px-4 py-8 text-center text-sm text-neutral-500">{children}</p>;
+}
+
+/** A row of choices, one of them on. */
+export function Segmented<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: { value: T; label: string; badge?: ReactNode }[];
+  value: T;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div role="tablist" className="flex shrink-0 gap-0.5 rounded-md bg-neutral-900 p-0.5">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          role="tab"
+          aria-selected={o.value === value}
+          onClick={() => onChange(o.value)}
+          className={`flex h-6 items-center gap-1 rounded px-2.5 text-xs font-medium ${
+            o.value === value ? "bg-neutral-200 text-black" : "text-neutral-300 active:bg-neutral-800"
+          }`}
+        >
+          {o.label}
+          {o.badge}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** One thing a sheet offers. `onSelect` may answer a promise: a copy says whether it landed,
+ *  and the tile shows "Copied" before the sheet closes. */
+export type SheetAction = {
+  icon: LucideIcon;
+  label: string;
+  onSelect: () => void | Promise<boolean>;
+  danger?: boolean;
+  /** Ticked: the choice that is on now (a column the clone is in). */
+  current?: boolean;
+};
+
+/** A group of tiles in a sheet, under a small heading when it has one. */
+export type SheetGroup = { title?: string; actions: SheetAction[] };
+
+/** What a ⋯ button opens on a touch screen: a sheet over the page, with a tile per action, in
+ *  groups. A tap on a tile does it and closes the sheet; a tap beside the sheet closes it. */
+export function ActionSheet({
+  title,
+  groups,
+  onClose,
+}: {
+  title: ReactNode;
+  groups: SheetGroup[];
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const select = (a: SheetAction) => {
+    const answer = a.onSelect();
+    if (!answer) return onClose();
+    void answer.then((ok) => {
+      setCopied(ok ? a.label : null);
+      timer.current = setTimeout(onClose, ok ? 700 : 0);
+    });
+  };
+  return (
+    <div className="absolute inset-0 z-40 flex flex-col justify-end bg-black/60" onClick={onClose}>
+      <div
+        role="menu"
+        aria-label={typeof title === "string" ? title : undefined}
+        className="max-h-full overflow-y-auto overscroll-contain rounded-t-xl border-t border-neutral-700 bg-neutral-900 px-2 pb-2"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="sticky top-0 flex h-9 items-center gap-2 bg-neutral-900 pl-1">
+          <div className="min-w-0 flex-1 truncate text-sm font-semibold text-neutral-100">{title}</div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="flex h-8 w-8 items-center justify-center rounded-md text-neutral-400 active:bg-neutral-800"
+          >
+            <X aria-hidden className="size-4" />
+          </button>
+        </div>
+        {groups
+          .filter((g) => g.actions.length > 0)
+          .map((g, i) => (
+            <div key={i} className="mt-1 first-of-type:mt-0">
+              {g.title ? (
+                <div className="px-1 pb-1 pt-1 text-[11px] font-medium text-neutral-500">{g.title}</div>
+              ) : null}
+              <div className="grid grid-cols-4 gap-1.5">
+                {g.actions.map((a) => (
+                  <button
+                    key={a.label}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => select(a)}
+                    className={`flex h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-1 text-center text-xs leading-tight active:bg-neutral-700 ${
+                      a.current
+                        ? "bg-neutral-200 text-black"
+                        : a.danger
+                          ? "bg-rose-950/70 text-rose-300"
+                          : "bg-neutral-800 text-neutral-100"
+                    }`}
+                  >
+                    <a.icon aria-hidden className="size-4 shrink-0" />
+                    <span className="line-clamp-2 break-words">{copied === a.label ? "Copied" : a.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
