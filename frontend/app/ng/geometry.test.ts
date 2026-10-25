@@ -23,10 +23,10 @@ describe("keysLayout", () => {
     expect(k.keys.top + k.keys.height).toBeLessThan(H - BOTTOM);
   });
 
-  test("the trackpad takes everything under the tool row, down to the keys' bottom", () => {
-    expect(k.pad.top).toBe(4 + TOOL_H + GAP);
-    expect(k.pad.top + k.pad.height).toBeCloseTo(H - BOTTOM, 9);
-    expect(k.pad.width).toBe(W - 8);
+  test("the mouse buttons take everything under the keys, down to the bottom edge", () => {
+    expect(k.buttons.top).toBeCloseTo(k.keys.top + k.keys.height + GAP, 9);
+    expect(k.buttons.top + k.buttons.height).toBe(H);
+    expect(k.buttons.width).toBe(W - 8);
   });
 
   test("a short area makes the keys shorter, still the whole width", () => {

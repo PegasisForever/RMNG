@@ -21,8 +21,8 @@ export type KeysLayout = {
   tools: Box;
   /** The keys: right under the tool row; what is left of the area stays empty below them. */
   keys: Box;
-  /** The trackpad: all the space under the tool row, down to where the keys end. */
-  pad: Box;
+  /** The mouse buttons: all the space under the keys, down to the screen's bottom edge. */
+  buttons: Box;
 };
 
 /** Where things go in a keyboard area `width`×`height` with `bottom` kept for the home bar.
@@ -36,14 +36,14 @@ export function keysLayout(width: number, height: number, bottom: number): KeysL
   const h = ROWS * keyHeight + (ROWS - 1) * GAP;
   const left = PAD;
   const tools = { left: PAD, top: PAD, width: width - 2 * PAD, height: TOOL_H };
-  const padTop = PAD + TOOL_H + GAP;
-  const keysTop = padTop;
+  const keysTop = PAD + TOOL_H + GAP;
+  const buttonsTop = keysTop + h + GAP;
   return {
     pitch,
     keyHeight,
     tools,
     keys: { left, top: keysTop, width: w, height: h },
-    pad: { left: PAD, top: padTop, width: width - 2 * PAD, height: height - bottom - padTop },
+    buttons: { left: PAD, top: buttonsTop, width: width - 2 * PAD, height: height - buttonsTop },
   };
 }
 

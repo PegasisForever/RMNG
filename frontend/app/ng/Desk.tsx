@@ -1,7 +1,7 @@
 // The /ng page on the iPhone Duo: the selected clone's screen on top, the keyboard below. This
 // is the container: it holds the connection (`./session.ts`), the keyboard's state (held
-// modifiers, Fn, Caps Lock, keys or trackpad) and the trackpad's gestures (`./trackpad.ts`),
-// and turns them into input.
+// modifiers, Fn, Caps Lock) and the keys' touches, which type or move the pointer
+// (`./keypad.ts`), and turns them into input.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { layoutClaimer } from "~/lib/layoutClaim";
@@ -10,12 +10,12 @@ import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 
 import { Cursor } from "./Cursor";
-import { KeyboardView, type PadMode } from "./KeyboardView";
+import { KeyboardView, type TouchKind } from "./KeyboardView";
 import { screenFit } from "./geometry";
-import { CAPS_LOCK } from "./keyboard";
+import { CAPS_LOCK, type Key } from "./keyboard";
+import { Keypad, type KeypadOut } from "./keypad";
 import { SCROLL_GAIN, clampTo, pointerGain } from "./pointer";
 import { MONITOR, type Session, openSession } from "./session";
-import { type PadOut, Trackpad } from "./trackpad";
 
 /** The iPhone Duo layout's one monitor, in pixels (`wire::iphone_duo_layout`). */
 export const DUO_MONITOR = { width: 1002, height: 760 };
@@ -25,9 +25,6 @@ const KEYS_HEIGHT = 444;
 /** After this page moved the cursor, the clone's own cursor reports are this far behind (ms),
  *  so they do not pull the drawn cursor back. */
 const OWN_MOVES_MS = 400;
-/** A press of the Trackpad button shorter than this switches mode; a longer one is a hold:
- *  trackpad while it is down, keys again when it lifts. */
-const HOLD_MS = 300;
 /** Mutter axis flags: a finger scroll, and its end. */
 const AXIS_FINGER = 4;
 const AXIS_FINISH = 1;
@@ -55,13 +52,12 @@ export function Desk({ width, height, bottom }: Props) {
   const [latched, setLatched] = useState<ReadonlySet<number>>(new Set());
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
-  const [mode, setMode] = useState<PadMode>("keys");
   /** The cursor where this page last put it, and when. */
   const cursor = useRef({ ...pos, movedAt: -Infinity });
 
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
   const fit = screenFit(width, height - KEYS_HEIGHT, DUO_MONITOR.width, DUO_MONITOR.height, dpr);
-  /** Device px per monitor px now, for the trackpad's moves. */
+  /** Device px per monitor px now, for the cursor moves on the keys. */
   const scale = useRef(fit.scale);
   scale.current = fit.scale;
 
@@ -107,11 +103,38 @@ export function Desk({ width, height, bottom }: Props) {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [claim]);
 
-  /** The trackpad, made once: what it recognizes goes to the clone. */
-  const pad = useRef<Trackpad | null>(null);
-  if (!pad.current) {
-    const out = (o: PadOut) => {
+  const latchedRef = useRef(latched);
+  latchedRef.current = latched;
+  /** A modifier was tapped: it goes down, or up when it was down. */
+  const toggleModifier = (code: number) => {
+    const down = !latchedRef.current.has(code);
+    send({ kind: "key_code", keycode: code, pressed: down });
+    const next = new Set(latchedRef.current);
+    if (down) next.add(code);
+    else next.delete(code);
+    setLatched(next);
+  };
+  const keyCode = (code: number, pressed: boolean) => {
+    if (code === CAPS_LOCK && pressed) setCaps((c) => !c);
+    send({ kind: "key_code", keycode: code, pressed });
+  };
+
+  /** The keys' touches, made once: taps and holds type, the rest moves the pointer. */
+  const keypad = useRef<Keypad | null>(null);
+  if (!keypad.current) {
+    const out = (o: KeypadOut) => {
       switch (o.t) {
+        case "tap":
+          if (o.key.fn) setFn((f) => !f);
+          else if (o.key.mod) toggleModifier(o.key.code);
+          else {
+            keyCode(o.key.code, true);
+            keyCode(o.key.code, false);
+          }
+          break;
+        case "hold":
+          keyCode(o.key.code, o.pressed);
+          break;
         case "move": {
           // Screen px for this finger motion, then monitor px
           const g = (pointerGain(Math.hypot(o.dx, o.dy), o.ms) * dpr) / scale.current;
@@ -123,9 +146,6 @@ export function Desk({ width, height, bottom }: Props) {
           send({ kind: "pointer_move", monitor_id: MONITOR, x, y });
           break;
         }
-        case "button":
-          send({ kind: "button", button: o.button, pressed: o.pressed });
-          break;
         case "scroll":
           send({
             kind: "axis_continuous",
@@ -139,7 +159,7 @@ export function Desk({ width, height, bottom }: Props) {
           break;
       }
     };
-    pad.current = new Trackpad(out, {
+    keypad.current = new Keypad(out, {
       after(ms, f) {
         const id = setTimeout(f, ms);
         return () => clearTimeout(id);
@@ -148,43 +168,17 @@ export function Desk({ width, height, bottom }: Props) {
   }
 
   // Stable, so the keyboard does not render again each time the cursor moves
-  const latchedRef = useRef(latched);
-  latchedRef.current = latched;
-  const onModifier = useCallback((code: number) => {
-    const down = !latchedRef.current.has(code);
-    send({ kind: "key_code", keycode: code, pressed: down });
-    const next = new Set(latchedRef.current);
-    if (down) next.add(code);
-    else next.delete(code);
-    setLatched(next);
+  const onKeyTouch = useCallback((kind: TouchKind, id: number, key: Key, x: number, y: number) => {
+    const pad = keypad.current!;
+    if (kind === "down") pad.down(id, key, x, y, performance.now());
+    else if (kind === "move") pad.move(id, x, y, performance.now());
+    else if (kind === "up") pad.up(id);
+    else pad.cancel(id);
   }, []);
-  const onKey = useCallback((code: number, pressed: boolean) => {
-    if (code === CAPS_LOCK && pressed) setCaps((c) => !c);
-    send({ kind: "key_code", keycode: code, pressed });
-  }, []);
-  const onFn = useCallback(() => setFn((f) => !f), []);
-  const onPad = useCallback((kind: "down" | "move" | "up", id: number, x: number, y: number) => {
-    const t = performance.now();
-    if (kind === "down") pad.current!.down(id, x, y, t);
-    else if (kind === "move") pad.current!.move(id, x, y, t);
-    else pad.current!.up(id, t);
-  }, []);
-  const modeRef = useRef(mode);
-  modeRef.current = mode;
-  /** When the Trackpad button went down, and the mode before. */
-  const press = useRef<{ at: number; before: PadMode }>({ at: 0, before: "keys" });
-  const onTrackpadButton = useCallback((down: boolean) => {
-    if (down) {
-      press.current = { at: performance.now(), before: modeRef.current };
-      setMode("trackpad");
-      return;
-    }
-    const { at, before } = press.current;
-    const tap = performance.now() - at < HOLD_MS;
-    const next: PadMode = tap ? (before === "trackpad" ? "keys" : "trackpad") : before;
-    if (next === "keys") pad.current!.cancel();
-    setMode(next);
-  }, []);
+  const onButton = useCallback(
+    (button: number, pressed: boolean) => send({ kind: "button", button, pressed }),
+    [],
+  );
 
   const terminal = spec?.content.mode === "terminal";
   const note = !connected
@@ -221,12 +215,8 @@ export function Desk({ width, height, bottom }: Props) {
         fn={fn}
         latched={latched}
         caps={caps}
-        mode={mode}
-        onKey={onKey}
-        onModifier={onModifier}
-        onFn={onFn}
-        onTrackpadButton={onTrackpadButton}
-        onPad={onPad}
+        onKeyTouch={onKeyTouch}
+        onButton={onButton}
       />
     </div>
   );
