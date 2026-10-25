@@ -1,7 +1,6 @@
 import { Settings } from "lucide-react";
 import { type PointerEvent, type ReactNode } from "react";
 
-import { Haptic } from "./Haptic";
 import { GAP } from "./geometry";
 
 /** The pages the tool row opens, in place of the keyboard. */
@@ -96,7 +95,6 @@ function TabButton({
       }}
     >
       {children}
-      <Haptic />
     </div>
   );
 }

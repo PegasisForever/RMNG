@@ -40,8 +40,9 @@ beforeEach(() => {
   pad = new Keypad((o) => out.push(o), clock.timer);
 });
 
-/** What came out, the trackpad mode changes left out (their own tests have them). */
-const keys = () => out.filter((o) => o.t !== "pad");
+/** What came out, the trackpad mode changes and the key presses (for the click sound) left
+ *  out: their own tests have them. */
+const keys = () => out.filter((o) => o.t !== "pad" && o.t !== "press");
 const said = () =>
   keys().map((o) =>
     o.t === "tap" ? `tap ${o.key.id}` : o.t === "hold" ? `${o.key.id}${o.pressed ? "↓" : "↑"}` : o.t,
@@ -68,7 +69,7 @@ describe("Keypad", () => {
     pad.down(1, CTRL, 100, 100, 0);
     clock.advance(HOLD_MS * 4);
     pad.up(1, 0);
-    expect(out).toEqual([
+    expect(keys()).toEqual([
       { t: "mod", key: CTRL, down: true },
       { t: "mod", key: CTRL, down: false },
     ]);
@@ -240,5 +241,45 @@ describe("Keypad trackpad mode", () => {
     pad.up(1, 4000);
     clock.advance(PAD_LINGER_MS);
     expect(pads()).toEqual([true, false]);
+  });
+
+  describe("key presses and the mouse buttons", () => {
+    const presses = () => out.flatMap((o) => (o.t === "press" ? [o.key.id] : []));
+    const modes = () => out.flatMap((o) => (o.t === "pad" ? [o.on] : []));
+    /** One finger moves the cursor and lifts: the keys are a trackpad. */
+    const point = () => {
+      pad.down(9, A, 100, 100, 0);
+      pad.move(9, 160, 100, 20);
+      pad.up(9, 40);
+    };
+
+    test("a finger down on a key presses it at once, also when it turns into a cursor move", () => {
+      pad.down(1, A, 100, 100, 0);
+      expect(presses()).toEqual(["KeyA"]);
+      pad.move(1, 160, 100, 20);
+      pad.up(1, 40);
+      expect(presses()).toEqual(["KeyA"]);
+    });
+
+    test("in trackpad mode and between keys there is no press", () => {
+      point();
+      out = [];
+      pad.down(2, S, 100, 100, 100);
+      pad.up(2, 150);
+      pad.down(3, null, 10, 10, 2000);
+      expect(presses()).toEqual([]);
+    });
+
+    test("a mouse button held keeps trackpad mode on; after it lifts the mode lingers, then ends", () => {
+      point();
+      pad.button(true);
+      clock.advance(PAD_LINGER_MS * 3);
+      expect(modes()).toEqual([true]);
+      pad.button(false);
+      clock.advance(PAD_LINGER_MS - 1);
+      expect(modes()).toEqual([true]);
+      clock.advance(1);
+      expect(modes()).toEqual([true, false]);
+    });
   });
 });

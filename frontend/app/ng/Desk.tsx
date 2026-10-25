@@ -17,6 +17,7 @@ import { BTN_LEFT, KeyboardView, type TouchKind } from "./KeyboardView";
 import { keysLayout, screenFit } from "./geometry";
 import { CAPS_LOCK, type Key, isShift } from "./keyboard";
 import { Keypad, type KeypadOut } from "./keypad";
+import { KeySounds } from "./keySound";
 import { type ModState, Modifiers } from "./modifiers";
 import { SCROLL_GAIN, clampTo, pointerGain } from "./pointer";
 import { NgPagesContainer } from "./pages/NgPagesContainer";
@@ -146,11 +147,27 @@ export function Desk({ width, height, bottom }: Props) {
     if (!pressed) withMods((m) => m.keyDone());
   };
 
+  /** The keys' click sound (`./keySound.ts`). iOS starts audio only inside a touch, and a lift
+   *  is what counts as one there, so each lift tries. */
+  const sounds = useRef(new KeySounds()).current;
+  useEffect(() => {
+    const unlock = () => sounds.unlock();
+    document.addEventListener("touchend", unlock);
+    document.addEventListener("pointerup", unlock);
+    return () => {
+      document.removeEventListener("touchend", unlock);
+      document.removeEventListener("pointerup", unlock);
+    };
+  }, [sounds]);
+
   /** The keys' touches, made once: taps and holds type, the rest moves the pointer. */
   const keypad = useRef<Keypad | null>(null);
   if (!keypad.current) {
     const out = (o: KeypadOut) => {
       switch (o.t) {
+        case "press":
+          sounds.play(o.key);
+          break;
         case "tap":
           if (o.key.fn) setFn((f) => !f);
           else {
@@ -229,6 +246,8 @@ export function Desk({ width, height, bottom }: Props) {
   const pageBox = keysLayout(width, KEYS_HEIGHT, bottom).page;
   // A click is a key to the modifiers: Ctrl, then a click, is a Ctrl-click
   const onButton = useCallback((button: number, pressed: boolean) => {
+    // Held, a button keeps the keys a trackpad, so the buttons stay on screen
+    keypad.current!.button(pressed);
     if (pressed) modifiers.current!.keyDown();
     send({ kind: "button", button, pressed });
     if (!pressed) withMods((m) => m.keyDone());
@@ -240,6 +259,7 @@ export function Desk({ width, height, bottom }: Props) {
   // A touch outside the page puts the phone's keyboard away
   const onDownCapture = (e: PointerEvent<HTMLDivElement>) => {
     claim();
+    sounds.unlock();
     if (isTyping() && !(e.target as Element).closest("[role=tabpanel]")) {
       (document.activeElement as HTMLElement).blur();
     }

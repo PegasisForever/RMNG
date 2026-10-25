@@ -1,7 +1,6 @@
 import { ArrowBigUp, ArrowBigUpDash, ArrowRightToLine, CornerDownLeft } from "lucide-react";
 import { type PointerEvent, type ReactNode, memo, useRef, useState } from "react";
 
-import { Haptic } from "./Haptic";
 import { GAP, keysLayout } from "./geometry";
 import { CAPS_LOCK, type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SLOP_PX } from "./keypad";
@@ -49,7 +48,8 @@ type Props = {
  *  square keys under it, and the left, middle and right mouse buttons in the space below the
  *  keys; an open tab's page takes the place of the keys and the buttons. The keys are a touchpad too: a finger that moves on them moves the cursor, two
  *  scroll. Each finger works on its own, so a mouse button can stay down while another finger
- *  moves the cursor on the keys (a drag). A tap gives a haptic tick on iOS. */
+ *  moves the cursor on the keys (a drag). The mouse buttons show only while the keys are a
+ *  trackpad; in keyboard mode their space stays empty, so the keys do not move. */
 export const KeyboardView = memo(function KeyboardView(p: Props) {
   const k = keysLayout(p.width, p.height, p.bottom);
   const shift = SHIFTS.some((c) => p.mods.has(c));
@@ -89,8 +89,15 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
           </div>
         ))}
       </div>
-      {/* Down to the bottom edge, home bar included: a tap there is a tap */}
-      <div className={`absolute flex ${p.tab ? "hidden" : ""}`} style={k.buttons}>
+      {/* Down to the bottom edge, home bar included: a tap there is a tap. Only in trackpad
+          mode; the keypad keeps that mode on while a button is held. */}
+      <div
+        aria-hidden={!p.pad}
+        className={`absolute flex transition-opacity duration-200 ${p.tab ? "hidden" : ""} ${
+          p.pad ? "opacity-100" : "pointer-events-none opacity-0"
+        }`}
+        style={k.buttons}
+      >
         <MouseButton label="Left" button={BTN_LEFT} onButton={p.onButton} />
         <MouseButton label="Middle" button={BTN_MIDDLE} onButton={p.onButton} divider />
         <MouseButton label="Right" button={BTN_RIGHT} onButton={p.onButton} divider />
@@ -115,18 +122,18 @@ function tone(down: boolean, active = false) {
   return down ? "bg-neutral-600 text-white" : "bg-neutral-800 text-neutral-100";
 }
 
-/** Touch keeps each finger on what it touched first (the haptic switch), and the tap that
- *  toggles the switch needs that, so only a mouse is captured. */
+/** A touch stays with the element it went down on by itself; a mouse is captured so that it
+ *  does too. */
 function capture(e: PointerEvent<HTMLElement>) {
   if (e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
 }
 
 /** The key area's touches: which key each finger went down on (by `data-key`; none between
- *  keys), which keys show as pressed, and the haptic switch of a finger that drags. */
+ *  keys), and which keys show as pressed. */
 function useKeysTouch(rows: Key[][], onKeyTouch: Props["onKeyTouch"]) {
   const [pressed, setPressed] = useState<ReadonlySet<string>>(new Set());
-  /** Each finger: its key, where it went down, and its key's switch. */
-  const fingers = useRef(new Map<number, { key: Key | null; x: number; y: number; sw: HTMLInputElement | null }>());
+  /** Each finger: its key, where it went down, and whether it moved off as a drag. */
+  const fingers = useRef(new Map<number, { key: Key | null; x: number; y: number; dragged: boolean }>());
   const byId = new Map(rows.flat().map((k) => [k.id, k]));
   const show = (id: string, on: boolean) =>
     setPressed((s) => {
@@ -141,18 +148,16 @@ function useKeysTouch(rows: Key[][], onKeyTouch: Props["onKeyTouch"]) {
       capture(e);
       const el = (e.target as HTMLElement).closest<HTMLElement>("[data-key]");
       const key = (el && byId.get(el.dataset.key!)) ?? null;
-      const sw = el?.querySelector<HTMLInputElement>("input[switch]") ?? null;
-      fingers.current.set(e.pointerId, { key, x: e.clientX, y: e.clientY, sw });
+      fingers.current.set(e.pointerId, { key, x: e.clientX, y: e.clientY, dragged: false });
       if (key) show(key.id, true);
       onKeyTouch("down", e.pointerId, key, e.clientX, e.clientY);
     },
     move(e: PointerEvent<HTMLDivElement>) {
       const f = fingers.current.get(e.pointerId);
       if (!f) return;
-      // A finger that drags is no tap: its key stops looking pressed, and its switch stops
-      // working, as a switch toggles (and ticks) when a finger slides across it
-      if (f.sw && !f.sw.disabled && Math.hypot(e.clientX - f.x, e.clientY - f.y) >= SLOP_PX) {
-        f.sw.disabled = true;
+      // A finger that drags is no tap: its key stops looking pressed
+      if (!f.dragged && Math.hypot(e.clientX - f.x, e.clientY - f.y) >= SLOP_PX) {
+        f.dragged = true;
         if (f.key) show(f.key.id, false);
       }
       onKeyTouch("move", e.pointerId, f.key, e.clientX, e.clientY);
@@ -162,9 +167,6 @@ function useKeysTouch(rows: Key[][], onKeyTouch: Props["onKeyTouch"]) {
       if (!f) return;
       fingers.current.delete(e.pointerId);
       if (f.key) show(f.key.id, false);
-      // On again once the click that ends this touch has gone by
-      const sw = f.sw;
-      if (sw?.disabled) setTimeout(() => (sw.disabled = false), 100);
       onKeyTouch(kind, e.pointerId, f.key, e.clientX, e.clientY);
     },
   };
@@ -202,7 +204,6 @@ function KeyButton({
       ) : (
         label
       )}
-      <Haptic />
     </div>
   );
 }
@@ -288,7 +289,6 @@ function MouseButton({
     >
       {divider ? <div className="absolute inset-y-2 left-0 w-px bg-neutral-700" /> : null}
       {label}
-      <Haptic />
     </div>
   );
 }

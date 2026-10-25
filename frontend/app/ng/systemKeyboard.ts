@@ -4,8 +4,8 @@
 // the keyboard leaves in view through `visualViewport`.
 import { useEffect, useState } from "react";
 
-/** A text box (or another field that brings up the phone's keyboard) has the focus. The keys'
- *  hidden switches (`./Haptic.tsx`) do not count. */
+/** A text box (or another field that brings up the phone's keyboard) has the focus.
+ *  Checkboxes and buttons do not count. */
 export function isTyping(): boolean {
   const e = document.activeElement;
   return (

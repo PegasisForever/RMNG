@@ -16,7 +16,8 @@
 // move moves the cursor, two scroll, and a quick tap (under TAP_MS) clicks, as on a touchpad:
 // the click waits TAP_WAIT_MS for a second touch. A second touch that moves drags (the left
 // button down until it lifts); a second quick tap makes a double click. Each touch in that
-// time starts the wait for the keys again.
+// time starts the wait for the keys again. The mouse buttons show only in trackpad mode, and
+// one held down keeps the mode on (`button`), so they do not go while in use.
 //
 // Fingers that roll from one key to the next (the next one down before the last is up) are
 // still two taps, as neither moved. A touch that starts between keys has no key: it only ever
@@ -38,6 +39,8 @@ export const HOLD_MS = 250;
 export const SLOP_PX = 10;
 
 export type KeypadOut =
+  /** A finger came down on `key` while the keys are keys (the key's click sound plays). */
+  | { t: "press"; key: Key }
   /** A finger tapped `key` (it lifted without moving or holding). */
   | { t: "tap"; key: Key }
   /** A finger holds `key` down (`pressed`), or lifted after holding it. */
@@ -90,6 +93,8 @@ export class Keypad {
   private cancelLinger = () => {};
   /** The cancel of a tap's click that waits for a second touch, or null. */
   private waitingClick: (() => void) | null = null;
+  /** Mouse buttons held down now. */
+  private buttons = 0;
 
   constructor(
     private out: (o: KeypadOut) => void,
@@ -121,14 +126,16 @@ export class Keypad {
         if (this.touches.size) this.out({ t: "click" });
         else touch.afterTap = true;
       }
-    }
-    else if (key?.mod) this.out({ t: "mod", key, down: true });
-    else if (key && !key.fn) {
-      touch.cancelHold = this.timer.after(HOLD_MS, () => {
-        if (touch.is !== "new") return;
-        touch.is = "hold";
-        this.out({ t: "hold", key, pressed: true });
-      });
+    } else if (key) {
+      this.out({ t: "press", key });
+      if (key.mod) this.out({ t: "mod", key, down: true });
+      else if (!key.fn) {
+        touch.cancelHold = this.timer.after(HOLD_MS, () => {
+          if (touch.is !== "new") return;
+          touch.is = "hold";
+          this.out({ t: "hold", key, pressed: true });
+        });
+      }
     }
     // A finger that joins a moving one scrolls with it once it moves too
     this.touches.set(id, touch);
@@ -201,14 +208,23 @@ export class Keypad {
     else if (p.is === "scroll" && ![...this.touches.values()].some((o) => o.is === "scroll")) {
       this.out({ t: "scroll_end" });
     }
-    if (this.pad && this.touches.size === 0) this.linger();
+    if (this.pad && this.touches.size === 0 && this.buttons === 0) this.linger();
+  }
+
+  /** A mouse button went down or up. While one is held the keys stay a trackpad, and after the
+   *  last one is up they stay one PAD_LINGER_MS more, as after a touch on them. */
+  button(pressed: boolean) {
+    this.buttons = Math.max(0, this.buttons + (pressed ? 1 : -1));
+    if (!this.pad) return;
+    if (pressed) this.cancelLinger();
+    else if (this.touches.size === 0 && this.buttons === 0) this.linger();
   }
 
   /** The keys stay a trackpad PAD_LINGER_MS more, unless a finger comes down again. */
   private linger() {
     this.cancelLinger();
     this.cancelLinger = this.timer.after(PAD_LINGER_MS, () => {
-      if (this.touches.size) return;
+      if (this.touches.size || this.buttons) return;
       this.pad = false;
       this.out({ t: "pad", on: false });
     });
