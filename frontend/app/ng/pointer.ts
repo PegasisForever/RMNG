@@ -13,11 +13,19 @@ export function pointerGain(d: number, ms: number): number {
   return Math.min(BASE_GAIN + ACCEL * speed, MAX_GAIN);
 }
 
-/** Scroll distance (the clone's surface px) per CSS px of two-finger motion. The content
- *  follows the fingers, as Windows does by default: fingers up scroll down. Ten times slower
- *  than the first value (2), which was much too fast on the Duo. It goes out as touchpad
- *  scroll (finger source, see `~/ng/Desk.tsx`), not as wheel notches. */
-export const SCROLL_GAIN = -0.2;
+/** Scroll distance (the clone's surface px) per CSS px of two-finger motion at a layout scroll
+ *  speed of 100%. The content follows the fingers, as Windows does by default: fingers up
+ *  scroll down. The layout's speed scales it (`scrollGain`); the iPhone Duo layout's is 15%
+ *  (`wire::iphone_duo_layout`), as this base was much too fast on the Duo. It goes out as
+ *  touchpad scroll (finger source, see `~/ng/Desk.tsx`), not as wheel notches. */
+export const SCROLL_BASE = -2;
+
+/** The iPhone Duo layout's speed, until the server's first word on it. */
+export const DUO_SCROLL_SPEED = 15;
+
+/** Scroll distance per CSS px for a layout scroll speed of `speed` percent (negative: the other
+ *  way). */
+export const scrollGain = (speed: number) => (SCROLL_BASE * speed) / 100;
 
 /** `v` held to the pixels of an axis `size` pixels long. */
 export function clampTo(v: number, size: number): number {

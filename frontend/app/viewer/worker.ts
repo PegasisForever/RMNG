@@ -1,7 +1,8 @@
 // The browser viewer's worker: it owns the WebSocket, the H.264 decoder and the canvas, so a
 // busy page thread never delays a frame. With sound on, it also decodes the sound packets
-// (WebCodecs Opus) and sends the samples straight to the page's sound worklet on a port of
-// their own, so a busy page thread never delays the sound either.
+// (Opus: WebCodecs, or libopus in WebAssembly, `./opus.ts`) and sends the samples straight to
+// the page's sound worklet on a port of their own, so a busy page thread never delays the sound
+// either.
 //
 // Display: decoded frames are drawn straight onto the page's canvas, which the page gave to
 // this worker (`transferControlToOffscreen`). That is one GPU copy per frame, and every part of
@@ -21,6 +22,7 @@
 import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
 import { type HeldInput, freshInput, holdInput, letterbox } from "./input";
+import { type Opus, openOpus } from "./opus";
 import {
   AUDIO_FRAME_MS,
   AUDIO_HEADER_LEN,
@@ -129,7 +131,7 @@ let held: HeldInput = [];
  *  the decoder is on (-1: none yet, so the next packet starts one). */
 let soundOn = false;
 let soundPort: MessagePort | null = null;
-let audio: AudioDecoder | null = null;
+let audio: Opus | null = null;
 let audioStream = -1;
 
 function send(msg: FromBrowser) {
@@ -351,45 +353,35 @@ function newCopy() {
 const toWorklet = (m: SoundIn, transfer: Transferable[] = []) =>
   soundPort?.postMessage(m, transfer);
 
-/** A new decoder, and nothing stale in the worklet. */
+/** A new decoder (`./opus.ts`: WebCodecs, or libopus in WebAssembly), and nothing stale in the
+ *  worklet. */
 function resetAudio() {
-  if (audio && audio.state !== "closed") audio.close();
-  audio = new AudioDecoder({
-    output: onPcm,
-    error: (e) => {
+  audio?.close();
+  audio = openOpus(
+    onPcm,
+    (e) => {
       console.warn("sound decoder error:", e);
       audioStream = -1; // the next packet starts again
     },
-  });
-  audio.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 2 });
+    AUDIO_FRAME_MS,
+  );
   toWorklet({ t: "reset" });
 }
 
 function onAudio(buf: ArrayBuffer) {
   if (!soundOn || !soundPort) return;
   const h = parseAudioHeader(buf);
-  if (h.stream !== audioStream || audio?.state !== "configured") {
+  if (h.stream !== audioStream || !audio) {
     resetAudio();
     audioStream = h.stream;
   }
   if (buf.byteLength === AUDIO_HEADER_LEN) return toWorklet({ t: "quiet" });
-  audio!.decode(
-    new EncodedAudioChunk({
-      type: "key",
-      timestamp: h.seq * AUDIO_FRAME_MS * 1000,
-      data: new Uint8Array(buf, AUDIO_HEADER_LEN),
-    }),
-  );
+  audio!.decode(h.seq, new Uint8Array(buf, AUDIO_HEADER_LEN));
 }
 
-function onPcm(d: AudioData) {
+function onPcm(l: Float32Array, r: Float32Array) {
   // A packet still in the decoder when the sound went off.
-  if (!soundOn) return d.close();
-  const l = new Float32Array(d.numberOfFrames);
-  const r = new Float32Array(d.numberOfFrames);
-  d.copyTo(l, { planeIndex: 0, format: "f32-planar" });
-  d.copyTo(r, { planeIndex: d.numberOfChannels > 1 ? 1 : 0, format: "f32-planar" });
-  d.close();
+  if (!soundOn) return;
   toWorklet({ t: "pcm", l, r }, [l.buffer, r.buffer]);
 }
 

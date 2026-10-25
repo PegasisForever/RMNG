@@ -34,6 +34,7 @@ pub const IPHONE_DUO_LAYOUT: &str = "iPhone Duo";
 /// be at the screen's own pixels. The area is 2007 × 1617 device px (669 × 539 CSS px at 3×),
 /// half of it 1003.5 × 808.5; the encoder takes even sizes only (4:2:0 chroma), so the monitor
 /// is 1002 × 808 and the page leaves a strip of 3 pixels at the right and 1 at the bottom.
+/// Scrolling with two fingers on the page's keys is 15% of the page's base speed.
 pub fn iphone_duo_layout() -> &'static LayoutPreset {
     static DUO: std::sync::LazyLock<LayoutPreset> = std::sync::LazyLock::new(|| LayoutPreset {
         name: IPHONE_DUO_LAYOUT.to_string(),
@@ -45,7 +46,7 @@ pub fn iphone_duo_layout() -> &'static LayoutPreset {
             primary: true,
         }],
         scroll_mode: ScrollMode::Auto,
-        scroll_speed: default_scroll_speed(),
+        scroll_speed: 15.0,
     });
     &DUO
 }

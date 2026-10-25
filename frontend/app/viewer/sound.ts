@@ -5,17 +5,32 @@
 // Chrome starts an AudioContext only after a click or a key in the page. A viewer window opens
 // with none, so the sound starts at the first click or key. The window asks the server for the
 // sound only while the context runs, so a window nobody clicked yet gets no packets.
+//
+// iOS (the /ng phone app) is stricter, as selkies found: there a touch counts only as it ends,
+// so the lift and the click resume the context too, and iOS stops a running context
+// ("interrupted") when the app goes to the background, so every gesture tries again. The
+// page's audio session is "playback", as a video app's: the ring/silent switch does not mute
+// the clone.
 import workletUrl from "./sound-worklet.ts?worker&url";
 
 import type { SoundStats, WorkerIn } from "./protocol";
 
 /** Events that let Chrome start the AudioContext. Capture phase, so the input handlers that
  *  stop key events do not hide them. */
-const GESTURES = ["pointerdown", "keydown"] as const;
+const GESTURES = ["pointerdown", "pointerup", "touchend", "click", "keydown"] as const;
+
+/** The phone's audio session (Safari 16.4+), not in TypeScript's DOM types yet. */
+type WithAudioSession = Navigator & { audioSession?: { type: string } };
 
 export function attachSound(post: (m: WorkerIn, transfer?: Transferable[]) => void): {
   detach(): void;
 } {
+  const session = (navigator as WithAudioSession).audioSession;
+  try {
+    if (session && session.type !== "play-and-record") session.type = "playback";
+  } catch {
+    // the browser refused the type
+  }
   const ctx = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });
   /** The worker has its port to the worklet. */
   let ready = false;
@@ -30,10 +45,10 @@ export function attachSound(post: (m: WorkerIn, transfer?: Transferable[]) => vo
     post({ type: "sound", on: flow });
   };
   const resume = () => {
-    if (ctx.state === "suspended") ctx.resume().then(update, update);
+    if (ctx.state !== "running" && ctx.state !== "closed") ctx.resume().then(update, update);
   };
   ctx.onstatechange = update;
-  for (const g of GESTURES) window.addEventListener(g, resume, true);
+  for (const g of GESTURES) window.addEventListener(g, resume, { capture: true, passive: true });
 
   (async () => {
     await ctx.audioWorklet.addModule(workletUrl);
@@ -57,7 +72,7 @@ export function attachSound(post: (m: WorkerIn, transfer?: Transferable[]) => vo
   return {
     detach() {
       detached = true;
-      for (const g of GESTURES) window.removeEventListener(g, resume, true);
+      for (const g of GESTURES) window.removeEventListener(g, resume, { capture: true });
       ctx.close();
     },
   };

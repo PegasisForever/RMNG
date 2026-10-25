@@ -3784,6 +3784,8 @@ PLAIN=plainvalue
         assert_eq!(ask(LayoutDevice::Phone).await.0["changed"], true);
         assert!(app.store.get().phone_layout);
         assert_eq!(app.effective_monitors(), wire::iphone_duo_layout().monitors);
+        // Its own scroll speed too, which the /ng page scales its two-finger scroll by
+        assert_eq!(app.effective_scroll().1, 15.0);
         assert_eq!(ask(LayoutDevice::Phone).await.0["changed"], false);
 
         assert_eq!(ask(LayoutDevice::Desktop).await.0["changed"], true);

@@ -5,8 +5,8 @@
 // The sounds are made here, not loaded: each is a burst of band-passed noise (the tick) over a
 // damped tone (the body), a few milliseconds long, rendered once into an AudioBuffer so a key
 // plays with no delay. iOS only starts audio inside a tap, so the first touches unlock it
-// (`unlock`). The audio session is "ambient", as the iOS keyboard's is: the ring/silent
-// switch mutes it, and it does not stop music that plays.
+// (`unlock`). The page's audio session is the clone sound's ("playback", `~/viewer/sound.ts`):
+// a page has one session, so the clicks do not set their own.
 //
 // Every click must sound the same. Two things made fast taps sound unlike slow ones: iOS turns
 // the audio output off after a moment of silence and fades it in again on the next sound, and
@@ -83,9 +83,6 @@ export function renderClick(kind: ClickKind, rate: number): Float32Array<ArrayBu
   return out;
 }
 
-/** The phone's audio session (Safari 16.4+), not in TypeScript's DOM types yet. */
-type WithAudioSession = Navigator & { audioSession?: { type: string } };
-
 /** How fast a click that is still sounding fades out when the next one starts, s. */
 const CUT_S = 0.002;
 
@@ -100,8 +97,6 @@ export class KeySounds {
   unlock() {
     if (typeof window === "undefined" || typeof AudioContext === "undefined") return;
     if (!this.ctx) {
-      const session = (navigator as WithAudioSession).audioSession;
-      if (session) session.type = "ambient";
       this.ctx = new AudioContext({ latencyHint: "interactive" });
       for (const kind of Object.keys(VOICE) as ClickKind[]) {
         const samples = renderClick(kind, this.ctx.sampleRate);

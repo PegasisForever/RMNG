@@ -1,5 +1,6 @@
 // The /ng page's connection to the selected clone: the browser viewer's socket for monitor 0,
-// run by the viewer's own worker (`~/viewer/worker.ts`: socket, decode, drawing). The monitor
+// run by the viewer's own worker (`~/viewer/worker.ts`: socket, decode, drawing, and the
+// clone's sound, which `~/viewer/sound.ts` plays from the first touch). The monitor
 // is the iPhone Duo layout's; the page sizes the box it is shown in (`./geometry.ts`). Input does not come from the page's events here, as it
 // does in the viewer: the on-screen keyboard and buttons send it (`send`).
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
@@ -8,6 +9,7 @@ import type { TouchMsg } from "~/lib/wire/TouchMsg";
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 import type { WorkerIn, WorkerOut } from "~/viewer/protocol";
+import { attachSound } from "~/viewer/sound";
 
 export interface Session {
   send(msg: InputMsg): void;
@@ -22,6 +24,8 @@ export interface SessionEvents {
   onSpec(spec: ViewSpec): void;
   onCursor(c: CursorMeta): void;
   onConnected(connected: boolean): void;
+  /** The active layout's scroll speed, percent (the server's `scroll` message). */
+  onScrollSpeed(speed: number): void;
 }
 
 /** The monitor shown, and the only one input goes to. */
@@ -53,6 +57,9 @@ export function openSession(box: HTMLElement, events: SessionEvents): Session {
       case "cursor":
         if (msg.monitor_id === MONITOR) events.onCursor(msg);
         break;
+      case "scroll":
+        events.onScrollSpeed(msg.speed);
+        break;
     }
   };
   worker.onmessage = (e: MessageEvent<WorkerOut>) => {
@@ -71,12 +78,15 @@ export function openSession(box: HTMLElement, events: SessionEvents): Session {
     },
     [offscreen],
   );
+  // The only monitor, so the only window: it plays the clone's sound
+  const sound = attachSound(post);
 
   return {
     send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
     touch: (msg) => post({ type: "send", msg: { t: "touch", ...msg } }),
     resize: (width, height) => post({ type: "resize", width, height }),
     detach() {
+      sound.detach();
       worker.terminate();
       canvas.remove();
     },

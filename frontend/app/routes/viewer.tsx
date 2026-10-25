@@ -128,9 +128,9 @@ export default function Viewer() {
       },
     });
     input.current = inp;
-    // The worker decodes the sound with WebCodecs' AudioDecoder: Safari has it from 26.
-    const snd =
-      monitor === SOUND_MONITOR && typeof AudioDecoder !== "undefined" ? attachSound(post) : null;
+    // The worker decodes the sound with WebCodecs, or with libopus in WebAssembly where the
+    // browser's WebCodecs takes no Opus (`~/viewer/opus.ts`)
+    const snd = monitor === SOUND_MONITOR ? attachSound(post) : null;
 
     /** The build this page belongs to, from the first connection's `version` message. */
     let buildId: string | null = null;

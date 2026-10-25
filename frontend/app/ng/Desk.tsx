@@ -20,7 +20,7 @@ import { CAPS_LOCK, type Key, isShift } from "./keyboard";
 import { Keypad, type KeypadOut } from "./keypad";
 import { KeySounds } from "./keySound";
 import { type ModState, Modifiers } from "./modifiers";
-import { SCROLL_GAIN, clampTo, pointerGain } from "./pointer";
+import { DUO_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
 import { NgPagesContainer } from "./pages/NgPagesContainer";
 import { MONITOR, type Session, openSession } from "./session";
 import { isTyping, useLift } from "./systemKeyboard";
@@ -70,6 +70,8 @@ export function Desk({ width, height, bottom }: Props) {
   const live = useLiveState(useRef(emptyState()).current);
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
+  /** The layout's scroll speed, percent: the server says it when the socket opens. */
+  const scrollSpeed = useRef(DUO_SCROLL_SPEED);
   /** The cursor where this page last put it, and when. */
   const cursor = useRef({ ...pos, movedAt: -Infinity });
 
@@ -96,6 +98,7 @@ export function Desk({ width, height, bottom }: Props) {
         setPos({ x: c.x, y: c.y });
       },
       onConnected: setConnected,
+      onScrollSpeed: (speed) => (scrollSpeed.current = speed),
     });
     return () => {
       session.current?.detach();
@@ -235,14 +238,11 @@ export function Desk({ width, height, bottom }: Props) {
           send({ kind: "pointer_move", monitor_id: MONITOR, x, y });
           break;
         }
-        case "scroll":
-          send({
-            kind: "axis_continuous",
-            dx: o.dx * SCROLL_GAIN,
-            dy: o.dy * SCROLL_GAIN,
-            flags: AXIS_FINGER,
-          });
+        case "scroll": {
+          const gain = scrollGain(scrollSpeed.current);
+          send({ kind: "axis_continuous", dx: o.dx * gain, dy: o.dy * gain, flags: AXIS_FINGER });
           break;
+        }
         case "scroll_end":
           send({ kind: "axis_continuous", dx: 0, dy: 0, flags: AXIS_FINGER | AXIS_FINISH });
           break;
