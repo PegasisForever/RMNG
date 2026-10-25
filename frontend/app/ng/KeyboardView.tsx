@@ -2,8 +2,6 @@ import { type PointerEvent, type ReactNode, memo, useRef, useState } from "react
 
 import { type Key, ROW_UNITS, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SCROLL_START_PX, scrollSteps } from "./pointer";
-import type { VideoMode } from "./session";
-import type { VideoStats } from "~/viewer/protocol";
 
 /** Evdev mouse buttons. */
 export const BTN_LEFT = 0x110;
@@ -15,7 +13,7 @@ const COLUMN = 76;
 /** Space between keys, CSS px. */
 const GAP = 4;
 /** Buttons kept free in the column for later. */
-const SPARE_BUTTONS = 2;
+const SPARE_BUTTONS = 3;
 /** The red dot sits between P (second row) and L (third row): halfway between their middles,
  *  in key units from the left, and on the line between the two rows. */
 const DOT_UNITS = (11 + 10.25) / 2;
@@ -41,11 +39,6 @@ type Props = {
   /** The finger on the red dot, as its push from where it first touched (CSS px), or null
    *  when it lifts. */
   onDot: (push: { dx: number; dy: number } | null) => void;
-  /** The video mode asked for, and how the video did in the last second (null until the
-   *  first second). */
-  video: { mode: VideoMode; stats: VideoStats | null };
-  /** Switch to the other video mode. */
-  onVideoMode: () => void;
 };
 
 /** The /ng keyboard area: a full keyboard, a column of mouse buttons on the right, and a
@@ -81,9 +74,6 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
         <Hold label="Right" onPress={(down) => p.onButton(BTN_RIGHT, down)} />
         <Pad active={p.fn} onDown={p.onFn}>
           Fn
-        </Pad>
-        <Pad onDown={p.onVideoMode}>
-          <VideoInfo {...p.video} />
         </Pad>
         {Array.from({ length: SPARE_BUTTONS }, (_, i) => (
           <Pad key={i} />
@@ -224,28 +214,6 @@ function Pad({ active = false, onDown, children }: { active?: boolean; onDown?: 
       }}
     >
       {children}
-    </div>
-  );
-}
-
-/** The video mode and its numbers: frames shown per second, the mean time to show one, and
- *  the frames the track dropped. The mode shown is the one in use: a track that failed falls
- *  back to the canvas. */
-function VideoInfo({ mode, stats }: Props["video"]) {
-  const used = stats?.mode ?? mode;
-  return (
-    <div className="flex flex-col items-center gap-0.5 font-mono text-[10px] leading-tight text-slate-300">
-      <span className="font-sans text-xs text-slate-100">{used === "track" ? "Track" : "Canvas"}</span>
-      {stats ? (
-        <>
-          <span>{stats.fps} fps</span>
-          <span>{stats.showMs.toFixed(1)} ms</span>
-          {used === "track" ? <span>{stats.dropped} drop</span> : null}
-        </>
-      ) : (
-        <span>…</span>
-      )}
-      {used !== mode ? <span className="text-amber-400">no track</span> : null}
     </div>
   );
 }

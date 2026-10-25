@@ -200,15 +200,7 @@ export function sameBytes(a: Uint8Array | null, b: Uint8Array | null): boolean {
  *  canvas's new size in device pixels (`resize`), or sound on or off (`sound`; with `on`, the
  *  port to the sound worklet the first time). */
 export type WorkerIn =
-  | {
-      type: "init";
-      canvas: OffscreenCanvas;
-      url: string;
-      monitor: number;
-      track: boolean;
-      /** Send `stats` once a second. */
-      stats?: boolean;
-    }
+  | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number; track: boolean }
   | { type: "send"; msg: FromBrowser }
   | { type: "clipboard"; data: ClipboardBytes }
   | { type: "resize"; width: number; height: number }
@@ -237,17 +229,4 @@ export type WorkerOut =
   | { type: "connected"; connected: boolean }
   /** The video track to show in a <video> (`./track.ts`), transferred; null when the worker
    *  stopped writing to it and draws on the canvas again. */
-  | { type: "track"; track: MediaStreamTrack | null }
-  /** Once a second, when the page asked at `init`. */
-  | { type: "stats"; stats: VideoStats };
-
-/** How the video was shown in the last second: where the frames went (`mode`; a track that
- *  failed falls back to the canvas), frames shown per second, the mean time one took to show
- *  (ms: the canvas draw, or the track write until the track took it), and the frames the track
- *  dropped because it was full. */
-export interface VideoStats {
-  mode: "canvas" | "track";
-  fps: number;
-  showMs: number;
-  dropped: number;
-}
+  | { type: "track"; track: MediaStreamTrack | null };

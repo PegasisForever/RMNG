@@ -979,7 +979,7 @@ mod tests {
         assert!(!c.has_layout("B"));
         c.active_layout = crate::control::IPHONE_DUO_LAYOUT.into();
         let m = c.effective_monitors();
-        assert_eq!((m.len(), m[0].width, m[0].height), (1, 2006, 1622));
+        assert_eq!((m.len(), m[0].width, m[0].height), (1, 1002, 810));
         assert_eq!(c.layout_presets.len(), 1);
     }
 

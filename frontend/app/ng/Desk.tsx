@@ -1,7 +1,7 @@
 // The /ng page on the iPhone Duo: the selected clone's screen on top, the keyboard below. This
 // is the container: it holds the connection (`./session.ts`), the keyboard's state (held
 // modifiers, Fn, Caps Lock) and the red dot's cursor motion, and turns them into input.
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { activateLayout } from "~/lib/api";
 import type { CursorShape } from "~/lib/wire/CursorShape";
@@ -12,29 +12,19 @@ import { Cursor } from "./Cursor";
 import { KeyboardView } from "./KeyboardView";
 import { CAPS_LOCK } from "./keyboard";
 import { clampTo, dotVelocity } from "./pointer";
-import { MONITOR, type Session, type VideoMode, defaultVideoMode, openSession } from "./session";
-import type { VideoStats } from "~/viewer/protocol";
+import { MONITOR, type Session, openSession } from "./session";
 
 /** The built-in layout of the iPhone Duo (`wire::IPHONE_DUO_LAYOUT`). */
 const DUO_LAYOUT = "iPhone Duo";
 /** Its one monitor, in pixels (`wire::iphone_duo_layout`). */
-export const DUO_MONITOR = { width: 2006, height: 1622 };
+export const DUO_MONITOR = { width: 1002, height: 810 };
+/** Screen (device) pixels per monitor pixel, each way: text is twice its 1:1 size. */
+const SCALE = 2;
+/** The video's box in device pixels: the monitor at SCALE. */
+const BOX = { width: DUO_MONITOR.width * SCALE, height: DUO_MONITOR.height * SCALE };
 /** After the red dot moved the cursor, the clone's own cursor reports are this far behind
  *  (ms), so they do not pull the drawn cursor back. */
 const OWN_MOVES_MS = 400;
-
-/** The video mode picked on this phone. */
-const VIDEO_KEY = "ng-video";
-
-function savedVideoMode(): VideoMode {
-  try {
-    const v = localStorage.getItem(VIDEO_KEY);
-    if (v === "canvas" || v === "track") return v;
-  } catch {
-    // no storage: the default
-  }
-  return defaultVideoMode();
-}
 
 const isDuoSpec = (s: ViewSpec) =>
   s.monitors.length === 1 &&
@@ -60,10 +50,8 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
   const [latched, setLatched] = useState<ReadonlySet<number>>(new Set());
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
-  const [videoMode, setVideoMode] = useState<VideoMode>(savedVideoMode);
-  const [stats, setStats] = useState<VideoStats | null>(null);
   /** The cursor where this page last put it, and when. */
-  const cursor = useRef({ ...pos, movedAt: 0 });
+  const cursor = useRef({ ...pos, movedAt: -Infinity });
   /** The finger's push on the red dot; null while no finger is on it. */
   const push = useRef<{ dx: number; dy: number } | null>(null);
   const frame = useRef(0);
@@ -73,8 +61,7 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
   useEffect(() => {
     if (!box.current) return;
     let asked = false;
-    setStats(null);
-    session.current = openSession(box.current, DUO_MONITOR, videoMode, {
+    session.current = openSession(box.current, BOX, {
       onSpec(s) {
         setSpec(s);
         // This page needs the iPhone Duo layout; ask once per open, and only when another is
@@ -95,26 +82,25 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
         setPos({ x: c.x, y: c.y });
       },
       onConnected: setConnected,
-      onStats: setStats,
     });
     return () => {
       cancelAnimationFrame(frame.current);
       session.current?.detach();
       session.current = null;
     };
-    // A new mode needs a new worker: the canvas goes to the worker once, at its start
-  }, [videoMode]);
+  }, []);
 
   /** Moves the cursor while a finger pushes the red dot, once per screen frame. */
   const runDot = (last: number) => (t: number) => {
     const p = push.current;
     if (!p) return;
     const dt = Math.min((t - last) / 1000, 0.05);
+    // In screen pixels per second, so a push moves the cursor as fast at any SCALE
     const { vx, vy } = dotVelocity(p.dx, p.dy);
     if (vx || vy) {
       const c = cursor.current;
-      const x = clampTo(c.x + vx * dt, DUO_MONITOR.width);
-      const y = clampTo(c.y + vy * dt, DUO_MONITOR.height);
+      const x = clampTo(c.x + (vx / SCALE) * dt, DUO_MONITOR.width);
+      const y = clampTo(c.y + (vy / SCALE) * dt, DUO_MONITOR.height);
       cursor.current = { x, y, movedAt: performance.now() };
       setPos({ x, y });
       send({ kind: "pointer_move", monitor_id: MONITOR, x, y });
@@ -150,22 +136,6 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
   );
   const onScroll = useCallback((step: number) => send({ kind: "axis", axis: 0, step }), []);
   const onFn = useCallback(() => setFn((f) => !f), []);
-  const onVideoMode = useCallback(
-    () =>
-      setVideoMode((m) => {
-        const next = m === "track" ? "canvas" : "track";
-        try {
-          localStorage.setItem(VIDEO_KEY, next);
-        } catch {
-          // no storage: the default next time
-        }
-        return next;
-      }),
-    [],
-  );
-
-  const video = useMemo(() => ({ mode: videoMode, stats }), [videoMode, stats]);
-
   const terminal = spec?.content.mode === "terminal";
   const note = !connected
     ? "Connecting…"
@@ -182,7 +152,7 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
       <div className="relative overflow-hidden" style={{ height: screenHeight }}>
         {/* The session puts the video in here; the cursor and the note come after it, on top */}
         <div ref={box} className="absolute inset-0" />
-        {shape && !hidden && !terminal && connected ? <Cursor shape={shape} x={pos.x} y={pos.y} /> : null}
+        {shape && !hidden && !terminal && connected ? <Cursor shape={shape} x={pos.x} y={pos.y} scale={SCALE} /> : null}
         {note ? (
           <p className="absolute inset-0 flex items-center justify-center text-sm text-slate-400">{note}</p>
         ) : null}
@@ -199,8 +169,6 @@ export function Desk({ screenHeight, keysHeight, bottom }: Props) {
           onScroll={onScroll}
           onFn={onFn}
           onDot={onDot}
-          video={video}
-          onVideoMode={onVideoMode}
         />
       </div>
     </div>

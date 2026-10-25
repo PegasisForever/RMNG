@@ -26,8 +26,6 @@ function Frame(args: { fn: boolean; latched: number[]; caps: boolean }) {
         onScroll={fn()}
         onFn={() => setFn((f) => !f)}
         onDot={fn()}
-        video={{ mode: "track", stats: { mode: "track", fps: 60, showMs: 0.4, dropped: 0 } }}
-        onVideoMode={fn()}
       />
     </div>
   );
