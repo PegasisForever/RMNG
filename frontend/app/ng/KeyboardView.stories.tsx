@@ -1,13 +1,22 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { KeyboardView } from "./KeyboardView";
 import { SHIFTS } from "./keyboard";
+import type { NgTab } from "./ToolRow";
 import type { ModState } from "./modifiers";
 
 /** The keyboard area on the unfolded iPhone Duo: 669 × 412, a 34 px home bar. The container
  *  tells taps from pointer gestures, so here a key only shows that it is touched. */
-function Frame(args: { height: number; fn: boolean; mods: [number, ModState][]; caps: boolean }) {
+function Frame(args: {
+  height: number;
+  fn: boolean;
+  mods: [number, ModState][];
+  caps: boolean;
+  tab: NgTab | null;
+}) {
+  const [tab, setTab] = useState(args.tab);
   return (
     <KeyboardView
       width={669}
@@ -18,6 +27,9 @@ function Frame(args: { height: number; fn: boolean; mods: [number, ModState][]; 
       caps={args.caps}
       onKeyTouch={fn()}
       onButton={fn()}
+      usage={{ cpu: "23%", mem: "41.2GB", disk: "812.4GB" }}
+      tab={tab}
+      onTab={(t) => setTab((open) => (open === t ? null : t))}
     />
   );
 }
@@ -26,7 +38,7 @@ const meta = {
   title: "ng/KeyboardView",
   component: Frame,
   parameters: { layout: "centered" },
-  args: { height: 412, fn: false, mods: [], caps: false },
+  args: { height: 412, fn: false, mods: [], caps: false, tab: null },
 } satisfies Meta<typeof Frame>;
 
 export default meta;
@@ -48,6 +60,9 @@ export const CapsOn: Story = { args: { caps: true } };
 
 /** Fn: F1–F12 on the number row, Home/PgUp/PgDn/End on the arrows. */
 export const FnOn: Story = { args: { fn: true } };
+
+/** The Usage tab open: its page in the keyboard's place (a placeholder for now). */
+export const UsageTab: Story = { args: { tab: "usage" } };
 
 /** A shorter area: the keys get shorter, the mouse buttons keep what is left. */
 export const Short: Story = { args: { height: 330 } };

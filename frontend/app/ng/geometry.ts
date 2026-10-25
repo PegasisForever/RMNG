@@ -32,6 +32,9 @@ export type KeysLayout = {
   keys: Box;
   /** The mouse buttons: all the space under the keys, down to the screen's bottom edge. */
   buttons: Box;
+  /** An open tab's page, in the keys' and the mouse buttons' place: under the tool row, down
+   *  to the home bar. */
+  page: Box;
 };
 
 /** Where things go in a keyboard area `width`×`height` with `bottom` kept for the home bar.
@@ -58,6 +61,7 @@ export function keysLayout(width: number, height: number, bottom: number): KeysL
     tools,
     keys: { left: PAD, top: keysTop, width: w, height: h },
     buttons: { left: PAD, top: buttonsTop, width: width - 2 * PAD, height: height - buttonsTop },
+    page: { left: PAD, top: keysTop, width: width - 2 * PAD, height: height - bottom - keysTop },
   };
 }
 

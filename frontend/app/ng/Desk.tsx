@@ -4,9 +4,12 @@
 // (`./keypad.ts`), and turns them into input.
 import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 
+import { formatLxcUsage } from "~/components/BoardRail";
 import { layoutClaimer } from "~/lib/layoutClaim";
+import { openLiveEvents } from "~/lib/liveEvents";
 import type { CursorShape } from "~/lib/wire/CursorShape";
 import type { InputMsg } from "~/lib/wire/InputMsg";
+import type { LxcStats } from "~/lib/wire/LxcStats";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 
 import { Cursor } from "./Cursor";
@@ -17,6 +20,7 @@ import { Keypad, type KeypadOut } from "./keypad";
 import { type ModState, Modifiers } from "./modifiers";
 import { SCROLL_GAIN, clampTo, pointerGain } from "./pointer";
 import { MONITOR, type Session, openSession } from "./session";
+import type { NgTab } from "./ToolRow";
 
 /** The iPhone Duo layout's one monitor, in pixels (`wire::iphone_duo_layout`). */
 export const DUO_MONITOR = { width: 1002, height: 808 };
@@ -54,6 +58,9 @@ export function Desk({ width, height, bottom }: Props) {
   const [hidden, setHidden] = useState(false);
   const [pos, setPos] = useState({ x: DUO_MONITOR.width / 2, y: DUO_MONITOR.height / 2 });
   const [mods, setMods] = useState<ReadonlyMap<number, ModState>>(new Map());
+  /** The open tool-row tab; null shows the keyboard. */
+  const [tab, setTab] = useState<NgTab | null>(null);
+  const [lxc, setLxc] = useState<LxcStats | null>(null);
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
   /** The cursor where this page last put it, and when. */
@@ -88,6 +95,22 @@ export function Desk({ width, height, bottom }: Props) {
       session.current = null;
     };
   }, []);
+
+  // The server's CPU, memory and disk for the tool row, from the dashboard's live stream
+  useEffect(
+    () =>
+      openLiveEvents("/events", {
+        lxcStats: (data) => {
+          try {
+            setLxc(JSON.parse(data));
+          } catch {
+            // a malformed frame: keep the last numbers
+          }
+        },
+      }),
+    [],
+  );
+  const usage = formatLxcUsage(lxc);
 
   // The video's box in device pixels
   useEffect(() => {
@@ -191,6 +214,8 @@ export function Desk({ width, height, bottom }: Props) {
     else if (kind === "up") pad.up(id);
     else pad.cancel(id);
   }, []);
+  // A tab opens its page in the keyboard's place; tapped again, the keyboard comes back
+  const onTab = useCallback((t: NgTab) => setTab((open) => (open === t ? null : t)), []);
   // A click is a key to the modifiers: Ctrl, then a click, is a Ctrl-click
   const onButton = useCallback((button: number, pressed: boolean) => {
     if (pressed) modifiers.current!.keyDown();
@@ -276,6 +301,9 @@ export function Desk({ width, height, bottom }: Props) {
         caps={caps}
         onKeyTouch={onKeyTouch}
         onButton={onButton}
+        usage={usage}
+        tab={tab}
+        onTab={onTab}
       />
     </div>
   );

@@ -5,6 +5,7 @@ import { Haptic } from "./Haptic";
 import { GAP, keysLayout } from "./geometry";
 import { CAPS_LOCK, type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SLOP_PX } from "./keypad";
+import { type NgTab, type ServerUsage, TabPage, ToolRow } from "./ToolRow";
 import type { ModState } from "./modifiers";
 
 /** Evdev mouse buttons. */
@@ -12,8 +13,6 @@ export const BTN_LEFT = 0x110;
 export const BTN_RIGHT = 0x111;
 export const BTN_MIDDLE = 0x112;
 
-/** Buttons kept free in the tool row for later. */
-const SPARE_TOOLS = 5;
 
 export type TouchKind = "down" | "move" | "up" | "cancel";
 
@@ -34,11 +33,17 @@ type Props = {
   onKeyTouch: (kind: TouchKind, id: number, key: Key | null, x: number, y: number) => void;
   /** A mouse button goes down or up (evdev code). */
   onButton: (button: number, pressed: boolean) => void;
+  /** The server's CPU, memory and disk, for the tool row; null until known. */
+  usage: ServerUsage | null;
+  /** The open tab, whose page shows in place of the keys and the mouse buttons; null for the
+   *  keyboard. */
+  tab: NgTab | null;
+  onTab: (tab: NgTab) => void;
 };
 
-/** The /ng keyboard area: a tool row (spares for now) under the screen, a full keyboard of
+/** The /ng keyboard area: a tool row under the screen (`./ToolRow.tsx`), a full keyboard of
  *  square keys under it, and the left, middle and right mouse buttons in the space below the
- *  keys. The keys are a touchpad too: a finger that moves on them moves the cursor, two
+ *  keys; an open tab's page takes the place of the keys and the buttons. The keys are a touchpad too: a finger that moves on them moves the cursor, two
  *  scroll. Each finger works on its own, so a mouse button can stay down while another finger
  *  moves the cursor on the keys (a drag). A tap gives a haptic tick on iOS. */
 export const KeyboardView = memo(function KeyboardView(p: Props) {
@@ -48,14 +53,11 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
   const touch = useKeysTouch(rows, p.onKeyTouch);
   return (
     <div className="relative touch-none select-none bg-black" style={{ width: p.width, height: p.height }}>
-      <div className="absolute flex" style={{ ...k.tools, gap: GAP }}>
-        {Array.from({ length: SPARE_TOOLS }, (_, i) => (
-          <div key={i} className="flex-1 rounded-md bg-neutral-900" />
-        ))}
-      </div>
+      <ToolRow box={k.tools} usage={p.usage} tab={p.tab} onTab={p.onTab} />
+      {p.tab ? <TabPage tab={p.tab} box={k.page} /> : null}
       {/* One handler for the whole key area, gaps too: a drag may start between keys */}
       <div
-        className="absolute flex flex-col"
+        className={`absolute flex flex-col ${p.tab ? "hidden" : ""}`}
         style={{ ...k.keys, gap: GAP }}
         onPointerDown={touch.down}
         onPointerMove={touch.move}
@@ -79,7 +81,7 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
         ))}
       </div>
       {/* Down to the bottom edge, home bar included: a tap there is a tap */}
-      <div className="absolute flex" style={k.buttons}>
+      <div className={`absolute flex ${p.tab ? "hidden" : ""}`} style={k.buttons}>
         <MouseButton label="Left" button={BTN_LEFT} onButton={p.onButton} />
         <MouseButton label="Middle" button={BTN_MIDDLE} onButton={p.onButton} divider />
         <MouseButton label="Right" button={BTN_RIGHT} onButton={p.onButton} divider />
