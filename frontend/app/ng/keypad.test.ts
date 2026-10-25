@@ -9,6 +9,7 @@ import {
   PAD_LINGER_MS,
   SLOP_PX,
   TAP_MS,
+  TAP_SLOP_PX,
   TAP_WAIT_MS,
 } from "./keypad";
 import { keyRows } from "./keyboard";
@@ -328,5 +329,59 @@ describe("Keypad trackpad mode", () => {
     pad.move(1, 100 + SLOP_PX - 1, 100, 50);
     pad.up(1, 100);
     expect(said()).toEqual(["tap KeyA"]);
+  });
+
+  describe("trackpad mode has no move threshold", () => {
+    /** One finger moves the cursor and lifts: the keys are a trackpad. */
+    const point = () => {
+      pad.down(9, A, 100, 100, 0);
+      pad.move(9, 160, 100, 20);
+      pad.up(9, 40);
+      out = [];
+    };
+    const moves = () => out.flatMap((o) => (o.t === "move" ? [o.dx] : []));
+    const clicks = () => out.filter((o) => o.t === "click").length;
+
+    test("a 2 px move moves the cursor at once", () => {
+      point();
+      pad.down(1, S, 100, 100, 100);
+      pad.move(1, 102, 100, 110);
+      expect(moves()).toEqual([2]);
+    });
+
+    test("a quick tap that moves a little still clicks", () => {
+      point();
+      pad.down(1, S, 100, 100, 100);
+      pad.move(1, 100 + TAP_SLOP_PX - 2, 100, 150);
+      pad.up(1, 100 + TAP_MS - 10);
+      clock.advance(TAP_WAIT_MS);
+      expect(clicks()).toBe(1);
+    });
+
+    test("a touch that moves farther is no click", () => {
+      point();
+      pad.down(1, S, 100, 100, 100);
+      pad.move(1, 100 + TAP_SLOP_PX + 5, 100, 150);
+      pad.up(1, 200);
+      clock.advance(TAP_WAIT_MS);
+      expect(clicks()).toBe(0);
+    });
+
+    test("after a tap, a second tap that moves a little double-clicks; one that moves farther drags", () => {
+      point();
+      pad.down(1, S, 100, 100, 100);
+      pad.up(1, 150);
+      pad.down(2, S, 100, 100, 200);
+      pad.move(2, 103, 100, 220);
+      pad.up(2, 260);
+      expect(said().filter((x) => x !== "move")).toEqual(["click", "click"]);
+      out = [];
+      pad.down(3, S, 100, 100, 400);
+      pad.up(3, 450);
+      pad.down(4, S, 100, 100, 500);
+      pad.move(4, 100 + TAP_SLOP_PX, 100, 520);
+      pad.up(4, 900);
+      expect(out.filter((o) => o.t === "drag").map((o) => o.t === "drag" && o.pressed)).toEqual([true, false]);
+    });
   });
 });

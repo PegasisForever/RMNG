@@ -13,7 +13,8 @@
 //
 // Trackpad mode: once a touch moves the cursor or scrolls, the keys are a trackpad (`pad`
 // on) until no finger has been on them for PAD_LINGER_MS. Meanwhile a touch types nothing: a
-// move moves the cursor, two scroll, and a quick tap (under TAP_MS) clicks, as on a touchpad:
+// move moves the cursor from its first pixel (no SLOP_PX wait), two scroll, and a quick tap
+// (under TAP_MS, and less than TAP_SLOP_PX of motion) clicks, as on a touchpad:
 // the click waits TAP_WAIT_MS for a second touch. A second touch that moves drags (the left
 // button down until it lifts); a second quick tap makes a double click. Each touch in that
 // time starts the wait for the keys again. The mouse buttons show only in trackpad mode, and
@@ -41,6 +42,10 @@ export const HOLD_MS = 250;
 /** A finger that moves this far (CSS px) before it lifts or holds is a pointer gesture. Well
  *  over what a fingertip rolls on a tap (a key is about 54 px). */
 export const SLOP_PX = 20;
+/** In trackpad mode a touch moves the cursor from the first pixel, and it is still a tap (a
+ *  click) when it lifts within TAP_MS having gone less than this far (CSS px); a second touch
+ *  after a tap drags once it has gone this far. */
+export const TAP_SLOP_PX = 10;
 /** A drag on Space types an arrow key for each this far (CSS px) sideways, and up or down. */
 export const ARROW_STEP_X = 12;
 export const ARROW_STEP_Y = 28;
@@ -95,6 +100,8 @@ type Touch = {
   afterTap: boolean;
   /** It is dragging: the left button is down. */
   dragging: boolean;
+  /** The farthest it has been from where it came down, CSS px. */
+  far: number;
 };
 
 export class Keypad {
@@ -127,6 +134,7 @@ export class Keypad {
       t0: t,
       afterTap: false,
       dragging: false,
+      far: 0,
       ax: x,
       ay: y,
     };
@@ -158,8 +166,11 @@ export class Keypad {
     const p = this.touches.get(id);
     if (!p || p.is === "hold") return;
     if (p.is === "arrows") return this.arrows(p, x, y);
+    const d = Math.hypot(x - p.sx, y - p.sy);
+    p.far = Math.max(p.far, d);
     if (p.is === "new") {
-      if (Math.hypot(x - p.sx, y - p.sy) < SLOP_PX) return;
+      // A key waits to see a tap; the trackpad moves the cursor at once
+      if (p.pad ? d === 0 : d < SLOP_PX) return;
       p.cancelHold();
       if (!p.pad && p.key?.code === SPACE) {
         p.is = "arrows";
@@ -180,14 +191,14 @@ export class Keypad {
         }
         p.is = "scroll";
       } else p.is = "point";
-      if (p.afterTap && p.is === "point") {
-        p.dragging = true;
-        this.out({ t: "drag", pressed: true });
-      }
       if (!this.pad) {
         this.pad = true;
         this.out({ t: "pad", on: true });
       }
+    }
+    if (p.afterTap && p.is === "point" && !p.dragging && p.far >= TAP_SLOP_PX) {
+      p.dragging = true;
+      this.out({ t: "drag", pressed: true });
     }
     const dx = x - p.x;
     const dy = y - p.y;
@@ -205,17 +216,18 @@ export class Keypad {
     if (!p) return;
     this.touches.delete(id);
     p.cancelHold();
+    const quick = t - p.t0 < TAP_MS && p.far < TAP_SLOP_PX;
     if (p.dragging) this.out({ t: "drag", pressed: false });
-    else if (p.afterTap && p.is === "new") {
+    else if (p.afterTap && p.is !== "scroll") {
       // The first tap's click, and this one's when it was a tap too: a double click
       this.out({ t: "click" });
-      if (t - p.t0 < TAP_MS) this.out({ t: "click" });
-    } else if (p.is === "new") {
+      if (quick) this.out({ t: "click" });
+    } else if (p.is === "new" || (p.pad && p.is === "point")) {
       if (p.key?.mod && !p.pad) {
         // A modifier lifted while the keys were a trackpad was no tap: put it back
         this.out(this.pad ? { t: "mod", key: p.key, down: false, dragged: true } : { t: "mod", key: p.key, down: false });
       } else if (this.pad) {
-        if (t - p.t0 < TAP_MS) {
+        if (quick) {
           this.waitingClick = this.timer.after(TAP_WAIT_MS, () => {
             this.waitingClick = null;
             this.out({ t: "click" });
