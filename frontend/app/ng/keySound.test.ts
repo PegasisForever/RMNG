@@ -8,7 +8,9 @@ const find = (id: string) => [...keyRows(false), ...keyRows(true)].flat().find((
 describe("clickKind", () => {
   test("letters, digits and symbols tick; Delete and Backspace have their own; wide keys and modifiers the low one", () => {
     expect(["KeyA", "Digit5", "Comma", "ArrowLeft"].map((id) => clickKind(find(id)))).toEqual(["key", "key", "key", "key"]);
-    expect(["Backspace", "Delete"].map((id) => clickKind(find(id)))).toEqual(["delete", "delete"]);
+    expect(["Backspace", "Delete", "BackspaceRight", "DeleteRight"].map((id) => clickKind(find(id)))).toEqual(
+      Array(4).fill("delete"),
+    );
     expect(["Space", "Enter", "ShiftLeft", "Tab", "ControlLeft", "Escape", "F1"].map((id) => clickKind(find(id)))).toEqual(
       Array(7).fill("modifier"),
     );

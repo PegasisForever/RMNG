@@ -28,7 +28,10 @@ describe("keyRows", () => {
     expect(rows[0].map((k) => k.label).join(" ")).toBe("` [ ] \\ ; ' , . / - = PrtSc");
     expect(rows[0].length).toBe(rows[1].length);
     expect(rows[0].at(-1)!.code).toBe(99); // KEY_SYSRQ, the evdev code of Print Screen
-    for (const row of rows.slice(2, 5)) expect(row.every((k) => k.letter || k.label.length > 1)).toBe(true);
+    // No symbol among the letters: only letters and named keys (⌫ is Backspace)
+    for (const row of rows.slice(2, 5)) {
+      expect(row.every((k) => k.letter || k.label.length > 1 || k.label === "⌫")).toBe(true);
+    }
   });
 
   test("Fn swaps the number row for F1 to F12 and the arrows for Home PgUp PgDn End", () => {
@@ -45,7 +48,7 @@ describe("keyRows", () => {
 
   test("only Shift, Ctrl, Alt and Win are modifiers", () => {
     const mods = keyRows(false).flat().filter((k) => k.mod).map((k) => k.id);
-    expect(mods.sort()).toEqual(["AltLeft", "ControlLeft", "MetaLeft", "ShiftLeft", "ShiftRight"].sort());
+    expect(mods.sort()).toEqual(["AltLeft", "ControlLeft", "MetaLeft", "ShiftLeft"].sort());
   });
 
   test("Fn is where the right Alt and Ctrl were, in both modes, and sends nothing", () => {
@@ -75,5 +78,13 @@ describe("keyLabel", () => {
 
   test("Caps Lock does not change symbols", () => {
     expect(keyLabel(find(false, "Digit1"), false, true)).toBe("1");
+  });
+
+  test("after m is a delete key: Backspace, and forward Delete under Fn", () => {
+    const after = (fn: boolean) => keyRows(fn)[4].at(-1)!;
+    expect([after(false).code, after(false).label, after(false).units]).toEqual([14, "⌫", 2.25]);
+    expect([after(true).code, after(true).label]).toEqual([111, "Del"]);
+    // Its own id, unlike the number row's key with the same code
+    expect(keyRows(false).flat().filter((k) => k.code === 14).map((k) => k.id)).toEqual(["Backspace", "BackspaceRight"]);
   });
 });

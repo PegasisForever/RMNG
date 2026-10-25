@@ -72,19 +72,25 @@ const SYMBOL_ROW = even([
   key("PrintScreen", "PrtSc"),
 ]);
 
-const LETTER_ROWS = [
-  [key("Tab", "Tab", 1, { icon: "tab" }), ...letters("qwertyuiop")],
-  [
-    key("CapsLock", "Caps", 1.25),
-    ...letters("asdfghjkl"),
-    key("Enter", "Enter", 1.25, { icon: "enter" }),
-  ],
-  [
-    mod("ShiftLeft", "Shift", 2.25, { icon: "shift" }),
-    ...letters("zxcvbnm"),
-    mod("ShiftRight", "Shift", 2.25, { icon: "shift" }),
-  ],
-];
+/** The key after "m", where the iPhone keyboard has its delete key: Backspace, and forward
+ *  Delete under Fn (as on the number row). Its id is its own, so a touch on it does not light
+ *  the number row's key with the same code. */
+const deleteKey = (fn: boolean): Key =>
+  fn
+    ? { ...key("Delete", "Del", 2.25), id: "DeleteRight" }
+    : { ...key("Backspace", "⌫", 2.25), id: "BackspaceRight" };
+
+function letterRows(fn: boolean): Key[][] {
+  return [
+    [key("Tab", "Tab", 1, { icon: "tab" }), ...letters("qwertyuiop")],
+    [
+      key("CapsLock", "Caps", 1.25),
+      ...letters("asdfghjkl"),
+      key("Enter", "Enter", 1.25, { icon: "enter" }),
+    ],
+    [mod("ShiftLeft", "Shift", 2.25, { icon: "shift" }), ...letters("zxcvbnm"), deleteKey(fn)],
+  ];
+}
 
 const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown", "↓"), key("ArrowRight", "→")];
 /** With Fn, the arrows are the keys a laptop puts on them. */
@@ -107,7 +113,7 @@ function spaceRow(fn: boolean): Key[] {
 /** The six rows, top first: symbols, numbers, three of letters, space. `fn` puts F1–F12 in
  *  place of the number row and Home, PgUp, PgDn, End in place of the arrows. */
 export function keyRows(fn: boolean): Key[][] {
-  return [SYMBOL_ROW, fn ? F_ROW : NUMBER_ROW, ...LETTER_ROWS, spaceRow(fn)];
+  return [SYMBOL_ROW, fn ? F_ROW : NUMBER_ROW, ...letterRows(fn), spaceRow(fn)];
 }
 
 /** The evdev codes of the Shift keys. */
