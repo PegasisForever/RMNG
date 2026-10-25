@@ -1,7 +1,6 @@
 // The /ng page's connection to the selected clone: the browser viewer's socket for monitor 0,
 // run by the viewer's own worker (`~/viewer/worker.ts`: socket, decode, drawing). The monitor
-// is the iPhone Duo layout's, and the box on the screen is a whole multiple of it in device
-// pixels, so each monitor pixel covers a square of whole screen pixels. Input does not come from the page's events here, as it
+// is the iPhone Duo layout's; the page sizes the box it is shown in (`./geometry.ts`). Input does not come from the page's events here, as it
 // does in the viewer: the on-screen keyboard and buttons send it (`send`).
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
 import type { InputMsg } from "~/lib/wire/InputMsg";
@@ -11,6 +10,8 @@ import type { WorkerIn, WorkerOut } from "~/viewer/protocol";
 
 export interface Session {
   send(msg: InputMsg): void;
+  /** The box is now `width`×`height` device pixels. */
+  resize(width: number, height: number): void;
   detach(): void;
 }
 
@@ -23,19 +24,12 @@ export interface SessionEvents {
 /** The monitor shown, and the only one input goes to. */
 export const MONITOR = 0;
 
-/** Show monitor 0 of the selected clone in `box`, scaled to fit `width`×`height` device
- *  pixels at its top left. Always on the canvas: on the iPhone Duo it ran better than the
+/** Show monitor 0 of the selected clone in `box`, which the canvas fills, scaled to fit its
+ *  device pixels (`resize`). Always on the canvas: on the iPhone Duo it ran better than the
  *  video track the viewer uses in Safari. */
-export function openSession(
-  box: HTMLElement,
-  { width, height }: { width: number; height: number },
-  events: SessionEvents,
-): Session {
-  const dpr = window.devicePixelRatio || 1;
+export function openSession(box: HTMLElement, events: SessionEvents): Session {
   const canvas = document.createElement("canvas");
-  canvas.className = "absolute left-0 top-0 block";
-  canvas.style.width = `${width / dpr}px`;
-  canvas.style.height = `${height / dpr}px`;
+  canvas.className = "absolute inset-0 block h-full w-full";
   box.append(canvas);
   const offscreen = canvas.transferControlToOffscreen();
   const worker = new Worker(new URL("../viewer/worker.ts", import.meta.url), { type: "module" });
@@ -74,10 +68,10 @@ export function openSession(
     },
     [offscreen],
   );
-  post({ type: "resize", width, height });
 
   return {
     send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
+    resize: (width, height) => post({ type: "resize", width, height }),
     detach() {
       worker.terminate();
       canvas.remove();

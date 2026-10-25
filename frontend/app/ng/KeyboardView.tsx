@@ -1,128 +1,140 @@
-import { type PointerEvent, type ReactNode, memo, useRef, useState } from "react";
+import { type PointerEvent, type ReactNode, memo, useState } from "react";
 
-import { type Key, ROW_UNITS, SHIFTS, keyLabel, keyRows } from "./keyboard";
-import { SCROLL_START_PX, scrollSteps } from "./pointer";
+import { GAP, TOOL_H, keysLayout } from "./geometry";
+import { type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 
-/** Evdev mouse buttons. */
-export const BTN_LEFT = 0x110;
-export const BTN_RIGHT = 0x111;
-export const BTN_MIDDLE = 0x112;
+/** What the key area is: the keys, or a trackpad. */
+export type PadMode = "keys" | "trackpad";
 
-/** Width of the button column, CSS px. */
-const COLUMN = 76;
-/** Space between keys, CSS px. */
-const GAP = 4;
-/** Buttons kept free in the column for later. */
+/** Spare buttons kept free in the tool row for later. */
 const SPARE_BUTTONS = 3;
-/** The red dot sits between P (second row) and L (third row): halfway between their middles,
- *  in key units from the left, and on the line between the two rows. */
-const DOT_UNITS = (11 + 10.25) / 2;
 
 type Props = {
+  /** The keyboard area, CSS px, and the space kept clear at its bottom for the home bar. */
+  width: number;
+  height: number;
+  bottom: number;
   /** Fn: F1–F12 in place of the number row, Home/PgUp/PgDn/End on the arrows. */
   fn: boolean;
   /** The modifiers held down (evdev codes). */
   latched: ReadonlySet<number>;
   /** Caps Lock is on (only the labels follow it). */
   caps: boolean;
-  /** Space kept clear at the bottom for the home bar, CSS px. */
-  bottom: number;
+  mode: PadMode;
   /** A key that is not a modifier goes down or up. */
   onKey: (code: number, pressed: boolean) => void;
   /** A modifier was tapped: it goes down, or up when it was down. */
   onModifier: (code: number) => void;
-  /** A mouse button goes down or up (evdev code). */
-  onButton: (button: number, pressed: boolean) => void;
-  /** Wheel notches from a middle-button drag: positive is down. */
-  onScroll: (steps: number) => void;
   onFn: () => void;
-  /** The finger on the red dot, as its push from where it first touched (CSS px), or null
-   *  when it lifts. */
-  onDot: (push: { dx: number; dy: number } | null) => void;
+  /** The Trackpad button goes down or up (the container tells a tap from a hold). */
+  onTrackpadButton: (down: boolean) => void;
+  /** A finger on the trackpad: its id and where it is (CSS px, page coordinates). */
+  onPad: (kind: "down" | "move" | "up", id: number, x: number, y: number) => void;
+  /** Open the keyboard / screen split dialog. */
+  onSplit: () => void;
 };
 
-/** The /ng keyboard area: a full keyboard, a column of mouse buttons on the right, and a
- *  red dot that moves the cursor (like a ThinkPad TrackPoint). Each finger works on its own,
- *  so a mouse button can stay down while another finger moves the dot. */
+/** The /ng keyboard area: a tool row over a full keyboard with square keys, at the bottom of
+ *  the area. In trackpad mode the keys' place is a trackpad; the tool row stays. Each finger
+ *  works on its own, so the Trackpad button can be held while other fingers use the pad. */
 export const KeyboardView = memo(function KeyboardView(p: Props) {
+  const k = keysLayout(p.width, p.height, p.bottom);
   const shift = SHIFTS.some((c) => p.latched.has(c));
+  const keyH = k.pitch - GAP;
   return (
-    <div
-      className="flex h-full touch-none select-none bg-black px-1 pt-1.5"
-      style={{ gap: GAP, paddingBottom: p.bottom }}
-    >
-      <div className="relative flex min-w-0 flex-1 flex-col" style={{ gap: GAP }}>
-        {keyRows(p.fn).map((row, i) => (
-          <div key={i} className="flex min-h-0 flex-1" style={{ gap: GAP }}>
-            {row.map((k) => (
-              <KeyButton
-                key={k.id}
-                k={k}
-                label={keyLabel(k, shift, p.caps)}
-                latched={p.latched.has(k.code)}
-                onKey={p.onKey}
-                onModifier={p.onModifier}
-              />
-            ))}
-          </div>
-        ))}
-        <RedDot onDot={p.onDot} />
-      </div>
-      <div className="flex flex-col" style={{ gap: GAP, width: COLUMN }}>
-        <Hold label="Left" onPress={(down) => p.onButton(BTN_LEFT, down)} />
-        <MiddleButton onButton={p.onButton} onScroll={p.onScroll} />
-        <Hold label="Right" onPress={(down) => p.onButton(BTN_RIGHT, down)} />
-        <Pad active={p.fn} onDown={p.onFn}>
-          Fn
-        </Pad>
+    <div className="relative touch-none select-none bg-black" style={{ width: p.width, height: p.height }}>
+      <div
+        className="absolute flex"
+        style={{ left: k.left, top: k.top - GAP - TOOL_H, width: k.width, height: TOOL_H, gap: GAP }}
+      >
+        <Tool
+          grow={2}
+          active={p.mode === "trackpad"}
+          onDown={() => p.onTrackpadButton(true)}
+          onUp={() => p.onTrackpadButton(false)}
+        >
+          Trackpad
+        </Tool>
+        <Tool onDown={p.onSplit}>Split</Tool>
         {Array.from({ length: SPARE_BUTTONS }, (_, i) => (
-          <Pad key={i} />
+          <Tool key={i} />
         ))}
       </div>
+      {p.mode === "trackpad" ? (
+        <TrackpadSurface box={k} onPad={p.onPad} />
+      ) : (
+        <div className="absolute flex flex-col" style={{ left: k.left, top: k.top, width: k.width, gap: GAP }}>
+          {keyRows(p.fn).map((row, i) => (
+            <div key={i} className="flex" style={{ gap: GAP, height: keyH }}>
+              {row.map((key) => (
+                <KeyButton
+                  key={key.id}
+                  k={key}
+                  width={key.units * k.pitch - GAP}
+                  size={keyH}
+                  label={keyLabel(key, shift, p.caps)}
+                  latched={key.fn ? p.fn : p.latched.has(key.code)}
+                  onKey={p.onKey}
+                  onModifier={p.onModifier}
+                  onFn={p.onFn}
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 });
 
-const KEY = "flex min-w-0 items-center justify-center rounded-md font-medium leading-none";
+const KEY = "flex shrink-0 items-center justify-center rounded-md leading-none";
 
 function tone(down: boolean, active = false) {
-  if (active) return "bg-blue-600 text-white";
-  return down ? "bg-slate-500 text-white" : "bg-slate-800 text-slate-100";
+  if (active) return "bg-neutral-200 text-black";
+  return down ? "bg-neutral-600 text-white" : "bg-neutral-800 text-neutral-100";
 }
 
 function KeyButton({
   k,
+  width,
+  size,
   label,
   latched,
   onKey,
   onModifier,
+  onFn,
 }: {
   k: Key;
+  width: number;
+  /** The key's height, CSS px; the label scales with it. */
+  size: number;
   label: string;
   latched: boolean;
   onKey: Props["onKey"];
   onModifier: Props["onModifier"];
+  onFn: Props["onFn"];
 }) {
   const [down, setDown] = useState(false);
   const press = (e: PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     setDown(true);
-    if (k.mod) onModifier(k.code);
+    if (k.fn) onFn();
+    else if (k.mod) onModifier(k.code);
     else onKey(k.code, true);
   };
   const lift = () => {
     if (!down) return;
     setDown(false);
-    if (!k.mod) onKey(k.code, false);
+    if (!k.mod && !k.fn) onKey(k.code, false);
   };
   return (
     <div
       role="button"
       aria-label={k.id}
-      aria-pressed={k.mod ? latched : undefined}
-      className={`${KEY} ${tone(down, latched)} ${label.length > 2 ? "text-sm" : "text-xl"}`}
-      style={{ flex: `${k.units} ${k.units} 0` }}
+      aria-pressed={k.mod || k.fn ? latched : undefined}
+      className={`${KEY} ${tone(down, latched)}`}
+      style={{ width, height: size, fontSize: size * (label.length > 1 ? 0.3 : 0.45) }}
       onPointerDown={press}
       onPointerUp={lift}
       onPointerCancel={lift}
@@ -132,119 +144,74 @@ function KeyButton({
   );
 }
 
-/** A column button that is down while the finger is on it. */
-function Hold({ label, onPress }: { label: string; onPress: (down: boolean) => void }) {
+/** A tool-row button: `onDown` when touched, `onUp` when the finger lifts. Without either it is
+ *  a spare. */
+function Tool({
+  grow = 1,
+  active = false,
+  onDown,
+  onUp,
+  children,
+}: {
+  grow?: number;
+  active?: boolean;
+  onDown?: () => void;
+  onUp?: () => void;
+  children?: ReactNode;
+}) {
   const [down, setDown] = useState(false);
   const lift = () => {
     if (!down) return;
     setDown(false);
-    onPress(false);
+    onUp?.();
   };
-  return (
-    <div
-      role="button"
-      className={`${KEY} flex-1 text-sm ${tone(down)}`}
-      onPointerDown={(e) => {
-        e.preventDefault();
-        e.currentTarget.setPointerCapture(e.pointerId);
-        setDown(true);
-        onPress(true);
-      }}
-      onPointerUp={lift}
-      onPointerCancel={lift}
-    >
-      {label}
-    </div>
-  );
-}
-
-/** The middle button: a tap clicks it, a drag up or down scrolls up or down. */
-function MiddleButton({ onButton, onScroll }: Pick<Props, "onButton" | "onScroll">) {
-  const touch = useRef<{ startY: number; lastY: number; scrolling: boolean } | null>(null);
-  const rem = useRef({ y: 0 });
-  const [down, setDown] = useState(false);
-  const lift = (click: boolean) => {
-    const t = touch.current;
-    touch.current = null;
-    setDown(false);
-    if (click && t && !t.scrolling) {
-      onButton(BTN_MIDDLE, true);
-      onButton(BTN_MIDDLE, false);
-    }
-  };
-  return (
-    <div
-      role="button"
-      className={`${KEY} flex-1 flex-col gap-1 text-sm ${tone(down)}`}
-      onPointerDown={(e) => {
-        e.preventDefault();
-        e.currentTarget.setPointerCapture(e.pointerId);
-        touch.current = { startY: e.clientY, lastY: e.clientY, scrolling: false };
-        rem.current = { y: 0 };
-        setDown(true);
-      }}
-      onPointerMove={(e) => {
-        const t = touch.current;
-        if (!t) return;
-        if (!t.scrolling && Math.abs(e.clientY - t.startY) < SCROLL_START_PX) return;
-        t.scrolling = true;
-        const steps = scrollSteps(e.clientY - t.lastY, rem.current);
-        t.lastY = e.clientY;
-        if (steps) onScroll(steps);
-      }}
-      onPointerUp={() => lift(true)}
-      onPointerCancel={() => lift(false)}
-    >
-      <span>Middle</span>
-      <span className="text-xs text-slate-400">↕ scroll</span>
-    </div>
-  );
-}
-
-/** A column button that does something when touched, or nothing yet (a spare). */
-function Pad({ active = false, onDown, children }: { active?: boolean; onDown?: () => void; children?: ReactNode }) {
   return (
     <div
       role={onDown ? "button" : undefined}
-      aria-pressed={onDown ? active : undefined}
-      className={`${KEY} flex-1 text-sm ${onDown ? tone(false, active) : "bg-slate-900"}`}
+      aria-pressed={onUp ? active : undefined}
+      className={`${KEY} text-sm ${onDown ? tone(down, active) : "bg-neutral-900"}`}
+      style={{ flex: `${grow} ${grow} 0` }}
       onPointerDown={(e) => {
         e.preventDefault();
-        onDown?.();
+        if (!onDown) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setDown(true);
+        onDown();
       }}
+      onPointerUp={lift}
+      onPointerCancel={lift}
     >
       {children}
     </div>
   );
 }
 
-/** The red dot. It reports how far the finger pushed from where it touched. */
-function RedDot({ onDot }: Pick<Props, "onDot">) {
-  const origin = useRef<{ x: number; y: number } | null>(null);
-  const lift = () => {
-    if (!origin.current) return;
-    origin.current = null;
-    onDot(null);
+/** The trackpad, where the keys are. It reports each finger. */
+function TrackpadSurface({
+  box,
+  onPad,
+}: {
+  box: { left: number; top: number; width: number; height: number };
+  onPad: Props["onPad"];
+}) {
+  const report = (kind: "down" | "move" | "up") => (e: PointerEvent<HTMLDivElement>) => {
+    if (kind === "down") {
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+    onPad(kind, e.pointerId, e.clientX, e.clientY);
   };
   return (
     <div
-      aria-label="Red dot"
-      className="absolute flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full"
-      style={{ left: `${(DOT_UNITS / ROW_UNITS) * 100}%`, top: `calc(40% + ${GAP * 0.7}px)` }}
-      onPointerDown={(e) => {
-        e.preventDefault();
-        e.currentTarget.setPointerCapture(e.pointerId);
-        origin.current = { x: e.clientX, y: e.clientY };
-        onDot({ dx: 0, dy: 0 });
-      }}
-      onPointerMove={(e) => {
-        const o = origin.current;
-        if (o) onDot({ dx: e.clientX - o.x, dy: e.clientY - o.y });
-      }}
-      onPointerUp={lift}
-      onPointerCancel={lift}
+      aria-label="Trackpad"
+      className="absolute flex items-center justify-center rounded-xl border border-neutral-800 bg-neutral-950 text-sm text-neutral-600"
+      style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
+      onPointerDown={report("down")}
+      onPointerMove={report("move")}
+      onPointerUp={report("up")}
+      onPointerCancel={report("up")}
     >
-      <div className="h-4 w-4 rounded-full bg-red-600 shadow-[0_0_0_2px_rgba(0,0,0,0.6)]" />
+      Trackpad
     </div>
   );
 }

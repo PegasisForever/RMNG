@@ -17,10 +17,14 @@ export type Key = {
   letter?: boolean;
   /** A modifier: a tap holds it down, the next tap lets it go. */
   mod?: boolean;
+  /** The Fn key: it switches the keys, and sends nothing itself (`code` is 0). */
+  fn?: boolean;
 };
 
 /** Every row is this many units wide. */
 export const ROW_UNITS = 15;
+/** The keyboard's rows. */
+export const ROWS = 5;
 
 function key(id: string, label: string, units = 1, extra: Partial<Key> = {}): Key {
   const code = CODE_TO_EVDEV[id];
@@ -80,14 +84,16 @@ const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown",
 /** With Fn, the arrows are the keys a laptop puts on them. */
 const FN_ARROWS = [key("Home", "Home"), key("PageUp", "PgUp"), key("PageDown", "PgDn"), key("End", "End")];
 
+/** Fn, where a laptop has the right Alt and Ctrl. */
+const FN: Key = { id: "Fn", code: 0, label: "Fn", units: 1.25, fn: true };
+
 function spaceRow(fn: boolean): Key[] {
   return [
     mod("ControlLeft", "Ctrl", 1.25),
     mod("MetaLeft", "Win", 1.25),
     mod("AltLeft", "Alt", 1.25),
-    key("Space", "", 4.75),
-    mod("AltRight", "Alt", 1.25),
-    mod("ControlRight", "Ctrl", 1.25),
+    key("Space", "", 6),
+    FN,
     ...(fn ? FN_ARROWS : ARROWS),
   ];
 }

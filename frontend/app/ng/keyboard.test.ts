@@ -34,9 +34,15 @@ describe("keyRows", () => {
 
   test("only Shift, Ctrl, Alt and Win are modifiers", () => {
     const mods = keyRows(false).flat().filter((k) => k.mod).map((k) => k.id);
-    expect(mods.sort()).toEqual(
-      ["AltLeft", "AltRight", "ControlLeft", "ControlRight", "MetaLeft", "ShiftLeft", "ShiftRight"].sort(),
-    );
+    expect(mods.sort()).toEqual(["AltLeft", "ControlLeft", "MetaLeft", "ShiftLeft", "ShiftRight"].sort());
+  });
+
+  test("Fn is where the right Alt and Ctrl were, in both modes, and sends nothing", () => {
+    for (const fn of [false, true]) {
+      const row = keyRows(fn)[4];
+      expect(row.map((k) => k.id).slice(0, 5)).toEqual(["ControlLeft", "MetaLeft", "AltLeft", "Space", "Fn"]);
+      expect(row[4].code).toBe(0);
+    }
   });
 });
 

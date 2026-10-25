@@ -13,8 +13,6 @@ export function meta() {
 
 /** The unfolded screen, held upright, in CSS px (a screenshot is 2007 × 2853 at 3×). */
 const SCREEN = { width: 669, height: 951 };
-/** The keyboard and controls at the bottom; the clone's screen has the rest (541 px). */
-const KEYS_HEIGHT = 410;
 
 /** The page size iOS gives the installed app on that screen: 21 px short at the bottom until
  *  the document is as tall as the screen (see the effect below), then the whole screen. Folded
@@ -97,7 +95,7 @@ export default function Ng() {
         </div>
       ) : null}
       {ok && secure ? (
-        <Desk screenHeight={SCREEN.height - KEYS_HEIGHT} keysHeight={KEYS_HEIGHT} bottom={page.bottom} />
+        <Desk width={SCREEN.width} height={SCREEN.height} bottom={page.bottom} />
       ) : null}
     </div>
   );
