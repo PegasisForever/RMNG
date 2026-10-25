@@ -228,6 +228,7 @@ async fn run_shipping(
             loop {
                 match transport.recv() {
                     Ok(ServerMsg::Input(im)) => holder.send(ToHolder::Input(im)),
+                    Ok(ServerMsg::Touch(t)) => holder.send(ToHolder::Touch(t)),
                     Ok(ServerMsg::Ack(a)) => {
                         if let Some(f) = flags.lock().unwrap().get(&a.monitor_id) {
                             f.store(false, Ordering::Relaxed);

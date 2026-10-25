@@ -59,6 +59,14 @@ pub trait RemoteDesktopSession {
     fn notify_pointer_motion_relative(&self, dx: f64, dy: f64) -> zbus::Result<()>;
     #[zbus(no_reply)]
     fn notify_pointer_motion_absolute(&self, stream: &str, x: f64, y: f64) -> zbus::Result<()>;
+    /// Touch screen: a finger in `slot` comes down at `x`, `y` of `stream`'s monitor, moves,
+    /// and lifts.
+    #[zbus(no_reply)]
+    fn notify_touch_down(&self, stream: &str, slot: u32, x: f64, y: f64) -> zbus::Result<()>;
+    #[zbus(no_reply)]
+    fn notify_touch_motion(&self, stream: &str, slot: u32, x: f64, y: f64) -> zbus::Result<()>;
+    #[zbus(no_reply)]
+    fn notify_touch_up(&self, slot: u32) -> zbus::Result<()>;
 
     // --- clipboard (rich + lazy; we use it for text) ---
     fn enable_clipboard(&self, options: HashMap<&str, Value<'_>>) -> zbus::Result<()>;

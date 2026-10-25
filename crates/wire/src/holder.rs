@@ -23,7 +23,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::control::MonitorSpec;
-use crate::socket::{ClipboardData, ClipboardOffer, ClipboardRequest, InputMsg, MonitorPlacement};
+use crate::socket::{
+    ClipboardData, ClipboardOffer, ClipboardRequest, InputMsg, MonitorPlacement, TouchMsg,
+};
 
 /// Protocol version, and the only thing that makes a running holder restart.
 ///
@@ -94,6 +96,8 @@ pub enum ToHolder {
     /// Inject one event. Fire-and-forget: `SOCK_SEQPACKET` preserves order on a connection,
     /// so a press still lands before its release.
     Input(InputMsg),
+    /// Inject one touch, in the same queue as `Input`. An older holder ignores it.
+    Touch(TouchMsg),
     /// Ask when the input queued before this has actually been applied. Answered by
     /// [`FromHolder::InputSynced`] carrying the same `id`.
     ///

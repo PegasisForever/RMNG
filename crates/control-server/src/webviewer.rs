@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use wire::browser::{FromBrowser, ToBrowser};
-use wire::socket::{ClipboardData, ClipboardMsg, InputMsg};
+use wire::socket::{ClipboardData, ClipboardMsg, InputMsg, TouchMsg};
 
 use crate::app::App;
 use crate::clone_home::CloneHome;
@@ -141,6 +141,10 @@ pub(crate) fn serve(app: App, monitor: u32, tab: Option<String>, ws: WebSocket) 
                 held.follow(&app, app.store.selected());
                 held.track(input);
             }
+            if let FromBrowser::Touch(touch) = &msg {
+                held.follow(&app, app.store.selected());
+                held.track_touch(touch);
+            }
             // A newer copy: the browser stopped sending the old one.
             if let FromBrowser::Clipboard(ClipboardMsg::Offer(_)) = &msg {
                 upload = Upload::default();
@@ -158,13 +162,15 @@ pub(crate) fn serve(app: App, monitor: u32, tab: Option<String>, ws: WebSocket) 
     });
 }
 
-/// The keys and buttons this socket holds down in the clone that got them, so they can be
-/// released in that clone when the selection moves to another one or the socket ends.
+/// The keys, buttons and touch slots this socket holds down in the clone that got them, so
+/// they can be released in that clone when the selection moves to another one or the socket
+/// ends.
 #[derive(Default)]
 struct Held {
     clone: Option<String>,
     keys: BTreeSet<u32>,
     buttons: BTreeSet<i32>,
+    touches: BTreeSet<u32>,
 }
 
 impl Held {
@@ -188,6 +194,18 @@ impl Held {
         }
     }
 
+    fn track_touch(&mut self, msg: &TouchMsg) {
+        match *msg {
+            TouchMsg::Down { slot, .. } => {
+                self.touches.insert(slot);
+            }
+            TouchMsg::Up { slot } => {
+                self.touches.remove(&slot);
+            }
+            TouchMsg::Motion { .. } => {}
+        }
+    }
+
     /// Input now goes to `selected`: if that is another clone, release everything held in
     /// the old one first.
     fn follow(&mut self, app: &App, selected: Option<String>) {
@@ -197,6 +215,9 @@ impl Held {
         if let Some(old) = std::mem::replace(&mut self.clone, selected) {
             for msg in self.releases() {
                 let _ = app.media.send_input(&old, msg);
+            }
+            for slot in std::mem::take(&mut self.touches) {
+                let _ = app.media.send_touch(&old, TouchMsg::Up { slot });
             }
         }
     }
@@ -356,6 +377,18 @@ mod tests {
         }
         assert_eq!(held.releases(), vec![key(29, false), button(0x110, false)]);
         assert!(held.releases().is_empty());
+    }
+
+    /// The touch slots still down are the ones lifted when the selection moves or the socket
+    /// ends.
+    #[test]
+    fn held_touches_are_tracked_by_slot() {
+        let mut held = Held::default();
+        let down = |slot| TouchMsg::Down { monitor_id: 0, slot, x: 1.0, y: 2.0 };
+        for m in [down(0), down(1), TouchMsg::Motion { monitor_id: 0, slot: 1, x: 3.0, y: 4.0 }, TouchMsg::Up { slot: 0 }] {
+            held.track_touch(&m);
+        }
+        assert_eq!(held.touches.iter().copied().collect::<Vec<_>>(), vec![1]);
     }
 
     #[test]

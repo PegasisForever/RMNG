@@ -13,7 +13,7 @@ export const BTN_RIGHT = 0x111;
 export const BTN_MIDDLE = 0x112;
 
 /** Buttons kept free in the tool row for later. */
-const SPARE_TOOLS = 5;
+const SPARE_TOOLS = 4;
 
 export type TouchKind = "down" | "move" | "up" | "cancel";
 
@@ -34,9 +34,11 @@ type Props = {
   onKeyTouch: (kind: TouchKind, id: number, key: Key | null, x: number, y: number) => void;
   /** A mouse button goes down or up (evdev code). */
   onButton: (button: number, pressed: boolean) => void;
+  /** Open the dialog that tries other heights for the keyboard area (for now). */
+  onSplit: () => void;
 };
 
-/** The /ng keyboard area: a tool row (spares for now) under the screen, a full keyboard of
+/** The /ng keyboard area: a tool row (Split, and spares for now) under the screen, a full keyboard of
  *  square keys under it, and the left, middle and right mouse buttons in the space below the
  *  keys. The keys are a touchpad too: a finger that moves on them moves the cursor, two
  *  scroll. Each finger works on its own, so a mouse button can stay down while another finger
@@ -49,6 +51,17 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
   return (
     <div className="relative touch-none select-none bg-black" style={{ width: p.width, height: p.height }}>
       <div className="absolute flex" style={{ ...k.tools, gap: GAP }}>
+        <div
+          role="button"
+          className={`${KEY} flex-1 text-sm ${tone(false)}`}
+          onPointerDown={(e) => {
+            capture(e);
+            p.onSplit();
+          }}
+        >
+          Split
+          <Haptic />
+        </div>
         {Array.from({ length: SPARE_TOOLS }, (_, i) => (
           <div key={i} className="flex-1 rounded-md bg-neutral-900" />
         ))}

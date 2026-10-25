@@ -4,12 +4,15 @@
 // does in the viewer: the on-screen keyboard and buttons send it (`send`).
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
 import type { InputMsg } from "~/lib/wire/InputMsg";
+import type { TouchMsg } from "~/lib/wire/TouchMsg";
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 import type { WorkerIn, WorkerOut } from "~/viewer/protocol";
 
 export interface Session {
   send(msg: InputMsg): void;
+  /** A finger on the screen, as a touch screen's touch. */
+  touch(msg: TouchMsg): void;
   /** The box is now `width`×`height` device pixels. */
   resize(width: number, height: number): void;
   detach(): void;
@@ -71,6 +74,7 @@ export function openSession(box: HTMLElement, events: SessionEvents): Session {
 
   return {
     send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
+    touch: (msg) => post({ type: "send", msg: { t: "touch", ...msg } }),
     resize: (width, height) => post({ type: "resize", width, height }),
     detach() {
       worker.terminate();

@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use wire::holder::{FromHolder, HolderMonitor, PROTO_VERSION, ToHolder};
-use wire::socket::InputMsg;
+use wire::socket::{InputMsg, TouchMsg};
 
 use crate::mutter::{self, Session};
 use crate::{MonitorCfg, clipboard, ipc, monitors_from_specs};
@@ -231,6 +231,9 @@ pub async fn run(boot: Vec<MonitorCfg>) -> Result<()> {
                     ToHolder::Input(m) => {
                         let _ = input_tx.send(Inject::Event(m));
                     }
+                    ToHolder::Touch(t) => {
+                        let _ = input_tx.send(Inject::Touch(t));
+                    }
                     // Rides the same queue as the input it is asking about, which is what
                     // makes it a barrier rather than a second opinion.
                     ToHolder::SyncInput { id } => {
@@ -381,6 +384,8 @@ fn watch_closed(session: &Session, generation: u64, tx: UnboundedSender<u64>) {
 /// everything ahead of it has been applied.
 enum Inject {
     Event(InputMsg),
+    /// A touch screen's touch, in order with the rest of the input.
+    Touch(TouchMsg),
     Barrier(u64),
 }
 
@@ -394,6 +399,10 @@ async fn inject_loop(
         // earlier notify has already returned from Mutter by the time this is reached.
         let msg = match item {
             Inject::Event(m) => m,
+            Inject::Touch(t) => {
+                inject_touch(&active, t).await;
+                continue;
+            }
             Inject::Barrier(id) => {
                 let _ = out.send(FromHolder::InputSynced { id });
                 continue;
@@ -429,6 +438,32 @@ async fn inject_loop(
         if let Err(e) = r {
             tracing::warn!("input inject failed: {e}");
         }
+    }
+}
+
+/// One touch against the current session: a finger comes down or moves on its monitor's
+/// stream, or lifts. A touch on a monitor the session does not have is dropped.
+async fn inject_touch(active: &ActiveSession, t: TouchMsg) {
+    let (rd, stream) = {
+        let rt = active.lock().await;
+        let stream = match t {
+            TouchMsg::Down { monitor_id, .. } | TouchMsg::Motion { monitor_id, .. } => {
+                rt.streams.get(&monitor_id).cloned()
+            }
+            TouchMsg::Up { .. } => None,
+        };
+        (rt.rd.clone(), stream)
+    };
+    let r = match (t, stream) {
+        (TouchMsg::Down { slot, x, y, .. }, Some(s)) => rd.notify_touch_down(&s, slot, x, y).await,
+        (TouchMsg::Motion { slot, x, y, .. }, Some(s)) => {
+            rd.notify_touch_motion(&s, slot, x, y).await
+        }
+        (TouchMsg::Up { slot }, _) => rd.notify_touch_up(slot).await,
+        _ => Ok(()),
+    };
+    if let Err(e) = r {
+        tracing::warn!("touch inject failed: {e}");
     }
 }
 

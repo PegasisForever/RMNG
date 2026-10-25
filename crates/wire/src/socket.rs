@@ -114,6 +114,22 @@ pub enum InputMsg {
     KeyCode { keycode: u32, pressed: bool },
 }
 
+/// A touch on a monitor, as a touch screen sends it (Mutter RemoteDesktop `NotifyTouchDown`,
+/// `NotifyTouchMotion`, `NotifyTouchUp`). `slot` tells the fingers apart: a finger keeps its
+/// slot from down to up, and a slot is free again after its up. `x`, `y` are monitor pixels.
+///
+/// A message of its own, not an [`InputMsg`] kind, so an older daemon or session holder
+/// decodes it to `Unknown` and ignores it: an `InputMsg` kind it does not know would be a
+/// decode error, which ends the daemon's reader.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub enum TouchMsg {
+    Down { monitor_id: u32, slot: u32, x: f64, y: f64 },
+    Motion { monitor_id: u32, slot: u32, x: f64, y: f64 },
+    Up { slot: u32 },
+}
+
 /// Mutter `NotifyPointerAxis` flags (org.gnome.Mutter.RemoteDesktop.Session).
 pub mod axis_flags {
     pub const FINISH: u32 = 1 << 0;
@@ -243,6 +259,8 @@ pub enum ClipboardMsg {
 pub enum ServerMsg {
     Ack(Ack),
     Input(InputMsg),
+    /// A touch screen's touch (see [`TouchMsg`]).
+    Touch(TouchMsg),
     /// Apply a new monitor layout live (no session restart, apps stay open). The daemon
     /// rebuilds a fresh Mutter session with this set, switches capture + input to it, then
     /// stops the old session (make-before-break). Sent on the daemon's `Hello` and on every

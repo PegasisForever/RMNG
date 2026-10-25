@@ -383,9 +383,18 @@ impl MediaHandle {
     /// drains anyway. Dropping it keeps the viewer's input thread moving, which matters
     /// because that thread is the only thing that tears the viewer down when it leaves.
     pub fn send_input(&self, clone: &str, input: InputMsg) -> Result<(), String> {
+        self.send_msg(clone, &ServerMsg::Input(input))
+    }
+
+    /// A touch screen's touch, to one clone-daemon (see [`wire::socket::TouchMsg`]).
+    pub fn send_touch(&self, clone: &str, touch: wire::socket::TouchMsg) -> Result<(), String> {
+        self.send_msg(clone, &ServerMsg::Touch(touch))
+    }
+
+    fn send_msg(&self, clone: &str, msg: &ServerMsg) -> Result<(), String> {
         let conn = self.conns.lock().unwrap().get(clone).cloned();
         match conn {
-            Some(c) => match c.send(&ServerMsg::Input(input)) {
+            Some(c) => match c.send(msg) {
                 Ok(()) | Err(media::sock::SendError::WouldBlock) => Ok(()),
                 Err(e) => Err(e.to_string()),
             },
@@ -1587,6 +1596,11 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
         FromBrowser::Input(input) => {
             if let Some(clone) = app.store.selected() {
                 let _ = handle.send_input(&clone, input);
+            }
+        }
+        FromBrowser::Touch(touch) => {
+            if let Some(clone) = app.store.selected() {
+                let _ = handle.send_touch(&clone, touch);
             }
         }
         FromBrowser::Clipboard(msg) => {

@@ -2,7 +2,7 @@
 // is the container: it holds the connection (`./session.ts`), the keyboard's state (held
 // modifiers, Fn, Caps Lock) and the keys' touches, which type or move the pointer
 // (`./keypad.ts`), and turns them into input.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { type PointerEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import { layoutClaimer } from "~/lib/layoutClaim";
 import type { CursorShape } from "~/lib/wire/CursorShape";
@@ -10,6 +10,7 @@ import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 
 import { Cursor } from "./Cursor";
+import { SplitDialog } from "./SplitDialog";
 import { KeyboardView, type TouchKind } from "./KeyboardView";
 import { screenFit } from "./geometry";
 import { CAPS_LOCK, type Key, isShift } from "./keyboard";
@@ -21,8 +22,25 @@ import { MONITOR, type Session, openSession } from "./session";
 /** The iPhone Duo layout's one monitor, in pixels (`wire::iphone_duo_layout`). */
 export const DUO_MONITOR = { width: 1002, height: 760 };
 /** The keyboard area at the bottom of the screen, CSS px; the clone's screen has the rest
- *  (507 px on the Duo, the layout's monitor at 2×). */
+ *  (507 px on the Duo, the layout's monitor at 2×). The Split dialog can try another height
+ *  for now; the phone keeps what it was set to. */
 const KEYS_HEIGHT = 444;
+const SPLIT_KEY = "ng-keys-height";
+/** The Split dialog's range: the least keyboard area, and the least screen. */
+const MIN_KEYS = 250;
+const MIN_SCREEN = 200;
+/** Touch slots a touch screen offers, fingers at once. */
+const TOUCH_SLOTS = 10;
+
+function savedKeysHeight(): number {
+  try {
+    const v = Number(localStorage.getItem(SPLIT_KEY));
+    if (v > 0) return v;
+  } catch {
+    // no storage: the default
+  }
+  return KEYS_HEIGHT;
+}
 /** After this page moved the cursor, the clone's own cursor reports are this far behind (ms),
  *  so they do not pull the drawn cursor back. */
 const OWN_MOVES_MS = 400;
@@ -51,13 +69,15 @@ export function Desk({ width, height, bottom }: Props) {
   const [hidden, setHidden] = useState(false);
   const [pos, setPos] = useState({ x: DUO_MONITOR.width / 2, y: DUO_MONITOR.height / 2 });
   const [mods, setMods] = useState<ReadonlyMap<number, ModState>>(new Map());
+  const [keysHeight, setKeysHeight] = useState(savedKeysHeight);
+  const [splitOpen, setSplitOpen] = useState(false);
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
   /** The cursor where this page last put it, and when. */
   const cursor = useRef({ ...pos, movedAt: -Infinity });
 
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
-  const fit = screenFit(width, height - KEYS_HEIGHT, DUO_MONITOR.width, DUO_MONITOR.height, dpr);
+  const fit = screenFit(width, height - keysHeight, DUO_MONITOR.width, DUO_MONITOR.height, dpr);
   /** Device px per monitor px now, for the cursor moves on the keys. */
   const scale = useRef(fit.scale);
   scale.current = fit.scale;
@@ -188,6 +208,7 @@ export function Desk({ width, height, bottom }: Props) {
     else if (kind === "up") pad.up(id);
     else pad.cancel(id);
   }, []);
+  const onSplit = useCallback(() => setSplitOpen(true), []);
   // A click is a key to the modifiers: Ctrl, then a click, is a Ctrl-click
   const onButton = useCallback((button: number, pressed: boolean) => {
     if (pressed) modifiers.current!.keyDown();
@@ -207,32 +228,93 @@ export function Desk({ width, height, bottom }: Props) {
           : null;
   const place = { left: fit.left, top: fit.top, width: fit.width, height: fit.height };
 
+  // Fingers on the screen go to the clone as a touch screen's touches, each in a slot of its
+  // own from down to up
+  const slots = useRef(new Map<number, number>());
+  const touchAt = (e: PointerEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return {
+      monitor_id: MONITOR,
+      x: clampTo(((e.clientX - r.left) / r.width) * DUO_MONITOR.width, DUO_MONITOR.width),
+      y: clampTo(((e.clientY - r.top) / r.height) * DUO_MONITOR.height, DUO_MONITOR.height),
+    };
+  };
+  const onScreenDown = (e: PointerEvent<HTMLDivElement>) => {
+    const used = new Set(slots.current.values());
+    const slot = [...Array(TOUCH_SLOTS).keys()].find((s) => !used.has(s));
+    if (slot === undefined) return;
+    if (e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
+    slots.current.set(e.pointerId, slot);
+    session.current?.touch({ phase: "down", slot, ...touchAt(e) });
+  };
+  const onScreenMove = (e: PointerEvent<HTMLDivElement>) => {
+    const slot = slots.current.get(e.pointerId);
+    if (slot !== undefined) session.current?.touch({ phase: "motion", slot, ...touchAt(e) });
+  };
+  const onScreenUp = (e: PointerEvent<HTMLDivElement>) => {
+    const slot = slots.current.get(e.pointerId);
+    if (slot === undefined) return;
+    slots.current.delete(e.pointerId);
+    session.current?.touch({ phase: "up", slot });
+  };
+  const onSplitChange = (v: number) => {
+    setKeysHeight(v);
+    try {
+      localStorage.setItem(SPLIT_KEY, String(v));
+    } catch {
+      // no storage: the default next time
+    }
+  };
+
   return (
     <div className="absolute inset-0 bg-black" onPointerDownCapture={claim}>
-      <div className="relative overflow-hidden" style={{ height: height - KEYS_HEIGHT }}>
-        {/* The session puts the video in here; the cursor and the note come after it, on top */}
-        <div ref={box} className="absolute" style={place} />
+      <div className="relative overflow-hidden" style={{ height: height - keysHeight }}>
+        {/* The session puts the video in here, and touches on it go to the clone; the cursor
+            and the note come after it, on top, and let touches through */}
+        <div
+          ref={box}
+          className="absolute"
+          style={place}
+          onPointerDown={onScreenDown}
+          onPointerMove={onScreenMove}
+          onPointerUp={onScreenUp}
+          onPointerCancel={onScreenUp}
+        />
         <div className="pointer-events-none absolute" style={place}>
           {shape && !hidden && !terminal && connected ? (
             <Cursor shape={shape} x={pos.x} y={pos.y} scale={fit.scale} />
           ) : null}
         </div>
         {note ? (
-          <p className="absolute inset-0 flex items-center justify-center text-sm text-neutral-400">
-            {note}
+          <p className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
+            <span className="rounded-full bg-black/50 px-4 py-2 text-center text-sm text-neutral-100 backdrop-blur-md">
+              {note}
+            </span>
           </p>
         ) : null}
       </div>
       <KeyboardView
         width={width}
-        height={KEYS_HEIGHT}
+        height={keysHeight}
         bottom={bottom}
         fn={fn}
         mods={mods}
         caps={caps}
         onKeyTouch={onKeyTouch}
         onButton={onButton}
+        onSplit={onSplit}
       />
+      {splitOpen ? (
+        <SplitDialog
+          value={keysHeight}
+          min={MIN_KEYS}
+          max={height - MIN_SCREEN}
+          total={height}
+          standard={KEYS_HEIGHT}
+          onChange={onSplitChange}
+          onClose={() => setSplitOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

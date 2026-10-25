@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::socket::{ClipboardData, ClipboardMsg, CursorMeta, InputMsg};
+use crate::socket::{ClipboardData, ClipboardMsg, CursorMeta, InputMsg, TouchMsg};
 
 /// Byte 0 of a binary message: a video frame ([`VideoHeader`]).
 pub const KIND_VIDEO: u8 = 0;
@@ -158,6 +158,8 @@ pub enum ToBrowser {
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum FromBrowser {
     Input(InputMsg),
+    /// A touch on the selected clone's monitor, from a touch screen (`/ng`).
+    Touch(TouchMsg),
     Clipboard(ClipboardMsg),
     TermInput(TermInput),
     TermResize(TermResize),
@@ -273,6 +275,27 @@ pub struct TermResize {
 mod tests {
     use super::*;
     use crate::socket::ClipboardOffer;
+
+    /// The page sends this JSON for a finger on the screen (`frontend/app/ng/Desk.tsx`); it
+    /// reaches the daemon as its own message, which an older daemon decodes to `Unknown`.
+    #[test]
+    fn a_touch_crosses_as_its_own_message() {
+        let msg: FromBrowser = serde_json::from_str(
+            r#"{"t":"touch","phase":"down","monitor_id":0,"slot":1,"x":10.5,"y":20}"#,
+        )
+        .unwrap();
+        let touch = TouchMsg::Down { monitor_id: 0, slot: 1, x: 10.5, y: 20.0 };
+        assert_eq!(msg, FromBrowser::Touch(touch));
+        let on_socket = serde_json::to_string(&crate::socket::ServerMsg::Touch(touch)).unwrap();
+        assert_eq!(on_socket, r#"{"t":"touch","phase":"down","monitor_id":0,"slot":1,"x":10.5,"y":20.0}"#);
+        // What an older holder makes of it: nothing to act on, and no error
+        let old: crate::holder::ToHolder =
+            serde_json::from_str(r#"{"t":"some_future_message","slot":1}"#).unwrap();
+        assert_eq!(old, crate::holder::ToHolder::Unknown);
+        let up: crate::holder::ToHolder =
+            serde_json::from_str(r#"{"t":"touch","phase":"up","slot":1}"#).unwrap();
+        assert_eq!(up, crate::holder::ToHolder::Touch(TouchMsg::Up { slot: 1 }));
+    }
 
     /// The frontend's `parseVideoHeader` test reads these same bytes; keep the two in step.
     #[test]

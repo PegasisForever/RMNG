@@ -18,6 +18,7 @@ function Frame(args: { height: number; fn: boolean; mods: [number, ModState][]; 
       caps={args.caps}
       onKeyTouch={fn()}
       onButton={fn()}
+      onSplit={fn()}
     />
   );
 }
