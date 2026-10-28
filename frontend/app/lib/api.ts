@@ -247,9 +247,14 @@ export const testConfig = (what: string, value?: string, model?: string) =>
  }>;
 /** The device in use now takes the clones' layout: `phone` puts the iPhone Duo layout in force
  *  (`/ng`), `desktop` the active preset. The server changes nothing for a device that has it
- *  already, so each device asks on its own user's actions, as often as it likes. */
-export const claimLayout = (device: "phone" | "desktop") =>
- postJson("/api/layout/device", { device }) as Promise<{ ok: boolean; changed: boolean }>;
+ *  already, so each device asks on its own user's actions, as often as it likes. The phone may
+ *  name its monitor's size; without one it keeps the size it has (the iPhone Duo layout's, the
+ *  first time). */
+export const claimLayout = (device: "phone" | "desktop", size?: { width: number; height: number }) =>
+ postJson("/api/layout/device", size ? { device, size } : { device }) as Promise<{
+  ok: boolean;
+  changed: boolean;
+ }>;
 
 /** Make `name` the active layout preset and live-apply it to the clone on screen. The rest of
  * the fleet keeps its current monitors until the operator switches to it. */

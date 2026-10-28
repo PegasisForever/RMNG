@@ -40,7 +40,7 @@ async fn missing_frontend() -> Response {
 }
 use wire::{AppConfigRedacted, ConfigPutResponse, ControlState, Operation};
 
-use crate::app::App;
+use crate::app::{App, PhoneSize};
 use crate::config;
 use crate::files;
 use crate::jobs;
@@ -1148,7 +1148,7 @@ async fn layout_activate(
     crate::config::save(&cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     *app.cfg.write().unwrap() = cfg.clone();
     // Picking a layout on the desktop takes the clones back from the phone.
-    app.set_phone(false);
+    app.set_phone(None);
 
     // 2. Mirror into ControlState for the sidebar (SSE broadcast).
     mirror_layout_to_state(&app);
@@ -1182,11 +1182,22 @@ enum LayoutDevice {
 #[derive(Deserialize)]
 struct LayoutDeviceReq {
     device: LayoutDevice,
+    /// The phone's monitor size, from its screen. Absent: the size it has (the iPhone Duo
+    /// layout's when it has none yet).
+    #[serde(default)]
+    size: Option<LayoutDeviceSize>,
+}
+
+#[derive(Deserialize)]
+struct LayoutDeviceSize {
+    width: u32,
+    height: u32,
 }
 
 /// `POST /api/layout/device`: the device the operator uses now takes the clones' layout.
-/// `phone` puts the built-in iPhone Duo layout in force (`/ng`), `desktop` the active preset,
-/// which the phone never changes. Each device asks on a real action on it (opening or
+/// `phone` puts the phone's layout in force (`/ng`): the built-in iPhone Duo layout, its one
+/// monitor at the size the phone asks for (an even size in range) or keeps; `desktop` the
+/// active preset, which the phone never changes. Each device asks on a real action on it (opening or
 /// touching the phone, a click or a key in a desktop viewer window), never because it sees
 /// the other device's layout, so the two never take turns by themselves. A device that has
 /// the layout already changes nothing; the reply says whether this one did.
@@ -1194,7 +1205,14 @@ async fn layout_device(
     State(app): State<App>,
     Json(req): Json<LayoutDeviceReq>,
 ) -> Json<serde_json::Value> {
-    let changed = app.set_phone(matches!(req.device, LayoutDevice::Phone));
+    let size = match req.device {
+        LayoutDevice::Phone => Some(match req.size {
+            Some(s) => PhoneSize::sane(s.width, s.height),
+            None => app.phone_size().unwrap_or_else(PhoneSize::duo),
+        }),
+        LayoutDevice::Desktop => None,
+    };
+    let changed = app.set_phone(size);
     if changed {
         // The state change makes the media plane send every window its new window set.
         mirror_layout_to_state(&app);
@@ -3778,11 +3796,12 @@ PLAIN=plainvalue
     #[tokio::test]
     async fn the_phone_takes_the_layout_and_the_desktop_takes_it_back() {
         let app = test_app();
-        let ask = |device| layout_device(State(app.clone()), Json(LayoutDeviceReq { device }));
+        let ask = |device| layout_device(State(app.clone()), Json(LayoutDeviceReq { device, size: None }));
         let desktop = app.config().effective_monitors();
 
         assert_eq!(ask(LayoutDevice::Phone).await.0["changed"], true);
         assert!(app.store.get().phone_layout);
+        assert_eq!(app.phone_size(), Some(PhoneSize::duo()));
         assert_eq!(app.effective_monitors(), wire::iphone_duo_layout().monitors);
         // Its own scroll speed too, which the /ng page scales its two-finger scroll by
         assert_eq!(app.effective_scroll().1, 15.0);
@@ -3794,6 +3813,33 @@ PLAIN=plainvalue
         assert_eq!(ask(LayoutDevice::Desktop).await.0["changed"], false);
         // The phone never touched the operator's own choice.
         assert_eq!(app.config().active_layout, "");
+    }
+
+    /// The phone asks for its own monitor size (its screen turned another way): it gets that
+    /// size, made even and kept in range; a claim with no size keeps it; the Duo size again
+    /// puts the Duo layout back.
+    #[tokio::test]
+    async fn the_phone_gets_the_monitor_size_it_asks_for() {
+        let app = test_app();
+        let ask = |size: Option<(u32, u32)>| {
+            layout_device(
+                State(app.clone()),
+                Json(LayoutDeviceReq {
+                    device: LayoutDevice::Phone,
+                    size: size.map(|(width, height)| LayoutDeviceSize { width, height }),
+                }),
+            )
+        };
+        assert_eq!(ask(Some((1427, 972))).await.0["changed"], true);
+        let m = &app.effective_monitors()[0];
+        assert_eq!((m.width, m.height, app.effective_monitors().len()), (1426, 972, 1));
+        assert_eq!(ask(None).await.0["changed"], false);
+        assert_eq!(app.phone_size(), Some(PhoneSize { width: 1426, height: 972 }));
+        assert_eq!(ask(Some((10, 99_999))).await.0["changed"], true);
+        assert_eq!(app.phone_size(), Some(PhoneSize { width: PhoneSize::MIN, height: PhoneSize::MAX }));
+        let duo = PhoneSize::duo();
+        assert_eq!(ask(Some((duo.width, duo.height))).await.0["changed"], true);
+        assert_eq!(app.effective_monitors(), wire::iphone_duo_layout().monitors);
     }
 
     /// Pages go back to the server on each load, so the installed /ng app opens the newest

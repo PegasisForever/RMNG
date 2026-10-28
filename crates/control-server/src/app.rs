@@ -1,7 +1,6 @@
 //! Shared application state handed to every request handler and background job:
 //! the state store, the live config, and the shared HTTP client.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use wire::AppConfig;
@@ -76,11 +75,36 @@ pub struct App {
     /// connect, and a page that sees it change reloads itself, so an upgraded server never
     /// leaves an old bundle talking to it.
     build_id: Arc<RwLock<String>>,
-    /// The phone (`/ng` on the iPhone Duo) is using the clones: the built-in iPhone Duo layout
-    /// is in force in place of the operator's active preset, which stays as it is, until a
-    /// desktop viewer window takes them back (`POST /api/layout/device`). In memory only: a
-    /// restart gives them back to the desktop.
-    phone: Arc<AtomicBool>,
+    /// The phone (`/ng`) is using the clones, and the size of its one monitor: the phone's
+    /// layout (the built-in iPhone Duo layout, at this size) is in force in place of the
+    /// operator's active preset, which stays as it is, until a desktop viewer window takes them
+    /// back (`POST /api/layout/device`). None: the desktop has them. In memory only: a restart
+    /// gives them back to the desktop.
+    phone: Arc<RwLock<Option<PhoneSize>>>,
+}
+
+/// The size of the phone's one monitor, in pixels: even, and in [PhoneSize::MIN, PhoneSize::MAX].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhoneSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl PhoneSize {
+    pub const MIN: u32 = 320;
+    pub const MAX: u32 = 4096;
+
+    /// The iPhone Duo layout's (`wire::iphone_duo_layout`), what the phone has upright.
+    pub fn duo() -> Self {
+        let m = &wire::iphone_duo_layout().monitors[0];
+        Self { width: m.width, height: m.height }
+    }
+
+    /// A size a page asked for, made one the encoder takes: even (4:2:0 chroma), and in range.
+    pub fn sane(width: u32, height: u32) -> Self {
+        let fix = |v: u32| v.clamp(Self::MIN, Self::MAX) & !1;
+        Self { width: fix(width), height: fix(height) }
+    }
 }
 
 /// A value unique to this process. Used until (and instead of) the image revision, so a dev
@@ -135,7 +159,7 @@ impl App {
             logins: Arc::new(crate::oauth::Logins::new()),
             views: Arc::new(crate::monitor::ViewTracker::new()),
             build_id: Arc::new(RwLock::new(boot_id())),
-            phone: Arc::new(AtomicBool::new(false)),
+            phone: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -162,21 +186,30 @@ impl App {
 
     /// Whether the phone has the clones (see the field).
     pub fn phone(&self) -> bool {
-        self.phone.load(Ordering::Relaxed)
+        self.phone_size().is_some()
     }
 
-    /// Give the clones to the phone or back to the desktop; whether that changed anything.
-    pub fn set_phone(&self, phone: bool) -> bool {
-        self.phone.swap(phone, Ordering::Relaxed) != phone
+    /// The phone's monitor size while it has the clones.
+    pub fn phone_size(&self) -> Option<PhoneSize> {
+        *self.phone.read().unwrap()
     }
 
-    /// The monitors in force: the iPhone Duo layout's while the phone has the clones, else
-    /// the active preset's ([`AppConfig::effective_monitors`]).
+    /// Give the clones to the phone at `size`, or back to the desktop (None); whether that
+    /// changed anything.
+    pub fn set_phone(&self, size: Option<PhoneSize>) -> bool {
+        std::mem::replace(&mut *self.phone.write().unwrap(), size) != size
+    }
+
+    /// The monitors in force: the phone's one monitor while it has the clones, else the active
+    /// preset's ([`AppConfig::effective_monitors`]).
     pub fn effective_monitors(&self) -> Vec<wire::MonitorSpec> {
-        if self.phone() {
-            wire::iphone_duo_layout().monitors.clone()
-        } else {
-            self.config().effective_monitors()
+        match self.phone_size() {
+            Some(size) => vec![wire::MonitorSpec {
+                width: size.width,
+                height: size.height,
+                ..wire::iphone_duo_layout().monitors[0].clone()
+            }],
+            None => self.config().effective_monitors(),
         }
     }
 

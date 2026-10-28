@@ -18,13 +18,17 @@ function Frame(args: {
   tab: NgTab | null;
   pad: boolean;
   dictation: DictationState;
+  /** The floating keyboard of the other orientations: the keys only, the display's width. */
+  bare?: boolean;
+  width?: number;
 }) {
   const [tab, setTab] = useState(args.tab);
   return (
     <KeyboardView
-      width={669}
+      width={args.width ?? 669}
       height={args.height}
-      bottom={34}
+      bottom={args.bare ? 21 : 34}
+      bare={args.bare}
       fn={args.fn}
       mods={new Map(args.mods)}
       caps={args.caps}
@@ -75,6 +79,10 @@ export const Trackpad: Story = { args: { pad: true } };
 /** The Usage tab open: the keys and the mouse buttons make way. The page that takes their
  *  place is the container's; the pages have their own stories (ng/Pages). */
 export const UsageTab: Story = { args: { tab: "usage" } };
+
+/** The floating keyboard on a sideways phone (951 px wide, 45% of 648 px high): the keys only,
+ *  the symbol and number rows short. */
+export const Floating: Story = { args: { bare: true, width: 951, height: 292 } };
 
 /** A shorter area: the keys get shorter, the mouse buttons keep what is left. */
 export const Short: Story = { args: { height: 330 } };

@@ -37,12 +37,16 @@ export type KeysLayout = {
   page: Box;
 };
 
-/** Where things go in a keyboard area `width`×`height` with `bottom` kept for the home bar.
+/** Where things go in a keyboard area `width`×`height` with `bottom` kept for the home bar;
+ *  with `bare`, the keys only (no tool row, no mouse buttons).
  *  The keys take the whole width and are square where the area has room for that. Where it
  *  has not, the symbol and number rows get shorter and the four rows under them stay square;
  *  only when the two are down to MIN_TOP_ROW do those get shorter too. */
-export function keysLayout(width: number, height: number, bottom: number): KeysLayout {
-  const room = height - PAD - TOOL_H - GAP - GAP - Math.max(bottom, MIN_BUTTONS_H);
+export function keysLayout(width: number, height: number, bottom: number, bare = false): KeysLayout {
+  // `bare`: the keys alone (the floating keyboard of the other orientations), down to `bottom`
+  const room = bare
+    ? height - PAD - PAD - bottom
+    : height - PAD - TOOL_H - GAP - GAP - Math.max(bottom, MIN_BUTTONS_H);
   const pitch = (width - 2 * PAD + GAP) / ROW_UNITS;
   const full = (pitch - GAP) * KEY_ASPECT;
   const rowsRoom = room - (ROWS - 1) * GAP;
@@ -52,8 +56,8 @@ export function keysLayout(width: number, height: number, bottom: number): KeysL
   const rowHeights = Array.from({ length: ROWS }, (_, i) => (i < TOP_ROWS ? top : lower));
   const w = ROW_UNITS * pitch - GAP;
   const h = rowHeights.reduce((a, b) => a + b, 0) + (ROWS - 1) * GAP;
-  const tools = { left: PAD, top: PAD, width: width - 2 * PAD, height: TOOL_H };
-  const keysTop = PAD + TOOL_H + GAP;
+  const tools = { left: PAD, top: PAD, width: width - 2 * PAD, height: bare ? 0 : TOOL_H };
+  const keysTop = bare ? PAD : PAD + TOOL_H + GAP;
   const buttonsTop = keysTop + h + GAP;
   return {
     pitch,
@@ -80,12 +84,40 @@ export type ScreenFit = {
 const SNAP = 0.02;
 
 /** The monitor (`monW`×`monH` px) as large as fits in an area `areaW`×`areaH` CSS px, in the
- *  middle; `dpr` device px per CSS px. */
-export function screenFit(areaW: number, areaH: number, monW: number, monH: number, dpr: number): ScreenFit {
-  const fit = Math.min((areaW * dpr) / monW, (areaH * dpr) / monH);
+ *  middle; `dpr` device px per CSS px. Never more than `maxScale` device px per monitor px: a
+ *  monitor smaller than the area then stays at that scale, with black around it. */
+export function screenFit(
+  areaW: number,
+  areaH: number,
+  monW: number,
+  monH: number,
+  dpr: number,
+  maxScale = Infinity,
+): ScreenFit {
+  const fit = Math.min((areaW * dpr) / monW, (areaH * dpr) / monH, maxScale);
   const whole = Math.floor(fit);
   const scale = whole >= 1 && fit - whole < SNAP * whole ? whole : fit;
   const width = (monW * scale) / dpr;
   const height = (monH * scale) / dpr;
   return { scale, left: (areaW - width) / 2, top: (areaH - height) / 2, width, height };
+}
+
+/** Device px per monitor px on the phone, in every orientation: the iPhone Duo layout is shown
+ *  at 2× upright, and the other orientations keep that, so text is the same size on the clone
+ *  whichever way the phone is held. */
+export const PHONE_SCALE = 2;
+
+/** The monitor for a screen of `width`×`height` CSS px at `dpr`: PHONE_SCALE device px per
+ *  monitor px, in even sizes (the encoder takes even sizes only). */
+export function phoneMonitorSize(width: number, height: number, dpr: number): { width: number; height: number } {
+  const even = (css: number) => Math.floor((css * dpr) / PHONE_SCALE / 2) * 2;
+  return { width: even(width), height: even(height) };
+}
+
+/** How far to move the clone's screen up (CSS px) so its cursor, `cursorY` from the page top,
+ *  stays `margin` above the top of a keyboard over the screen, `visible` px down the page. Never
+ *  more than it takes to bring the screen's bottom edge, `bottom`, to the keyboard's top: the
+ *  screen moves only as far as the cursor needs, and stays put while the cursor is high. */
+export function cursorShift(cursorY: number, visible: number, bottom: number, margin: number): number {
+  return Math.max(0, Math.min(cursorY + margin - visible, bottom - visible));
 }

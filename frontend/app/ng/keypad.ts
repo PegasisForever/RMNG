@@ -21,7 +21,12 @@
 // one held down keeps the mode on (`button`), so they do not go while in use.
 //
 // Three fingers that move together are a swipe, as on a laptop touchpad: one gesture each
-// time they go SWIPE_PX one way (`swipe`; the container sends its keys).
+// time they go SWIPE_PX one way (`swipe`; the container sends its keys). Two fingers that tap
+// together (all down and up within TAP_MS, none moving TAP_SLOP_PX) are a right click, three a
+// middle click.
+//
+// `alwaysPad`: the keypad is a trackpad only, with no keys (the whole screen of the other
+// orientations, `./FullDesk.tsx`): trackpad mode from the start, for good.
 //
 // A drag that starts on Space is no pointer gesture: as on the iPhone keyboard, it moves the
 // text cursor, one arrow key for each ARROW_STEP_X (sideways) or ARROW_STEP_Y (up and down)
@@ -75,8 +80,8 @@ export type KeypadOut =
   | { t: "pad"; on: boolean }
   /** Three fingers swiped this way together (once per swipe). */
   | { t: "swipe"; dir: "up" | "down" | "left" | "right" }
-  /** A tap in trackpad mode: a left click. */
-  | { t: "click" }
+  /** A tap in trackpad mode: a left click; a two-finger tap a right one, three a middle one. */
+  | { t: "click"; button?: "right" | "middle" }
   /** A drag in trackpad mode: the left button goes down, or up. */
   | { t: "drag"; pressed: boolean };
 
@@ -125,11 +130,19 @@ export class Keypad {
   private buttons = 0;
   /** The three-finger swipe now on has made its gesture: no second one until the fingers lift. */
   private swiped = false;
+  /** The trackpad touches since no finger was down: the most at once, and whether one of them
+   *  moved or stayed too long for a tap (`groupTap`). */
+  private group = { most: 0, spoilt: false };
+  private readonly always: boolean;
 
   constructor(
     private out: (o: KeypadOut) => void,
     private timer: Timer,
-  ) {}
+    opts: { alwaysPad?: boolean } = {},
+  ) {
+    this.always = opts.alwaysPad === true;
+    this.pad = this.always;
+  }
 
   down(id: number, key: Key | null, x: number, y: number, t: number) {
     const pad = this.pad;
@@ -152,6 +165,8 @@ export class Keypad {
       gx: x,
       gy: y,
     };
+    if (this.touches.size === 0) this.group = { most: 0, spoilt: false };
+    this.group.most = Math.max(this.group.most, this.touches.size + 1);
     if (pad) {
       this.cancelLinger();
       if (this.waitingClick) {
@@ -239,7 +254,15 @@ export class Keypad {
     this.touches.delete(id);
     p.cancelHold();
     const quick = t - p.t0 < TAP_MS && p.far < TAP_SLOP_PX;
+    if (!quick || !p.pad) this.group.spoilt = true;
+    // Two or three fingers down together: their tap is one right or middle click, when all are up
+    const many = p.pad && this.group.most >= 2 && (p.is === "new" || p.is === "point");
     if (p.dragging) this.out({ t: "drag", pressed: false });
+    else if (many) {
+      if (this.touches.size === 0 && !this.group.spoilt && this.group.most <= 3) {
+        this.out({ t: "click", button: this.group.most === 2 ? "right" : "middle" });
+      }
+    }
     else if (p.afterTap && p.is !== "scroll" && p.is !== "swipe") {
       // The first tap's click, and this one's when it was a tap too: a double click
       this.out({ t: "click" });
@@ -299,6 +322,7 @@ export class Keypad {
 
   /** The keys stay a trackpad PAD_LINGER_MS more, unless a finger comes down again. */
   private linger() {
+    if (this.always) return;
     this.cancelLinger();
     this.cancelLinger = this.timer.after(PAD_LINGER_MS, () => {
       if (this.touches.size || this.buttons) return;

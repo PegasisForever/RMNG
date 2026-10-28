@@ -430,4 +430,52 @@ describe("Keypad trackpad mode", () => {
       expect(swipes()).toEqual(["right"]);
     });
   });
+
+  describe("two- and three-finger taps", () => {
+    const clicks = () => out.flatMap((o) => (o.t === "click" ? [o.button ?? "left"] : []));
+    /** Fingers at `xs` down together, then up `ms` later, the first moved `move` px. */
+    const tapWith = (xs: number[], ms = 100, move = 0) => {
+      xs.forEach((x, i) => pad.down(i + 1, null, x, 100, 1000));
+      if (move) pad.move(1, xs[0] + move, 100, 1000 + ms / 2);
+      xs.forEach((_, i) => pad.up(i + 1, 1000 + ms));
+      clock.advance(TAP_WAIT_MS);
+    };
+    beforeEach(() => {
+      pad = new Keypad((o) => out.push(o), clock.timer, { alwaysPad: true });
+    });
+
+    test("two fingers tapped together are one right click; three, a middle click", () => {
+      tapWith([100, 160]);
+      tapWith([100, 160, 220]);
+      expect(clicks()).toEqual(["right", "middle"]);
+    });
+
+    test("a slow two-finger touch, or one that moves, is no click", () => {
+      tapWith([100, 160], TAP_MS + 50);
+      tapWith([100, 160], 100, TAP_SLOP_PX + 5);
+      expect(clicks()).toEqual([]);
+    });
+
+    test("one finger still left-clicks", () => {
+      tapWith([100]);
+      expect(clicks()).toEqual(["left"]);
+    });
+  });
+
+  describe("trackpad only (alwaysPad)", () => {
+    beforeEach(() => {
+      pad = new Keypad((o) => out.push(o), clock.timer, { alwaysPad: true });
+    });
+
+    test("it is a trackpad from the start and stays one: the first touch moves the cursor at once", () => {
+      pad.down(1, null, 100, 100, 0);
+      pad.move(1, 103, 100, 10);
+      pad.up(1, 300);
+      clock.advance(PAD_LINGER_MS * 5);
+      pad.down(2, null, 100, 100, 6000);
+      pad.move(2, 102, 100, 6010);
+      expect(out.filter((o) => o.t === "move").map((o) => o.t === "move" && o.dx)).toEqual([3, 2]);
+      expect(out.some((o) => o.t === "pad")).toBe(false);
+    });
+  });
 });

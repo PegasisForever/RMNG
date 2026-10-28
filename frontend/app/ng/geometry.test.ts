@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { GAP, KEY_ASPECT, MIN_BUTTONS_H, TOOL_H, keysLayout, screenFit } from "./geometry";
+import { GAP, KEY_ASPECT, MIN_BUTTONS_H, TOOL_H, cursorShift, keysLayout, phoneMonitorSize, screenFit } from "./geometry";
 
 // The unfolded iPhone Duo, upright: 669 px wide, a 412 px keyboard area, a 34 px home bar.
 const W = 669;
@@ -71,5 +71,42 @@ describe("screenFit", () => {
       expect(f.width).toBeLessThanOrEqual(669 + 1e-9);
       expect(f.height).toBeLessThanOrEqual(h + 1e-9);
     }
+  });
+});
+
+describe("keysLayout bare (the floating keyboard)", () => {
+  test("keys only: from the top, down to the home bar, no tool row, no mouse buttons", () => {
+    const k = keysLayout(951, 290, 21, true);
+    expect(k.keys.top).toBe(4);
+    expect(k.tools.height).toBe(0);
+    expect(k.keys.top + k.keys.height).toBeCloseTo(290 - 4 - 21, 5);
+  });
+});
+
+describe("phoneMonitorSize", () => {
+  test("2 device px per monitor px, even: the Duo upright is the Duo layout's size, sideways the same scale", () => {
+    expect(phoneMonitorSize(669, 539, 3)).toEqual({ width: 1002, height: 808 });
+    expect(phoneMonitorSize(951, 648, 3)).toEqual({ width: 1426, height: 972 });
+  });
+});
+
+describe("cursorShift", () => {
+  test("no shift while the cursor is high, then the screen follows it, up to the screen's bottom", () => {
+    expect(cursorShift(100, 400, 648, 40)).toBe(0);
+    expect(cursorShift(500, 400, 648, 40)).toBe(140);
+    expect(cursorShift(640, 400, 648, 40)).toBe(248);
+  });
+});
+
+describe("screenFit with a largest scale", () => {
+  test("the Duo layout's monitor sideways stays at 2x, in the middle, not stretched to fill", () => {
+    const f = screenFit(951, 648, 1002, 808, 3, 2);
+    expect(f.scale).toBe(2);
+    expect(f.width).toBeCloseTo(668, 0);
+    expect(f.left).toBeCloseTo((951 - 668) / 2, 0);
+  });
+
+  test("one too large for the screen at 2x still shrinks to fit (the folded phone)", () => {
+    expect(screenFit(466, 657, 1002, 808, 3, 2).scale).toBeLessThan(2);
   });
 });

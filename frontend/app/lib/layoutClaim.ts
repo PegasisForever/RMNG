@@ -7,13 +7,17 @@ import { claimLayout } from "./api";
  *  has the layout already, so more would be noise. */
 const CLAIM_EVERY_MS = 2000;
 
-/** A function that claims the layout for `device`, at most once per CLAIM_EVERY_MS. */
-export function layoutClaimer(device: "phone" | "desktop"): () => void {
+/** A function that claims the layout for `device`, at most once per CLAIM_EVERY_MS. The phone
+ *  may name its monitor's size (`size`, asked at each claim); without one it keeps its size. */
+export function layoutClaimer(
+  device: "phone" | "desktop",
+  size?: () => { width: number; height: number } | undefined,
+): () => void {
   let last = -Infinity;
   return () => {
     const t = performance.now();
     if (t - last < CLAIM_EVERY_MS) return;
     last = t;
-    claimLayout(device).catch(() => {});
+    claimLayout(device, size?.()).catch(() => {});
   };
 }

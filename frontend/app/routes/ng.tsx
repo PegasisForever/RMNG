@@ -1,10 +1,13 @@
 // `/ng`: the installed phone app (Add to Home Screen; `public/manifest.webmanifest` opens it
-// here). It is made for one device, the folding iPhone, unfolded and held upright, and shows
-// nothing on any other screen. The selected clone's screen is on top, the keyboard and the
-// mouse controls are below it: `~/ng/Desk.tsx`. The update rules are in `~/ng/pwa.ts`.
+// here). It is made for the folding iPhone, unfolded and held upright: the selected clone's
+// screen on top, the keyboard and the mouse controls below it (`~/ng/Desk.tsx`). Any other
+// way it is held (folded, sideways), and on any other screen, the clone's screen fills the
+// display, the display is a trackpad, and floating buttons open the keyboard and the pages
+// (`~/ng/FullDesk.tsx`). The update rules are in `~/ng/pwa.ts`.
 import { useEffect, useRef, useState } from "react";
 
 import { Desk } from "~/ng/Desk";
+import { FullDesk } from "~/ng/FullDesk";
 import { attachPwa } from "~/ng/pwa";
 import { isTyping } from "~/ng/systemKeyboard";
 
@@ -88,12 +91,7 @@ export default function Ng() {
   }, []);
 
   const ok = page !== null && fits(page.size);
-  const message =
-    secure === false
-      ? "This page is not HTTPS: open it at the server's HTTPS address."
-      : page && !ok
-        ? "Unfold the phone and hold it upright."
-        : null;
+  const message = secure === false ? "This page is not HTTPS: open it at the server's HTTPS address." : null;
 
   return (
     // Sized to the screen, not to the page: the page can be 21 px short (PAGE_HEIGHTS)
@@ -110,8 +108,12 @@ export default function Ng() {
           </div>
         </div>
       ) : null}
-      {ok && secure ? (
-        <Desk width={SCREEN.width} height={SCREEN.height} bottom={page.bottom} />
+      {secure && page ? (
+        ok ? (
+          <Desk width={SCREEN.width} height={SCREEN.height} bottom={page.bottom} />
+        ) : (
+          <FullDesk width={page.size[0]} height={page.size[1]} bottom={page.bottom} />
+        )
       ) : null}
     </div>
   );

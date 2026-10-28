@@ -47,6 +47,9 @@ type Props = {
   /** What the dictation key shows: off, starting, listening (red), a fault, or no dictation in
    *  this browser (dim). */
   dictation: DictationState;
+  /** The keys alone, with no tool row and no mouse buttons: the floating keyboard of the other
+   *  orientations (`./FullDesk.tsx`), where the whole screen is the trackpad. */
+  bare?: boolean;
 };
 
 /** The /ng keyboard area: a tool row under the screen (`./ToolRow.tsx`), a full keyboard of
@@ -56,13 +59,16 @@ type Props = {
  *  moves the cursor on the keys (a drag). The mouse buttons show only while the keys are a
  *  trackpad; in keyboard mode their space stays empty, so the keys do not move. */
 export const KeyboardView = memo(function KeyboardView(p: Props) {
-  const k = keysLayout(p.width, p.height, p.bottom);
+  const k = keysLayout(p.width, p.height, p.bottom, p.bare);
   const shift = SHIFTS.some((c) => p.mods.has(c));
   const rows = keyRows(p.fn);
   const touch = useKeysTouch(rows, p.onKeyTouch);
   return (
-    <div className="relative touch-none select-none bg-black" style={{ width: p.width, height: p.height }}>
-      <ToolRow box={k.tools} usage={p.usage} tab={p.tab} onTab={p.onTab} badges={p.badges} />
+    <div
+      className={`relative touch-none select-none ${p.bare ? "" : "bg-black"}`}
+      style={{ width: p.width, height: p.height }}
+    >
+      {p.bare ? null : <ToolRow box={k.tools} usage={p.usage} tab={p.tab} onTab={p.onTab} badges={p.badges} />}
       {/* An open tab's page is the container's, over the space the keys leave (`k.page`) */}
       {/* One handler for the whole key area, gaps too: a drag may start between keys */}
       {/* The trackpad the keys fade into: four corners of an outline. Touches go through it
@@ -99,7 +105,7 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
           mode; the keypad keeps that mode on while a button is held. */}
       <div
         aria-hidden={!p.pad}
-        className={`absolute flex transition-opacity duration-200 ${p.tab ? "hidden" : ""} ${
+        className={`absolute flex transition-opacity duration-200 ${p.tab || p.bare ? "hidden" : ""} ${
           p.pad ? "opacity-100" : "pointer-events-none opacity-0"
         }`}
         style={k.buttons}
