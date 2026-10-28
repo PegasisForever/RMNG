@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { GAP, KEY_ASPECT, MIN_BUTTONS_H, TOOL_H, cursorShift, keysLayout, phoneMonitorSize, screenFit } from "./geometry";
+import { GAP, KEY_ASPECT, MIN_BUTTONS_H, TOOL_H, followAxis, keysLayout, phoneMonitorSize, screenFit } from "./geometry";
 
 // The unfolded iPhone Duo, upright: 669 px wide, a 412 px keyboard area, a 34 px home bar.
 const W = 669;
@@ -90,14 +90,6 @@ describe("phoneMonitorSize", () => {
   });
 });
 
-describe("cursorShift", () => {
-  test("no shift while the cursor is high, then the screen follows it, up to the screen's bottom", () => {
-    expect(cursorShift(100, 400, 648, 40)).toBe(0);
-    expect(cursorShift(500, 400, 648, 40)).toBe(140);
-    expect(cursorShift(640, 400, 648, 40)).toBe(248);
-  });
-});
-
 describe("screenFit with a largest scale", () => {
   test("the Duo layout's monitor sideways stays at 2x, in the middle, not stretched to fill", () => {
     const f = screenFit(951, 648, 1002, 808, 3, 2);
@@ -108,5 +100,31 @@ describe("screenFit with a largest scale", () => {
 
   test("one too large for the screen at 2x still shrinks to fit (the folded phone)", () => {
     expect(screenFit(466, 657, 1002, 808, 3, 2).scale).toBeLessThan(2);
+  });
+});
+
+describe("followAxis", () => {
+  test("a screen shorter than the display stays in the middle while the cursor is in view", () => {
+    expect(followAxis(0, 100, 539, 648, 648, 32)).toBeCloseTo(54.5);
+  });
+
+  test("with the keyboard up it moves up only as far as the cursor needs, and no further than its bottom", () => {
+    expect(followAxis(54.5, 100, 539, 356, 648, 32)).toBeCloseTo(54.5);
+    expect(followAxis(54.5, 400, 539, 356, 648, 32)).toBeCloseTo(356 - 32 - 400);
+    expect(followAxis(54.5, 539, 539, 356, 648, 32)).toBeCloseTo(356 - 539);
+  });
+
+  test("zoomed in (longer than the display) it follows the cursor both ways, between its ends", () => {
+    // 1900 long on 951: start between -949 and 0
+    expect(followAxis(0, 500, 1900, 951, 951, 32)).toBe(0);
+    expect(followAxis(0, 1200, 1900, 951, 951, 32)).toBeCloseTo(951 - 32 - 1200);
+    expect(followAxis(-400, 300, 1900, 951, 951, 32)).toBeCloseTo(32 - 300);
+    expect(followAxis(-400, 1890, 1900, 951, 951, 32)).toBeCloseTo(951 - 1900);
+  });
+});
+
+describe("phoneMonitorSize at another scale", () => {
+  test("1 device px per monitor px: the display's own pixels", () => {
+    expect(phoneMonitorSize(951, 648, 3, 1)).toEqual({ width: 2852, height: 1944 });
   });
 });

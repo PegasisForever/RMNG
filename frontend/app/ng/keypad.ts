@@ -25,6 +25,10 @@
 // together (all down and up within TAP_MS, none moving TAP_SLOP_PX) are a right click, three a
 // middle click.
 //
+// `pinch`: two fingers are a scroll or a pinch, whichever they show first: their distance
+// changing by PINCH_PX makes a pinch (`zoom`, the change as a factor; the clone gets nothing),
+// their middle moving by TWO_SLOP_PX a scroll. Without it, two fingers always scroll.
+//
 // `alwaysPad`: the keypad is a trackpad only, with no keys (the whole screen of the other
 // orientations, `./FullDesk.tsx`): trackpad mode from the start, for good.
 //
@@ -59,6 +63,10 @@ export const ARROW_STEP_X = 12;
 export const ARROW_STEP_Y = 28;
 /** Three fingers that go this far together (CSS px, their mean) make a swipe. */
 export const SWIPE_PX = 30;
+/** With `pinch`: two fingers whose distance changes this far (CSS px) pinch, and two whose
+ *  middle moves this far first scroll. */
+export const PINCH_PX = 16;
+export const TWO_SLOP_PX = 8;
 
 export type KeypadOut =
   /** A finger came down on `key` while the keys are keys (the key's click sound plays). */
@@ -78,6 +86,8 @@ export type KeypadOut =
   | { t: "scroll_end" }
   /** The keys became a trackpad, or keys again. */
   | { t: "pad"; on: boolean }
+  /** Two fingers pinched: the view's zoom changes by `factor` (their distance now over before). */
+  | { t: "zoom"; factor: number }
   /** Three fingers swiped this way together (once per swipe). */
   | { t: "swipe"; dir: "up" | "down" | "left" | "right" }
   /** A tap in trackpad mode: a left click; a two-finger tap a right one, three a middle one. */
@@ -99,7 +109,7 @@ type Touch = {
   sy: number;
   /** Not decided yet, holding its key, moving the cursor, scrolling, or (a drag on Space)
    *  typing arrow keys. */
-  is: "new" | "hold" | "point" | "scroll" | "arrows" | "swipe";
+  is: "new" | "hold" | "point" | "scroll" | "arrows" | "swipe" | "two" | "pinch";
   /** For the arrows: where the finger was at the last arrow key. */
   ax: number;
   ay: number;
@@ -134,13 +144,18 @@ export class Keypad {
    *  moved or stayed too long for a tap (`groupTap`). */
   private group = { most: 0, spoilt: false };
   private readonly always: boolean;
+  private readonly pinch: boolean;
+  /** Two fingers not yet a scroll or a pinch: their distance and middle when they began; and a
+   *  pinch's distance at its last zoom. */
+  private two = { d0: 0, cx: 0, cy: 0, last: 0 };
 
   constructor(
     private out: (o: KeypadOut) => void,
     private timer: Timer,
-    opts: { alwaysPad?: boolean } = {},
+    opts: { alwaysPad?: boolean; pinch?: boolean } = {},
   ) {
     this.always = opts.alwaysPad === true;
+    this.pinch = opts.pinch === true;
     this.pad = this.always;
   }
 
@@ -208,10 +223,12 @@ export class Keypad {
       }
       if (p.key?.mod && !p.pad) this.out({ t: "mod", key: p.key, down: false, dragged: true });
       const others = [...this.touches.values()].filter(
-        (o) => o !== p && (o.is === "new" || o.is === "point" || o.is === "scroll" || o.is === "swipe"),
+        (o) =>
+          o !== p &&
+          (o.is === "new" || o.is === "point" || o.is === "scroll" || o.is === "swipe" || o.is === "two" || o.is === "pinch"),
       );
-      // Three (or more) fingers swipe; two scroll; none of them types
-      const next = others.length >= 2 ? "swipe" : others.length ? "scroll" : "point";
+      // Three (or more) fingers swipe; two scroll (or, with `pinch`, wait to see); none types
+      const next = others.length >= 2 ? "swipe" : others.length ? (this.pinch ? "two" : "scroll") : "point";
       if (next === "swipe" && others.some((o) => o.is === "scroll")) this.out({ t: "scroll_end" });
       for (const o of next === "point" ? [] : others) {
         o.cancelHold();
@@ -227,12 +244,20 @@ export class Keypad {
       }
       p.is = next;
       if (next === "swipe") Object.assign(p, { gx: x, gy: y });
+      if (next === "two") {
+        const o = others[0];
+        this.two = { d0: Math.hypot(x - o.x, y - o.y), cx: (x + o.x) / 2, cy: (y + o.y) / 2, last: 0 };
+      }
       if (!this.pad) {
         this.pad = true;
         this.out({ t: "pad", on: true });
       }
     }
     if (p.is === "swipe") return this.swipe(p, x, y);
+    if (p.is === "two" || p.is === "pinch") {
+      Object.assign(p, { x, y, t });
+      return this.twoFingers();
+    }
     if (p.afterTap && p.is === "point" && !p.dragging && p.far >= TAP_SLOP_PX) {
       p.dragging = true;
       this.out({ t: "drag", pressed: true });
@@ -256,14 +281,14 @@ export class Keypad {
     const quick = t - p.t0 < TAP_MS && p.far < TAP_SLOP_PX;
     if (!quick || !p.pad) this.group.spoilt = true;
     // Two or three fingers down together: their tap is one right or middle click, when all are up
-    const many = p.pad && this.group.most >= 2 && (p.is === "new" || p.is === "point");
+    const many = p.pad && this.group.most >= 2 && (p.is === "new" || p.is === "point" || p.is === "two");
     if (p.dragging) this.out({ t: "drag", pressed: false });
     else if (many) {
       if (this.touches.size === 0 && !this.group.spoilt && this.group.most <= 3) {
         this.out({ t: "click", button: this.group.most === 2 ? "right" : "middle" });
       }
     }
-    else if (p.afterTap && p.is !== "scroll" && p.is !== "swipe") {
+    else if (p.afterTap && (p.is === "new" || p.is === "point" || p.is === "hold")) {
       // The first tap's click, and this one's when it was a tap too: a double click
       this.out({ t: "click" });
       if (quick) this.out({ t: "click" });
@@ -285,6 +310,27 @@ export class Keypad {
     }
     if (![...this.touches.values()].some((o) => o.is === "swipe")) this.swiped = false;
     if (this.pad && this.touches.size === 0 && this.buttons === 0) this.linger();
+  }
+
+  /** Two fingers with `pinch`: until they show which, a scroll or a pinch; in a pinch, the zoom
+   *  for each change of their distance. */
+  private twoFingers() {
+    const f = [...this.touches.values()].filter((o) => o.is === "two" || o.is === "pinch");
+    if (f.length !== 2) return;
+    const d = Math.hypot(f[0].x - f[1].x, f[0].y - f[1].y);
+    if (f[0].is === "pinch") {
+      if (this.two.last > 0 && d > 0) this.out({ t: "zoom", factor: d / this.two.last });
+      this.two.last = d;
+      return;
+    }
+    const moved = Math.hypot((f[0].x + f[1].x) / 2 - this.two.cx, (f[0].y + f[1].y) / 2 - this.two.cy);
+    if (Math.abs(d - this.two.d0) >= PINCH_PX) {
+      for (const o of f) o.is = "pinch";
+      if (this.two.d0 > 0) this.out({ t: "zoom", factor: d / this.two.d0 });
+      this.two.last = d;
+    } else if (moved >= TWO_SLOP_PX) {
+      for (const o of f) o.is = "scroll";
+    }
   }
 
   /** A three-finger swipe: once the fingers' mean has gone SWIPE_PX one way, that way's

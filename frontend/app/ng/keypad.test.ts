@@ -7,11 +7,13 @@ import {
   type KeypadOut,
   Keypad,
   PAD_LINGER_MS,
+  PINCH_PX,
   SLOP_PX,
   SWIPE_PX,
   TAP_MS,
   TAP_SLOP_PX,
   TAP_WAIT_MS,
+  TWO_SLOP_PX,
 } from "./keypad";
 import { keyRows } from "./keyboard";
 
@@ -476,6 +478,47 @@ describe("Keypad trackpad mode", () => {
       pad.move(2, 102, 100, 6010);
       expect(out.filter((o) => o.t === "move").map((o) => o.t === "move" && o.dx)).toEqual([3, 2]);
       expect(out.some((o) => o.t === "pad")).toBe(false);
+    });
+  });
+
+  describe("pinch (the full-screen trackpad)", () => {
+    beforeEach(() => {
+      pad = new Keypad((o) => out.push(o), clock.timer, { alwaysPad: true, pinch: true });
+    });
+    const zooms = () => out.flatMap((o) => (o.t === "zoom" ? [o.factor] : []));
+
+    test("two fingers that spread zoom in by the change of their distance, and send no scroll", () => {
+      pad.down(1, null, 100, 100, 0);
+      pad.down(2, null, 200, 100, 0);
+      pad.move(1, 90, 100, 20); // 110 apart: where the pair begins
+      pad.move(2, 210, 100, 20); // 120 apart: under PINCH_PX yet
+      pad.move(2, 230, 100, 30); // 140 apart: a pinch, x140/110
+      pad.move(2, 300, 100, 40); // 210 apart: x1.5 more
+      pad.up(1, 100);
+      pad.up(2, 100);
+      const z = zooms();
+      expect(z.length).toBe(2);
+      expect(z[0]).toBeCloseTo(140 / 110, 5);
+      expect(z[1]).toBeCloseTo(1.5, 5);
+      expect(out.some((o) => o.t === "scroll" || o.t === "move")).toBe(false);
+    });
+
+    test("two fingers that move together scroll, and do not zoom", () => {
+      pad.down(1, null, 100, 100, 0);
+      pad.down(2, null, 200, 100, 0);
+      for (let i = 1; i <= 5; i++) {
+        pad.move(1, 100, 100 + i * 4, i * 10);
+        pad.move(2, 200, 100 + i * 4, i * 10);
+      }
+      expect(zooms()).toEqual([]);
+      expect(out.some((o) => o.t === "scroll")).toBe(true);
+    });
+
+    test("the thresholds: less than PINCH_PX of spread and TWO_SLOP_PX of travel is neither", () => {
+      pad.down(1, null, 100, 100, 0);
+      pad.down(2, null, 200, 100, 0);
+      pad.move(2, 200 + PINCH_PX - 4, 100 + TWO_SLOP_PX - 2, 10);
+      expect(out.some((o) => o.t === "zoom" || o.t === "scroll")).toBe(false);
     });
   });
 });

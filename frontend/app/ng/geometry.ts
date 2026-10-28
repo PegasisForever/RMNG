@@ -107,17 +107,40 @@ export function screenFit(
  *  whichever way the phone is held. */
 export const PHONE_SCALE = 2;
 
-/** The monitor for a screen of `width`×`height` CSS px at `dpr`: PHONE_SCALE device px per
- *  monitor px, in even sizes (the encoder takes even sizes only). */
-export function phoneMonitorSize(width: number, height: number, dpr: number): { width: number; height: number } {
-  const even = (css: number) => Math.floor((css * dpr) / PHONE_SCALE / 2) * 2;
+/** The monitor for a screen of `width`×`height` CSS px at `dpr`: `scale` (PHONE_SCALE unless
+ *  the phone's own setting says) device px per monitor px, in even sizes (the encoder takes
+ *  even sizes only). */
+export function phoneMonitorSize(
+  width: number,
+  height: number,
+  dpr: number,
+  scale = PHONE_SCALE,
+): { width: number; height: number } {
+  const even = (css: number) => Math.floor((css * dpr) / scale / 2) * 2;
   return { width: even(width), height: even(height) };
 }
 
-/** How far to move the clone's screen up (CSS px) so its cursor, `cursorY` from the page top,
- *  stays `margin` above the top of a keyboard over the screen, `visible` px down the page. Never
- *  more than it takes to bring the screen's bottom edge, `bottom`, to the keyboard's top: the
- *  screen moves only as far as the cursor needs, and stays put while the cursor is high. */
-export function cursorShift(cursorY: number, visible: number, bottom: number, margin: number): number {
-  return Math.max(0, Math.min(cursorY + margin - visible, bottom - visible));
+/** Where the clone's screen goes on one axis (its start, CSS px), so the cursor stays in view:
+ *  `content` px long on a display `full` px long, of which the first `visible` px are not under
+ *  the keyboard; the cursor `cursor` px from the screen's start; `prev` where it was. It moves
+ *  as little as it can: not at all while the cursor stays `margin` inside the view.
+ *
+ *  A screen shorter than the display sits in its middle, and moves (up) only as far as needed to
+ *  keep the cursor above the keyboard; a longer one (zoomed in) moves anywhere between its two
+ *  ends lining up with the view's. */
+export function followAxis(
+  prev: number,
+  cursor: number,
+  content: number,
+  visible: number,
+  full: number,
+  margin: number,
+): number {
+  const hi = content <= full ? (full - content) / 2 : 0;
+  const lo = Math.min(hi, visible - content);
+  let at = Math.min(hi, Math.max(lo, prev));
+  const c = at + cursor;
+  if (c < margin) at += margin - c;
+  else if (c > visible - margin) at -= c - (visible - margin);
+  return Math.min(hi, Math.max(lo, at));
 }

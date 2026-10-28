@@ -41,6 +41,8 @@ export function useRemote(
   box: RefObject<HTMLDivElement | null>,
   /** The monitor size this screen claims with the layout; undefined keeps the phone's size. */
   claimSize?: () => Size | undefined,
+  /** A pinch on the trackpad (the full screen's): the view's zoom changes by `factor`. */
+  onZoom?: (factor: number) => void,
 ) {
   const session = useRef<Session | null>(null);
   const [spec, setSpec] = useState<ViewSpec | null>(null);
@@ -105,6 +107,8 @@ export function useRemote(
   // click or a key in a desktop viewer window takes it back (`~/lib/layoutClaim.ts`)
   const sizeRef = useRef(claimSize);
   sizeRef.current = claimSize;
+  const zoomRef = useRef(onZoom);
+  zoomRef.current = onZoom;
   const claim = useRef(layoutClaimer("phone", () => sizeRef.current?.())).current;
   useEffect(() => {
     claim();
@@ -254,6 +258,9 @@ export function useRemote(
       case "scroll_end":
         send({ kind: "axis_continuous", dx: 0, dy: 0, flags: AXIS_FINGER | AXIS_FINISH });
         break;
+      case "zoom":
+        zoomRef.current?.(o.factor);
+        break;
       case "pad":
         break;
     }
@@ -270,9 +277,10 @@ export function useRemote(
   if (!keypad.current) {
     keypad.current = new Keypad((o) => (o.t === "pad" ? setPadMode(o.on) : out(o)), timer);
   }
-  /** A trackpad with no keys, for good (the whole screen of the other orientations). */
+  /** A trackpad with no keys, for good (the whole screen of the other orientations), where two
+   *  fingers also pinch to zoom the view. */
   const trackpad = useRef<Keypad | null>(null);
-  if (!trackpad.current) trackpad.current = new Keypad(out, timer, { alwaysPad: true });
+  if (!trackpad.current) trackpad.current = new Keypad(out, timer, { alwaysPad: true, pinch: true });
 
   const feed = (pad: Keypad, kind: TouchKind, id: number, key: Key | null, x: number, y: number) => {
     const t = performance.now();

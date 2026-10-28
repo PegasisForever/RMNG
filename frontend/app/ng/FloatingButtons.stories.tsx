@@ -23,6 +23,7 @@ const meta = {
     onPages: fn(),
     onKeyboard: fn(),
     onFit: fn(),
+    onFitSettings: fn(),
   },
 } satisfies Meta<typeof FloatingButtons>;
 
