@@ -22,6 +22,7 @@
 import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
 import { type HeldInput, freshInput, holdInput, letterbox } from "./input";
+import { clientLog } from "./clientLog";
 import { type Opus, openOpus } from "./opus";
 import {
   AUDIO_FRAME_MS,
@@ -62,6 +63,13 @@ const RECONNECT_MAX_MS = 1000;
  *  software decoder for the rest of the page's life. */
 const SOFTWARE_AFTER_ERRORS = 3;
 const ERROR_WINDOW_MS = 5000;
+/** Chunks in the decoder this long with no frame out and no chunk in: the decoder holds frames
+ *  until more come (Android's hardware decoders do), and on a still screen no more come. The
+ *  worker then takes the software decoder, or, where there is none or it holds frames too,
+ *  flushes the frames out each time the input stops (`checkHeld`). */
+const HELD_MS = 250;
+/** After a flush the next keyframe is asked for at most this often. */
+const KEY_ASK_MS = 500;
 /** A keyframe that finds more chunks than this waiting in the decoder resets the decoder and is
  *  decoded alone, so the picture catches up at once. */
 const KEY_RESET_BACKLOG = 6;
@@ -102,9 +110,19 @@ let waitKey = true;
 /** Decoder errors in the current run (errors less than ERROR_WINDOW_MS apart). */
 let errors = 0;
 let lastErrorAt = -Infinity;
-/** Set once the errors reach SOFTWARE_AFTER_ERRORS; never cleared. A decoder that decodes one
- *  keyframe and then fails again would otherwise never get here. */
+/** Set once the errors reach SOFTWARE_AFTER_ERRORS, or the decoder held frames; never cleared.
+ *  A decoder that decodes one keyframe and then fails again would otherwise never get here. */
 let software = false;
+/** When the last chunk went into the decoder and the last frame came out. */
+let lastIn = 0;
+let lastOut = 0;
+/** The decoder (the software one too, or there is none) holds frames: flush when input stops.
+ *  `flushing` while a flush runs; `flushed` until the keyframe it needs arrives, and when it
+ *  was last asked for. */
+let flushWhenStill = false;
+let flushing = false;
+let flushed = false;
+let keyAskedAt = -Infinity;
 
 /** The newest frame done on this socket (decoded, or dropped while waiting for a keyframe) and
  *  when; the last acknowledgement and when. */
@@ -170,6 +188,7 @@ function requestKeyframe() {
 function resetDecoder() {
   if (decoder && decoder.state !== "closed") decoder.close();
   decoder = new VideoDecoder({ output: onFrame, error: onDecoderError });
+  flushing = flushed = false;
   codec = "";
   description = null;
   inDecoder = [];
@@ -183,6 +202,7 @@ function onDecoderError(e: DOMException) {
   errors++;
   if (errors >= SOFTWARE_AFTER_ERRORS) software = true;
   console.warn(`decoder error ${errors}:`, e);
+  clientLog("viewer", `decoder error ${errors}${software ? " (software)" : ""}: ${e.message}`);
   resetDecoder();
   requestKeyframe();
 }
@@ -203,6 +223,58 @@ function configure(d: Uint8Array) {
   description = d;
 }
 
+/** Each ACK_MS: chunks held in the decoder with nothing in or out for HELD_MS. The first time,
+ *  the software decoder takes over, where the browser has one; after that (or with none) the
+ *  held frames are flushed out, and the next keyframe is waited for, as a flush requires. */
+function checkHeld() {
+  const now = performance.now();
+  if (flushing || decoder?.state !== "configured" || !inDecoder.length) return;
+  if (now - lastIn < HELD_MS || now - lastOut < HELD_MS) return;
+  if (!software && !flushWhenStill) {
+    const held = `decoder held ${inDecoder.length} frames ${Math.round(now - lastIn)} ms`;
+    void softwareDecodes().then((yes) => {
+      clientLog("viewer", `${held}: ${yes ? "software decoder" : "no software decoder, flush when still"}`);
+      if (yes) software = true;
+      else flushWhenStill = true;
+      if (yes) {
+        resetDecoder();
+        requestKeyframe();
+      } else flush();
+    });
+    // Not again while the answer is on its way
+    lastIn = now;
+    return;
+  }
+  if (!flushWhenStill) {
+    flushWhenStill = true;
+    clientLog("viewer", `the software decoder holds frames too: flush when still`);
+  }
+  flush();
+}
+
+/** Whether the browser has a software decoder for the stream. */
+async function softwareDecodes(): Promise<boolean> {
+  if (!codec || !description) return false;
+  try {
+    const s = await VideoDecoder.isConfigSupported({ codec, description, hardwareAcceleration: "prefer-software" });
+    return s.supported === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Get the frames the decoder holds out; the next chunk it takes must then be a keyframe. */
+function flush() {
+  const d = decoder!;
+  flushing = true;
+  waitKey = flushed = true;
+  d.flush()
+    .catch(() => {})
+    .finally(() => {
+      if (decoder === d) flushing = false;
+    });
+}
+
 function onVideo(buf: ArrayBuffer) {
   const h = parseVideoHeader(buf);
   const au = new Uint8Array(buf, VIDEO_HEADER_LEN);
@@ -215,8 +287,17 @@ function onVideo(buf: ArrayBuffer) {
   }
   // A frame dropped while waiting for a keyframe (or for a keyframe with an SPS) is done when
   // it arrives; a decoded one when the decoder outputs it, so the server sees a slow decoder.
-  if ((waitKey && !h.key) || !codec) return done(h.seq);
-  waitKey = false;
+  if ((waitKey && !h.key) || !codec) {
+    // A flush needs a keyframe after it: ask for one when the picture changes again
+    const now = performance.now();
+    if (flushed && now - keyAskedAt >= KEY_ASK_MS) {
+      keyAskedAt = now;
+      requestKeyframe();
+    }
+    return done(h.seq);
+  }
+  waitKey = flushed = false;
+  lastIn = performance.now();
   inDecoder.push({ stamp: ++stamp, seq: h.seq });
   decoder!.decode(
     new EncodedVideoChunk({
@@ -236,6 +317,7 @@ function seqOf(timestamp: number): number | undefined {
 }
 
 function onFrame(frame: VideoFrame) {
+  lastOut = performance.now();
   const seq = seqOf(frame.timestamp);
   if (seq !== undefined) done(seq);
   if (track) return toTrack(frame);
@@ -471,5 +553,8 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   if (m.track) startTrack();
   resetDecoder();
   connect();
-  setInterval(ack, ACK_MS);
+  setInterval(() => {
+    ack();
+    checkHeld();
+  }, ACK_MS);
 };

@@ -69,6 +69,7 @@ pub fn router(app: App) -> Router {
         .route("/api/hosts/:id/rebase", post(rebase))
         .route("/api/layout/activate", post(layout_activate))
         .route("/api/layout/device", post(layout_device))
+        .route("/api/client-log", post(client_log))
         .route("/api/delete", post(delete))
         .route("/api/notes/:id", get(notes_get).put(notes_save))
         .route("/api/upload", post(upload))
@@ -1223,6 +1224,26 @@ async fn layout_device(
         }
     }
     Json(serde_json::json!({ "ok": true, "changed": changed }))
+}
+
+#[derive(Deserialize)]
+struct ClientLogReq {
+    lines: Vec<String>,
+}
+
+/// The most lines one request writes, and the longest line, so a page cannot flood the log.
+const CLIENT_LOG_LINES: usize = 40;
+const CLIENT_LOG_CHARS: usize = 600;
+
+/// `POST /api/client-log`: lines from a browser (`viewer/clientLog.ts`) into this log, for what
+/// only the browser sees: a video decoder that holds frames, a touch gesture the trackpad did
+/// not take.
+async fn client_log(Json(req): Json<ClientLogReq>) -> StatusCode {
+    for line in req.lines.iter().take(CLIENT_LOG_LINES) {
+        let line: String = line.chars().take(CLIENT_LOG_CHARS).collect();
+        tracing::info!(target: "rmng_control_server::client", "{line}");
+    }
+    StatusCode::NO_CONTENT
 }
 
 // --- notes + uploads (side stores, not in ControlState) --------------------
