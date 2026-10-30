@@ -665,6 +665,10 @@ inherits it (there's no per-install control-server payload any more; see
   corrects the template's baked-in `RMNG_MONITORS` boot value before anyone opens the clone.
   Existing clones are not touched: each keeps the layout it was last viewed with until the
   operator switches to it.
+- **`/ng` is a shell** (`frontend/public/ng-shell.html`): a small page that holds the app
+  (`/ng/app`) in a frame and owns the fullscreen and the key lock. A server update reloads only
+  the frame, so a fullscreen window stays fullscreen. The shell has no build step and changes
+  rarely; a browser with no fullscreen (an iPhone) goes straight to `/ng/app`.
 - **Layouts** are each client's own (the Edit layout dialog, in the dashboard or on a long
   press of the `/ng` page's Fit; Fit itself gives a monitor its window's size). The client used last has its layout in force (`POST /api/layout/claim`): the selected
   clone's daemon gets `ServerMsg::SetMonitors` and live-swaps to a fresh Mutter session with

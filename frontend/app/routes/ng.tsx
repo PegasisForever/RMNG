@@ -1,11 +1,14 @@
-// `/ng`: the selected clone's screen, on a phone (the installed app: Add to Home Screen;
-// `public/manifest.webmanifest` opens it here) and on a desktop, with touch or with a mouse and
-// a keyboard (`~/ng/FullDesk.tsx`). `?monitor=N` shows monitor N of this browser's layout (a
-// desktop has one window per monitor); `?pages` shows only the pages, in a window of their own
-// (`~/ng/PagesWindow.tsx`). The update rules are in `~/ng/pwa.ts`.
+// `/ng/app`: the selected clone's screen, on a phone (the installed app: Add to Home Screen;
+// `public/manifest.webmanifest` opens `/ng`) and on a desktop, with touch or with a mouse and a
+// keyboard (`~/ng/FullDesk.tsx`). `/ng` is the shell that holds it in a frame
+// (`public/ng-shell.html`), or sends a browser with no fullscreen here. `?monitor=N` shows
+// monitor N of this browser's layout (a desktop has one window per monitor); `?pages` shows
+// only the pages, in a window of their own (`~/ng/PagesWindow.tsx`). The update rules are in
+// `~/ng/pwa.ts`.
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
+import { shellWindow } from "~/lib/host";
 import { FullDesk } from "~/ng/FullDesk";
 import { PagesWindow } from "~/ng/PagesWindow";
 import { attachPwa } from "~/ng/pwa";
@@ -22,9 +25,11 @@ const VIEWPORT =
 type Page = { size: [number, number]; bottom: number };
 
 function measure(probe: HTMLElement): Page {
+  // A frame has no home bar inset of its own: the shell's window has it
+  const shell = shellWindow();
   return {
     size: [window.innerWidth, window.innerHeight],
-    bottom: Math.round(parseFloat(getComputedStyle(probe).paddingBottom) || 0),
+    bottom: Math.round(shell ? shell.rmngShell.insetBottom() : parseFloat(getComputedStyle(probe).paddingBottom) || 0),
   };
 }
 
@@ -32,7 +37,9 @@ export default function Ng() {
   const [params, setParams] = useSearchParams();
   const monitor = Number(params.get("monitor") ?? 0) || 0;
   const pagesOnly = params.has("pages");
-  const setMonitor = (next: number) =>
+  const setMonitor = (next: number) => {
+    // The browser window's address too, so a reload of the shell shows the same monitor
+    shellWindow()?.history.replaceState(null, "", `/ng?monitor=${next}`);
     setParams(
       (p) => {
         p.set("monitor", String(next));
@@ -40,6 +47,7 @@ export default function Ng() {
       },
       { replace: true },
     );
+  };
   const probe = useRef<HTMLDivElement>(null);
   const [page, setPage] = useState<Page | null>(null);
   // Null until the effect has looked: the page has no `window` while it is built

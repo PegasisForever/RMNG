@@ -134,7 +134,14 @@ pub fn router(app: App) -> Router {
                 .precompressed_br()
                 .precompressed_gzip()
                 .fallback(index);
-            routes.fallback_service(SetResponseHeader::overriding(
+            // `/ng` is a small page that holds the app (`/ng/app`) in a frame and keeps the
+            // fullscreen, so a new build reloads only the frame (`frontend/public/ng-shell.html`)
+            let shell = SetResponseHeader::overriding(
+                ServeFile::new(dir.join("ng-shell.html")),
+                header::CACHE_CONTROL,
+                header::HeaderValue::from_static("no-cache"),
+            );
+            routes.route_service("/ng", shell).fallback_service(SetResponseHeader::overriding(
                 files,
                 header::CACHE_CONTROL,
                 |res: &Response<_>| {
@@ -3769,7 +3776,8 @@ PLAIN=plainvalue
     }
 
     /// Pages go back to the server on each load, so the installed /ng app opens the newest
-    /// build; code files keep normal caching. Needs a frontend build, so it passes without one.
+    /// build; code files keep normal caching. `/ng` is the shell around the app. Needs a
+    /// frontend build, so it passes without one.
     #[tokio::test]
     async fn pages_are_not_cached_and_code_files_are() {
         let Some(dir) = crate::assets::static_dir() else {
@@ -3786,9 +3794,15 @@ PLAIN=plainvalue
                 .map(|v| v.to_str().unwrap().to_string())
         };
 
-        for page in ["/", "/ng", "/viewer?monitor=0", "/index.html"] {
+        for page in ["/", "/ng", "/ng?monitor=1", "/ng/app", "/viewer?monitor=0", "/index.html"] {
             assert_eq!(cache(page.into()).await.as_deref(), Some("no-cache"), "{page}");
         }
+        // `/ng` is the shell, `/ng/app` the app in its frame
+        let body = |path: &'static str| async move {
+            reqwest::get(format!("http://{addr}{path}")).await.unwrap().text().await.unwrap()
+        };
+        assert!(body("/ng").await.contains("rmngShell"));
+        assert!(!body("/ng/app").await.contains("rmngShell"));
         let code = std::fs::read_dir(dir.join("assets"))
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())

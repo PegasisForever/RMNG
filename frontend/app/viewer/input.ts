@@ -11,6 +11,7 @@ import type { CursorMeta } from "../lib/wire/CursorMeta";
 import type { CursorShape } from "../lib/wire/CursorShape";
 import type { InputMsg } from "../lib/wire/InputMsg";
 import type { ViewMonitor } from "../lib/wire/ViewMonitor";
+import { hostWindow } from "../lib/host";
 import { evdevFor } from "./keycodes";
 
 /** Engage the automatic pointer lock after the remote cursor stays hidden this long. */
@@ -273,17 +274,23 @@ export function holdInput(held: HeldInput, msg: InputMsg, now: number): HeldInpu
   return out;
 }
 
-/** Chrome's Keyboard Lock API; not in TypeScript's DOM types. */
+/** Chrome's Keyboard Lock API, the browser window's (`~/lib/host.ts`); not in TypeScript's DOM
+ *  types. */
 const keyboard = () =>
-  (navigator as Navigator & { keyboard?: { lock(): Promise<void>; unlock(): void } }).keyboard;
+  (hostWindow().navigator as Navigator & { keyboard?: { lock(): Promise<void>; unlock(): void } }).keyboard;
+
+/** The document whose fullscreen this page uses: the /ng shell's around it, or its own. */
+const fullscreenDoc = () => hostWindow().document;
 
 /** Fullscreen on or off, on the screen the window is on. The page's own fullscreen hides
  *  the browser's address bar, which macOS fullscreen (the green button) keeps. A browser
  *  without Keyboard Lock is asked for `keyboardLock: "browser"` (Safari 26.4, Firefox 156): for
  *  as long as the fullscreen lasts, Esc and the browser's own shortcuts go to the clone, and a
  *  held Esc leaves, as with Chrome's Keyboard Lock. A browser that does not know the option
- *  ignores it. */
+ *  ignores it. In the /ng shell's frame, the shell's page goes fullscreen, so a reload of the
+ *  frame keeps it. */
 export function toggleFullscreen() {
+  const document = fullscreenDoc();
   if (document.fullscreenElement) void document.exitFullscreen();
   else {
     const options = keyboard() ? undefined : { keyboardLock: "browser" };
@@ -665,7 +672,7 @@ export function attachInput(o: InputOptions): Input {
   };
   // Keyboard Lock only works in fullscreen, so take it on entry and give it back on exit.
   const onFullscreen = () => {
-    if (document.fullscreenElement) void keyboard()?.lock();
+    if (fullscreenDoc().fullscreenElement) void keyboard()?.lock();
     else keyboard()?.unlock();
   };
 
@@ -686,10 +693,10 @@ export function attachInput(o: InputOptions): Input {
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("pointerlockchange", onLockChange);
   document.addEventListener("pointerlockerror", onLockError);
-  document.addEventListener("fullscreenchange", onFullscreen);
+  fullscreenDoc().addEventListener("fullscreenchange", onFullscreen);
   window.addEventListener("paste", onPaste);
   // Attached while the page is fullscreen already: the keys are locked from now
-  if (document.fullscreenElement) void keyboard()?.lock();
+  if (fullscreenDoc().fullscreenElement) void keyboard()?.lock();
   const timer = setInterval(tick, 50);
   const resize = new ResizeObserver(([entry]) => {
     // Safari has no device-pixel box: there it is the CSS box at the device pixel ratio.
@@ -771,7 +778,7 @@ export function attachInput(o: InputOptions): Input {
       document.removeEventListener("visibilitychange", onVisibility);
       document.removeEventListener("pointerlockchange", onLockChange);
       document.removeEventListener("pointerlockerror", onLockError);
-      document.removeEventListener("fullscreenchange", onFullscreen);
+      fullscreenDoc().removeEventListener("fullscreenchange", onFullscreen);
       window.removeEventListener("paste", onPaste);
       if (locked()) document.exitPointerLock();
     },

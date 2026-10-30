@@ -26,6 +26,10 @@
 //
 // Where the browser can open windows, the pages can move to a window of their own (`?pages`).
 //
+// It runs in the frame of the /ng shell (`public/ng-shell.html`) where the browser has
+// fullscreen: the fullscreen, the key lock, the window's name and address are the shell's
+// (`~/lib/host.ts`), so a reload onto a new build keeps them.
+//
 // The clone's screen shows at the pixel scale in the middle (smaller only where it does not
 // fit), not stretched. This browser's layout is in force while it is in use: a window opens,
 // comes to the front, or is touched or clicked.
@@ -36,6 +40,7 @@ import { type PointerEvent, useEffect, useRef, useState } from "react";
 import { LayoutEditorContainer } from "~/components/LayoutEditorContainer";
 import { type BrowserLayout, clientKind, ensureLayout, readLayout, saveLayout } from "~/lib/clientLayout";
 import { resize } from "~/lib/monitorLayout";
+import { hostWindow } from "~/lib/host";
 import { useViewerChannel } from "~/lib/useViewerChannel";
 import { toggleFullscreen } from "~/viewer/input";
 
@@ -114,11 +119,13 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
   const [fullscreen, setFullscreen] = useState<boolean | null>(null);
   useEffect(() => {
-    if (!document.fullscreenEnabled) return;
-    const on = () => setFullscreen(document.fullscreenElement !== null);
+    // The shell's fullscreen, when this page is in its frame (`~/lib/host.ts`)
+    const doc = hostWindow().document;
+    if (!doc.fullscreenEnabled) return;
+    const on = () => setFullscreen(doc.fullscreenElement !== null);
     on();
-    document.addEventListener("fullscreenchange", on);
-    return () => document.removeEventListener("fullscreenchange", on);
+    doc.addEventListener("fullscreenchange", on);
+    return () => doc.removeEventListener("fullscreenchange", on);
   }, []);
 
   // The keyboard: the display's width; its keys square, no taller than KEYBOARD_PART of the
@@ -189,7 +196,9 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
 
   // The Edit layout dialog finds this window by its name and its number
   useEffect(() => {
-    if (windows) window.name = `rmng-viewer-${monitor}`;
+    if (windows) hostWindow().name = `rmng-viewer-${monitor}`;
+    // Several windows: each says its monitor in its title
+    hostWindow().document.title = windows && monitor > 0 ? `RMNG monitor ${monitor}` : "RMNG";
   }, [windows, monitor]);
   const identify = useViewerChannel(
     monitor,
@@ -198,7 +207,7 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
     (next) => {
       if (next !== null) return onMonitor(next);
       // Its monitor was removed: the window closes, where the page opened it
-      window.close();
+      hostWindow().close();
       setTimeout(() => onMonitor(0), 300);
     },
   );
@@ -314,7 +323,7 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
   const popOut = () => {
     const win = window.open("", PAGES_WINDOW, PAGES_WINDOW_FEATURES);
     if (!win) return;
-    if (win.location.href === "about:blank") win.location.replace("/ng?pages");
+    if (win.location.href === "about:blank") win.location.replace("/ng/app?pages");
     win.focus();
     popout.current = win;
     setPages(false);

@@ -17,7 +17,7 @@ type Pages = {
   "/viewer": {
     params: {};
   };
-  "/ng": {
+  "/ng/app": {
     params: {};
   };
 };
@@ -25,7 +25,7 @@ type Pages = {
 type RouteFiles = {
   "root.tsx": {
     id: "root";
-    page: "/" | "/viewer" | "/ng";
+    page: "/" | "/viewer" | "/ng/app";
   };
   "routes/_index.tsx": {
     id: "routes/_index";
@@ -37,7 +37,7 @@ type RouteFiles = {
   };
   "routes/ng.tsx": {
     id: "routes/ng";
-    page: "/ng";
+    page: "/ng/app";
   };
 };
 
