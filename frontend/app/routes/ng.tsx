@@ -11,14 +11,6 @@ export function meta() {
   return [{ title: "RMNG" }];
 }
 
-/** The unfolded screen, held upright, in CSS px (a screenshot is 2007 × 2853 at 3×). */
-const SCREEN = { width: 669, height: 951 };
-
-/** The page size iOS gives the installed app on that screen: 21 px short at the bottom until
- *  the document is as tall as the screen (see the effect below), then the whole screen. Folded
- *  the page is 466 × 657; unfolded and flat, 951 × 648. */
-const PAGE_HEIGHTS = [930, SCREEN.height];
-
 /** The page runs under the clock bar and the home bar, and cannot be zoomed. */
 const VIEWPORT =
   "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover";
@@ -31,9 +23,6 @@ function measure(probe: HTMLElement): Page {
     bottom: Math.round(parseFloat(getComputedStyle(probe).paddingBottom) || 0),
   };
 }
-
-/** Whether the page is the unfolded iPhone Duo held upright (then it gets the whole screen). */
-const fits = ([w, h]: [number, number]) => w === SCREEN.width && PAGE_HEIGHTS.includes(h);
 
 export default function Ng() {
   const probe = useRef<HTMLDivElement>(null);
@@ -86,15 +75,10 @@ export default function Ng() {
     };
   }, []);
 
-  const ok = page !== null && fits(page.size);
   const message = secure === false ? "This page is not HTTPS: open it at the server's HTTPS address." : null;
 
   return (
-    // Sized to the screen, not to the page: the page can be 21 px short (PAGE_HEIGHTS)
-    <div
-      className="fixed left-0 top-0 touch-none select-none overflow-hidden bg-black text-white"
-      style={ok ? SCREEN : { width: "100%", height: "100%" }}
-    >
+    <div className="fixed inset-0 touch-none select-none overflow-hidden bg-black text-white">
       <div ref={probe} className="pointer-events-none absolute inset-0 pb-[env(safe-area-inset-bottom)]" />
       {message && page ? (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-8 text-center text-slate-500">
@@ -105,11 +89,7 @@ export default function Ng() {
         </div>
       ) : null}
       {secure && page ? (
-        <FullDesk
-          width={ok ? SCREEN.width : page.size[0]}
-          height={ok ? SCREEN.height : page.size[1]}
-          bottom={page.bottom}
-        />
+        <FullDesk width={page.size[0]} height={page.size[1]} bottom={page.bottom} />
       ) : null}
     </div>
   );

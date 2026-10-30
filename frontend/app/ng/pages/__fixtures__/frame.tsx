@@ -1,4 +1,4 @@
-// The space a /ng page has on the iPhone Duo (the keyboard's place: 661 × 334 CSS px), in the
+// A small space for a /ng page (661 × 334 CSS px), in the
 // phone app's dark greys, for the page stories.
 import type { Decorator } from "@storybook/react-vite";
 

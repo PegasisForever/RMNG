@@ -1,20 +1,22 @@
 import { describe, expect, test } from "bun:test";
 
-import { GAP, KEY_ASPECT, followAxis, keysLayout, phoneMonitorSize, screenFit } from "./geometry";
+import { GAP, KEY_ASPECT, followAxis, naturalKeysHeight, keysLayout, phoneMonitorSize, screenFit } from "./geometry";
 
 describe("keysLayout", () => {
-  // The unfolded iPhone Duo, upright: 669 px wide, a 34 px home bar
+  // A large phone, upright: 669 px wide, a 34 px home bar
   const k = keysLayout(669, 428, 34);
   const full = k.pitch - GAP;
 
-  test("on the Duo the keys take the width", () => {
+  test("on a 669 px wide phone the keys take the width", () => {
     expect(k.keys.width).toBeCloseTo(669 - 8, 5);
     expect(full).toBeGreaterThan(53);
   });
 
-  test("an area with room keeps every row square", () => {
-    const t = keysLayout(669, 444, 34);
-    expect(t.rowHeights.every((h) => Math.abs(h - full * KEY_ASPECT) < 1e-9)).toBe(true);
+  test("the natural height makes every row square; a taller area every row taller alike", () => {
+    const n = keysLayout(669, naturalKeysHeight(669, 34), 34);
+    expect(n.rowHeights.every((h) => Math.abs(h - full * KEY_ASPECT) < 1e-9)).toBe(true);
+    const t = keysLayout(669, naturalKeysHeight(669, 34) + 60, 34);
+    expect(t.rowHeights.every((h) => Math.abs(h - (full + 10)) < 1e-9)).toBe(true);
   });
 
   test("a shorter area: the four lower rows stay square, the symbol and number rows give way", () => {
@@ -39,7 +41,7 @@ describe("keysLayout", () => {
 });
 
 describe("screenFit", () => {
-  test("the screen area of the iPhone Duo layout shows the monitor at exactly 2×", () => {
+  test("a 1002 × 808 monitor in a 669 × 539 area at 3× shows at exactly 2×", () => {
     const f = screenFit(669, 539, 1002, 808, 3);
     expect(f.scale).toBe(2);
     expect(f.width).toBeCloseTo(668, 5);
@@ -68,14 +70,14 @@ describe("screenFit", () => {
 });
 
 describe("phoneMonitorSize", () => {
-  test("2 device px per monitor px, even: the Duo upright is the Duo layout's size, sideways the same scale", () => {
+  test("2 device px per monitor px, even, upright and sideways", () => {
     expect(phoneMonitorSize(669, 539, 3)).toEqual({ width: 1002, height: 808 });
     expect(phoneMonitorSize(951, 648, 3)).toEqual({ width: 1426, height: 972 });
   });
 });
 
 describe("screenFit with a largest scale", () => {
-  test("the Duo layout's monitor sideways stays at 2x, in the middle, not stretched to fill", () => {
+  test("a small monitor stays at 2x, in the middle, not stretched to fill", () => {
     const f = screenFit(951, 648, 1002, 808, 3, 2);
     expect(f.scale).toBe(2);
     expect(f.width).toBeCloseTo(668, 0);

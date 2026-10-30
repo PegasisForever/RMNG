@@ -2,12 +2,10 @@
 // the container holds a `SettingsDraft` in state and the View renders one, so both sides
 // agree on what "the form" is, and a story can build one with `makeSettingsDraft`.
 //
-// Three rules live here because they are the ones a many-way component split endangers, and
-// none of them belongs to any single section:
+// Two rules live here because they are the ones a many-way component split endangers, and
+// neither belongs to any single section:
 //
-//   - `settingsDraftFrom` seeds the form from the server's redacted config, including the
-//     one place a blank config becomes a visible default (a rig with no layout preset gets a
-//     1080p one to edit rather than an empty list).
+//   - `settingsDraftFrom` seeds the form from the server's redacted config.
 //   - `settingsPatch` decides what a save actually sends: what is trimmed, what is dropped
 //     for being half-typed, what is deduped, and the one field that is only sent before
 //     first-run setup finishes.
@@ -15,31 +13,10 @@
 // (Cosmetic account ordering used to be a third rule here; it moved to `accountOrder`,
 // alongside the store and the sort it belongs with.)
 
-import type { ScrollMode } from "~/lib/wire/ScrollMode";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { GroupMember } from "~/lib/wire/GroupMember";
 import type { JudgeProvider } from "~/lib/wire/JudgeProvider";
 import type { SshConfig } from "~/lib/wire/SshConfig";
-
-/** One monitor in a layout preset. Same shape as the wire `MonitorSpec`; named separately
- *  because the editor writes it in place. */
-export interface MonitorDraft {
-  width: number;
-  height: number;
-  x: number;
-  y: number;
-  primary: boolean;
-}
-
-/** A named monitor arrangement, as the form edits it. */
-export interface LayoutPresetDraft {
-  name: string;
-  monitors: MonitorDraft[];
-  /** How the viewer reads wheel events while this layout is active. */
-  scrollMode: ScrollMode;
-  /** Scroll distance in percent. */
-  scrollSpeed: number;
-}
 
 /** A named account pool: a name plus the member rows in its grid. One row per
  *  email: the row's scope tag (both/Claude/Codex) says which side it serves. */
@@ -75,7 +52,6 @@ export interface PresetDraft {
 
 /** Everything the settings form can edit, as one model. */
 export interface SettingsDraft {
-  layoutPresets: LayoutPresetDraft[];
   presets: PresetDraft[];
   hostnamePrefix: string;
   cloneCpus: number;
@@ -90,17 +66,6 @@ export interface SettingsDraft {
   judge: { provider: JudgeProvider; geminiKey: string };
   /** The chat panel's assistant (a pi-web origin) and this server's address as it sees it. */
   assistant: { url: string; serverUrl: string };
-}
-
-/** The layout preset a rig with none configured is given to edit. Offering an empty list
- *  would leave the operator with nothing to type into. */
-export function newLayoutPreset(name = ""): LayoutPresetDraft {
-  return {
-    name,
-    monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
-    scrollMode: "auto",
-    scrollSpeed: 100,
-  };
 }
 
 /** A blank preset row. The caller passes the pool it should point at (the first pool —
@@ -125,21 +90,6 @@ export function newGroup(): GroupDraft {
   return { name: "", accounts: [] };
 }
 
-/** One monitor as a save sends it: a size of at least 1, an offset of at least 0.
- *
- *  The number inputs accept anything a keyboard can produce, including a blank field that
- *  reads back as 0, and a monitor 0 pixels wide is not a monitor. Shared with the setup
- *  wizard, which clamps the arrangement it edits by exactly this rule. */
-export function monitorPatch(m: MonitorDraft): MonitorDraft {
-  return {
-    width: Math.max(1, m.width),
-    height: Math.max(1, m.height),
-    x: Math.max(0, m.x),
-    y: Math.max(0, m.y),
-    primary: m.primary,
-  };
-}
-
 /** Seed the form from the server's redacted config.
  *
  *  Every array is copied down to its members. The editors below replace rather than mutate,
@@ -150,14 +100,6 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
   // first pool (there is always at least one). `"none"` (any group) survives as-is.
   const fallback = c.groups[0]?.name.trim() ?? "none";
   return {
-    layoutPresets: c.layoutPresets.length
-      ? c.layoutPresets.map((p) => ({
-          name: p.name,
-          monitors: p.monitors.map((m) => ({ ...m })),
-          scrollMode: p.scrollMode,
-          scrollSpeed: p.scrollSpeed,
-        }))
-      : [newLayoutPreset("Default")],
     presets: c.presets.map((p) => ({
       name: p.name,
       labels: p.labels.join(", "),
@@ -245,14 +187,6 @@ export function settingsPatch(draft: SettingsDraft): Record<string, unknown> {
   // form) falls back to the first pool. `"none"` (any group) is a real choice, not blank.
   const fallback = groups[0]?.name ?? "none";
   return {
-    layoutPresets: draft.layoutPresets
-      .filter((p) => p.name.trim())
-      .map((p) => ({
-        name: p.name.trim(),
-        monitors: p.monitors.map(monitorPatch),
-        scrollMode: p.scrollMode,
-        scrollSpeed: p.scrollSpeed || 100,
-      })),
     docker: {
       hostnamePrefix: draft.hostnamePrefix,
       cloneCpus: draft.cloneCpus,

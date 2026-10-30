@@ -204,9 +204,9 @@ function makeRail() {
     now: accountsNow,
     lxcStats,
     operations: [],
-    presetNames: ["Default", "Focus"],
-    activeLayout: "Default",
-    onActivateLayout: fn(),
+    monitorCount: 2,
+    elsewhere: null,
+    onEditLayout: fn(),
     onOpenViewer: fn(),
     onOpenSettings: toSettings,
     onImportAccount: toImportAccount,
@@ -330,10 +330,9 @@ export const ActiveJobs: Story = {
   },
 };
 
-/** The iPhone Duo has the clones with its own layout: the rail says so under the layout
- *  picker, which keeps the operator's own choice. */
+/** The phone has the clones, with its own layout: the rail says so under Edit layout. */
 export const PhoneHasTheClones: Story = {
-  args: { rail: { ...makeRail(), phoneLayout: true }, board: makeBoard() },
+  args: { rail: { ...makeRail(), elsewhere: "phone" }, board: makeBoard() },
 };
 
 /** A ticket has the side panel, as one card instead of two. The clone stays selected

@@ -6,7 +6,7 @@ import { SHIFTS } from "./keyboard";
 import type { DictationState } from "./dictation";
 import type { ModState } from "./modifiers";
 
-/** The keyboard on the unfolded iPhone Duo, upright: 669 px wide, 45% of 951 px high, a 34 px
+/** The keyboard on a large phone, upright: 669 px wide, 45% of 951 px high, a 34 px
  *  home bar. The container tells taps from pointer gestures, so here a key only shows that it is
  *  touched. */
 function Frame(args: {

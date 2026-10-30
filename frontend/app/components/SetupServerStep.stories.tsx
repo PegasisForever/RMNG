@@ -16,8 +16,6 @@ const meta = {
   component: SetupServerStep,
   parameters: { layout: "centered" },
   args: {
-    // The seeded form, rebuilt per story: the monitors array is what the editor replaces on
-    // every edit, so one draft behind every story is how an edit in one leaks into the next.
     draft: makeSetupDraft(),
     onDraftChange: fn(),
   },
@@ -31,7 +29,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** The normal first run: a two-monitor arrangement carried over from the config. */
+/** The normal first run. */
 export const Default: Story = { args: { draft: makeSetupDraft() } };
 
 /** No prefix typed, so the example hostname under the field falls back to the one the server
@@ -40,18 +38,7 @@ export const BlankPrefix: Story = {
   args: { draft: makeSetupDraft({ hostnamePrefix: "" }) },
 };
 
-/** A host with one screen. The preview draws a single box and Remove is dead: an arrangement
- *  with no monitors is not one a clone can boot. */
-export const SingleMonitor: Story = {
-  args: {
-    draft: makeSetupDraft({
-      monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
-    }),
-  },
-};
-
-/** The step wired to local state instead of the wizard: every field really edits and the
- *  monitor editor really rearranges the preview. */
+/** The step wired to local state instead of the wizard: every field really edits. */
 export const Interactive: Story = {
   args: { draft: makeSetupDraft() },
   render: function Render(args) {

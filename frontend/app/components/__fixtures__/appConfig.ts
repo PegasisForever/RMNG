@@ -19,18 +19,6 @@ export function makeAppConfig(
 ): AppConfigRedacted {
   return {
     setupComplete: true,
-    layoutPresets: [
-      {
-        name: "Default",
-        monitors: [
-          { width: 2560, height: 1440, x: 0, y: 0, primary: true },
-          { width: 1920, height: 1080, x: 2560, y: 0, primary: false },
-        ],
-        scrollMode: "auto",
-        scrollSpeed: 100,
-      },
-    ],
-    activeLayout: "Default",
     docker: {
       hostnamePrefix: "pega-",
       cloneCpus: 16,
@@ -72,10 +60,7 @@ export function makeSettingsDraft(
 }
 
 /** The first-run wizard's form, seeded from the config above through the same function the
- *  wizard's container uses.
- *
- *  Freshly built, monitors included: the Server step replaces what it is given, but
- *  every story that drags a monitor would otherwise be dragging the next story's too. */
+ *  wizard's container uses. */
 export function makeSetupDraft(
   overrides: Partial<SetupDraft> = {},
 ): SetupDraft {

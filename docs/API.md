@@ -44,7 +44,7 @@ disk), the JSON control API, two SSE streams, and the browser viewer's WebSocket
 | POST | `/api/hosts/:id/archive` | Stop and retain a managed clone | 200 `Operation` |
 | POST | `/api/hosts/:id/unarchive` | Restart a retained archived clone | 200 `Operation` |
 | GET | `/api/self` | The calling clone's own record, by the address it called from | 200 `Clone` / 404 |
-| POST | `/api/layout/activate` | Make a layout preset active and live-apply it to the selected clone | 200 `{ok,applied,errors}` |
+| POST | `/api/layout/claim` | Put the sending client's own monitor layout in force; live-apply it to the selected clone | 200 `{ok,changed}` |
 | POST | `/api/images/prebuild` | Warm a preset image without creating (build posted Dockerfile on miss) | 200 `{ok,op}` |
 | GET/PUT | `/api/notes/:id` | Fetch or save a clone's rich-text notes | 200 `[block]` / 204 |
 | POST | `/api/upload` | Upload an image (multipart) | 200 `{url}` |
@@ -112,8 +112,7 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 | Field | Type | Notes |
 | --- | --- | --- |
 | `selected` | `string?` | clone id shown in the viewer |
-| `activeLayout` | `string` | name of the active layout preset, mirrored from config so the board rail's switcher updates over SSE |
-| `layoutPresetNames` | `string[]` | names of all layout presets, in config order — drives the board rail's preset buttons |
+| `layout` | `ClientLayout \| null` | the monitor layout in force: the last one a client sent with `POST /api/layout/claim` (`{client, label, monitors, scrollMode, scrollSpeed}`); null until one did (the clones then have two 2560×1440 monitors) |
 | `hosts` | `Clone[]` | all registered clones (managed + unmanaged) |
 | `boardColumns` | `BoardColumn[]` | the board's columns, left to right — see [below](#boardcolumns) |
 | `operations` | `Operation[]` | in-flight + recent clone/delete/archive/unarchive/pull/commit/update jobs |
@@ -534,10 +533,10 @@ which is why the comparison above is stated as a gap against an age rather than 
 Set `selected` (or clear with `null`). Returns the updated `ControlState`. The media plane
 sends every open viewer window the newly selected clone (a fresh `ViewSpec` and keyframe).
 
-A clone coming on screen also gets a `ServerMsg::SetMonitors` carrying the active layout
-preset, which is where a preset activated while the operator was elsewhere reaches it. The
-clone's session holder ignores a layout equal to the one it already holds, so a clone already
-on the active preset does not move a window. Deleting or archiving the selected clone moves
+A clone coming on screen also gets a `ServerMsg::SetMonitors` carrying the layout in force,
+which is where a layout claimed while the operator was elsewhere reaches it. The clone's
+session holder ignores a layout equal to the one it already holds, so a clone already on that
+layout does not move a window. Deleting or archiving the selected clone moves
 the selection on its own, and pushes the layout to the clone it lands on the same way.
 
 ### `PUT /api/board` — body `{ "columns": BoardColumn[] }`
@@ -698,26 +697,29 @@ on the first probe.
 Nothing here is fatal. A step that fails is logged, left unstamped, and picked up by its loop,
 which is what the loops were for.
 
-### `POST /api/layout/activate` — body `{ "name": string }`
+### `POST /api/layout/claim` — body `ClientLayout`
 
-Make the named layout preset the active one and live-apply it to the clone on screen. No
-session restart, no app loss. Validates `name` against `config.layoutPresets` (`400` if
-unknown), persists it as `config.activeLayout`, mirrors `activeLayout` +
-`layoutPresetNames` into `ControlState` (SSE), then pushes `ServerMsg::SetMonitors` with the
-preset's monitors to the selected clone's daemon over the clone socket. That daemon does a
-make-before-break session swap (builds a fresh Mutter session with the new monitors, switches
-capture + input to it, stops the old one), so running apps never close.
+`{ "client": string, "label": string, "monitors": MonitorSpec[], "scrollMode": "auto" | "trackpad" | "mouse", "scrollSpeed": number }`
 
-Every other clone keeps the layout it was last viewed with and takes the new one on the switch
-to it, through `POST /api/activate`. Rebuilding the whole fleet's Mutter sessions at once
-stalls the board for as long as the slowest clone takes, and only the visible clone's layout
-is being looked at.
+The server keeps no list of layouts. Each client keeps its own layout in its browser storage
+(the desktop browser: up to 8 monitors, edited in the dashboard's Edit layout dialog; the `/ng`
+phone page: one monitor) and sends it on each real action of the operator in it (a touch, a
+click, a key, a wheel, the mouse moving, the window opening or coming to the front), only while
+its window is in the foreground. The last layout sent is in force: it is stored as
+`ControlState.layout` and its scroll settings go to every viewer window (`scroll`). `client` is
+a random id the client keeps; `label` says what it is (`desktop`, `phone`).
 
-Returns `{ "ok": bool, "applied": string[], "errors": string[] }`. `ok` is currently always
-`true` (the activation itself succeeded; the push result is in `applied`/`errors`). Both lists
-hold at most the selected clone, and both are empty when nothing is selected or the selection
-has no connected daemon (headless, archived, still booting). `errors` captures an immediate
-socket-send failure only (there is no ack).
+The layout is made sane first: 1 to 8 monitors, each side even and in 320–8192, monitor 0 the
+only primary one, the scroll speed in −1000–1000. `400` with no monitor or no client id.
+
+When the monitors change, the selected clone's daemon gets `ServerMsg::SetMonitors` (a
+make-before-break session swap, so running apps never close). Every other clone keeps the
+layout it was last viewed with and takes the new one on the switch to it, through
+`POST /api/activate`. Returns `{ "ok": true, "changed": bool }`: whether the monitors changed.
+
+On the first boot after the upgrade that dropped the layout list, the old config's active
+preset becomes the layout in force, labelled `desktop`, and the first desktop browser takes it
+as its own.
 
 ### `POST /api/delete` — body `{ "id": string }`
 
@@ -950,7 +952,7 @@ returns an empty `text` rather than an error. An unknown clone or session is a 4
 The full config, preset Linear keys included as `linearKey: string`. The browser lists Linear
 issues itself, so this is where it gets a key; the server answers only on a Tailscale-only
 network, which is what makes that acceptable.
-Everything else is returned verbatim — `layoutPresets`/`activeLayout`, the `docker` block
+Everything else is returned verbatim — the `docker` block
 (`socket`/`subnet`/`hostnamePrefix`/`cloneCpus`/`cloneMemoryMb`; no secret — the local daemon
 socket needs none), `setupComplete`,
 `agentPlaybook` (the person's ticket procedure for the assistant, seeded with the shipped default and written into
@@ -975,11 +977,6 @@ posts the full list, so an omitted pool is a deletion and `[]` normalizes to one
 leaves unclaimed (an account in zero groups is removed; the save fails 400 if a clone pins it).
 `setupComplete` is a one-way latch. The data directory, the clone socket and the `rmng`
 subnet are constants in `wire::config`, not config fields.
-
-An edit that changes `effectiveMonitors()`, whether it moves the active preset's geometry or
-names a different `activeLayout`, pushes `ServerMsg::SetMonitors` to the selected clone, the
-same one-clone push `POST /api/layout/activate` does. Every other clone takes the new geometry
-when the operator switches to it.
 
 ### `POST /api/config/test` (body `{ "what", "value"?, "model"? }`) → `{ ok, message }`
 

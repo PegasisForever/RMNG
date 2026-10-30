@@ -41,8 +41,8 @@ body {
    than the screen, iOS gives the page a viewport short by up to the clock bar's height and
    paints nothing below it (WebKit bug 301108; the fix from frappe-ui#1284). A document as tall
    as the screen gets all of it. Here in the stylesheet, so it holds from the first layout: set
-   from /ng's code after the page loaded, the first open kept the short page (669 × 869 on the
-   iPhone Duo) until the phone was turned. */
+   from /ng's code after the page loaded, the first open kept the short page until the phone was
+   turned. */
 @media (display-mode: standalone), (display-mode: fullscreen) {
   html {
     min-height: min(100lvh, calc(100% + env(safe-area-inset-top)));

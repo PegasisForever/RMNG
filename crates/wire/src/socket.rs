@@ -203,7 +203,7 @@ pub struct Hello {
     /// a preset change from rebuilding every clone's session at once. That rule protects
     /// window positions, and a session this new has none: the holder came up on whatever it
     /// remembered, or on the built-in single monitor when it remembered nothing. So the server
-    /// pushes the active preset here instead of leaving the clone on a layout nobody chose.
+    /// pushes the layout in force here instead of leaving the clone on a layout nobody chose.
     ///
     /// Defaults to false so a daemon older than this field reads as "the holder was already
     /// running", which is the case that must not trigger a push.
@@ -264,7 +264,7 @@ pub enum ServerMsg {
     /// Apply a new monitor layout live (no session restart, apps stay open). The daemon
     /// rebuilds a fresh Mutter session with this set, switches capture + input to it, then
     /// stops the old session (make-before-break). Sent on the daemon's `Hello` and on every
-    /// `POST /api/layout/activate`.
+    /// `POST /api/layout/claim`.
     SetMonitors {
         monitors: Vec<crate::control::MonitorSpec>,
     },

@@ -86,6 +86,11 @@ impl StateStore {
         self.inner.read().unwrap().state.selected.clone()
     }
 
+    /// Cheap read of just the layout in force (hot path: every state change re-checks it).
+    pub fn layout(&self) -> Option<wire::ClientLayout> {
+        self.inner.read().unwrap().state.layout.clone()
+    }
+
     /// A new SSE subscriber: the current snapshot + a live receiver.
     pub fn subscribe(&self) -> (String, broadcast::Receiver<String>) {
         let inner = self.inner.read().unwrap();

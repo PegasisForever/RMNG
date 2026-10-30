@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { liftFor } from "./systemKeyboard";
 
-// The Duo: the page ends at the home bar's top, 951 − 34
+// A phone 951 px high: the page ends at the home bar's top, 951 − 34
 const BOTTOM = 917;
 
 describe("liftFor", () => {

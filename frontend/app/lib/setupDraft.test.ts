@@ -1,11 +1,9 @@
-// The first-run wizard's seed and save rules. Two of them are the reason this module is not
-// `settingsDraft.ts`: each step patches only the fields that step edits, and the step-2 patch
-// round-trips the layout presets the wizard never showed rather than rewriting them the way a
-// full settings save does. Getting either wrong silently corrupts a fresh install.
+// The first-run wizard's seed and save rules. The reason this module is not `settingsDraft.ts`:
+// each step patches only the fields that step edits. Getting that wrong silently corrupts a
+// fresh install.
 import { expect, test } from "bun:test";
 
 import {
-  layoutPresetsPatch,
   nextDisabled,
   serverPatch,
   setupDraftFrom,
@@ -15,15 +13,6 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
     setupComplete: false,
-    layoutPresets: [
-      {
-        name: "Default",
-        monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }],
-        scrollMode: "auto",
-        scrollSpeed: 100,
-      },
-    ],
-    activeLayout: "Default",
     docker: {
       hostnamePrefix: "pega-",
       cloneCpus: 16,
@@ -45,113 +34,15 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
 
 /** The step-2 patch, narrowed to the shape the tests read. The patch functions return
  *  `unknown` because they are request bodies, not values this app consumes. */
-type ServerPatch = {
-  docker: Record<string, unknown>;
-  layoutPresets: { name: string; monitors: { width: number; x: number }[] }[];
-};
-
-test("a rig with no layout preset gets one 1080p monitor to edit", () => {
-  expect(setupDraftFrom(config({ layoutPresets: [] })).monitors).toEqual([
-    { width: 1920, height: 1080, x: 0, y: 0, primary: true },
-  ]);
-});
-
-test("the seed copies the monitors rather than aliasing the config's", () => {
-  const c = config();
-  const draft = setupDraftFrom(c);
-  draft.monitors[0].width = 1;
-  expect(c.layoutPresets[0].monitors[0].width).toBe(2560);
-});
-
-test("the seed follows activeLayout, not the first preset", () => {
-  const c = config({
-    activeLayout: "Wide",
-    layoutPresets: [
-      {
-        name: "Default",
-        monitors: [{ width: 1280, height: 720, x: 0, y: 0, primary: true }],
-        scrollMode: "auto",
-        scrollSpeed: 100,
-      },
-      {
-        name: "Wide",
-        monitors: [{ width: 3840, height: 2160, x: 0, y: 0, primary: true }],
-        scrollMode: "auto",
-        scrollSpeed: 100,
-      },
-    ],
-  });
-  expect(setupDraftFrom(c).monitors[0].width).toBe(3840);
-});
+type ServerPatch = { docker: Record<string, unknown> };
 
 test("step 2 patches only the three docker fields it edits", () => {
-  const patch = serverPatch(setupDraftFrom(config()), config()) as ServerPatch;
+  const patch = serverPatch(setupDraftFrom(config())) as ServerPatch;
   expect(Object.keys(patch.docker).sort()).toEqual([
     "cloneCpus",
     "cloneMemoryMb",
     "hostnamePrefix",
   ]);
-});
-
-test("step 2 clamps the edited arrangement", () => {
-  const draft = {
-    ...setupDraftFrom(config()),
-    monitors: [{ width: 0, height: 0, x: -5, y: -5, primary: true }],
-    scrollMode: "auto",
-    scrollSpeed: 100,
-  };
-  expect(layoutPresetsPatch(draft, config())[0].monitors).toEqual([
-    { width: 1, height: 1, x: 0, y: 0, primary: true },
-  ]);
-});
-
-test("step 2 round-trips the presets the wizard never showed, untouched", () => {
-  const c = config({
-    activeLayout: "Default",
-    layoutPresets: [
-      {
-        name: "Default",
-        monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }],
-        scrollMode: "auto",
-        scrollSpeed: 100,
-      },
-      // Junk a hand-edited config can hold. A full settings save would clamp and trim it;
-      // the wizard has no business rewriting a preset it never drew.
-      {
-        name: "  Legacy  ",
-        monitors: [{ width: 0, height: 0, x: -8, y: 0, primary: false }],
-        scrollMode: "auto",
-        scrollSpeed: 100,
-      },
-    ],
-  });
-  const presets = layoutPresetsPatch(setupDraftFrom(c), c);
-  expect(presets).toHaveLength(2);
-  expect(presets[1].name).toBe("  Legacy  ");
-  expect(presets[1].monitors[0]).toEqual({
-    width: 0,
-    height: 0,
-    x: -8,
-    y: 0,
-    primary: false,
-  });
-});
-
-test("an active layout the config does not name is appended, not swapped in", () => {
-  const c = config({
-    activeLayout: "Default",
-    layoutPresets: [
-      {
-        name: "Other",
-        monitors: [{ width: 1280, height: 720, x: 0, y: 0, primary: true }],
-        scrollMode: "auto",
-        scrollSpeed: 100,
-      },
-    ],
-  });
-  // `activeLayoutName` falls back to the FIRST preset, so this edits "Other" in place.
-  const presets = layoutPresetsPatch(setupDraftFrom(c), c);
-  expect(presets.map((p) => p.name)).toEqual(["Other"]);
 });
 
 test("Next is blocked by a failing check and a save", () => {

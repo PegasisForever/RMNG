@@ -19,7 +19,6 @@ import {
 } from "~/components/SettingsNav";
 import {
   BoardPane,
-  LayoutPane,
   LlmPane,
   PresetsPane,
   ServerPane,
@@ -158,8 +157,6 @@ export function SettingsPane(
           onReorderBoardColumns={onReorderBoardColumns}
         />
       );
-    case "layout":
-      return <LayoutPane draft={loaded} onDraftChange={onDraftChange} />;
     case "presets":
       return (
         <PresetsPane

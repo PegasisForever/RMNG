@@ -88,14 +88,17 @@ async fn main() -> Result<()> {
     // Non-fatal by design.
     zfs::ensure_dev_zfs();
 
+    // The first boot after the upgrade that dropped the layout list: its active preset is the
+    // layout in force until a client sends its own.
+    if store.layout().is_none() {
+        if let Some(l) = config::legacy_layout() {
+            store.mutate(|s| s.layout = Some(l.clone()));
+        }
+    }
     let app = app::App::new(store, cfg, wire::DATA_DIR);
 
-    // Seed ControlState with the config's active layout + preset names so the sidebar
-    // switcher renders correctly on a fresh boot, before any `/api/config` PUT or
-    // `/api/layout/activate` call runs.
-    web::mirror_layout_to_state(&app);
-    // Same for the sidebar's pool sections: seed the configured pools so accounts
-    // group correctly from the first frame.
+    // Seed the sidebar's pool sections with the configured pools so accounts group correctly
+    // from the first frame.
     web::mirror_groups_to_state(&app);
 
     // Probe the Docker environment (daemon reachable, self-container detection, sock mount,

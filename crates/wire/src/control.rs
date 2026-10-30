@@ -24,48 +24,39 @@ pub struct MonitorSpec {
     pub primary: bool,
 }
 
-/// The name of the built-in layout for the `/ng` phone page on the folding iPhone (see
-/// [`iphone_duo_layout`]). It is in no config and in no layout list, so the operator does not
-/// see it: it is in force while the phone has the clones (`POST /api/layout/device`).
-pub const IPHONE_DUO_LAYOUT: &str = "iPhone Duo";
-
-/// The built-in layout for the `/ng` page: one monitor that fills the screen area above the
-/// page's keyboard, each monitor pixel 2 × 2 screen pixels, so text is twice the size it would
-/// be at the screen's own pixels. The area is 2007 × 1617 device px (669 × 539 CSS px at 3×),
-/// half of it 1003.5 × 808.5; the encoder takes even sizes only (4:2:0 chroma), so the monitor
-/// is 1002 × 808 and the page leaves a strip of 3 pixels at the right and 1 at the bottom.
-/// Scrolling with two fingers on the page's keys is 15% of the page's base speed.
-pub fn iphone_duo_layout() -> &'static LayoutPreset {
-    static DUO: std::sync::LazyLock<LayoutPreset> = std::sync::LazyLock::new(|| LayoutPreset {
-        name: IPHONE_DUO_LAYOUT.to_string(),
-        monitors: vec![MonitorSpec {
-            width: 1002,
-            height: 808,
-            x: 0,
-            y: 0,
-            primary: true,
-        }],
-        scroll_mode: ScrollMode::Auto,
-        scroll_speed: 15.0,
-    });
-    &DUO
-}
-
-/// A named monitor-layout preset: a full arrangement the operator can switch to.
-/// Distinct from clone-provisioning `Preset` (env/Linear) — this is display geometry only.
+/// The monitor layout in force: the one of the client the operator used last.
+///
+/// Each client (a desktop browser, the `/ng` phone page) keeps its own layout in its own
+/// browser storage, and sends it on each real action of the operator in it while its window
+/// is in the foreground (`POST /api/layout/claim`). The server keeps only the last one it got,
+/// and gives the clones its monitors. Never set: the built-in default ([`default_monitors`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct LayoutPreset {
-    pub name: String,
+pub struct ClientLayout {
+    /// The client that sent it: a random id the client keeps.
+    pub client: String,
+    /// What the client is, for people: "desktop" or "phone".
+    #[serde(default)]
+    pub label: String,
+    /// Monitor 0 is the primary one.
     pub monitors: Vec<MonitorSpec>,
-    /// How the viewer reads wheel events while this layout is active.
+    /// How the viewer reads wheel events.
     #[serde(default)]
     pub scroll_mode: ScrollMode,
     /// Scroll distance in percent: 100 sends what the device reported, a negative speed
     /// scrolls the other way.
     #[serde(default = "default_scroll_speed")]
     pub scroll_speed: f64,
+}
+
+/// The monitors before any client sent a layout: two 2560×1440 side by side, the primary on
+/// the right.
+pub fn default_monitors() -> Vec<MonitorSpec> {
+    vec![
+        MonitorSpec { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
+        MonitorSpec { width: 2560, height: 1440, x: 0, y: 0, primary: false },
+    ]
 }
 
 fn default_scroll_speed() -> f64 {
@@ -532,17 +523,10 @@ pub struct ControlState {
     /// not in the list; consumers must tolerate both.
     #[serde(default)]
     pub selected: Option<String>,
-    /// Name of the active layout preset (mirrored from config so the sidebar switcher
-    /// updates live over `/events`). Empty when no presets exist.
+    /// The layout in force: the last one a client sent (see [`ClientLayout`]). None until one
+    /// did: the clones have [`default_monitors`].
     #[serde(default)]
-    pub active_layout: String,
-    /// Names of all layout presets, in config order — the sidebar's segmented buttons.
-    #[serde(default)]
-    pub layout_preset_names: Vec<String>,
-    /// The phone (`/ng` on the iPhone Duo) has the clones: the built-in iPhone Duo layout is
-    /// in force, not `active_layout`, until a desktop viewer window takes them back.
-    #[serde(default)]
-    pub phone_layout: bool,
+    pub layout: Option<ClientLayout>,
     #[serde(default)]
     pub hosts: Vec<RmngClone>,
     /// The board's columns, left to right. Empty until the operator makes one, in which

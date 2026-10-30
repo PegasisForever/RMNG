@@ -113,7 +113,7 @@ keeps only the pieces of the replies it asked for since then.
 
 | `t` | Body | Meaning |
 | --- | --- | --- |
-| `scroll` | `{mode, speed}` | The active layout preset's scroll mode (`auto`, `trackpad` or `mouse`) and speed in percent (a decimal; a negative speed scrolls the other way). Sent at connect and whenever either changes; the window applies it at once. |
+| `scroll` | `{mode, speed}` | The scroll mode (`auto`, `trackpad` or `mouse`) of the layout in force (`ControlState.layout`, the last client's) and speed in percent (a decimal; a negative speed scrolls the other way). Sent at connect and whenever either changes; the window applies it at once. |
 | `version` | `{build_id}` | The server's build, first on every connection. A window that reconnects and sees a different one reloads. |
 | `view_spec` | `ViewSpec {monitors: ViewMonitor[], content}` | The window set and what it shows. `content.mode` is `desktop`, or `terminal` with `clone` and `sessions` for a clone with no desktop. Sent at connect and on every selection or layout change. Empty `monitors` = nothing is selected. |
 | `cursor` | `CursorMeta` | The remote cursor (position, shape on change, `warp`). Sent only to the windows of its `monitor_id`. |
@@ -306,7 +306,7 @@ control-server **and** every clone (a named volume, not a bind, so siblings can 
 **Handshake:** the daemon's first message is `DaemonMsg::Hello { clone_id, fresh_session }`.
 `fresh_session` is true when this daemon had to start the session holder, so the desktop
 behind it is seconds old and holds no window anyone placed. The server answers those with the
-active layout preset even when the clone is not the selected one, because a holder that
+layout in force even when the clone is not the selected one, because a holder that
 remembered nothing comes up on the built-in single 1920x1080. The field defaults to false, so
 a daemon older than it reads as "the holder was already running" and is left alone.
 
@@ -329,8 +329,8 @@ a viewer is connected; a screenshot's short wake starts only video), and `set_mo
 MonitorSpec[]}` — apply a layout **live**: the daemon does a make-before-break session swap
 (rebuilds a fresh Mutter session with the desired monitors, switches capture + input to it,
 then stops the old one, so running apps never close). Sent to the selected clone: on its
-`Hello`, on `POST /api/layout/activate`, on a `PUT /api/config` that moves the active preset's
-geometry, and on the `POST /api/activate` that brings it on screen. Sent to any clone, watched
+`Hello`, on a `POST /api/layout/claim` that changes the monitors, and on the
+`POST /api/activate` that brings it on screen. Sent to any clone, watched
 or not, on a `Hello` that carries `fresh_session`, and once to a brand-new clone when its
 daemon first registers. Every other clone keeps the layout it was last viewed with.
 
@@ -488,8 +488,6 @@ Ports, the data directory, the clone socket and the Docker socket are constants 
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `setup_complete` | bool | `false` | latched `true` by the first-run setup wizard; gates the frontend to the wizard until then |
-| `layout_presets` | `LayoutPreset[]` | `[]` | named monitor-layout presets (`{name, monitors: MonitorSpec[], scrollMode, scrollSpeed}`); the operator switches the active one from the sidebar (`POST /api/layout/activate`) |
-| `active_layout` | string | `""` | name of the active layout preset; drives `effective_monitors()` (see below) |
 | `docker` | `DockerConfig` | see below | hostname prefix + per-clone limits + ZFS parent dataset for clone homes |
 | `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (the key is a credential, and `GET /api/config` vends it to the clients) |
 | `claude` | `ClaudeConfig` | — | usage polling config |
@@ -568,10 +566,12 @@ Ports, the data directory, the clone socket and the Docker socket are constants 
   Claude equivalents. One clone can hold both a Claude and a Codex account simultaneously.
 
 - **`MonitorSpec`**: `width`, `height`, `x`, `y`, `primary`.
-- **`LayoutPreset`**: `name`, `monitors: MonitorSpec[]`, `scrollMode` (`auto` guesses mouse wheel or trackpad per event, `trackpad` and `mouse` take every event as one; default `auto`), `scrollSpeed` (percent, 10–1000, default 100) — a full named arrangement the
-  operator can switch to live. `AppConfig::effective_monitors()` returns the active preset's
-  (`active_layout`) monitors, falling back to the first preset, then a built-in dual
-  2560×1440 default when `layout_presets` is empty.
+- **`ClientLayout`** (in `ControlState.layout`, not in the config): `client`, `label`,
+  `monitors: MonitorSpec[]` (monitor 0 the primary one), `scrollMode` (`auto` guesses mouse
+  wheel or trackpad per event, `trackpad` and `mouse` take every event as one; default
+  `auto`), `scrollSpeed` (percent, default 100). The layout of the client used last
+  (`POST /api/layout/claim`); each client keeps its own in its browser storage.
+  `App::effective_monitors()` returns its monitors, else a built-in dual 2560×1440 default.
 
 Template params are mostly not config: the base OS is fixed in the template build
 (`ubuntu:26.04` in `template/Dockerfile` — the patched gnome-shell is compiled against 26.04's
@@ -599,7 +599,7 @@ Codex `auth.json`); the server does not.
 
 **clone-daemon:** `RMNG_SOCKET` (media socket; required unless `--session-holder`),
 `RMNG_CLONE_ID` (id; default hostname), `RMNG_MONITORS` (boot-default layout CSV, below —
-corrected to the config's active layout preset by the server's `SetMonitors` on a new clone's
+corrected to the layout in force by the server's `SetMonitors` on a new clone's
 first registration, and thereafter whenever the clone is the selected one),
 `RMNG_DAEMON_MCP_PORT` (`9004`), `RMNG_DESKTOP_HEIGHT` (`1080`; height of the MCP's virtual
 coordinate/screenshot space — `0` serves everything at native res; see [MCP.md](MCP.md)),
@@ -627,14 +627,15 @@ one 1920×1080 primary. The unique `WxH` sizes also seed `MUTTER_DEBUG_DUMMY_MOD
 env var is now only a **boot default** baked into the clone template, read by the session
 holder and only when `~/.rmng/monitors` has no remembered layout. The shipped holder unit
 carries no layout of its own, one unit going to every clone, so a payload push writes the
-active preset into `~/.rmng/monitors` when the file is absent. That is what keeps a clone
+layout in force into `~/.rmng/monitors` when the file is absent. That is what keeps a clone
 upgrading onto the holder from building its first session on the built-in single monitor.
 
 The server corrects a stale layout with `ServerMsg::SetMonitors` carrying
-`config.effective_monitors()` (the active layout preset), live and without a restart. That
+`App::effective_monitors()` (the layout in force), live and without a restart. That
 happens once for a brand-new clone when its daemon first registers, on any `Hello` that
 reports a freshly started holder, and after that only while the clone is the one on screen:
-its `Hello`, a `POST /api/layout/activate`, and the `POST /api/activate` that selects it.
+its `Hello`, a `POST /api/layout/claim` that changes the monitors, and the `POST /api/activate`
+that selects it.
 
 ---
 

@@ -19,6 +19,7 @@ import { AppShellV2, type SideFocus } from "~/components/AppShellV2";
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
 import { CloneModalContainer } from "~/components/CloneModalContainer";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
+import { LayoutEditorContainer } from "~/components/LayoutEditorContainer";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { RebaseModalContainer } from "~/components/RebaseModalContainer";
 import { SettingsPanelContainer } from "~/components/SettingsPanelContainer";
@@ -50,7 +51,6 @@ import {
 } from "~/lib/tickets";
 import {
   activate,
-  activateLayout,
   archiveClone,
   deleteClone,
   getConfig,
@@ -101,6 +101,13 @@ import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { LxcStats } from "~/lib/wire/LxcStats";
+import {
+  DEFAULT_DESKTOP_LAYOUT,
+  attachLayoutClaims,
+  clientId,
+  desktopClaim,
+  ensureDesktopLayout,
+} from "~/lib/clientLayout";
 import { openViewerWindows } from "~/viewer/open";
 
 // BlockNote + the chat panel are browser-only; load them lazily and render only
@@ -163,6 +170,23 @@ export function DashboardContainer({
   const [error, setError] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [layoutOpen, setLayoutOpen] = useState(false);
+  // This browser's layout (`~/lib/clientLayout.ts`): an action on the dashboard puts it in
+  // force, as one in a viewer window does
+  const [monitorCount, setMonitorCount] = useState(DEFAULT_DESKTOP_LAYOUT.monitors.length);
+  const claims = useRef<ReturnType<typeof attachLayoutClaims> | null>(null);
+  useEffect(() => {
+    let gone = false;
+    void ensureDesktopLayout().then((l) => {
+      if (gone) return;
+      setMonitorCount(l.monitors.length);
+      claims.current = attachLayoutClaims("desktop", desktopClaim);
+    });
+    return () => {
+      gone = true;
+      claims.current?.detach();
+    };
+  }, []);
   // The shared cosmetic account order and the live clock. Both are session reads, so they
   // are resolved here and handed down: the rail's usage bars and the settings account lists
   // then draw from props alone, and both stay in step because they read one subscription.
@@ -756,10 +780,9 @@ export function DashboardContainer({
           now,
           lxcStats,
           operations: state.operations,
-          presetNames: state.layoutPresetNames ?? [],
-          activeLayout: state.activeLayout ?? "",
-          phoneLayout: state.phoneLayout ?? false,
-          onActivateLayout: (name) => run(activateLayout(name)),
+          monitorCount,
+          elsewhere: state.layout && state.layout.client !== clientId("desktop") ? state.layout.label : null,
+          onEditLayout: () => setLayoutOpen(true),
           onOpenViewer: () => run(openViewerWindows()),
           onOpenSettings: () => setSettingsOpen(true),
           onReplaceAccount: (account) => openImport(account),
@@ -924,6 +947,16 @@ export function DashboardContainer({
               return op;
             })
           }
+        />
+      ) : null}
+
+      {layoutOpen ? (
+        <LayoutEditorContainer
+          onSaved={(l) => {
+            setMonitorCount(l.monitors.length);
+            claims.current?.claim(true);
+          }}
+          onClose={() => setLayoutOpen(false)}
         />
       ) : null}
 

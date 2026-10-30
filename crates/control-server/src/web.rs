@@ -40,7 +40,7 @@ async fn missing_frontend() -> Response {
 }
 use wire::{AppConfigRedacted, ConfigPutResponse, ControlState, Operation};
 
-use crate::app::{App, PhoneSize};
+use crate::app::App;
 use crate::config;
 use crate::files;
 use crate::jobs;
@@ -67,8 +67,7 @@ pub fn router(app: App) -> Router {
         .route("/api/clone", post(clone))
         .route("/api/fork", post(fork))
         .route("/api/hosts/:id/rebase", post(rebase))
-        .route("/api/layout/activate", post(layout_activate))
-        .route("/api/layout/device", post(layout_device))
+        .route("/api/layout/claim", post(layout_claim))
         .route("/api/delete", post(delete))
         .route("/api/notes/:id", get(notes_get).put(notes_save))
         .route("/api/upload", post(upload))
@@ -425,7 +424,7 @@ async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<
         s.selected = req.id;
     });
     // The clone coming on screen takes the active layout now. It kept the monitors it was
-    // last viewed with while the operator was elsewhere, so this is where a layout preset
+    // last viewed with while the operator was elsewhere, so this is where a layout
     // activated in the meantime reaches it. Same-layout clones are unaffected: their session
     // holder drops a layout equal to the one it holds, and no window moves.
     if state.selected != previously_selected {
@@ -1119,110 +1118,59 @@ async fn delete(
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
-#[derive(Deserialize)]
-struct LayoutActivateReq {
-    name: String,
+/// The most monitors a layout may have, and the range of a monitor's side, in pixels.
+const MAX_MONITORS: usize = 8;
+const MIN_SIDE: u32 = 320;
+const MAX_SIDE: u32 = 8192;
+
+/// A layout a client sent, made one the clones can take: 1 to MAX_MONITORS monitors, each side
+/// even (the encoder takes even sizes only, 4:2:0 chroma) and in range, monitor 0 the only
+/// primary one, the scroll speed in range. None: no monitors, or no client id.
+fn sane_layout(mut l: wire::ClientLayout) -> Option<wire::ClientLayout> {
+    if l.monitors.is_empty() || l.client.trim().is_empty() {
+        return None;
+    }
+    l.monitors.truncate(MAX_MONITORS);
+    for (i, m) in l.monitors.iter_mut().enumerate() {
+        m.width = m.width.clamp(MIN_SIDE, MAX_SIDE) & !1;
+        m.height = m.height.clamp(MIN_SIDE, MAX_SIDE) & !1;
+        m.primary = i == 0;
+    }
+    l.client.truncate(64);
+    l.label.truncate(32);
+    l.scroll_speed = if l.scroll_speed.is_finite() { l.scroll_speed.clamp(-1000.0, 1000.0) } else { 100.0 };
+    Some(l)
 }
 
-/// `POST /api/layout/activate`: make `name` the active layout preset and live-apply it to
-/// the clone on screen (no session restart). Persists config, mirrors the active name into
-/// ControlState (so all sidebars update over SSE), then pushes `SetMonitors` to the selected
-/// clone's daemon. Best-effort; a failure is reported.
+/// `POST /api/layout/claim`: the client the operator uses now sends its layout
+/// ([`wire::ClientLayout`]), and that layout is in force. Each client sends it on a real action
+/// of the operator in it, while its window is in the foreground; never because it sees another
+/// client's layout, so two clients never take turns by themselves.
 ///
-/// The rest of the fleet keeps the monitors it was last viewed with and takes the new layout
-/// on the switch to it, in `activate`. Pushing to everything at once rebuilds every clone's
-/// Mutter session in the same second, which stalls the whole board.
-async fn layout_activate(
+/// The clone on screen takes new monitors at once; the rest of the fleet takes them on the
+/// switch to each clone (`apply_active_layout`). A layout the same as the one in force (from any
+/// client) changes no monitors; the reply says whether the monitors changed.
+async fn layout_claim(
     State(app): State<App>,
-    Json(req): Json<LayoutActivateReq>,
+    Json(layout): Json<wire::ClientLayout>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // 1. Validate + persist the active_layout.
-    let mut cfg = app.config();
-    if !cfg.layout_presets.iter().any(|p| p.name == req.name) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("unknown layout preset '{}'", req.name),
-        ));
+    let layout = sane_layout(layout)
+        .ok_or((StatusCode::BAD_REQUEST, "a layout needs a client id and a monitor".to_string()))?;
+    let before = app.effective_monitors();
+    if app.store.layout().as_ref() != Some(&layout) {
+        // The state change makes the media plane send every window its new window set and
+        // scroll settings.
+        app.store.mutate(|s| s.layout = Some(layout.clone()));
     }
-    cfg.active_layout = req.name.clone();
-    crate::config::save(&cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    *app.cfg.write().unwrap() = cfg.clone();
-    // Picking a layout on the desktop takes the clones back from the phone.
-    app.set_phone(None);
-
-    // 2. Mirror into ControlState for the sidebar (SSE broadcast).
-    mirror_layout_to_state(&app);
-
-    // 3. Live-apply to the clone the operator is watching, and to that one only.
-    let monitors = app.effective_monitors();
-    let mut applied = Vec::new();
-    let mut errors = Vec::new();
-    if let Some(id) = app.store.selected() {
-        // A selection with no daemon behind it (headless, archived, still booting) is not a
-        // failure of this request: it has no monitors to change.
-        if app.media.is_connected(&id) {
-            match app.media.set_monitors(&id, &monitors) {
-                Ok(()) => applied.push(id),
-                Err(e) => errors.push(format!("{id}: {e}")),
-            }
-        }
-    }
-    Ok(Json(
-        serde_json::json!({ "ok": true, "applied": applied, "errors": errors }),
-    ))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum LayoutDevice {
-    Phone,
-    Desktop,
-}
-
-#[derive(Deserialize)]
-struct LayoutDeviceReq {
-    device: LayoutDevice,
-    /// The phone's monitor size, from its screen. Absent: the size it has (the iPhone Duo
-    /// layout's when it has none yet).
-    #[serde(default)]
-    size: Option<LayoutDeviceSize>,
-}
-
-#[derive(Deserialize)]
-struct LayoutDeviceSize {
-    width: u32,
-    height: u32,
-}
-
-/// `POST /api/layout/device`: the device the operator uses now takes the clones' layout.
-/// `phone` puts the phone's layout in force (`/ng`): the built-in iPhone Duo layout, its one
-/// monitor at the size the phone asks for (an even size in range) or keeps; `desktop` the
-/// active preset, which the phone never changes. Each device asks on a real action on it (opening or
-/// touching the phone, a click or a key in a desktop viewer window), never because it sees
-/// the other device's layout, so the two never take turns by themselves. A device that has
-/// the layout already changes nothing; the reply says whether this one did.
-async fn layout_device(
-    State(app): State<App>,
-    Json(req): Json<LayoutDeviceReq>,
-) -> Json<serde_json::Value> {
-    let size = match req.device {
-        LayoutDevice::Phone => Some(match req.size {
-            Some(s) => PhoneSize::sane(s.width, s.height),
-            None => app.phone_size().unwrap_or_else(PhoneSize::duo),
-        }),
-        LayoutDevice::Desktop => None,
-    };
-    let changed = app.set_phone(size);
+    let changed = app.effective_monitors() != before;
     if changed {
-        // The state change makes the media plane send every window its new window set.
-        mirror_layout_to_state(&app);
         if let Some(id) = app.store.selected() {
             if app.media.is_connected(&id) {
                 crate::mediaplane::apply_active_layout(&app, &id);
             }
         }
     }
-    Json(serde_json::json!({ "ok": true, "changed": changed }))
+    Ok(Json(serde_json::json!({ "ok": true, "changed": changed })))
 }
 
 // --- notes + uploads (side stores, not in ControlState) --------------------
@@ -1753,22 +1701,6 @@ async fn uploads_serve(State(app): State<App>, AxPath(file): AxPath<String>) -> 
 
 // --- config API (redacted read / validated write / live-apply) -------------
 
-/// Copy the config's active layout + preset names, and whether the phone has the clones, into
-/// ControlState so the sidebar switcher renders + highlights over the live `/events` SSE.
-/// Idempotent; call after any change to `layout_presets` / `active_layout` / the phone, and
-/// once at boot.
-pub(crate) fn mirror_layout_to_state(app: &App) {
-    let cfg = app.config();
-    let active = cfg.active_layout.clone();
-    let names: Vec<String> = cfg.layout_presets.iter().map(|p| p.name.clone()).collect();
-    let phone = app.phone();
-    app.store.mutate(|s| {
-        s.active_layout = active.clone();
-        s.layout_preset_names = names.clone();
-        s.phone_layout = phone;
-    });
-}
-
 /// Copy the config's account pools into ControlState so the sidebar usage list groups
 /// by them over the live `/events` SSE. Idempotent; call after any change to `groups`
 /// and once at boot. Without this the sidebar renders the page-load pool list against
@@ -1876,9 +1808,7 @@ async fn config_put(
             tracing::warn!("ssh apply_now timed out; reconcile loop will retry");
         }
     }
-    // Keep the sidebar's live layout list/active marker in sync with the just-saved presets.
-    mirror_layout_to_state(&app);
-    // Same for the sidebar's pool sections: a fresh/renamed pool must regroup the live
+    // Keep the sidebar's pool sections in sync: a fresh/renamed pool must regroup the live
     // accounts on the next SSE frame, not after a page reload.
     mirror_groups_to_state(&app);
     // Fan out content convergence: prompts, presets, and keys changed above reach running
@@ -1890,15 +1820,6 @@ async fn config_put(
         tokio::spawn(async move {
             crate::clone_reconcile::sync_all_running(&app, "settings-save").await;
         });
-    }
-    // Editing the active preset's geometry is the same kind of change as activating another
-    // preset, so it lands the same way: on the clone the operator is watching, now, and on
-    // every other clone when they switch to it. Compared rather than assumed, because most
-    // config writes touch nothing to do with monitors.
-    if old.effective_monitors() != merged.effective_monitors() {
-        if let Some(id) = app.store.selected() {
-            crate::mediaplane::apply_active_layout(&app, &id);
-        }
     }
     Ok(Json(ConfigPutResponse {
         config: merged.redacted(),
@@ -2576,7 +2497,7 @@ mod tests {
         let got = crate::mediaplane::recv_now(&client).expect("the clone got a layout push");
         match serde_json::from_slice::<wire::socket::ServerMsg>(&got).unwrap() {
             wire::socket::ServerMsg::SetMonitors { monitors } => {
-                assert_eq!(monitors, app.config().effective_monitors());
+                assert_eq!(monitors, app.effective_monitors());
             }
             other => panic!("expected SetMonitors, got {other:?}"),
         }
@@ -3791,55 +3712,60 @@ PLAIN=plainvalue
         );
     }
 
-    /// The phone and the desktop each take the layout on an action of their own, and asking
-    /// for a layout a device has already changes nothing, so the two cannot take turns.
-    #[tokio::test]
-    async fn the_phone_takes_the_layout_and_the_desktop_takes_it_back() {
-        let app = test_app();
-        let ask = |device| layout_device(State(app.clone()), Json(LayoutDeviceReq { device, size: None }));
-        let desktop = app.config().effective_monitors();
-
-        assert_eq!(ask(LayoutDevice::Phone).await.0["changed"], true);
-        assert!(app.store.get().phone_layout);
-        assert_eq!(app.phone_size(), Some(PhoneSize::duo()));
-        assert_eq!(app.effective_monitors(), wire::iphone_duo_layout().monitors);
-        // Its own scroll speed too, which the /ng page scales its two-finger scroll by
-        assert_eq!(app.effective_scroll().1, 15.0);
-        assert_eq!(ask(LayoutDevice::Phone).await.0["changed"], false);
-
-        assert_eq!(ask(LayoutDevice::Desktop).await.0["changed"], true);
-        assert!(!app.store.get().phone_layout);
-        assert_eq!(app.effective_monitors(), desktop);
-        assert_eq!(ask(LayoutDevice::Desktop).await.0["changed"], false);
-        // The phone never touched the operator's own choice.
-        assert_eq!(app.config().active_layout, "");
+    fn layout(client: &str, sizes: &[(u32, u32)]) -> wire::ClientLayout {
+        wire::ClientLayout {
+            client: client.into(),
+            label: "desktop".into(),
+            monitors: sizes
+                .iter()
+                .map(|&(width, height)| wire::MonitorSpec { width, height, x: 0, y: 0, primary: false })
+                .collect(),
+            scroll_mode: wire::ScrollMode::Auto,
+            scroll_speed: 100.0,
+        }
     }
 
-    /// The phone asks for its own monitor size (its screen turned another way): it gets that
-    /// size, made even and kept in range; a claim with no size keeps it; the Duo size again
-    /// puts the Duo layout back.
+    /// The layout in force is the last one a client sent, whichever client that was; the same
+    /// layout again changes nothing.
     #[tokio::test]
-    async fn the_phone_gets_the_monitor_size_it_asks_for() {
+    async fn the_last_client_that_sends_its_layout_has_it() {
         let app = test_app();
-        let ask = |size: Option<(u32, u32)>| {
-            layout_device(
-                State(app.clone()),
-                Json(LayoutDeviceReq {
-                    device: LayoutDevice::Phone,
-                    size: size.map(|(width, height)| LayoutDeviceSize { width, height }),
-                }),
-            )
-        };
-        assert_eq!(ask(Some((1427, 972))).await.0["changed"], true);
-        let m = &app.effective_monitors()[0];
-        assert_eq!((m.width, m.height, app.effective_monitors().len()), (1426, 972, 1));
-        assert_eq!(ask(None).await.0["changed"], false);
-        assert_eq!(app.phone_size(), Some(PhoneSize { width: 1426, height: 972 }));
-        assert_eq!(ask(Some((10, 99_999))).await.0["changed"], true);
-        assert_eq!(app.phone_size(), Some(PhoneSize { width: PhoneSize::MIN, height: PhoneSize::MAX }));
-        let duo = PhoneSize::duo();
-        assert_eq!(ask(Some((duo.width, duo.height))).await.0["changed"], true);
-        assert_eq!(app.effective_monitors(), wire::iphone_duo_layout().monitors);
+        let claim = |l: wire::ClientLayout| layout_claim(State(app.clone()), Json(l));
+        assert_eq!(app.effective_monitors(), wire::default_monitors());
+
+        let phone = layout("phone", &[(1426, 972)]);
+        assert_eq!(claim(phone.clone()).await.unwrap().0["changed"], true);
+        assert_eq!(app.store.get().layout.unwrap().client, "phone");
+        let m = app.effective_monitors();
+        assert_eq!((m.len(), m[0].width, m[0].primary), (1, 1426, true));
+        assert_eq!(claim(phone).await.unwrap().0["changed"], false);
+
+        let desk = layout("desk", &[(1920, 1080), (2560, 1440)]);
+        assert_eq!(claim(desk).await.unwrap().0["changed"], true);
+        assert_eq!(app.store.get().layout.unwrap().client, "desk");
+        assert_eq!(app.effective_monitors().len(), 2);
+    }
+
+    /// A layout is made one the clones take: even sides in range, monitor 0 the only primary
+    /// one, at most MAX_MONITORS; one with no monitor or no client id is refused.
+    #[tokio::test]
+    async fn a_claimed_layout_is_made_sane() {
+        let app = test_app();
+        let mut l = layout("x", &[(1427, 99_999), (10, 1080)]);
+        l.monitors[1].primary = true;
+        l.scroll_speed = f64::NAN;
+        let _ = layout_claim(State(app.clone()), Json(l)).await.unwrap();
+        let m = app.effective_monitors();
+        assert_eq!((m[0].width, m[0].height, m[0].primary), (1426, MAX_SIDE, true));
+        assert_eq!((m[1].width, m[1].primary), (MIN_SIDE, false));
+        assert_eq!(app.effective_scroll().1, 100.0);
+
+        let many = layout("x", &[(1920, 1080); 12]);
+        let _ = layout_claim(State(app.clone()), Json(many)).await.unwrap();
+        assert_eq!(app.effective_monitors().len(), MAX_MONITORS);
+
+        assert!(layout_claim(State(app.clone()), Json(layout("x", &[]))).await.is_err());
+        assert!(layout_claim(State(app.clone()), Json(layout(" ", &[(1920, 1080)]))).await.is_err());
     }
 
     /// Pages go back to the server on each load, so the installed /ng app opens the newest

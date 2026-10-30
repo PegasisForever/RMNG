@@ -4,11 +4,16 @@
 // - Pages: the tab pages (usage, tickets, clones, notes, settings) over the screen.
 // - Keyboard: a tap shows or hides the keys, floating over the bottom of the screen. The screen
 //   keeps its size; it moves up as far as it takes to keep the cursor above the keys
-//   (`followAxis`). A long press docks the keyboard, or undocks it (`./keyboardDock.ts`).
-// - Fit: the clone's monitor takes the size of the screen's area, at the phone's pixel ratio
-//   (`phoneMonitorSize`; 2 screen px per clone px, or what a long press on Fit set,
-//   `./pixelRatio.ts`). Until then the clone keeps the size it had, shown at that same ratio in
-//   the middle (smaller only where it does not fit), not stretched.
+//   (`followAxis`). A long press docks the keyboard, or undocks it (`./keyboardDock.ts`). A long
+//   press on the bar along the keyboard's top, then a drag, sets its height (`./KeyboardHandle.tsx`).
+// - Fit: this phone's monitor (its layout: one monitor, `./phoneMonitor.ts`) takes the size of
+//   the screen's area, at the phone's pixel ratio (`phoneMonitorSize`; 2 screen px per clone px,
+//   or what a long press on Fit set, `./pixelRatio.ts`). The first time, it is that size from
+//   the start. The clone's screen shows at that same ratio in the middle (smaller only where it
+//   does not fit), not stretched.
+//
+// The phone's layout is in force while the phone is in use (`~/lib/clientLayout.ts`): it opens,
+// comes to the front, or is touched.
 //
 // With the keyboard floating (or hidden), the whole display is a trackpad. Two fingers that pinch
 // on it zoom the view (1× to MAX_ZOOM); the clone gets nothing. The view follows the cursor
@@ -23,10 +28,12 @@ import { type PointerEvent, useEffect, useRef, useState } from "react";
 
 import { Cursor } from "./Cursor";
 import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
-import { GAP, TOOL_H, followAxis, keysLayout, phoneMonitorSize, screenFit } from "./geometry";
+import { GAP, TOOL_H, followAxis, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
+import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
 import { KeyboardView, type TouchKind } from "./KeyboardView";
-import { readKeyboardDocked, saveKeyboardDocked } from "./keyboardDock";
+import { readKeyboardDocked, readKeyboardHeight, saveKeyboardDocked, saveKeyboardHeight } from "./keyboardDock";
 import { NgPagesContainer } from "./pages/NgPagesContainer";
+import { readPhoneMonitor, savePhoneMonitor } from "./phoneMonitor";
 import { readPixelRatio, savePixelRatio } from "./pixelRatio";
 import { clampTo } from "./pointer";
 import { RatioDialog } from "./RatioDialog";
@@ -41,6 +48,10 @@ const KEYBOARD_PART = 0.45;
 const CURSOR_MARGIN = 36;
 /** The most the view zooms in. */
 const MAX_ZOOM = 4;
+/** The keyboard's bar makes it no shorter than this (CSS px), and no taller than this part of
+ *  the display. */
+const MIN_KEYS_H = 160;
+const MAX_KEYS_PART = 0.8;
 /** Touch slots a touch screen offers, fingers at once. */
 const TOUCH_SLOTS = 10;
 
@@ -56,30 +67,42 @@ export function FullDesk({ width, height, bottom }: Props) {
   /** The view's zoom (1: the clone as large as the pixel ratio allows). */
   const [zoom, setZoom] = useState(1);
   const onZoom = (factor: number) => setZoom((z) => Math.min(MAX_ZOOM, Math.max(1, z * factor)));
-  // The clone keeps the monitor it has until Fit
-  const r = useRemote(box, onZoom);
+  /** Screen px per clone px (this phone's setting), and its dialog. */
+  const [ratio, setRatio] = useState(readPixelRatio);
+  const [ratioOpen, setRatioOpen] = useState(false);
+  /** The keyboard's height as a part of the display's (the bar on top of it sets it), and the
+   *  height during a drag of that bar. */
+  const [keysPart, setKeysPart] = useState(readKeyboardHeight);
+  const [dragH, setDragH] = useState<number | null>(null);
   /** The floating keyboard is shown; the keyboard is docked (then always shown). */
   const [keyboard, setKeyboard] = useState(false);
   const [docked, setDocked] = useState(readKeyboardDocked);
   const keysShown = keyboard || docked;
-  /** The pages over the screen, and the tab they show. */
-  const [pages, setPages] = useState(false);
-  const [tab, setTab] = useState<NgTab>("clones");
-  /** Screen px per clone px (this phone's setting), and its dialog. */
-  const [ratio, setRatio] = useState(readPixelRatio);
-  const [ratioOpen, setRatioOpen] = useState(false);
 
-  // The keyboard: the display's width, its keys square where there is room, no taller than
-  // KEYBOARD_PART of the display
-  const natural = keysLayout(width, 10_000, bottom);
-  const keysH = Math.min(
-    Math.ceil(natural.keys.top + natural.keys.height + 4 + bottom),
-    Math.round(height * KEYBOARD_PART),
+  // The keyboard: the display's width; its keys square, no taller than KEYBOARD_PART of the
+  // display, until its bar sets another height
+  const keysH = Math.round(
+    dragH ??
+      (keysPart ? height * keysPart : Math.min(Math.ceil(naturalKeysHeight(width, bottom) + HANDLE_H), height * KEYBOARD_PART)),
   );
   /** The clone's screen's area: the display, or the part above the docked keyboard. */
   const areaH = docked ? height - keysH : height;
-
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+  /** What Fit gives the clone's monitor: the screen's area at the pixel ratio. */
+  const target = phoneMonitorSize(width, areaH, dpr, ratio);
+  /** This phone's monitor size (its layout, `./phoneMonitor.ts`): what Fit set last, else the
+   *  first target, kept from the start. */
+  const [size, setSize] = useState(() => readPhoneMonitor() ?? target);
+  useEffect(() => {
+    if (!readPhoneMonitor()) savePhoneMonitor(size);
+  }, [size]);
+  const fits = size.width === target.width && size.height === target.height;
+
+  const r = useRemote(box, () => size, onZoom);
+  /** The pages over the screen, and the tab they show. */
+  const [pages, setPages] = useState(false);
+  const [tab, setTab] = useState<NgTab>("clones");
+
   const fit = screenFit(width, areaH, r.monitor.width, r.monitor.height, dpr, ratio);
   // The video's pixels stay those of the unzoomed view; a zoom scales the picture
   useEffect(() => {
@@ -91,8 +114,6 @@ export function FullDesk({ width, height, bottom }: Props) {
   const w = (r.monitor.width * shown) / dpr;
   const h = (r.monitor.height * shown) / dpr;
 
-  const target = phoneMonitorSize(width, areaH, dpr, ratio);
-  const fits = r.monitor.width === target.width && r.monitor.height === target.height;
   /** The part of the display not under the keyboard. */
   const visible = keysShown ? height - keysH : height;
 
@@ -121,7 +142,6 @@ export function FullDesk({ width, height, bottom }: Props) {
   const lift = useLift(panel.top + panel.height);
 
   const onDownCapture = (e: PointerEvent<HTMLDivElement>) => {
-    r.claim();
     r.sounds.unlock();
     // A touch outside the pages puts the phone's keyboard away
     if (isTyping() && !(e.target as Element).closest("[role=tabpanel]")) {
@@ -167,11 +187,16 @@ export function FullDesk({ width, height, bottom }: Props) {
   };
 
   const place = { left: 0, top: 0, width: w, height: h };
+  /** Fit: the clone's monitor takes `next`, from now on. */
+  const fitTo = (next: { width: number; height: number }) => {
+    setZoom(1);
+    setSize(next);
+    r.claimMonitor(next);
+  };
   const chooseRatio = (next: number) => {
     savePixelRatio(next);
     setRatio(next);
-    setZoom(1);
-    r.claimMonitor(phoneMonitorSize(width, areaH, dpr, next));
+    fitTo(phoneMonitorSize(width, areaH, dpr, next));
   };
   const toggleDock = () => {
     const next = !docked;
@@ -223,9 +248,19 @@ export function FullDesk({ width, height, bottom }: Props) {
           className={`absolute bottom-0 left-0 ${docked ? "bg-black" : "bg-black/75 backdrop-blur-xl"}`}
           style={{ width, height: keysH }}
         >
+          <KeyboardHandle
+            height={keysH}
+            onHeight={(h) => setDragH(Math.max(MIN_KEYS_H, Math.min(height * MAX_KEYS_PART, h)))}
+            onDone={() => {
+              if (dragH === null) return;
+              saveKeyboardHeight(dragH / height);
+              setKeysPart(dragH / height);
+              setDragH(null);
+            }}
+          />
           <KeyboardView
             width={width}
-            height={keysH}
+            height={keysH - HANDLE_H}
             bottom={bottom}
             fn={r.fn}
             mods={r.mods}
@@ -274,10 +309,7 @@ export function FullDesk({ width, height, bottom }: Props) {
         onPages={() => setPages((p) => !p)}
         onKeyboard={() => !docked && setKeyboard((k) => !k)}
         onKeyboardDock={toggleDock}
-        onFit={() => {
-          setZoom(1);
-          r.claimMonitor(target);
-        }}
+        onFit={() => fitTo(target)}
         onFitSettings={() => setRatioOpen(true)}
       />
       {ratioOpen ? (

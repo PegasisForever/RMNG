@@ -1,9 +1,8 @@
-// Step 2 of the first-run wizard: the fleet's server-side defaults. Clone naming, the
-// per-clone resource limits, and the monitor arrangement every clone boots with.
+// Step 2 of the first-run wizard: the fleet's server-side defaults. Clone naming and the
+// per-clone resource limits. (Monitors are each browser's own: the dashboard's Edit layout.)
 //
 // It takes the wizard's whole model plus one updater, the same pair `SetupWizardView` holds
 // and `SetupReviewStep` reads, rather than a value/setter couple per field.
-import { MonitorsEditor } from "~/components/MonitorsEditor";
 import { Field, settingsInput } from "~/components/SettingsFields";
 import type { SetupDraft } from "~/lib/setupDraft";
 
@@ -11,9 +10,7 @@ export function SetupServerStep({
   draft,
   onDraftChange,
 }: {
-  /** The whole wizard form. The monitors in it are the one arrangement the wizard edits:
-   *  there is no preset picker here, because which named preset this becomes is decided by
-   *  the config, not by the operator. */
+  /** The whole wizard form. */
   draft: SetupDraft;
   /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
   onDraftChange: <K extends keyof SetupDraft>(
@@ -24,7 +21,7 @@ export function SetupServerStep({
   return (
     <div className="space-y-4">
       <p className="text-sm text-slate-600 dark:text-slate-300">
-        Server-side layout and defaults for the fleet.
+        Server-side defaults for the fleet.
       </p>
 
       <Field label="Clone hostname prefix">
@@ -64,16 +61,6 @@ export function SetupServerStep({
             className={settingsInput}
           />
         </Field>
-      </div>
-
-      <div>
-        <span className="mb-1 block text-xs font-medium text-slate-500 dark:text-slate-400">
-          Monitors
-        </span>
-        <MonitorsEditor
-          monitors={draft.monitors}
-          onChange={(monitors) => onDraftChange("monitors", monitors)}
-        />
       </div>
 
     </div>

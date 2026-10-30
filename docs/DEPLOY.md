@@ -660,16 +660,17 @@ inherits it (there's no per-install control-server payload any more; see
 
 - **Clone**: `POST /api/clone` — a preset's image onto a fresh home (`/api/fork` copies a
   live clone's home instead). The
-  new clone is brought to `config.effective_monitors()` (the active layout preset, or the
-  built-in default when no presets exist) as soon as its clone-daemon registers, which
+  new clone is brought to the layout in force (the last client's, or the built-in default
+  before any client sent one) as soon as its clone-daemon registers, which
   corrects the template's baked-in `RMNG_MONITORS` boot value before anyone opens the clone.
   Existing clones are not touched: each keeps the layout it was last viewed with until the
   operator switches to it.
-- **Activate a layout preset** with `POST /api/layout/activate {name}`: pushes
-  `ServerMsg::SetMonitors` to the selected clone's daemon, which live-swaps to a fresh Mutter
-  session with the new monitors (make-before-break, no GNOME restart, no app loss). Every
-  other clone keeps its current monitors until the operator switches to it, so activating a
-  preset costs one session rebuild rather than one per clone.
+- **Layouts** are each client's own (the dashboard's Edit layout dialog; the `/ng` page's
+  Fit). The client used last has its layout in force (`POST /api/layout/claim`): the selected
+  clone's daemon gets `ServerMsg::SetMonitors` and live-swaps to a fresh Mutter session with
+  the new monitors (make-before-break, no GNOME restart, no app loss). Every other clone keeps
+  its current monitors until the operator switches to it, so a layout change costs one session
+  rebuild rather than one per clone.
 - **Hot-swap an account**: `POST /api/claude/swap {host, account}` (or `/api/codex/swap`) —
   writes the clone's `~/.claude/.credentials.json` / `~/.codex/auth.json` live via `docker exec`.
   No restart: the agents re-read those files per request.

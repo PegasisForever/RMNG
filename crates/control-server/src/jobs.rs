@@ -254,7 +254,7 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
         }
     };
     // A clone built from an image boots on one monitor nobody chose (the daemon's
-    // 1920x1080 default); bring it to the active layout preset. A fork's home remembers
+    // 1920x1080 default); bring it to the layout in force. A fork's home remembers
     // its own.
     if plan.source.is_none() && !plan.headless {
         crate::mediaplane::apply_active_layout_when_ready(app.clone(), id.clone());
@@ -637,7 +637,7 @@ async fn run_delete(app: App, op: OpHandle, host_id: String) -> anyhow::Result<F
         })
         .after(move |app, st| async move {
             // Deleting the watched clone moves the operator onto another one, which has been
-            // holding whatever layout it was last viewed with. Bring it to the active preset,
+            // holding whatever layout it was last viewed with. Bring it to the layout in force,
             // exactly as a deliberate switch would.
             if st.selected != previously_selected {
                 if let Some(id) = st.selected.as_deref() {
@@ -995,7 +995,7 @@ async fn run_archive(app: App, op: OpHandle, host_id: String) -> anyhow::Result<
         })
         .after(move |app, st| async move {
             // The clone the operator lands on has been holding its own layout since it was last
-            // viewed. Bring it to the active preset, as a deliberate switch does.
+            // viewed. Bring it to the layout in force, as a deliberate switch does.
             if st.selected != previously_selected {
                 if let Some(id) = st.selected.as_deref() {
                     crate::mediaplane::apply_active_layout(&app, id);

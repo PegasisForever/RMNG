@@ -1,8 +1,9 @@
 // The /ng page's connection to the selected clone: the browser viewer's socket for monitor 0,
 // run by the viewer's own worker (`~/viewer/worker.ts`: socket, decode, drawing, and the
-// clone's sound, which `~/viewer/sound.ts` plays from the first touch). The monitor
-// is the iPhone Duo layout's; the page sizes the box it is shown in (`./geometry.ts`). Input does not come from the page's events here, as it
-// does in the viewer: the on-screen keyboard and buttons send it (`send`).
+// clone's sound, which `~/viewer/sound.ts` plays from the first touch). The monitor is the
+// phone's layout's (`./phoneMonitor.ts`); the page sizes the box it is shown in
+// (`./geometry.ts`). Input does not come from the page's events here, as it does in the viewer:
+// the on-screen keyboard and buttons send it (`send`).
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
 import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { TouchMsg } from "~/lib/wire/TouchMsg";
@@ -38,8 +39,8 @@ const PHONE_SOUND_MAX = 15;
 export const MONITOR = 0;
 
 /** Show monitor 0 of the selected clone in `box`, which the canvas fills, scaled to fit its
- *  device pixels (`resize`). Always on the canvas: on the iPhone Duo it ran better than the
- *  video track the viewer uses in Safari. */
+ *  device pixels (`resize`). Always on the canvas: on an iPhone it ran better than the video
+ *  track the viewer uses in Safari. */
 export function openSession(box: HTMLElement, events: SessionEvents): Session {
   const canvas = document.createElement("canvas");
   canvas.className = "absolute inset-0 block h-full w-full";

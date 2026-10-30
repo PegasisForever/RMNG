@@ -67,6 +67,7 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
                 key={key.id}
                 k={key}
                 width={key.units * k.pitch - GAP}
+                height={k.rowHeights[i]}
                 size={Math.min(k.rowHeights[i], k.pitch - GAP)}
                 label={keyLabel(key, shift, p.caps)}
                 state={keyState(key, p)}
@@ -164,6 +165,7 @@ function useKeysTouch(rows: Key[][], onKeyTouch: Props["onKeyTouch"]) {
 function KeyButton({
   k,
   width,
+  height,
   size,
   label,
   state,
@@ -172,7 +174,8 @@ function KeyButton({
 }: {
   k: Key;
   width: number;
-  /** The key's height, CSS px; the label scales with it. */
+  height: number;
+  /** The key's height, or its width where that is less, CSS px; the label scales with it. */
   size: number;
   label: string;
   /** A modifier's (or Fn's) state; undefined when it is up. */
@@ -192,7 +195,7 @@ function KeyButton({
       data-key={k.id}
       data-state={state ?? dictation}
       className={`${KEY} ${dictation ? DICTATION_TONE[dictation] : tone(down, state !== undefined)}`}
-      style={{ width, height: size, fontSize: size * (label.length > 1 ? 0.25 : 0.38) }}
+      style={{ width, height, fontSize: size * (label.length > 1 ? 0.25 : 0.38) }}
     >
       {dictation ? (
         <DictationIcon state={dictation} size={iconSize} />

@@ -5,8 +5,7 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import { formatLxcUsage } from "~/components/BoardRail";
-import { claimLayout } from "~/lib/api";
-import { layoutClaimer } from "~/lib/layoutClaim";
+import { attachLayoutClaims, clientId } from "~/lib/clientLayout";
 import { emptyState } from "~/lib/types";
 import { useLiveState } from "~/lib/useLiveState";
 import type { CursorShape } from "~/lib/wire/CursorShape";
@@ -21,12 +20,12 @@ import { CAPS_LOCK, type Key, isShift } from "./keyboard";
 import { Keypad, type KeypadOut } from "./keypad";
 import { KeySounds } from "./keySound";
 import { type ModState, Modifiers } from "./modifiers";
-import { DUO_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
+import { PHONE_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
+import { savePhoneMonitor } from "./phoneMonitor";
 import { MONITOR, type Session, openSession } from "./session";
 
-/** The iPhone Duo layout's one monitor, in pixels (`wire::iphone_duo_layout`): the size shown
- *  until the server says the monitor's size. */
-const DUO_MONITOR = { width: 1002, height: 808 };
+/** The monitor size assumed until the server says the monitor's size. */
+const START_MONITOR = { width: 1002, height: 808 };
 
 /** After this page moved the cursor, the clone's own cursor reports are this far behind (ms),
  *  so they do not pull the drawn cursor back. */
@@ -39,6 +38,8 @@ type Size = { width: number; height: number };
 
 export function useRemote(
   box: RefObject<HTMLDivElement | null>,
+  /** The size of this phone's one monitor (`./phoneMonitor.ts`), asked at each claim. */
+  monitorSize: () => Size,
   /** A pinch on the trackpad (the screen's): the view's zoom changes by `factor`. */
   onZoom?: (factor: number) => void,
 ) {
@@ -47,7 +48,7 @@ export function useRemote(
   const [connected, setConnected] = useState(false);
   const [shape, setShape] = useState<CursorShape | null>(null);
   const [hidden, setHidden] = useState(false);
-  const [pos, setPos] = useState({ x: DUO_MONITOR.width / 2, y: DUO_MONITOR.height / 2 });
+  const [pos, setPos] = useState({ x: START_MONITOR.width / 2, y: START_MONITOR.height / 2 });
   const [mods, setMods] = useState<ReadonlyMap<number, ModState>>(new Map());
   /** The keys show as a trackpad (`./keypad.ts`: after a pointer gesture, for a while). */
   const [padMode, setPadMode] = useState(false);
@@ -58,13 +59,13 @@ export function useRemote(
   /** How the clone's sound plays here, for the Usage page. */
   const [soundReport, setSoundReport] = useState<SoundReport | null>(null);
   /** The layout's scroll speed, percent: the server says it when the socket opens. */
-  const scrollSpeed = useRef(DUO_SCROLL_SPEED);
+  const scrollSpeed = useRef(PHONE_SCROLL_SPEED);
   /** The cursor where this page last put it, and when. */
   const cursor = useRef({ ...pos, movedAt: -Infinity });
 
-  /** The clone's monitor 0, the one shown (the Duo layout's until the server says). */
+  /** The clone's monitor 0, the one shown (START_MONITOR until the server says). */
   const shown = spec?.monitors[0];
-  const monitor: Size = shown ? { width: shown.width, height: shown.height } : DUO_MONITOR;
+  const monitor: Size = shown ? { width: shown.width, height: shown.height } : START_MONITOR;
   const monitorRef = useRef(monitor);
   monitorRef.current = monitor;
   /** Device px per monitor px now (the screen sets it), for the cursor moves. */
@@ -101,21 +102,25 @@ export function useRemote(
   /** Clones that stopped working and nobody has looked at yet: a count on the Clones tab. */
   const unread = live.state.hosts.filter((h) => h.unread && !h.archived && h.id !== live.state.selected).length;
 
-  // The phone takes the clones' layout when it opens, comes to the front, or is touched; a
-  // click or a key in a desktop viewer window takes it back (`~/lib/layoutClaim.ts`). The claim
-  // keeps the phone's monitor size; Fit changes it (`claimMonitor`).
+  // The phone's layout is in force when it opens, comes to the front, or is touched, while it
+  // is in the foreground; an action in another client takes the clones (`~/lib/clientLayout.ts`)
   const zoomRef = useRef(onZoom);
   zoomRef.current = onZoom;
-  const claim = useRef(layoutClaimer("phone")).current;
+  const sizeRef = useRef(monitorSize);
+  sizeRef.current = monitorSize;
+  const claims = useRef<ReturnType<typeof attachLayoutClaims> | null>(null);
   useEffect(() => {
-    claim();
-    const onVisible = () => document.visibilityState === "visible" && claim();
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [claim]);
-  /** Give the clone's monitor this size now (the screen's "fit" button). */
+    claims.current = attachLayoutClaims("phone", () => ({
+      monitors: [{ ...sizeRef.current(), x: 0, y: 0, primary: true }],
+      scrollMode: "auto",
+      scrollSpeed: PHONE_SCROLL_SPEED,
+    }));
+    return () => claims.current?.detach();
+  }, []);
+  /** Give the clone's monitor this size now, and keep it (the screen's "fit" button). */
   const claimMonitor = useCallback((size: Size) => {
-    claimLayout("phone", size).catch(() => {});
+    savePhoneMonitor(size);
+    claims.current?.claim(true);
   }, []);
 
   /** The modifiers, made once (`./modifiers.ts`): what they decide goes to the clone. */
@@ -303,8 +308,8 @@ export function useRemote(
       ? "No clone is selected."
       : terminal
         ? "This clone has no desktop."
-        : live.state.phoneLayout === false
-          ? "In use on the desktop. Touch to use it here."
+        : live.state.layout && live.state.layout.client !== clientId("phone")
+          ? `In use on ${live.state.layout.label === "phone" ? "another phone" : "the desktop"}. Touch to use it here.`
           : null;
 
   return {
@@ -328,7 +333,6 @@ export function useRemote(
     soundReport,
     usage,
     unread,
-    claim,
     claimMonitor,
     sounds,
     onKeyTouch,

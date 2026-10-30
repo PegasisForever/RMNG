@@ -1,4 +1,4 @@
-// The parts every /ng page is made of. A page has the keyboard's space (on the Duo 661 × 334
+// The parts every /ng page is made of. A page has a small space (in the stories 661 × 334
 // CSS px), so each one is a 36 px header over a body that scrolls, and every control is a
 // finger's size: nothing here waits for a hover, and a menu is a sheet of large tiles over the
 // page (`ActionSheet`), not a small list at a pointer.

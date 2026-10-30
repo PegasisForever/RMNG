@@ -20,17 +20,18 @@ type Box = { left: number; top: number; width: number; height: number };
 export type KeysLayout = {
   /** One key unit plus the gap after it: a 1-unit key is `pitch - GAP` wide. */
   pitch: number;
-  /** Each row's height, top first: KEY_ASPECT × a 1-unit key's width, or less where the
-   *  rows do not fit, the two top rows first. */
+  /** Each row's height, top first: KEY_ASPECT × a 1-unit key's width, less where the rows do
+   *  not fit (the two top rows first), more, all the same, where the area is taller. */
   rowHeights: number[];
   /** The keys: at the top of the area; what is left of it stays empty below them. */
   keys: Box;
 };
 
 /** Where the keys go in a keyboard area `width`×`height` with `bottom` kept for the home bar.
- *  The keys take the whole width and are square where the area has room for that. Where it
- *  has not, the symbol and number rows get shorter and the four rows under them stay square;
- *  only when the two are down to MIN_TOP_ROW do those get shorter too. */
+ *  The keys take the whole width and the whole height. In an area of `naturalKeysHeight` they
+ *  are square; a taller one makes every row taller alike. In a shorter one the symbol and
+ *  number rows get shorter and the four rows under them stay square; only when the two are
+ *  down to MIN_TOP_ROW do those get shorter too. */
 export function keysLayout(width: number, height: number, bottom: number): KeysLayout {
   const room = height - PAD - PAD - bottom;
   const pitch = (width - 2 * PAD + GAP) / ROW_UNITS;
@@ -39,10 +40,18 @@ export function keysLayout(width: number, height: number, bottom: number): KeysL
   const low = ROWS - TOP_ROWS;
   const top = Math.min(full, Math.max((rowsRoom - low * full) / TOP_ROWS, MIN_TOP_ROW));
   const lower = Math.max(Math.min(full, (rowsRoom - TOP_ROWS * top) / low), 1);
-  const rowHeights = Array.from({ length: ROWS }, (_, i) => (i < TOP_ROWS ? top : lower));
+  const tall = rowsRoom / ROWS;
+  const rowHeights = Array.from({ length: ROWS }, (_, i) => (tall > full ? tall : i < TOP_ROWS ? top : lower));
   const w = ROW_UNITS * pitch - GAP;
   const h = rowHeights.reduce((a, b) => a + b, 0) + (ROWS - 1) * GAP;
   return { pitch, rowHeights, keys: { left: PAD, top: PAD, width: w, height: h } };
+}
+
+/** The height of a keyboard area `width` wide, `bottom` kept for the home bar, whose keys are
+ *  square. */
+export function naturalKeysHeight(width: number, bottom: number): number {
+  const full = ((width - 2 * PAD + GAP) / ROW_UNITS - GAP) * KEY_ASPECT;
+  return PAD + ROWS * full + (ROWS - 1) * GAP + PAD + bottom;
 }
 
 export type ScreenFit = {

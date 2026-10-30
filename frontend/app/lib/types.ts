@@ -4,6 +4,7 @@
 // viewer never tries to show a half-built container.
 
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
+import type { ClientLayout } from "~/lib/wire/ClientLayout";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { OperationKind } from "~/lib/wire/OperationKind";
@@ -169,13 +170,9 @@ export interface ControlState {
  /** Per-account usage view (no tokens). Despite the name it carries BOTH providers' rows,
   *  tagged by `ClaudeUsage.provider`. Refreshed by the two account pollers. */
  claudeAccounts: ClaudeUsage[];
- /** Name of the currently active layout preset. */
- activeLayout: string;
- /** Layout preset names in config order — powers the sidebar switcher. */
- layoutPresetNames: string[];
- /** The phone (`/ng` on the iPhone Duo) has the clones: its own layout is in force, not
-  *  `activeLayout`, until a desktop viewer window takes them back. */
- phoneLayout?: boolean;
+ /** The monitor layout in force: the last one a client sent (`~/lib/clientLayout.ts`); null
+  *  until one did. */
+ layout?: ClientLayout | null;
  /** The single configured account-pool list, mirrored from config over the live
   *  state — the sidebar usage list groups by this, so pool edits regroup the live
   *  accounts on the next frame with no page reload. */
@@ -202,8 +199,7 @@ export function emptyState(): ControlState {
   hosts: [],
   operations: [],
   claudeAccounts: [],
-  activeLayout: "",
-  layoutPresetNames: [],
+  layout: null,
   groups: [],
   cloneTokens: {},
   boardColumns: [],

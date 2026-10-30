@@ -11,7 +11,6 @@ import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
 import { Field, Section, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
-import { SettingsLayoutPresets } from "~/components/SettingsLayoutPresets";
 import type { BoardColumn } from "~/lib/board";
 import { SettingsPresetList } from "~/components/SettingsPresetList";
 import { SettingsServerSection } from "~/components/SettingsServerSection";
@@ -43,9 +42,6 @@ export interface BoardPaneProps extends PaneDraftProps {
   onDeleteBoardColumn?: (columnId: string) => void;
   onReorderBoardColumns?: (columnIds: string[]) => void;
 }
-
-/** Layout: only the form. */
-export type LayoutPaneProps = PaneDraftProps;
 
 /** Presets: only the form, plus the forkable clones the default-source picker offers. */
 export interface PresetsPaneProps extends PaneDraftProps {
@@ -105,24 +101,6 @@ export function BoardPane({
           />
         </Section>
       ) : null}
-    </>
-  );
-}
-
-/** Layout: the named monitor arrangements the viewer switches between. Applies the moment
- *  it is saved. */
-export function LayoutPane({ draft, onDraftChange }: LayoutPaneProps) {
-  return (
-    <>
-      <Section
-        title="Layout presets"
-        hint="Named monitor arrangements. Switch the active preset from the sidebar. Running clones reconfigure live without closing apps."
-      >
-        <SettingsLayoutPresets
-          presets={draft.layoutPresets}
-          onChange={(presets) => onDraftChange("layoutPresets", presets)}
-        />
-      </Section>
     </>
   );
 }

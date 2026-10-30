@@ -1,4 +1,5 @@
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
+import type { ClientLayout } from "~/lib/wire/ClientLayout";
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { CloneRequest } from "~/lib/wire/CloneRequest";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
@@ -245,22 +246,8 @@ export const testConfig = (what: string, value?: string, model?: string) =>
   ok: boolean;
   message: string;
  }>;
-/** The device in use now takes the clones' layout: `phone` puts the iPhone Duo layout in force
- *  (`/ng`), `desktop` the active preset. The server changes nothing for a device that has it
- *  already, so each device asks on its own user's actions, as often as it likes. The phone may
- *  name its monitor's size; without one it keeps the size it has (the iPhone Duo layout's, the
- *  first time). */
-export const claimLayout = (device: "phone" | "desktop", size?: { width: number; height: number }) =>
- postJson("/api/layout/device", size ? { device, size } : { device }) as Promise<{
-  ok: boolean;
-  changed: boolean;
- }>;
-
-/** Make `name` the active layout preset and live-apply it to the clone on screen. The rest of
- * the fleet keeps its current monitors until the operator switches to it. */
-export const activateLayout = (name: string) =>
- postJson("/api/layout/activate", { name }) as Promise<{
-  ok: boolean;
-  applied: string[];
-  errors: string[];
- }>;
+/** This client's layout is in force from now (`~/lib/clientLayout.ts`). The server changes no
+ *  monitors for a layout the same as the one in force, so a client sends it on each action of
+ *  the operator, as often as it likes. */
+export const claimLayout = (layout: ClientLayout) =>
+ postJson("/api/layout/claim", layout) as Promise<{ ok: boolean; changed: boolean }>;

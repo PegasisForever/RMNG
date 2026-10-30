@@ -25,18 +25,81 @@ pub fn load() -> Result<AppConfig> {
         }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let mut cfg = cfg;
-    // A build of 2026-10-24 saved the phone's layout as the active one. The phone's layout is
-    // no preset (see `App::phone`), so the operator's layout is the first preset again.
-    if cfg.active_layout == wire::IPHONE_DUO_LAYOUT {
-        cfg.active_layout = cfg.layout_presets.first().map(|p| p.name.clone()).unwrap_or_default();
-    }
     Ok(cfg)
+}
+
+/// The active layout preset of a config file from a build that kept a layout list
+/// (`layoutPresets`, `activeLayout`; the active one, else the first), as a desktop's layout.
+/// The server keeps no list now: on the first boot after the upgrade it becomes the layout in
+/// force, and the first desktop browser takes it as its own (`ensureDesktopLayout`).
+pub fn legacy_layout() -> Option<wire::ClientLayout> {
+    legacy_layout_of(&std::fs::read_to_string(config_path()).ok()?)
+}
+
+fn legacy_layout_of(json: &str) -> Option<wire::ClientLayout> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Old {
+        #[serde(default)]
+        layout_presets: Vec<OldPreset>,
+        #[serde(default)]
+        active_layout: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct OldPreset {
+        name: String,
+        monitors: Vec<wire::MonitorSpec>,
+        #[serde(default)]
+        scroll_mode: wire::ScrollMode,
+        #[serde(default)]
+        scroll_speed: Option<f64>,
+    }
+    let old: Old = serde_json::from_str(json).ok()?;
+    let p = old
+        .layout_presets
+        .iter()
+        .find(|p| p.name == old.active_layout)
+        .or(old.layout_presets.first())?;
+    if p.monitors.is_empty() {
+        return None;
+    }
+    // Monitor 0 is the primary one now
+    let mut monitors = p.monitors.clone();
+    if let Some(i) = monitors.iter().position(|m| m.primary) {
+        let primary = monitors.remove(i);
+        monitors.insert(0, primary);
+    }
+    for (i, m) in monitors.iter_mut().enumerate() {
+        m.primary = i == 0;
+    }
+    Some(wire::ClientLayout {
+        client: "legacy".into(),
+        label: "desktop".into(),
+        monitors,
+        scroll_mode: p.scroll_mode,
+        scroll_speed: p.scroll_speed.unwrap_or(100.0),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An old config's active preset becomes a desktop's layout, its primary monitor first.
+    #[test]
+    fn an_old_configs_active_preset_becomes_a_desktop_layout() {
+        let json = r#"{"activeLayout":"B","layoutPresets":[
+            {"name":"A","monitors":[{"width":1920,"height":1080,"primary":true}]},
+            {"name":"B","scrollSpeed":40,"monitors":[
+                {"width":2560,"height":1440,"x":0,"y":0},
+                {"width":3840,"height":2160,"x":2560,"y":0,"primary":true}]}]}"#;
+        let l = legacy_layout_of(json).unwrap();
+        assert_eq!((l.label.as_str(), l.scroll_speed), ("desktop", 40.0));
+        assert_eq!((l.monitors[0].width, l.monitors[0].x, l.monitors[0].primary), (3840, 2560, true));
+        assert!(!l.monitors[1].primary);
+        assert!(legacy_layout_of(r#"{"activeLayout":""}"#).is_none());
+    }
 
     #[test]
     fn merge_preserves_blank_scalars_and_applies_changes() {
@@ -274,103 +337,6 @@ mod tests {
         assert!(ok.setup_complete);
     }
 
-    fn ms(w: u32, h: u32) -> wire::MonitorSpec {
-        wire::MonitorSpec {
-            width: w,
-            height: h,
-            x: 0,
-            y: 0,
-            primary: true,
-        }
-    }
-
-    #[test]
-    fn merge_reconciles_active_layout_when_active_preset_removed() {
-        let mut base = AppConfig::default();
-        base.layout_presets = vec![
-            wire::LayoutPreset {
-                name: "A".into(),
-                monitors: vec![ms(1920, 1080)],
-                scroll_mode: Default::default(),
-                scroll_speed: 100.0,
-            },
-            wire::LayoutPreset {
-                name: "B".into(),
-                monitors: vec![ms(3840, 2160)],
-                scroll_mode: Default::default(),
-                scroll_speed: 100.0,
-            },
-        ];
-        base.active_layout = "B".into();
-        // The UI removes preset "B", sending only "A".
-        let incoming = serde_json::json!({
-            "layoutPresets": [ { "name": "A", "monitors": [
-                { "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": true } ] } ]
-        });
-        let merged = merge_update(&base, incoming).unwrap();
-        assert_eq!(merged.layout_presets.len(), 1);
-        assert_eq!(merged.active_layout, "A"); // reconciled off the removed "B"
-    }
-
-    #[test]
-    fn merge_rejects_invalid_layout_presets() {
-        let base = AppConfig::default();
-        let one = |primary: bool| serde_json::json!({ "width": 1920, "height": 1080, "x": 0, "y": 0, "primary": primary });
-
-        // Two presets sharing a (case-sensitive) name → Err.
-        let dup = serde_json::json!({ "layoutPresets": [
-            { "name": "A", "monitors": [one(true)] },
-            { "name": "A", "monitors": [one(true)] },
-        ] });
-        let e = merge_update(&base, dup).unwrap_err();
-        assert!(e.to_string().contains("duplicate"), "err: {e}");
-
-        // Empty / whitespace name → Err.
-        let empty_name = serde_json::json!({ "layoutPresets": [
-            { "name": "   ", "monitors": [one(true)] },
-        ] });
-        assert!(merge_update(&base, empty_name).is_err());
-
-        // Zero-monitor preset → Err.
-        let no_mons = serde_json::json!({ "layoutPresets": [
-            { "name": "A", "monitors": [] },
-        ] });
-        assert!(merge_update(&base, no_mons).is_err());
-
-        // Two primaries → Ok, normalized to exactly one (first kept, rest cleared).
-        let two_primaries = serde_json::json!({ "layoutPresets": [
-            { "name": "A", "monitors": [one(true), one(true)] },
-        ] });
-        let merged = merge_update(&base, two_primaries).unwrap();
-        let mons = &merged.layout_presets[0].monitors;
-        assert_eq!(
-            mons.iter().filter(|m| m.primary).count(),
-            1,
-            "exactly one primary"
-        );
-        assert!(
-            mons[0].primary && !mons[1].primary,
-            "first primary kept, rest cleared"
-        );
-
-        // Zero primaries → Ok, normalized so the first monitor becomes primary.
-        let no_primary = serde_json::json!({ "layoutPresets": [
-            { "name": "A", "monitors": [one(false), one(false)] },
-        ] });
-        let merged = merge_update(&base, no_primary).unwrap();
-        let mons = &merged.layout_presets[0].monitors;
-        assert_eq!(
-            mons.iter().filter(|m| m.primary).count(),
-            1,
-            "exactly one primary"
-        );
-        assert!(mons[0].primary, "first monitor promoted to primary");
-
-        // An empty layout_presets array is allowed (fresh install has none).
-        let none = serde_json::json!({ "layoutPresets": [] });
-        assert!(merge_update(&base, none).is_ok());
-    }
-
     #[test]
     fn merge_replaces_ssh_authorized_keys_wholesale() {
         let mut base = AppConfig::default();
@@ -471,62 +437,8 @@ pub fn merge_update(base: &AppConfig, incoming: serde_json::Value) -> Result<App
             }
         }
     }
-    // Keep active_layout valid after preset edits: if it no longer names a preset,
-    // point it at the first (or clear it when there are none).
-    if !merged
-        .layout_presets
-        .iter()
-        .any(|p| p.name == merged.active_layout)
-    {
-        merged.active_layout = merged
-            .layout_presets
-            .first()
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
-    }
     enforce_categories(base, &merged)?;
-    validate_layout_presets(&mut merged.layout_presets)?;
     Ok(merged)
-}
-
-/// Validate + normalize the merged `layout_presets` (mirrors the clone-`presets` uniqueness
-/// style). Rejects a preset with an empty/whitespace name, two presets sharing a name
-/// (case-sensitive), or a preset with zero monitors. NORMALIZES each preset in-place to
-/// exactly one primary: zero primaries → the first monitor becomes primary; more than one →
-/// keep the first primary, clear the rest. An empty `layout_presets` array is allowed (a
-/// fresh install legitimately has none — the "can't delete the last preset" rule is UI-only).
-fn validate_layout_presets(presets: &mut [wire::LayoutPreset]) -> Result<()> {
-    let mut seen: Vec<String> = Vec::new();
-    for p in presets.iter_mut() {
-        if p.name.trim().is_empty() {
-            bail!("layout preset name must not be empty");
-        }
-        if seen.contains(&p.name) {
-            bail!("duplicate layout preset name {:?}", p.name);
-        }
-        seen.push(p.name.clone());
-        if p.monitors.is_empty() {
-            bail!("layout preset {:?} must have at least one monitor", p.name);
-        }
-        p.scroll_speed = p.scroll_speed.clamp(-1000.0, 1000.0);
-        // Normalize to exactly one primary.
-        let primaries = p.monitors.iter().filter(|m| m.primary).count();
-        if primaries == 0 {
-            p.monitors[0].primary = true;
-        } else if primaries > 1 {
-            let mut kept = false;
-            for m in p.monitors.iter_mut() {
-                if m.primary {
-                    if kept {
-                        m.primary = false;
-                    } else {
-                        kept = true;
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Guard the invariants on a merged config: once first-run setup has completed

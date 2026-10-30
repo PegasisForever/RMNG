@@ -1304,7 +1304,7 @@ systemctl restart ssh
 /// unit carries no layout on purpose (one unit ships to every clone, and a baked layout would be
 /// wrong the moment the operator changes presets), so a holder with nothing remembered comes up
 /// on the built-in single 1920x1080. On a fleet upgrading onto the holder that is every clone at
-/// once, each one landing on a desktop the operator never chose. Writing the active preset into
+/// once, each one landing on a desktop the operator never chose. Writing the layout in force into
 /// the holder's own memory first makes its first session the right one. Only when the file is
 /// absent: after that the holder owns it, and overwriting would drag a clone back off the layout
 /// it was last viewed with.
@@ -2681,7 +2681,7 @@ mod tests {
         assert!(script.contains("readlink"));
     }
 
-    /// A clone that has never run a holder gets the active preset written into the holder's
+    /// A clone that has never run a holder gets the layout in force written into the holder's
     /// memory before the daemon starts it. Without it the first session comes up on the
     /// built-in single 1920x1080, which is how a whole fleet once landed on a layout nobody
     /// chose. A clone that already remembers a layout must be left alone: that memory is the

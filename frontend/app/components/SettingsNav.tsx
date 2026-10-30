@@ -4,12 +4,11 @@
 //
 // The categories are data rather than markup, so the panel, the panes and the stories all read
 // one list, and hiding a category (a page with no board) is a filter instead of a branch.
-import { Bot, Boxes, LayoutGrid, Monitor, Server } from "lucide-react";
+import { Bot, Boxes, LayoutGrid, Server } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 export type SettingsCategory =
   | "board"
-  | "layout"
   | "presets"
   | "llm"
   | "server";
@@ -24,7 +23,6 @@ export interface SettingsCategoryInfo {
  *  what the server was installed with last. */
 export const SETTINGS_CATEGORIES: SettingsCategoryInfo[] = [
   { id: "board", label: "Board", icon: LayoutGrid },
-  { id: "layout", label: "Layout", icon: Monitor },
   { id: "presets", label: "Presets", icon: Boxes },
   { id: "llm", label: "LLM", icon: Bot },
   { id: "server", label: "Server", icon: Server },

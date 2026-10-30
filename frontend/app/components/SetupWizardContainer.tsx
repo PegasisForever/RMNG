@@ -23,7 +23,7 @@ export function SetupWizardContainer({
   initialConfig,
   onDone,
 }: {
-  /** The config as the server sent it at mount. Seeds the form and the tracked config below.
+  /** The config as the server sent it at mount. Seeds the form.
    *  Read it nowhere else, because the route fetches it once and never refetches. */
   initialConfig: AppConfigRedacted;
   /** Called after setup latches; the parent refetches config and swaps to the dashboard. */
@@ -35,17 +35,6 @@ export function SetupWizardContainer({
   const [draft, setDraft] = useState<SetupDraft>(() =>
     setupDraftFrom(initialConfig),
   );
-
-  // The config as the server last confirmed it, which is what every step's patch reads for the
-  // fields the form does not carry: the layout preset the edited arrangement belongs to.
-  //
-  // It has to be state rather than the `initialConfig` prop. The route fetches config exactly
-  // once and never refetches, while the wizard writes to it on every Next. Reading the prop
-  // after a save answers with a value the operator has already replaced. Every successful PUT
-  // answers with the post-merge redacted config (`ConfigPutResponse.config`), so the response
-  // body is the authority here. No extra GET, and a value the server normalized on the way in
-  // shows up as the server holds it.
-  const [config, setConfig] = useState<AppConfigRedacted>(initialConfig);
 
   // Whether every REQUIRED environment check passes. Reported up by the checklist's own
   // container, because the answer is a function of a response only that half has.
@@ -64,7 +53,7 @@ export function SetupWizardContainer({
     setSaving(true);
     setError(null);
     try {
-      setConfig((await putConfig(patch)).config);
+      await putConfig(patch);
       return true;
     } catch (e) {
       setError((e as Error).message);
@@ -80,7 +69,7 @@ export function SetupWizardContainer({
       // Step 1 sends nothing now (the clone subnet is hardcoded on the server); it only
       // gates on the environment checks.
     } else if (step === 1) {
-      if (!(await persist(serverPatch(draft, config)))) return;
+      if (!(await persist(serverPatch(draft)))) return;
     }
     setStep((s) => Math.min(SETUP_STEPS.length - 1, s + 1));
     setError(null);

@@ -10,15 +10,6 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
   return {
     setupComplete: true,
-    layoutPresets: [
-      {
-        name: "Default",
-        monitors: [{ width: 2560, height: 1440, x: 0, y: 0, primary: true }],
-        scrollMode: "auto",
-        scrollSpeed: 100,
-      },
-    ],
-    activeLayout: "Default",
     docker: {
       hostnamePrefix: "pega-",
       cloneCpus: 16,
@@ -58,16 +49,6 @@ type Patch = {
   docker: { hostnamePrefix: string };
   codex: { autoReset: boolean };
   groups: { name: string; accounts: GroupMember[] }[];
-  layoutPresets: {
-    name: string;
-    monitors: {
-      width: number;
-      height: number;
-      x: number;
-      y: number;
-      primary: boolean;
-    }[];
-  }[];
   presets: {
     name: string;
     labels: string[];
@@ -87,21 +68,6 @@ const patch = (draft: ReturnType<typeof settingsDraftFrom>) =>
   settingsPatch(draft) as Patch;
 
 // --- seeding the form ---------------------------------------------------------------------
-
-test("a rig with no layout preset is given one to edit", () => {
-  // An empty list would leave the operator with nothing to type into, and no way to make the
-  // first arrangement.
-  const draft = settingsDraftFrom(config({ layoutPresets: [] }));
-
-  expect(draft.layoutPresets).toEqual([
-    {
-      name: "Default",
-      monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
-      scrollMode: "auto",
-      scrollSpeed: 100,
-    },
-  ]);
-});
 
 test("a preset with no pool default is seeded with the first pool", () => {
   // A preset always names a default: a blank from an older server reads as the first
@@ -124,9 +90,6 @@ test("the form never shares an array with the config it was seeded from", () => 
   const draft = settingsDraftFrom(c);
 
   expect(draft.groups[0].accounts).not.toBe(c.groups[0].accounts);
-  expect(draft.layoutPresets[0].monitors[0]).not.toBe(
-    c.layoutPresets[0].monitors[0],
-  );
 });
 
 // --- what a save sends --------------------------------------------------------------------
@@ -282,35 +245,6 @@ test("the fork default is trimmed, blank means newest", () => {
   const blank = settingsDraftFrom(config());
   blank.presets = [{ ...blank.presets[0], defaultForkClone: "   " }];
   expect(patch(blank).presets[0].defaultForkClone).toBe("");
-});
-
-test("an unnamed layout preset is dropped and negative geometry is clamped", () => {
-  const draft = settingsDraftFrom(config());
-  draft.layoutPresets = [
-    {
-      name: "  Dual  ",
-      monitors: [{ width: 0, height: -5, x: -100, y: -1, primary: true }],
-      scrollMode: "auto",
-      scrollSpeed: 100,
-    },
-    {
-      name: "",
-      monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: false }],
-      scrollMode: "auto",
-      scrollSpeed: 100,
-    },
-  ];
-
-  const saved = patch(draft).layoutPresets;
-  expect(saved).toHaveLength(1);
-  expect(saved[0].name).toBe("Dual");
-  expect(saved[0].monitors[0]).toEqual({
-    width: 1,
-    height: 1,
-    x: 0,
-    y: 0,
-    primary: true,
-  });
 });
 
 test("the cosmetic account order is never part of the patch", () => {

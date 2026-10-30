@@ -1,16 +1,13 @@
-import { getConfig } from "~/lib/api";
+import { DEFAULT_DESKTOP_LAYOUT, readDesktopLayout } from "~/lib/clientLayout";
 
-/** Open one browser viewer window per monitor: of `monitors` (a view spec), or else of the
- *  active layout preset (the same preset the server picks: the active one, else the first).
+/** Open one browser viewer window per monitor: of `monitors` (a view spec), or else of this
+ *  browser's layout (`~/lib/clientLayout.ts`).
  *  Each is a plain window at the browser's default place and size; the operator moves, sizes and
  *  fullscreens it. A window that is open already stays as it is. */
 export async function openViewerWindows(monitors?: { id: number }[]) {
   if (!monitors) {
-    const cfg = await getConfig();
-    const preset =
-      cfg.layoutPresets.find((p) => p.name === cfg.activeLayout) ?? cfg.layoutPresets[0];
-    // No preset at all: the server falls back to its built-in two monitors.
-    monitors = preset?.monitors.map((_, id) => ({ id })) ?? [{ id: 0 }, { id: 1 }];
+    const layout = readDesktopLayout() ?? DEFAULT_DESKTOP_LAYOUT;
+    monitors = layout.monitors.map((_, id) => ({ id }));
   }
   let blocked = 0;
   for (const m of monitors) {

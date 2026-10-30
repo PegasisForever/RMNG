@@ -15,8 +15,7 @@ function checklist(rows = makeEnvRows()) {
   );
 }
 
-/** Everything a story edits, rebuilt per story. The Server step replaces the monitors array
- *  on every edit, so one set behind every story is how a drag in one shows up in the next. */
+/** Everything a story edits, rebuilt per story. */
 function base() {
   return {
     draft: makeSetupDraft(),

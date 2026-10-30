@@ -512,7 +512,7 @@ pub fn spawn(app: App) {
         );
         std::thread::spawn(move || {
             let (_seed, mut rx) = app.store.subscribe();
-            // Track the configured window set so a layout-preset change re-broadcasts a fresh
+            // Track the configured window set so a layout change re-broadcasts a fresh
             // ViewSpec even when the *selection* is unchanged (the window set follows the layout,
             // not the daemon's report). Seeded to the current layout so the first tick is quiet.
             let mut last_monitors = configured_monitors(&app);
@@ -815,7 +815,7 @@ pub(crate) fn configured_monitors(app: &App) -> Vec<ViewMonitor> {
         .collect()
 }
 
-/// Bring one clone to the active layout preset.
+/// Bring one clone to the layout in force.
 ///
 /// A layout change reaches the fleet one clone at a time, on the switch to it. Applying it
 /// everywhere at once rebuilds every clone's Mutter session in the same second, and the whole
@@ -835,10 +835,10 @@ pub(crate) fn apply_active_layout(app: &App, clone: &str) {
 /// Whether a daemon's `Hello` should be answered with the active layout.
 ///
 /// Two cases, and the second is the one that cost a fleet its monitors. A clone on screen has
-/// to follow the active preset. A clone whose session holder this daemon just started has a
+/// to follow the layout in force. A clone whose session holder this daemon just started has a
 /// desktop seconds old, built on whatever the holder remembered, or on the built-in single
 /// monitor when it remembered nothing. Nobody chose that layout and no window on it was
-/// placed by hand, so it takes the active preset too.
+/// placed by hand, so it takes the layout in force too.
 ///
 /// Everything else is left alone. A daemon that restarted under a holder that kept running
 /// still has the operator's windows where they left them, and that is exactly what the lazy
@@ -852,7 +852,7 @@ fn push_layout_on_hello(selected: Option<&str>, clone_id: &str, fresh_session: b
 /// and the create op returns before all of that finishes.
 const NEW_CLONE_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
 
-/// Bring a freshly created clone to the active layout preset as soon as its daemon registers.
+/// Bring a freshly created clone to the layout in force as soon as its daemon registers.
 ///
 /// A clone nobody has watched keeps the layout it boots with, and a brand-new one boots on the
 /// single monitor baked into the template image. Nobody chose that layout, so the create path
@@ -1738,7 +1738,7 @@ mod tests {
     /// every other clone stayed on a layout nobody chose.
     #[test]
     fn a_hello_takes_a_layout_when_it_is_watched_or_its_session_is_new() {
-        // Watched: follows the active preset, as every other push does.
+        // Watched: follows the layout in force, as every other push does.
         assert!(push_layout_on_hello(Some("a"), "a", false));
         // Not watched, but this daemon just started the holder: the desktop behind it is
         // seconds old, so there is no window position to protect.
@@ -1776,7 +1776,7 @@ mod tests {
         let got = got.expect("the registered clone got the active layout");
         match serde_json::from_slice::<ServerMsg>(&got).unwrap() {
             ServerMsg::SetMonitors { monitors } => {
-                assert_eq!(monitors, app.config().effective_monitors());
+                assert_eq!(monitors, app.effective_monitors());
             }
             other => panic!("expected SetMonitors, got {other:?}"),
         }

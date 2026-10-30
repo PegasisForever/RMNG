@@ -23,7 +23,6 @@ export function SetupReviewStep({
             ["Clone hostname prefix", draft.hostnamePrefix || "(none)"],
             ["CPU limit per clone", `${draft.cloneCpus} cores`],
             ["Memory limit per clone", `${draft.cloneMemoryMb} MB`],
-            ["Monitors", `${draft.monitors.length} monitor(s)`],
           ] as const
         ).map(([k, v]) => (
           <div key={k} className="flex justify-between gap-3 px-3 py-2">

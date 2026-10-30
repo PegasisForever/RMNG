@@ -28,13 +28,12 @@ type Story = StoryObj<typeof meta>;
 /** A complete first run: every field filled in. */
 export const Default: Story = {};
 
-/** The barest rig the wizard will finish: no hostname prefix, one screen. A missing
- *  prefix is a choice, not a gap. */
+/** The barest rig the wizard will finish: no hostname prefix. A missing prefix is a
+ *  choice, not a gap. */
 export const Minimal: Story = {
   args: {
     draft: makeSetupDraft({
       hostnamePrefix: "",
-      monitors: [{ width: 1920, height: 1080, x: 0, y: 0, primary: true }],
     }),
   },
 };

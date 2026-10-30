@@ -15,7 +15,7 @@ test("clampTo keeps a point on the monitor", () => {
   expect(clampTo(42.5, 100)).toBe(42.5);
 });
 
-test("the scroll follows the layout's speed: the Duo's 15% is 0.3 surface px per CSS px, fingers up scroll down", () => {
+test("the scroll follows the layout's speed: the phone's 15% is 0.3 surface px per CSS px, fingers up scroll down", () => {
   expect(scrollGain(15)).toBeCloseTo(-0.3);
   expect(scrollGain(100)).toBe(-2);
   expect(scrollGain(-15)).toBeCloseTo(0.3);

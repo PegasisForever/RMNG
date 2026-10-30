@@ -1,13 +1,12 @@
 // The board's leftmost column: the controls that belong to the whole rig rather than to
-// any one clone. Layout presets, account usage, the CT totals, and whatever operations
+// any one clone. Edit layout, account usage, the CT totals, and whatever operations
 // are running. Creating a clone belongs to a column, so that button lives there.
 //
 // It is the first thing in the strip and scrolls with the columns.
-import { MonitorPlay, Settings } from "lucide-react";
+import { MonitorCog, MonitorPlay, Settings } from "lucide-react";
 import { useId } from "react";
 
 import { ClaudeAccountsPanel } from "~/components/ClaudeAccountsPanel";
-import { DropdownSelect } from "~/components/DropdownSelect";
 import { OperationProgress } from "~/components/OperationProgress";
 import type { AcctOrder } from "~/lib/accountOrder";
 import type { ClaudeUsage, Operation } from "~/lib/types";
@@ -35,11 +34,6 @@ export function formatLxcUsage(
     return { cpu, mem, disk };
 }
 
-/** The layout picker's trigger. The rail is narrow and everything in it is small, so this
- *  is the rest of the app's field styling at the rail's own text size rather than a form's. */
-const LAYOUT_FIELD =
-    "rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800";
-
 export interface BoardRailProps {
     /** Per-account usage rows (both providers), from `ControlState.claudeAccounts`. */
     accounts: ClaudeUsage[];
@@ -58,15 +52,15 @@ export interface BoardRailProps {
     lxcStats: LxcStats | null;
     /** All operations; the running ones render as progress rows. */
     operations: Operation[];
-    /** Layout preset names, in config order. */
-    presetNames: string[];
-    /** The active preset name. */
-    activeLayout: string;
-    /** The iPhone Duo has the clones, with its own layout (`/ng`); a click or a key in a
-     *  viewer window takes them back. */
-    phoneLayout?: boolean;
-    onActivateLayout: (name: string) => void;
-    /** Open the browser viewer: one window per monitor of the active layout. */
+    /** How many monitors this browser's layout has (`~/lib/clientLayout.ts`). */
+    monitorCount: number;
+    /** What kind of client's layout is in force, when it is another client's ("phone",
+     *  "desktop"); null when it is this browser's own, or none. An action in this browser
+     *  takes the clones back. */
+    elsewhere: string | null;
+    /** Open the Edit layout dialog. */
+    onEditLayout: () => void;
+    /** Open the browser viewer: one window per monitor of this browser's layout. */
     onOpenViewer: () => void;
     onOpenSettings: () => void;
     /** Import an account from a clone that is already signed in. */
@@ -85,10 +79,9 @@ export function BoardRail({
     now,
     lxcStats,
     operations,
-    presetNames,
-    activeLayout,
-    phoneLayout = false,
-    onActivateLayout,
+    monitorCount,
+    elsewhere,
+    onEditLayout,
     onOpenViewer,
     onOpenSettings,
     onReplaceAccount,
@@ -134,29 +127,28 @@ export function BoardRail({
                     </div>
                 </div>
 
-                {presetNames.length > 0 ? (
-                    <div className="flex items-center gap-2">
-                        <h3 className="shrink-0 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                            Layout
-                        </h3>
-                        <div className="min-w-0 flex-1">
-                            <DropdownSelect
-                                rows={presetNames.map((name) => ({
-                                    value: name,
-                                    label: name,
-                                }))}
-                                value={activeLayout}
-                                onChange={onActivateLayout}
-                                label="Layout"
-                                className={LAYOUT_FIELD}
-                            />
-                        </div>
-                    </div>
-                ) : null}
-                {phoneLayout ? (
+                <div className="flex items-center gap-2">
+                    <h3 className="shrink-0 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                        Layout
+                    </h3>
+                    <button
+                        type="button"
+                        onClick={onEditLayout}
+                        className="inline-flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+                    >
+                        <MonitorCog aria-hidden className="size-3.5 shrink-0" />
+                        <span className="truncate">Edit layout</span>
+                        <span className="ml-auto shrink-0 text-slate-400 dark:text-slate-500">
+                            {monitorCount} {monitorCount === 1 ? "monitor" : "monitors"}
+                        </span>
+                    </button>
+                </div>
+                {elsewhere ? (
                     <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                        The iPhone Duo is using the clones. Click or type in a viewer window to
-                        take them back.
+                        {elsewhere === "phone"
+                            ? "The phone is using the clones, with its layout."
+                            : "Another browser is using the clones, with its layout."}{" "}
+                        Use this browser to take them back.
                     </p>
                 ) : null}
 

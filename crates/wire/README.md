@@ -31,7 +31,7 @@ The other transport types (socket, holder) are serde-only.
 ## Key types
 
 ```text
-ControlState { selected: Option<String>, active_layout, layout_preset_names,
+ControlState { selected: Option<String>, layout: Option<ClientLayout>,
                hosts: Vec<RmngClone>, board_columns, ticket_order, muted_clones,
                operations: Vec<Operation>, groups, claude_accounts: Vec<ClaudeUsage>,
                codex_reset_marks, clone_tokens }
@@ -54,7 +54,7 @@ AppConfig { docker{hostname_prefix, clone_cpus, clone_memory_mb, homes_parent},
             clone_groups: [{name, accounts: [email]}],
             codex{autoReset},
             codex_groups: [{name, accounts: [email]}],
-            setup_complete, layout_presets, active_layout, ssh, ... }
+            setup_complete, ssh, ... }
 # Ports, data dir and sockets are constants (PORT_WEB, PORT_BASTION, PORT_DAEMON_MCP,
 # DATA_DIR, CLONE_SOCKET, DOCKER_SOCKET), not config. Old keys in config.json are ignored.
 # Clone images are gen-2 preset builds (each preset's Dockerfile into a hash tag, built on

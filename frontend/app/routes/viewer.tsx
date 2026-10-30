@@ -9,7 +9,13 @@
 import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
-import { layoutClaimer } from "~/lib/layoutClaim";
+import {
+  VIEWER_CHANNEL,
+  type ViewerChannelMsg,
+  attachLayoutClaims,
+  desktopClaim,
+  ensureDesktopLayout,
+} from "~/lib/clientLayout";
 import type { FromBrowser } from "~/lib/wire/FromBrowser";
 import type { TermData } from "~/lib/wire/TermData";
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
@@ -82,16 +88,35 @@ export default function Viewer() {
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, [monitor]);
 
-  // A click or a key here takes the clones' layout back from the phone, if it has it
+  // An action here puts this browser's layout in force (`~/lib/clientLayout.ts`)
   useEffect(() => {
-    const claim = layoutClaimer("desktop");
-    window.addEventListener("pointerdown", claim, true);
-    window.addEventListener("keydown", claim, true);
+    let claims: { detach: () => void } | null = null;
+    let gone = false;
+    void ensureDesktopLayout().then(() => {
+      if (!gone) claims = attachLayoutClaims("desktop", desktopClaim);
+    });
     return () => {
-      window.removeEventListener("pointerdown", claim, true);
-      window.removeEventListener("keydown", claim, true);
+      gone = true;
+      claims?.detach();
     };
   }, []);
+
+  // The dashboard's "Match window sizes" asks each viewer window for its size
+  useEffect(() => {
+    const ch = new BroadcastChannel(VIEWER_CHANNEL);
+    ch.onmessage = (e: MessageEvent<ViewerChannelMsg>) => {
+      if (e.data.t !== "ask-size") return;
+      const dpr = window.devicePixelRatio || 1;
+      const reply: ViewerChannelMsg = {
+        t: "size",
+        monitor,
+        width: Math.round(window.innerWidth * dpr),
+        height: Math.round(window.innerHeight * dpr),
+      };
+      ch.postMessage(reply);
+    };
+    return () => ch.close();
+  }, [monitor]);
 
   useEffect(() => {
     if (!secure || !box.current || !overlay.current) return;

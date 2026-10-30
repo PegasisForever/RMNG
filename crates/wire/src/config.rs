@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::control::{LayoutPreset, MonitorSpec, Provider, ScrollMode};
+use crate::control::Provider;
 
 /// Hardcoded control-server ports and paths (formerly the Settings "Advanced" pane).
 /// Nothing here is user-serviceable: changing a port would desync the clones that bake
@@ -461,13 +461,6 @@ pub struct AppConfig {
     /// unless the wizard set it.
     #[serde(default)]
     pub setup_complete: bool,
-    /// Named monitor-layout presets. The operator switches the active one from the
-    /// sidebar (`POST /api/layout/activate`); the active preset drives `effective_monitors()`.
-    #[serde(default)]
-    pub layout_presets: Vec<LayoutPreset>,
-    /// Name of the active layout preset (the fleet-wide live layout).
-    #[serde(default)]
-    pub active_layout: String,
     #[serde(default)]
     pub docker: DockerConfig,
     #[serde(default)]
@@ -514,8 +507,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             setup_complete: false,
-            layout_presets: Vec::new(),
-            active_layout: String::new(),
             docker: DockerConfig::default(),
             claude: ClaudeConfig::default(),
             codex: CodexConfig::default(),
@@ -544,51 +535,11 @@ pub fn default_global_prompt() -> String {
 }
 
 impl AppConfig {
-    /// The active preset, else the first one; None when no presets exist.
-    pub fn effective_preset(&self) -> Option<&LayoutPreset> {
-        self.layout_presets
-            .iter()
-            .find(|p| p.name == self.active_layout)
-            .or(self.layout_presets.first())
-    }
-
-    /// The active preset's scroll mode and speed (percent); auto at 100 without presets.
-    pub fn effective_scroll(&self) -> (ScrollMode, f64) {
-        self.effective_preset()
-            .map_or((ScrollMode::Auto, 100.0), |p| (p.scroll_mode, p.scroll_speed))
-    }
-
-    /// The active preset's monitors. Falls back to the first preset, then to a dual
-    /// 2560×1440 side-by-side default (primary on the right) when no presets exist.
-    pub fn effective_monitors(&self) -> Vec<MonitorSpec> {
-        if let Some(p) = self.effective_preset() {
-            return p.monitors.clone();
-        }
-        vec![
-            MonitorSpec {
-                width: 2560,
-                height: 1440,
-                x: 2560,
-                y: 0,
-                primary: true,
-            },
-            MonitorSpec {
-                width: 2560,
-                height: 1440,
-                x: 0,
-                y: 0,
-                primary: false,
-            },
-        ]
-    }
-
     /// Produce the redacted view for `GET /api/config`. Each preset's Linear key passes
     /// through verbatim; what the redaction still does is make it write-only on the way back.
     pub fn redacted(&self) -> AppConfigRedacted {
         AppConfigRedacted {
             setup_complete: self.setup_complete,
-            layout_presets: self.layout_presets.clone(),
-            active_layout: self.active_layout.clone(),
             docker: self.docker.clone(),
             claude: self.claude,
             codex: self.codex.clone(),
@@ -616,8 +567,6 @@ impl AppConfig {
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub struct AppConfigRedacted {
     pub setup_complete: bool,
-    pub layout_presets: Vec<LayoutPreset>,
-    pub active_layout: String,
     pub docker: DockerConfig,
     pub claude: ClaudeConfig,
     pub codex: CodexConfig,
@@ -703,7 +652,7 @@ mod tests {
         assert_eq!(BUILDKIT_CACHE_GB, 40);
         assert_eq!(CLAUDE_POLL_SECS, 600);
         assert_eq!(CODEX_POLL_SECS, 600);
-        let mons = AppConfig::default().effective_monitors();
+        let mons = crate::control::default_monitors();
         assert_eq!(mons.len(), 2);
         assert_eq!(
             (mons[0].width, mons[0].height, mons[0].x),
@@ -913,53 +862,22 @@ mod tests {
         assert_eq!(r.presets[0].global_prompt, "PRESET PROMPT");
     }
 
+    /// A config file of a build that kept a layout list still loads; the list is dropped.
     #[test]
-    fn effective_monitors_selection_rules() {
-        // Active preset wins.
-        let mut c = AppConfig::default();
-        c.layout_presets = vec![
-            LayoutPreset {
-                name: "A".into(),
-                scroll_mode: Default::default(),
-                scroll_speed: 100.0,
-                monitors: vec![MonitorSpec {
-                    width: 1920,
-                    height: 1080,
-                    x: 0,
-                    y: 0,
-                    primary: true,
-                }],
-            },
-            LayoutPreset {
-                name: "B".into(),
-                scroll_mode: Default::default(),
-                scroll_speed: 100.0,
-                monitors: vec![MonitorSpec {
-                    width: 3840,
-                    height: 2160,
-                    x: 0,
-                    y: 0,
-                    primary: true,
-                }],
-            },
-        ];
-        c.active_layout = "B".into();
-        assert_eq!(c.effective_monitors(), c.layout_presets[1].monitors);
-        // A missing active name falls back to the first preset.
-        c.active_layout = "Nonexistent".into();
-        assert_eq!(c.effective_monitors(), c.layout_presets[0].monitors);
-        // No presets → dual-1440p default (unchanged behavior).
-        let c = AppConfig::default();
-        assert_eq!(c.effective_monitors().len(), 2);
-        assert!(c.effective_monitors()[0].primary);
+    fn an_old_config_with_layout_presets_still_loads() {
+        let c: AppConfig = serde_json::from_str(
+            r#"{"layoutPresets":[{"name":"A","monitors":[{"width":1920,"height":1080}]}],"activeLayout":"A"}"#,
+        )
+        .unwrap();
+        assert!(!serde_json::to_string(&c).unwrap().contains("layoutPresets"));
     }
 
-    /// The iPhone Duo layout is one monitor the encoder takes: even sizes (4:2:0 chroma).
+    /// The default monitors: two, monitor 0 the primary one, in sizes the encoder takes.
     #[test]
-    fn the_built_in_iphone_duo_layout_has_one_even_sized_monitor() {
-        let m = &crate::control::iphone_duo_layout().monitors;
-        assert_eq!((m.len(), m[0].width, m[0].height, m[0].primary), (1, 1002, 808, true));
-        assert_eq!((m[0].width % 2, m[0].height % 2), (0, 0));
+    fn the_default_monitors_are_two_with_monitor_0_primary() {
+        let m = crate::control::default_monitors();
+        assert_eq!((m.len(), m[0].primary, m[1].primary), (2, true, false));
+        assert!(m.iter().all(|m| m.width % 2 == 0 && m.height % 2 == 0));
     }
 
     #[test]
