@@ -13,7 +13,6 @@ import { useLiveState } from "~/lib/useLiveState";
 import type { CursorShape } from "~/lib/wire/CursorShape";
 import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
-import { clientLog } from "~/viewer/clientLog";
 import { CODE_TO_EVDEV } from "~/viewer/keycodes";
 import type { SoundReport } from "~/viewer/protocol";
 
@@ -279,20 +278,9 @@ export function useRemote(
     keypad.current = new Keypad((o) => (o.t === "pad" ? setPadMode(o.on) : out(o)), timer);
   }
   /** A trackpad with no keys, for good (the whole screen of the other orientations), where two
-   *  fingers also pinch to zoom the view. Its gestures of two fingers or more go to the
-   *  server's log (`noteGesture`): what a browser sends for them differs. */
+   *  fingers also pinch to zoom the view. */
   const trackpad = useRef<Keypad | null>(null);
-  const gesture = useRef<Gesture | null>(null);
-  if (!trackpad.current) {
-    trackpad.current = new Keypad(
-      (o) => {
-        if (gesture.current) gesture.current.outs[o.t] = (gesture.current.outs[o.t] ?? 0) + 1;
-        out(o);
-      },
-      timer,
-      { alwaysPad: true, pinch: true },
-    );
-  }
+  if (!trackpad.current) trackpad.current = new Keypad(out, timer, { alwaysPad: true, pinch: true });
 
   const feed = (pad: Keypad, kind: TouchKind, id: number, key: Key | null, x: number, y: number) => {
     const t = performance.now();
@@ -306,10 +294,10 @@ export function useRemote(
     (kind: TouchKind, id: number, key: Key | null, x: number, y: number) => feed(keypad.current!, kind, id, key, x, y),
     [],
   );
-  const onPadTouch = useCallback((kind: TouchKind, id: number, x: number, y: number) => {
-    gesture.current = noteGesture(gesture.current, kind, id);
-    feed(trackpad.current!, kind, id, null, x, y);
-  }, []);
+  const onPadTouch = useCallback(
+    (kind: TouchKind, id: number, x: number, y: number) => feed(trackpad.current!, kind, id, null, x, y),
+    [],
+  );
   const onButton = useCallback((code: number, pressed: boolean) => {
     // Held, a button keeps the keys a trackpad, so the buttons stay on screen
     keypad.current!.button(pressed);
@@ -356,41 +344,4 @@ export function useRemote(
     onPadTouch,
     onButton,
   };
-}
-
-/** One trackpad gesture, from the first finger down to the last one up: its events, fingers
- *  numbered as they came (`d2` the second finger down, `m2x7` its 7 moves, `c` a cancel), and
- *  what the trackpad made of them. */
-type Gesture = { ids: number[]; down: Set<number>; ev: string[]; outs: Record<string, number>; t0: number };
-
-/** Logged gestures, and when the count started: at most GESTURE_LOGS a minute. */
-const GESTURE_LOGS = 10;
-let logged = { n: 0, since: 0 };
-
-function noteGesture(g: Gesture | null, kind: TouchKind, id: number): Gesture | null {
-  const now = performance.now();
-  if (!g) {
-    if (kind !== "down") return null;
-    g = { ids: [], down: new Set(), ev: [], outs: {}, t0: now };
-  }
-  if (kind === "down" && !g.ids.includes(id)) g.ids.push(id);
-  const n = g.ids.indexOf(id) + 1;
-  const code = `${kind === "down" ? "d" : kind === "move" ? "m" : kind === "up" ? "u" : "c"}${n}`;
-  // Moves in a row by one finger are counted, not listed
-  const last = g.ev.at(-1);
-  if (kind === "move" && last?.startsWith(code)) {
-    const [, times] = last.split("x");
-    g.ev[g.ev.length - 1] = `${code}x${Number(times ?? 1) + 1}`;
-  } else if (g.ev.length < 80) g.ev.push(code);
-  if (kind === "down") g.down.add(id);
-  if (kind === "up" || kind === "cancel") g.down.delete(id);
-  if (g.down.size) return g;
-  if (g.ids.length >= 2) {
-    if (now - logged.since > 60_000) logged = { n: 0, since: now };
-    if (logged.n++ < GESTURE_LOGS) {
-      const outs = Object.entries(g.outs).map(([k, v]) => `${k}x${v}`).join(" ") || "nothing";
-      clientLog("trackpad", `${g.ids.length} fingers, ${Math.round(now - g.t0)} ms: ${g.ev.join(" ")} -> ${outs}`);
-    }
-  }
-  return null;
 }

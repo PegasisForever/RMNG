@@ -22,7 +22,6 @@
 import type { FromBrowser } from "../lib/wire/FromBrowser";
 import type { ToBrowser } from "../lib/wire/ToBrowser";
 import { type HeldInput, freshInput, holdInput, letterbox } from "./input";
-import { clientLog } from "./clientLog";
 import { type Opus, openOpus } from "./opus";
 import {
   AUDIO_FRAME_MS,
@@ -202,7 +201,6 @@ function onDecoderError(e: DOMException) {
   errors++;
   if (errors >= SOFTWARE_AFTER_ERRORS) software = true;
   console.warn(`decoder error ${errors}:`, e);
-  clientLog("viewer", `decoder error ${errors}${software ? " (software)" : ""}: ${e.message}`);
   resetDecoder();
   requestKeyframe();
 }
@@ -231,9 +229,7 @@ function checkHeld() {
   if (flushing || decoder?.state !== "configured" || !inDecoder.length) return;
   if (now - lastIn < HELD_MS || now - lastOut < HELD_MS) return;
   if (!software && !flushWhenStill) {
-    const held = `decoder held ${inDecoder.length} frames ${Math.round(now - lastIn)} ms`;
     void softwareDecodes().then((yes) => {
-      clientLog("viewer", `${held}: ${yes ? "software decoder" : "no software decoder, flush when still"}`);
       if (yes) software = true;
       else flushWhenStill = true;
       if (yes) {
@@ -245,10 +241,7 @@ function checkHeld() {
     lastIn = now;
     return;
   }
-  if (!flushWhenStill) {
-    flushWhenStill = true;
-    clientLog("viewer", `the software decoder holds frames too: flush when still`);
-  }
+  flushWhenStill = true;
   flush();
 }
 
