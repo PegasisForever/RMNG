@@ -30,30 +30,28 @@
 // fit), not stretched. This browser's layout is in force while it is in use: a window opens,
 // comes to the front, or is touched or clicked.
 //
-// The connection and the input are `./remote.ts`'s.
+// The connection and the input are `./remote.ts`'s; the drawing is `./NgScreenView.tsx`'s.
 import { type PointerEvent, useEffect, useRef, useState } from "react";
 
 import { LayoutEditorContainer } from "~/components/LayoutEditorContainer";
-import { MonitorNumber } from "~/components/MonitorNumber";
 import { type BrowserLayout, clientKind, ensureLayout, readLayout, saveLayout } from "~/lib/clientLayout";
 import { resize } from "~/lib/monitorLayout";
 import { useViewerChannel } from "~/lib/useViewerChannel";
 import { toggleFullscreen } from "~/viewer/input";
 
-import { Cursor } from "./Cursor";
 import { firstLayout, startScale } from "./firstLayout";
-import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
-import { GAP, TOOL_H, followAxis, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
+import { followAxis, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
 import { useInputMode } from "./inputMode";
-import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
-import { KeyboardView, type TouchKind } from "./KeyboardView";
+import { HANDLE_H } from "./KeyboardHandle";
+import { type TouchKind } from "./KeyboardView";
 import { readKeyboardDocked, readKeyboardHeight, saveKeyboardDocked, saveKeyboardHeight } from "./keyboardDock";
+import { NgScreenView, pagesBox } from "./NgScreenView";
 import { NgPagesContainer } from "./pages/NgPagesContainer";
 import { clampTo } from "./pointer";
 import { useRemote } from "./remote";
 import { isPagesChord, pagesChordLabel } from "./shortcut";
 import { isTyping, useLift } from "./systemKeyboard";
-import { type NgTab, ToolRow } from "./ToolRow";
+import type { NgTab } from "./ToolRow";
 
 /** The floating keyboard takes at most this part of the display's height. */
 const KEYBOARD_PART = 0.45;
@@ -67,8 +65,6 @@ const MIN_KEYS_H = 160;
 const MAX_KEYS_PART = 0.8;
 /** Touch slots a touch screen offers, fingers at once. */
 const TOUCH_SLOTS = 10;
-/** The pages are at most this wide (CSS px), at the right, under the buttons. */
-const PANEL_MAX_W = 960;
 /** How long the chord's hint shows when mouse and keyboard mode starts, ms. */
 const HINT_MS = 4000;
 /** The pages' own window: its name, and its size when it opens. */
@@ -238,14 +234,8 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
   const y = still ? fit.top : followAxis(prev.y, cy, h, visible, height, CURSOR_MARGIN);
   at.current = { x, y, shown };
 
-  // The pages, under the buttons' row, at the right
-  const panelW = Math.min(width - 2 * FLOAT_GAP, PANEL_MAX_W);
-  const panel = {
-    left: width - FLOAT_GAP - panelW,
-    top: FLOAT_GAP * 2 + FLOAT_BUTTON,
-    width: panelW,
-    height: height - FLOAT_GAP * 3 - FLOAT_BUTTON - bottom,
-  };
+  // The phone's keyboard lifts the pages so all of the open one is above it
+  const panel = pagesBox(width, height, bottom);
   const lift = useLift(panel.top + panel.height);
 
   const onDownCapture = (e: PointerEvent<HTMLDivElement>) => {
@@ -262,7 +252,7 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
   };
 
   // The whole display is the trackpad (under the keyboard, the pages and the buttons)
-  const pad = (kind: TouchKind) => (e: PointerEvent<HTMLDivElement>) => {
+  const pad = (kind: TouchKind, e: PointerEvent<HTMLDivElement>) => {
     if (kind === "down" && e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
     r.onPadTouch(kind, e.pointerId, e.clientX, e.clientY);
   };
@@ -279,26 +269,27 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
       y: clampTo(((e.clientY - rect.top) / rect.height) * m.height, m.height),
     };
   };
-  const onScreenDown = (e: PointerEvent<HTMLDivElement>) => {
+  const onTouchScreen = (kind: TouchKind, e: PointerEvent<HTMLDivElement>) =>
+    kind === "down" ? onScreenDown(e) : kind === "move" ? onScreenMove(e) : onScreenUp(e);
+  function onScreenDown(e: PointerEvent<HTMLDivElement>) {
     const used = new Set(slots.current.values());
     const slot = [...Array(TOUCH_SLOTS).keys()].find((s) => !used.has(s));
     if (slot === undefined) return;
     if (e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
     slots.current.set(e.pointerId, slot);
     r.session.current?.touch({ phase: "down", slot, ...touchAt(e) });
-  };
-  const onScreenMove = (e: PointerEvent<HTMLDivElement>) => {
+  }
+  function onScreenMove(e: PointerEvent<HTMLDivElement>) {
     const slot = slots.current.get(e.pointerId);
     if (slot !== undefined) r.session.current?.touch({ phase: "motion", slot, ...touchAt(e) });
-  };
-  const onScreenUp = (e: PointerEvent<HTMLDivElement>) => {
+  }
+  function onScreenUp(e: PointerEvent<HTMLDivElement>) {
     const slot = slots.current.get(e.pointerId);
     if (slot === undefined) return;
     slots.current.delete(e.pointerId);
     r.session.current?.touch({ phase: "up", slot });
-  };
+  }
 
-  const place = { left: 0, top: 0, width: w, height: h };
   /** A new layout: kept, shown, and in force at once. */
   const apply = (next: BrowserLayout) => {
     saveLayout(next);
@@ -328,181 +319,96 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
     popout.current = win;
     setPages(false);
   };
-  // In mouse mode the buttons show only with the pages
-  const buttons = !mouse || pages;
 
   return (
-    <div className="absolute inset-0 touch-none select-none overflow-hidden bg-black" onPointerDownCapture={onDownCapture}>
-      {/* The clone's screen, where the cursor stays in sight */}
-      <div
-        className="absolute left-0 top-0 transition-transform duration-100 ease-out"
-        style={{ transform: `translate(${x}px, ${y}px)` }}
-      >
-        <div ref={box} className="absolute" style={place} />
-        <div className="pointer-events-none absolute" style={place}>
-          {!mouse && r.shape && !r.hidden && !r.terminal && r.connected ? (
-            <Cursor shape={r.shape} x={r.pos.x} y={r.pos.y} scale={shown} />
-          ) : null}
-        </div>
-      </div>
-      {/* Mouse mode's drawn cursor, where the CSS cursor cannot show it */}
-      <img ref={overlay} alt="" hidden className="pointer-events-none fixed left-0 top-0 max-w-none" />
-      {mouse ? null : dockedNow ? (
-        <div
-          aria-label="Touch screen"
-          className="absolute left-0 top-0"
-          style={{ width, height: areaH }}
-          onPointerDown={onScreenDown}
-          onPointerMove={onScreenMove}
-          onPointerUp={onScreenUp}
-          onPointerCancel={onScreenUp}
-        />
-      ) : (
-        <div
-          aria-label="Trackpad"
-          className="absolute inset-0"
-          onPointerDown={pad("down")}
-          onPointerMove={pad("move")}
-          onPointerUp={pad("up")}
-          onPointerCancel={pad("cancel")}
-        />
-      )}
-      <div className="pointer-events-none absolute left-0 top-0" style={{ width, height: visible }}>
-        <ScreenNotes
-          dictation={r.dictation}
-          heard={r.heard}
-          note={r.note}
-          hint={hint && !pages ? `${pagesChordLabel()} shows the pages` : null}
-          bottom={(keysShown ? 0 : bottom) + 12}
-        />
-      </div>
-
-      {keysShown ? (
-        <div
-          className={`absolute bottom-0 left-0 ${dockedNow ? "bg-black" : "bg-black/75 backdrop-blur-xl"}`}
-          style={{ width, height: keysH }}
-        >
-          <KeyboardHandle
-            height={keysH}
-            onHeight={(h) => setDragH(Math.max(MIN_KEYS_H, Math.min(height * MAX_KEYS_PART, h)))}
-            onDone={() => {
-              if (dragH === null) return;
-              saveKeyboardHeight(dragH / height);
-              setKeysPart(dragH / height);
-              setDragH(null);
-            }}
-          />
-          <KeyboardView
-            width={width}
-            height={keysH - HANDLE_H}
-            bottom={bottom}
-            fn={r.fn}
-            mods={r.mods}
-            caps={r.caps}
-            onKeyTouch={r.onKeyTouch}
-            pad={r.padMode}
-            dictation={r.dictation}
-          />
-        </div>
-      ) : null}
-
-      {/* The pages: mounted from the start, so their data is there when they open */}
-      <div
-        ref={panelRef}
-        className={`absolute z-40 transition-transform duration-300 ease-out ${pages ? "" : "hidden"}`}
-        style={{ ...panel, transform: `translateY(${-lift}px)` }}
-      >
-        <div className="absolute inset-0 overflow-hidden rounded-xl border border-neutral-800 bg-black/95 backdrop-blur-xl">
-          <ToolRow
-            box={{ left: 4, top: 4, width: panel.width - 8, height: TOOL_H }}
-            usage={r.usage}
+    <NgScreenView
+      width={width}
+      height={height}
+      bottom={bottom}
+      mode={mode}
+      screen={{ x, y, width: w, height: h }}
+      boxRef={box}
+      cursor={r.shape && !r.hidden && !r.terminal && r.connected ? { shape: r.shape, x: r.pos.x, y: r.pos.y, scale: shown } : null}
+      overlayRef={overlay}
+      onPad={pad}
+      onTouchScreen={onTouchScreen}
+      keyboard={
+        keysShown
+          ? {
+              docked: dockedNow,
+              height: keysH,
+              keys: { fn: r.fn, mods: r.mods, caps: r.caps, onKeyTouch: r.onKeyTouch, pad: r.padMode, dictation: r.dictation },
+              onHeight: (h) => setDragH(Math.max(MIN_KEYS_H, Math.min(height * MAX_KEYS_PART, h))),
+              onHeightDone: () => {
+                if (dragH === null) return;
+                saveKeyboardHeight(dragH / height);
+                setKeysPart(dragH / height);
+                setDragH(null);
+              },
+            }
+          : null
+      }
+      notes={{
+        dictation: r.dictation,
+        heard: r.heard,
+        note: r.note,
+        hint: hint && !pages ? `${pagesChordLabel()} shows the pages` : null,
+      }}
+      pages={{
+        open: pages,
+        tab,
+        onTab: setTab,
+        usage: r.usage,
+        badges: r.unread ? { clones: r.unread } : undefined,
+        onPopOut: windows ? popOut : undefined,
+        lift,
+        panelRef,
+        content: (
+          <NgPagesContainer
             tab={pages ? tab : null}
-            onTab={setTab}
-            badges={r.unread ? { clones: r.unread } : undefined}
-            onPopOut={windows ? popOut : undefined}
+            onTab={(t) => (t ? setTab(t) : setPages(false))}
+            state={r.live.state}
+            stats={r.live.stats}
+            sound={r.soundReport}
           />
-          <div
-            className="absolute"
-            style={{ left: 4, top: 4 + TOOL_H + GAP, width: panel.width - 8, height: panel.height - 8 - TOOL_H - GAP }}
-          >
-            <NgPagesContainer
-              tab={pages ? tab : null}
-              onTab={(t) => (t ? setTab(t) : setPages(false))}
-              state={r.live.state}
-              stats={r.live.stats}
-              sound={r.soundReport}
-            />
-          </div>
-        </div>
-      </div>
-
-      {buttons ? (
-        <FloatingButtons
-          pagesOpen={pages}
-          keyboard={!mouse}
-          keyboardOpen={keysShown}
-          keyboardDocked={docked}
-          fits={fits}
-          badge={r.unread}
-          onPages={() => setPages((p) => !p)}
-          onKeyboard={() => !docked && setKeyboard((k) => !k)}
-          onKeyboardDock={toggleDock}
-          onFit={() => fitTo(target)}
-          onFitSettings={() => setLayoutOpen(true)}
-          fullscreen={fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen }}
-        />
-      ) : null}
-      {layoutOpen ? (
-        <LayoutEditorContainer
-          page="/ng"
-          windows={windows}
-          here={monitor}
-          onApplied={(l) => {
-            setLayout(l);
-            r.claim();
-          }}
-          onClose={() => setLayoutOpen(false)}
-        />
-      ) : null}
-      {/* Not over the dialog: there its box says "here" */}
-      {identify && !layoutOpen ? <MonitorNumber monitor={monitor} /> : null}
-    </div>
-  );
-}
-
-/** What is said over the clone's screen: the words dictation hears, or the chord's hint (at the
- *  bottom, `bottom` px up), and a note when there is no screen to use (in the middle). Touches
- *  go through all of them. */
-function ScreenNotes({
-  dictation,
-  heard,
-  note,
-  hint,
-  bottom,
-}: {
-  dictation: string;
-  heard: string;
-  note: string | null;
-  hint: string | null;
-  bottom: number;
-}) {
-  const low = dictation === "listening" || heard ? heard || "Listening…" : hint;
-  return (
-    <>
-      {low ? (
-        <p className="pointer-events-none absolute inset-x-0 flex justify-center px-6" style={{ bottom }}>
-          <span className="max-w-full truncate rounded-full bg-black/60 px-4 py-2 text-sm text-neutral-100 backdrop-blur-md">
-            {low}
-          </span>
-        </p>
-      ) : null}
-      {note ? (
-        <p className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
-          <span className="rounded-full bg-black/50 px-4 py-2 text-center text-sm text-neutral-100 backdrop-blur-md">
-            {note}
-          </span>
-        </p>
-      ) : null}
-    </>
+        ),
+      }}
+      // In mouse mode the buttons show only with the pages
+      buttons={
+        !mouse || pages
+          ? {
+              pagesOpen: pages,
+              keyboard: !mouse,
+              keyboardOpen: keysShown,
+              keyboardDocked: docked,
+              fits,
+              badge: r.unread,
+              onPages: () => setPages((p) => !p),
+              onKeyboard: () => !docked && setKeyboard((k) => !k),
+              onKeyboardDock: toggleDock,
+              onFit: () => fitTo(target),
+              onFitSettings: () => setLayoutOpen(true),
+              fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
+            }
+          : null
+      }
+      dialog={
+        layoutOpen ? (
+          <LayoutEditorContainer
+            page="/ng"
+            windows={windows}
+            here={monitor}
+            onApplied={(l) => {
+              setLayout(l);
+              r.claim();
+            }}
+            onClose={() => setLayoutOpen(false)}
+          />
+        ) : null
+      }
+      // Not over the dialog: there its box says "here"
+      identify={identify && !layoutOpen ? monitor : null}
+      onPointerDownCapture={onDownCapture}
+    />
   );
 }

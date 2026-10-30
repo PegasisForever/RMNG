@@ -15,7 +15,7 @@ export const BTN_MIDDLE = 0x112;
 
 export type TouchKind = "down" | "move" | "up" | "cancel";
 
-type Props = {
+export type KeyboardViewProps = {
   /** The keyboard area, CSS px, and the space at its bottom the home bar is over. */
   width: number;
   height: number;
@@ -41,7 +41,7 @@ type Props = {
 /** The /ng keyboard: a full keyboard of square keys (`./FullDesk.tsx` puts it over the clone's
  *  screen or under it). The keys are a touchpad too: a finger that moves on them moves the
  *  cursor, two scroll. */
-export const KeyboardView = memo(function KeyboardView(p: Props) {
+export const KeyboardView = memo(function KeyboardView(p: KeyboardViewProps) {
   const k = keysLayout(p.width, p.height, p.bottom);
   const shift = SHIFTS.some((c) => p.mods.has(c));
   const rows = keyRows(p.fn);
@@ -87,7 +87,7 @@ const KEY = "relative flex shrink-0 items-center justify-center rounded-md leadi
 /** What a key shows it is: a modifier's state, Fn on, or Caps Lock on (lit like a Shift that is
  *  down). Caps Lock's state is the page's count of its presses, so a clone that turns it on or
  *  off by itself goes unseen. */
-function keyState(key: Key, p: Props): ModState | undefined {
+function keyState(key: Key, p: KeyboardViewProps): ModState | undefined {
   if (key.fn) return p.fn ? "latched" : undefined;
   if (key.code === CAPS_LOCK) return p.caps ? "latched" : undefined;
   return p.mods.get(key.code);
@@ -118,7 +118,7 @@ function nearestKey(area: HTMLElement, x: number, y: number): HTMLElement | null
 
 /** The key area's touches: which key each finger went down on (by `data-key`, or the nearest
  *  key for a touch between keys), and which keys show as pressed. */
-function useKeysTouch(rows: Key[][], onKeyTouch: Props["onKeyTouch"]) {
+function useKeysTouch(rows: Key[][], onKeyTouch: KeyboardViewProps["onKeyTouch"]) {
   const [pressed, setPressed] = useState<ReadonlySet<string>>(new Set());
   /** Each finger: its key, where it went down, and whether it moved off as a drag. */
   const fingers = useRef(new Map<number, { key: Key | null; x: number; y: number; dragged: boolean }>());
