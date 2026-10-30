@@ -952,7 +952,7 @@ export function DashboardContainer({
 
       {layoutOpen ? (
         <LayoutEditorContainer
-          onSaved={(l) => {
+          onApplied={(l) => {
             setMonitorCount(l.monitors.length);
             claims.current?.claim(true);
           }}

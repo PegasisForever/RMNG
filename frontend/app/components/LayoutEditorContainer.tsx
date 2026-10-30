@@ -1,9 +1,9 @@
-// The Edit layout dialog's container: the draft of this browser's layout, the sizes of its open
-// viewer windows (asked on `VIEWER_CHANNEL`), and the save, after which the layout is in force
-// at once (`onSaved`: the dashboard claims it).
+// The Edit layout dialog's container: this browser's layout, each change saved and in force at
+// once (`onApplied`: the dashboard claims it); the viewer windows, one opened for a new monitor
+// and the others told their new numbers (on `VIEWER_CHANNEL`); and their sizes, asked there too.
 import { useState } from "react";
 
-import { LayoutEditorView } from "~/components/LayoutEditorView";
+import { type LayoutChange, LayoutEditorView } from "~/components/LayoutEditorView";
 import {
   DEFAULT_DESKTOP_LAYOUT,
   type DesktopLayout,
@@ -13,6 +13,7 @@ import {
   saveDesktopLayout,
 } from "~/lib/clientLayout";
 import { resize } from "~/lib/monitorLayout";
+import { openViewerWindows } from "~/viewer/open";
 
 /** How long the viewer windows get to say their sizes. */
 const ANSWER_MS = 400;
@@ -35,13 +36,28 @@ function askWindowSizes(): Promise<Map<number, { width: number; height: number }
 }
 
 export function LayoutEditorContainer({
-  onSaved,
+  onApplied,
   onClose,
 }: {
-  onSaved: (layout: DesktopLayout) => void;
+  /** The layout changed and is saved: put it in force. */
+  onApplied: (layout: DesktopLayout) => void;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState<DesktopLayout>(() => readDesktopLayout() ?? DEFAULT_DESKTOP_LAYOUT);
+  const [layout, setLayout] = useState<DesktopLayout>(() => readDesktopLayout() ?? DEFAULT_DESKTOP_LAYOUT);
+  const apply = (next: DesktopLayout, change?: LayoutChange) => {
+    setLayout(next);
+    saveDesktopLayout(next);
+    onApplied(next);
+    if (change?.t === "add") {
+      // In the click itself, so the browser lets the window open
+      void openViewerWindows([{ id: change.monitor }]);
+    } else if (change?.t === "renumber") {
+      const ch = new BroadcastChannel(VIEWER_CHANNEL);
+      const msg: ViewerChannelMsg = { t: "renumber", map: change.map };
+      ch.postMessage(msg);
+      ch.close();
+    }
+  };
   const [matching, setMatching] = useState(false);
   const [matchNote, setMatchNote] = useState<string | null>(null);
 
@@ -49,15 +65,13 @@ export function LayoutEditorContainer({
     setMatching(true);
     const sizes = await askWindowSizes();
     setMatching(false);
-    setDraft((d) => {
-      const s = d.pixelScale;
-      const next = d.monitors.map((m, i) => {
-        const w = sizes.get(i);
-        return w ? { width: w.width / s, height: w.height / s } : m;
-      });
-      return { ...d, monitors: resize(d.monitors, next) };
+    const s = layout.pixelScale;
+    const next = layout.monitors.map((m, i) => {
+      const w = sizes.get(i);
+      return w ? { width: w.width / s, height: w.height / s } : m;
     });
-    const missing = draft.monitors.map((_, i) => i).filter((i) => !sizes.has(i));
+    if (sizes.size) apply({ ...layout, monitors: resize(layout.monitors, next) });
+    const missing = layout.monitors.map((_, i) => i).filter((i) => !sizes.has(i));
     setMatchNote(
       sizes.size === 0
         ? "No viewer window is open. Open the viewer windows, size them, then try again."
@@ -69,15 +83,11 @@ export function LayoutEditorContainer({
 
   return (
     <LayoutEditorView
-      layout={draft}
-      onChange={setDraft}
+      layout={layout}
+      onChange={apply}
       matchNote={matchNote}
       matching={matching}
       onMatchWindows={matchWindows}
-      onSave={() => {
-        saveDesktopLayout(draft);
-        onSaved(draft);
-      }}
       onClose={onClose}
     />
   );

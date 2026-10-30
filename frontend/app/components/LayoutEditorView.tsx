@@ -1,17 +1,18 @@
 // The Edit layout dialog: this browser's monitors (`~/lib/clientLayout.ts`), as the clones get
-// them while the operator uses this browser.
+// them while the operator uses this browser. Every change applies at once: there is no Save.
 //
 // - The arrangement: each monitor a box, moved only by drag and drop. While it is dragged it
 //   snaps to touch another monitor's edge, lined up with its edges or its center when close
 //   (`~/lib/monitorLayout.ts`); a dashed outline shows where the pointer is. Click one to edit
-//   its size, make it monitor 0 (the primary one), or remove it.
-// - Add a monitor, at the right.
+//   its size, make it monitor 0 (the primary one), or remove it (its viewer window closes).
+// - Add a monitor, at the right; a viewer window opens for it.
 // - Match window sizes: each monitor takes the size of its open viewer window, in screen pixels
 //   divided by the pixel scale (screen pixels per clone pixel).
 // - How the viewer reads the wheel, and the scroll speed.
 //
-// Pure: the draft comes in and every change goes out. The container keeps the draft, asks the
-// viewer windows for their sizes and saves.
+// Pure: the layout comes in and every change goes out, with what it does to the monitors'
+// numbers (`LayoutChange`). The container saves and applies it, opens and renumbers the viewer
+// windows, and asks them for their sizes.
 import { Plus, Star, Trash2 } from "lucide-react";
 import { type PointerEvent, useEffect, useRef, useState } from "react";
 
@@ -23,6 +24,8 @@ import {
   addMonitor,
   dropMonitor,
   makePrimary,
+  primaryMap,
+  removeMap,
   removeMonitor,
   resize,
   snapMonitor,
@@ -41,10 +44,15 @@ const SCROLL_MODES: { value: ScrollMode; label: string }[] = [
   { value: "mouse", label: "Mouse wheel" },
 ];
 
+/** What a change does to the monitors' numbers: a monitor added (its number), or monitors
+ *  renumbered (`map[old]` is the new number; null: removed). */
+export type LayoutChange = { t: "add"; monitor: number } | { t: "renumber"; map: (number | null)[] };
+
 export interface LayoutEditorViewProps {
-  /** The draft. */
+  /** This browser's layout. */
   layout: DesktopLayout;
-  onChange: (layout: DesktopLayout) => void;
+  /** A change, applied at once. */
+  onChange: (layout: DesktopLayout, change?: LayoutChange) => void;
   /** What the last "Match window sizes" did, for the line under the button; null before it ran. */
   matchNote: string | null;
   /** Asking the viewer windows for their sizes. */
@@ -52,7 +60,6 @@ export interface LayoutEditorViewProps {
   onMatchWindows: () => void;
   /** The dialog is on screen; false plays the exit. */
   open?: boolean;
-  onSave: () => void;
   /** The dialog has gone (after its exit). */
   onClose: () => void;
 }
@@ -64,7 +71,6 @@ export function LayoutEditorView({
   matching,
   onMatchWindows,
   open = true,
-  onSave,
   onClose,
 }: LayoutEditorViewProps) {
   const [selected, setSelected] = useState(0);
@@ -97,11 +103,11 @@ export function LayoutEditorView({
               setMonitors(resize(mons, mons.map((m, k) => (k === sel ? { width, height } : m))))
             }
             onPrimary={() => {
-              setMonitors(makePrimary(mons, sel));
+              onChange({ ...layout, monitors: makePrimary(mons, sel) }, { t: "renumber", map: primaryMap(mons.length, sel) });
               setSelected(0);
             }}
             onRemove={() => {
-              setMonitors(removeMonitor(mons, sel));
+              onChange({ ...layout, monitors: removeMonitor(mons, sel) }, { t: "renumber", map: removeMap(mons.length, sel) });
               setSelected(Math.max(0, sel - 1));
             }}
           />
@@ -111,7 +117,7 @@ export function LayoutEditorView({
               type="button"
               disabled={mons.length >= MAX_MONITORS}
               onClick={() => {
-                setMonitors(addMonitor(mons));
+                onChange({ ...layout, monitors: addMonitor(mons) }, { t: "add", monitor: mons.length });
                 setSelected(mons.length);
               }}
               className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
@@ -175,20 +181,14 @@ export function LayoutEditorView({
             </label>
           </div>
 
-          <div className="mt-4 flex justify-end gap-2">
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <span className="mr-auto text-[11px] text-slate-400 dark:text-slate-500">Changes apply at once.</span>
             <button
               type="button"
               onClick={() => close()}
-              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => close(onSave)}
               className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
             >
-              Save
+              Done
             </button>
           </div>
         </>

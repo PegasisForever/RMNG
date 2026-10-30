@@ -155,6 +155,17 @@ export function removeMonitor(monitors: MonitorSpec[], i: number): MonitorSpec[]
   return resize(rest, rest);
 }
 
+/** The new numbers after `removeMonitor(…, i)` of `n` monitors (`map[old]`; null: removed). */
+export function removeMap(n: number, i: number): (number | null)[] {
+  if (n < 2) return Array.from({ length: n }, (_, k) => k);
+  return Array.from({ length: n }, (_, k) => (k === i ? null : k > i ? k - 1 : k));
+}
+
+/** The new numbers after `makePrimary(…, i)` of `n` monitors (`map[old]`). */
+export function primaryMap(n: number, i: number): number[] {
+  return Array.from({ length: n }, (_, k) => (k === i ? 0 : k < i ? k + 1 : k));
+}
+
 /** Monitor `i` becomes monitor 0, the primary one; the arrangement stays. */
 export function makePrimary(monitors: MonitorSpec[], i: number): MonitorSpec[] {
   if (i === 0) return monitors;

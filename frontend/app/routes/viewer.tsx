@@ -59,7 +59,7 @@ function uploadFile(file: File, onProgress: (fraction: number) => void): Promise
 }
 
 export default function Viewer() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const monitor = Number(params.get("monitor") ?? 0);
   const sink = params.get("sink");
   const box = useRef<HTMLDivElement>(null);
@@ -101,10 +101,27 @@ export default function Viewer() {
     };
   }, []);
 
-  // The dashboard's "Match window sizes" asks each viewer window for its size
+  // The Edit layout dialog asks each viewer window for its size ("Match window sizes"), and
+  // tells it its monitor's new number
   useEffect(() => {
     const ch = new BroadcastChannel(VIEWER_CHANNEL);
     ch.onmessage = (e: MessageEvent<ViewerChannelMsg>) => {
+      if (e.data.t === "renumber") {
+        // The monitor this window shows has a new number, or is gone
+        const next = e.data.map[monitor];
+        if (next === null) window.close();
+        else if (next !== undefined && next !== monitor) {
+          window.name = `rmng-viewer-${next}`;
+          setParams(
+            (p) => {
+              p.set("monitor", String(next));
+              return p;
+            },
+            { replace: true },
+          );
+        }
+        return;
+      }
       if (e.data.t !== "ask-size") return;
       const dpr = window.devicePixelRatio || 1;
       const reply: ViewerChannelMsg = {
@@ -116,7 +133,7 @@ export default function Viewer() {
       ch.postMessage(reply);
     };
     return () => ch.close();
-  }, [monitor]);
+  }, [monitor, setParams]);
 
   useEffect(() => {
     if (!secure || !box.current || !overlay.current) return;

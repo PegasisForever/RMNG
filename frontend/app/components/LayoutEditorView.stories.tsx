@@ -15,7 +15,6 @@ function Frame(args: { layout: DesktopLayout; matchNote: string | null; matching
       matchNote={args.matchNote}
       matching={args.matching}
       onMatchWindows={fn()}
-      onSave={fn()}
       onClose={fn()}
     />
   );

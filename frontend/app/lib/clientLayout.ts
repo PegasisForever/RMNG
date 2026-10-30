@@ -124,10 +124,12 @@ export function desktopClaim(): LayoutBody | null {
 export const VIEWER_CHANNEL = "rmng-viewer";
 
 /** On VIEWER_CHANNEL: the dashboard asks, and each viewer window answers with its monitor and
- *  its content's size in screen (device) pixels. */
+ *  its content's size in screen (device) pixels; and the monitors were renumbered (`map[old]`
+ *  is the new number; null: removed), so each window follows its monitor, or closes. */
 export type ViewerChannelMsg =
   | { t: "ask-size" }
-  | { t: "size"; monitor: number; width: number; height: number };
+  | { t: "size"; monitor: number; width: number; height: number }
+  | { t: "renumber"; map: (number | null)[] };
 
 /** A client's claims are at most this far apart, unless forced: the server changes nothing for
  *  a layout it has already, so more would be noise. */

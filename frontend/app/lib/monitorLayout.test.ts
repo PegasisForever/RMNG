@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { addMonitor, dropMonitor, makePrimary, normalize, removeMonitor, resize } from "./monitorLayout";
+import { addMonitor, dropMonitor, makePrimary, normalize, primaryMap, removeMap, removeMonitor, resize } from "./monitorLayout";
 
 const mon = (width: number, height: number, x: number, y: number) => ({ width, height, x, y, primary: false });
 
@@ -87,6 +87,12 @@ describe("add, remove, primary", () => {
     const m = removeMonitor(row, 1);
     expect(m).toHaveLength(2);
     expect(m[1]).toMatchObject({ x: 1920, y: 0 });
+  });
+
+  test("the new numbers: a removed monitor's are null and the ones after it move down; a new primary is 0 and the ones before it move up", () => {
+    expect(removeMap(3, 1)).toEqual([0, null, 1]);
+    expect(primaryMap(3, 2)).toEqual([1, 2, 0]);
+    expect(primaryMap(3, 1)).toEqual([1, 0, 2]);
   });
 
   test("the last monitor stays", () => {
