@@ -593,6 +593,10 @@ the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no 
   it needs to resolve. Clone IPs are plain Docker IPAM — nothing
   allocates or stores them. If an `rmng` network already exists with a **different** subnet,
   `ensure_network` errors — delete it with `docker network rm rmng` and re-run setup.
+  It also refuses to create the bridge when the machine already routes an overlapping
+  subnet (`/proc/net/route`): that is a dev server run inside a clone, where a second
+  `10.99.0.0/24` bridge would take the clone's own gateway `10.99.0.1` and cut the clone's
+  internet until the bridge is removed.
 - **Clone media socket**: clone-daemon ships dmabuf frames to the control-server over a
   `SOCK_SEQPACKET` unix socket (fds via `SCM_RIGHTS`), *not* the network. The shared
   `rmng-sock` named volume is mounted into the control-server and every clone at the same path

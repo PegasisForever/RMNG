@@ -906,6 +906,20 @@ impl DockerCtl {
             Err(e) => return Err(anyhow!("inspecting the {NETWORK} network: {e}")),
         }
 
+        // A machine that already routes the subnet is inside a clone (a dev server run in
+        // one): a second bridge there takes the clone's own gateway `.1`, and the clone loses
+        // the internet until the bridge is removed. Refuse instead.
+        if let Ok(routes) = std::fs::read_to_string("/proc/net/route") {
+            if let Some((iface, cidr)) = plan.overlapping_route(&routes) {
+                bail!(
+                    "not creating the `{NETWORK}` Docker network: this machine already routes {cidr} \
+                     via {iface}, which overlaps {}. Inside a clone the new bridge would take the \
+                     clone's own gateway and cut its network.",
+                    plan.cidr()
+                );
+            }
+        }
+
         let req = NetworkCreateRequest {
             name: NETWORK.to_string(),
             driver: Some("bridge".to_string()),
@@ -2646,6 +2660,26 @@ impl SubnetPlan {
     pub fn gateway(&self) -> Ipv4Addr {
         Ipv4Addr::from(self.base + 1)
     }
+
+    /// The first non-default route in `/proc/net/route` text that overlaps this subnet, as
+    /// `(interface, cidr)`. The kernel prints each address as the hex of its in-memory
+    /// network-order word, hence the `from_be`.
+    pub fn overlapping_route(&self, routes: &str) -> Option<(String, String)> {
+        routes.lines().skip(1).find_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            let (iface, dest, mask) = (f.first()?, f.get(1)?, f.get(7)?);
+            let dest = u32::from_be(u32::from_str_radix(dest, 16).ok()?);
+            let mask = u32::from_be(u32::from_str_radix(mask, 16).ok()?);
+            if mask == 0 {
+                return None;
+            }
+            let shared = mask & prefix_to_mask(self.prefix);
+            (dest & shared == self.base & shared).then(|| {
+                let cidr = format!("{}/{}", Ipv4Addr::from(dest), mask.count_ones());
+                (iface.to_string(), cidr)
+            })
+        })
+    }
 }
 
 /// Convert a prefix length to a big-endian netmask (`/24` → `0xFFFFFF00`).
@@ -3087,6 +3121,32 @@ mod tests {
         let plan = SubnetPlan::parse("172.30.0.0/16").unwrap();
         assert_eq!(plan.cidr(), "172.30.0.0/16");
         assert_eq!(plan.gateway().to_string(), "172.30.0.1");
+    }
+
+    #[test]
+    fn subnet_overlapping_route_finds_a_clone_network() {
+        // A clone's own table: its default route, its 10.99.0.0/24 link, its inner docker0.
+        let routes = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
+            eth0\t00000000\t0100630A\t0003\t0\t0\t0\t00000000\t0\t0\t0\n\
+            eth0\t0000630A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n\
+            docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n";
+        let plan = SubnetPlan::parse(wire::DOCKER_SUBNET).unwrap();
+        assert_eq!(
+            plan.overlapping_route(routes),
+            Some(("eth0".to_string(), "10.99.0.0/24".to_string()))
+        );
+        // A wider route that contains the subnet overlaps too.
+        let wide = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+            vmbr0\t0000000A\t00000000\t0001\t0\t0\t0\t000000FF\n";
+        assert_eq!(
+            plan.overlapping_route(wide),
+            Some(("vmbr0".to_string(), "10.0.0.0/8".to_string()))
+        );
+        // A host with only a default route and docker0 is free to create it.
+        let host = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+            eth0\t00000000\t0100000A\t0003\t0\t0\t0\t00000000\n\
+            docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\n";
+        assert_eq!(plan.overlapping_route(host), None);
     }
 
     // --- line splitter --------------------------------------------------------------
