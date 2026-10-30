@@ -1,12 +1,14 @@
 // The Edit layout dialog's container: this browser's layout, each change saved and in force at
-// once (`onApplied`: the dashboard claims it); the viewer windows, one opened for a new monitor
-// and the others told their new numbers (on `VIEWER_CHANNEL`); and their sizes, asked there too.
-import { useState } from "react";
+// once (`onApplied`: the dashboard claims it); the viewer windows, one opened for a new monitor,
+// the others told their new numbers, and all told to show their numbers while the dialog is
+// open (on `VIEWER_CHANNEL`); and their sizes, asked there too.
+import { useEffect, useState } from "react";
 
 import { type LayoutChange, LayoutEditorView } from "~/components/LayoutEditorView";
 import {
   DEFAULT_DESKTOP_LAYOUT,
   type DesktopLayout,
+  IDENTIFY_EVERY_MS,
   VIEWER_CHANNEL,
   type ViewerChannelMsg,
   readDesktopLayout,
@@ -58,36 +60,43 @@ export function LayoutEditorContainer({
       ch.close();
     }
   };
-  const [matching, setMatching] = useState(false);
-  const [matchNote, setMatchNote] = useState<string | null>(null);
-
-  const matchWindows = async () => {
-    setMatching(true);
-    const sizes = await askWindowSizes();
-    setMatching(false);
+  /** Give monitor `i` the size of its viewer window, at the pixel scale. */
+  const [matching, setMatching] = useState<number | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const matchWindow = async (i: number) => {
+    setMatching(i);
+    setNote(null);
+    const size = (await askWindowSizes()).get(i);
+    setMatching(null);
+    if (!size) {
+      setNote(`No viewer window is open for monitor ${i}. Open it, size it, then try again.`);
+      return;
+    }
     const s = layout.pixelScale;
-    const next = layout.monitors.map((m, i) => {
-      const w = sizes.get(i);
-      return w ? { width: w.width / s, height: w.height / s } : m;
-    });
-    if (sizes.size) apply({ ...layout, monitors: resize(layout.monitors, next) });
-    const missing = layout.monitors.map((_, i) => i).filter((i) => !sizes.has(i));
-    setMatchNote(
-      sizes.size === 0
-        ? "No viewer window is open. Open the viewer windows, size them, then try again."
-        : missing.length
-          ? `Matched ${sizes.size} monitor(s). No window open for monitor ${missing.join(", ")}: kept its size.`
-          : `Matched all ${sizes.size} monitor(s) to their windows.`,
-    );
+    const sizes = layout.monitors.map((m, k) => (k === i ? { width: size.width / s, height: size.height / s } : m));
+    apply({ ...layout, monitors: resize(layout.monitors, sizes) });
   };
+
+  // While the dialog is open, each viewer window shows its monitor's number
+  useEffect(() => {
+    const ch = new BroadcastChannel(VIEWER_CHANNEL);
+    const say = (msg: ViewerChannelMsg) => ch.postMessage(msg);
+    say({ t: "identify" });
+    const timer = setInterval(() => say({ t: "identify" }), IDENTIFY_EVERY_MS);
+    return () => {
+      clearInterval(timer);
+      say({ t: "identify-off" });
+      ch.close();
+    };
+  }, []);
 
   return (
     <LayoutEditorView
       layout={layout}
       onChange={apply}
-      matchNote={matchNote}
+      onMatchWindow={matchWindow}
       matching={matching}
-      onMatchWindows={matchWindows}
+      note={note}
       onClose={onClose}
     />
   );

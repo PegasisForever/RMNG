@@ -122,12 +122,18 @@ export function desktopClaim(): LayoutBody | null {
 
 /** The channel the dashboard asks the viewer windows of this browser for their sizes on. */
 export const VIEWER_CHANNEL = "rmng-viewer";
+/** How often the open Edit layout dialog says so on VIEWER_CHANNEL, ms. */
+export const IDENTIFY_EVERY_MS = 1000;
 
 /** On VIEWER_CHANNEL: the dashboard asks, and each viewer window answers with its monitor and
- *  its content's size in screen (device) pixels; and the monitors were renumbered (`map[old]`
- *  is the new number; null: removed), so each window follows its monitor, or closes. */
+ *  its content's size in screen (device) pixels; the monitors were renumbered (`map[old]` is
+ *  the new number; null: removed), so each window follows its monitor, or closes; and the Edit
+ *  layout dialog is open (`identify`, said every IDENTIFY_EVERY_MS while it is), so each window
+ *  shows its monitor's number, until `identify-off` or until the word stops coming. */
 export type ViewerChannelMsg =
   | { t: "ask-size" }
+  | { t: "identify" }
+  | { t: "identify-off" }
   | { t: "size"; monitor: number; width: number; height: number }
   | { t: "renumber"; map: (number | null)[] };
 

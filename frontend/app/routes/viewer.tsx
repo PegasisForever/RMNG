@@ -10,6 +10,7 @@ import { type DragEvent, useCallback, useEffect, useRef, useState } from "react"
 import { useSearchParams } from "react-router";
 
 import {
+  IDENTIFY_EVERY_MS,
   VIEWER_CHANNEL,
   type ViewerChannelMsg,
   attachLayoutClaims,
@@ -79,6 +80,8 @@ export default function Viewer() {
   /** The file-drop note: progress, then the result for a few seconds. */
   const [note, setNote] = useState<{ text: string; error?: boolean } | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  /** The Edit layout dialog is open: this window shows its monitor's number. */
+  const [identify, setIdentify] = useState(false);
 
   useEffect(() => {
     document.title = `RMNG monitor ${monitor}`;
@@ -105,6 +108,7 @@ export default function Viewer() {
   // tells it its monitor's new number
   useEffect(() => {
     const ch = new BroadcastChannel(VIEWER_CHANNEL);
+    let identifyTimer: ReturnType<typeof setTimeout> | undefined;
     ch.onmessage = (e: MessageEvent<ViewerChannelMsg>) => {
       if (e.data.t === "renumber") {
         // The monitor this window shows has a new number, or is gone
@@ -122,6 +126,18 @@ export default function Viewer() {
         }
         return;
       }
+      if (e.data.t === "identify") {
+        // The Edit layout dialog is open: show this window's number until it stops saying so
+        setIdentify(true);
+        clearTimeout(identifyTimer);
+        identifyTimer = setTimeout(() => setIdentify(false), IDENTIFY_EVERY_MS * 2.5);
+        return;
+      }
+      if (e.data.t === "identify-off") {
+        clearTimeout(identifyTimer);
+        setIdentify(false);
+        return;
+      }
       if (e.data.t !== "ask-size") return;
       const dpr = window.devicePixelRatio || 1;
       const reply: ViewerChannelMsg = {
@@ -132,7 +148,10 @@ export default function Viewer() {
       };
       ch.postMessage(reply);
     };
-    return () => ch.close();
+    return () => {
+      clearTimeout(identifyTimer);
+      ch.close();
+    };
   }, [monitor, setParams]);
 
   useEffect(() => {
@@ -320,6 +339,16 @@ export default function Viewer() {
         >
           {note.text}
         </p>
+      ) : null}
+      {identify ? (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div className="flex flex-col items-center rounded-3xl bg-black/70 px-16 py-8 text-white shadow-2xl ring-4 ring-emerald-500 backdrop-blur-md">
+            <span className="text-[28vmin] font-bold leading-none tabular-nums">{monitor}</span>
+            <span className="mt-2 text-[4vmin] font-medium text-emerald-300">
+              {monitor === 0 ? "Monitor 0 · primary" : `Monitor ${monitor}`}
+            </span>
+          </div>
+        </div>
       ) : null}
       {/* Only outside fullscreen: the operator leaves fullscreen with the window's own controls.
           It never takes focus, so keys keep going to the clone. */}

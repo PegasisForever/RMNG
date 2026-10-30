@@ -6,15 +6,15 @@ import { LayoutEditorView } from "./LayoutEditorView";
 import { DEFAULT_DESKTOP_LAYOUT, type DesktopLayout } from "~/lib/clientLayout";
 
 /** The dialog on its own draft: drags, size edits, add and remove really change it. */
-function Frame(args: { layout: DesktopLayout; matchNote: string | null; matching: boolean }) {
+function Frame(args: { layout: DesktopLayout; note: string | null; matching: number | null }) {
   const [layout, setLayout] = useState(args.layout);
   return (
     <LayoutEditorView
       layout={layout}
       onChange={setLayout}
-      matchNote={args.matchNote}
+      note={args.note}
       matching={args.matching}
-      onMatchWindows={fn()}
+      onMatchWindow={fn()}
       onClose={fn()}
     />
   );
@@ -23,7 +23,7 @@ function Frame(args: { layout: DesktopLayout; matchNote: string | null; matching
 const meta = {
   title: "Dashboard/LayoutEditorView",
   component: Frame,
-  args: { layout: DEFAULT_DESKTOP_LAYOUT, matchNote: null, matching: false },
+  args: { layout: DEFAULT_DESKTOP_LAYOUT, note: null, matching: null },
 } satisfies Meta<typeof Frame>;
 
 export default meta;
@@ -49,7 +49,7 @@ export const Three: Story = {
   },
 };
 
-/** After Match window sizes, with one window not open. */
-export const Matched: Story = {
-  args: { matchNote: "Matched 1 monitor(s). No window open for monitor 1: kept its size." },
+/** A match for a monitor whose viewer window is not open. */
+export const NoWindow: Story = {
+  args: { note: "No viewer window is open for monitor 1. Open it, size it, then try again." },
 };
