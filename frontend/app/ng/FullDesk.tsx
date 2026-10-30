@@ -38,6 +38,7 @@ import { MonitorNumber } from "~/components/MonitorNumber";
 import { type BrowserLayout, clientKind, ensureLayout, readLayout, saveLayout } from "~/lib/clientLayout";
 import { resize } from "~/lib/monitorLayout";
 import { useViewerChannel } from "~/lib/useViewerChannel";
+import { toggleFullscreen } from "~/viewer/input";
 
 import { Cursor } from "./Cursor";
 import { firstLayout, startScale } from "./firstLayout";
@@ -114,6 +115,15 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
   const [layoutOpen, setLayoutOpen] = useState(false);
   /** The chord's hint, while mouse and keyboard mode is new. */
   const [hint, setHint] = useState(false);
+  /** The page is fullscreen (its own fullscreen); null where the browser has none. */
+  const [fullscreen, setFullscreen] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!document.fullscreenEnabled) return;
+    const on = () => setFullscreen(document.fullscreenElement !== null);
+    on();
+    document.addEventListener("fullscreenchange", on);
+    return () => document.removeEventListener("fullscreenchange", on);
+  }, []);
 
   // The keyboard: the display's width; its keys square, no taller than KEYBOARD_PART of the
   // display, until its bar sets another height
@@ -439,6 +449,7 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
           onKeyboardDock={toggleDock}
           onFit={() => fitTo(target)}
           onFitSettings={() => setLayoutOpen(true)}
+          fullscreen={fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen }}
         />
       ) : null}
       {layoutOpen ? (

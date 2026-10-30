@@ -287,7 +287,12 @@ export function toggleFullscreen() {
   if (document.fullscreenElement) void document.exitFullscreen();
   else {
     const options = keyboard() ? undefined : { keyboardLock: "browser" };
-    void document.documentElement.requestFullscreen(options as FullscreenOptions | undefined);
+    // Locked here too, not only when an input sees the change: a page that takes no keys
+    // now (`/ng` with its pages open) still gets them once it does
+    void document.documentElement
+      .requestFullscreen(options as FullscreenOptions | undefined)
+      .then(() => keyboard()?.lock())
+      .catch(() => {});
   }
 }
 
@@ -683,6 +688,8 @@ export function attachInput(o: InputOptions): Input {
   document.addEventListener("pointerlockerror", onLockError);
   document.addEventListener("fullscreenchange", onFullscreen);
   window.addEventListener("paste", onPaste);
+  // Attached while the page is fullscreen already: the keys are locked from now
+  if (document.fullscreenElement) void keyboard()?.lock();
   const timer = setInterval(tick, 50);
   const resize = new ResizeObserver(([entry]) => {
     // Safari has no device-pixel box: there it is the CSS box at the device pixel ratio.

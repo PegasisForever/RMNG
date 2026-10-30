@@ -40,9 +40,10 @@ describe("isPagesChord", () => {
     expect(isPagesChord(key({ metaKey: true, shiftKey: true }), "mac")).toBe(true);
   });
 
-  test("Ctrl+Alt+Space on Windows only", () => {
+  test("Ctrl+Alt+Space on Linux and Windows, not on macOS (its input source)", () => {
     expect(isPagesChord(key({ ctrlKey: true, altKey: true }), "windows")).toBe(true);
-    expect(isPagesChord(key({ ctrlKey: true, altKey: true }), "linux")).toBe(false);
+    expect(isPagesChord(key({ ctrlKey: true, altKey: true }), "linux")).toBe(true);
+    expect(isPagesChord(key({ ctrlKey: true, altKey: true }), "mac")).toBe(false);
   });
 
   test("not Space, or Space alone, or with Ctrl, is not it", () => {

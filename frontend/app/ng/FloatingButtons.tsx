@@ -5,7 +5,9 @@
 // Edit layout dialog. A button whose thing is open is lit; the docked keyboard's has a bar under
 // its icon; the fit is dim when the monitor fits already. A right click is a long press, for a
 // mouse. In mouse and keyboard mode they show only with the pages, and with no keyboard button.
-import { Expand, Keyboard, LayoutGrid } from "lucide-react";
+// Where the browser has fullscreen, a fourth button turns it on and off (the page's own
+// fullscreen: only that one hands the system's chords, such as Super+Space, to the page).
+import { Expand, Keyboard, LayoutGrid, Maximize, Minimize } from "lucide-react";
 import { type ReactNode, useRef } from "react";
 
 /** One button's size, and the space between them, CSS px. */
@@ -24,6 +26,7 @@ export function FloatingButtons({
   onKeyboardDock,
   onFit,
   onFitSettings,
+  fullscreen,
 }: {
   pagesOpen: boolean;
   /** The keyboard's button shows (not in mouse and keyboard mode). */
@@ -42,6 +45,8 @@ export function FloatingButtons({
   onFit: () => void;
   /** A long press on Fit: the Edit layout dialog. */
   onFitSettings: () => void;
+  /** Fullscreen: on or not, and the switch; absent where the browser has none. */
+  fullscreen?: { on: boolean; toggle: () => void };
 }) {
   return (
     <div
@@ -70,6 +75,11 @@ export function FloatingButtons({
         >
           <Keyboard aria-hidden className="size-5" />
           {keyboardDocked ? <span aria-hidden className="absolute bottom-2 h-0.5 w-5 rounded-full bg-current" /> : null}
+        </Round>
+      ) : null}
+      {fullscreen ? (
+        <Round label={fullscreen.on ? "Leave fullscreen" : "Fullscreen"} on={fullscreen.on} onClick={fullscreen.toggle}>
+          {fullscreen.on ? <Minimize aria-hidden className="size-5" /> : <Maximize aria-hidden className="size-5" />}
         </Round>
       ) : null}
       <Round
