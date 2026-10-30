@@ -1,8 +1,9 @@
-// The three buttons of the other orientations (`./FullDesk.tsx`), always on top in the screen's
-// top-right corner: the pages (usage, tickets, clones, notes, settings), the floating keyboard,
-// and the fit, which gives the clone's monitor this screen's size; a long press on the fit opens
-// the pixel ratio setting. A button whose thing is open is lit; the fit is dim when the monitor
-// fits already.
+// The three buttons of the /ng screen (`./FullDesk.tsx`), always on top in the screen's top-right
+// corner: the pages (usage, tickets, clones, notes, settings), the keyboard, and the fit, which
+// gives the clone's monitor this screen's size. A tap on the keyboard shows or hides the floating
+// keyboard; a long press docks it (always shown) or undocks it. A long press on the fit opens the
+// pixel ratio setting. A button whose thing is open is lit; the docked keyboard's has a bar under
+// its icon; the fit is dim when the monitor fits already.
 import { Expand, Keyboard, LayoutGrid } from "lucide-react";
 import { type ReactNode, useRef } from "react";
 
@@ -13,21 +14,27 @@ export const FLOAT_GAP = 8;
 export function FloatingButtons({
   pagesOpen,
   keyboardOpen,
+  keyboardDocked,
   fits,
   badge = 0,
   onPages,
   onKeyboard,
+  onKeyboardDock,
   onFit,
   onFitSettings,
 }: {
   pagesOpen: boolean;
   keyboardOpen: boolean;
+  /** The keyboard is docked: always shown, under the clone's screen. */
+  keyboardDocked: boolean;
   /** The clone's monitor has this screen's size already. */
   fits: boolean;
   /** A count on the pages button (clones that stopped working unseen). */
   badge?: number;
   onPages: () => void;
   onKeyboard: () => void;
+  /** A long press on the keyboard: dock it, or undock it. */
+  onKeyboardDock: () => void;
   onFit: () => void;
   /** A long press on Fit: the setting of its pixel ratio. */
   onFitSettings: () => void;
@@ -49,8 +56,14 @@ export function FloatingButtons({
           </span>
         ) : null}
       </Round>
-      <Round label="Keyboard" on={keyboardOpen} onClick={onKeyboard}>
+      <Round
+        label={keyboardDocked ? "Keyboard, docked" : "Keyboard"}
+        on={keyboardOpen}
+        onClick={onKeyboard}
+        onLongPress={onKeyboardDock}
+      >
         <Keyboard aria-hidden className="size-5" />
+        {keyboardDocked ? <span aria-hidden className="absolute bottom-2 h-0.5 w-5 rounded-full bg-current" /> : null}
       </Round>
       <Round
         label={fits ? "The clone fits this screen" : "Fit the clone to this screen"}

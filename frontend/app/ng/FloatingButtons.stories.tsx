@@ -18,10 +18,12 @@ const meta = {
   args: {
     pagesOpen: false,
     keyboardOpen: false,
+    keyboardDocked: false,
     fits: false,
     badge: 0,
     onPages: fn(),
     onKeyboard: fn(),
+    onKeyboardDock: fn(),
     onFit: fn(),
     onFitSettings: fn(),
   },
@@ -38,3 +40,6 @@ export const KeyboardOpenFits: Story = { args: { keyboardOpen: true, fits: true 
 
 /** Two clones stopped working unseen: a count on Pages. */
 export const Unread: Story = { args: { badge: 2, pagesOpen: true } };
+
+/** The keyboard is docked: lit, with a bar under its icon. */
+export const KeyboardDocked: Story = { args: { keyboardOpen: true, keyboardDocked: true } };

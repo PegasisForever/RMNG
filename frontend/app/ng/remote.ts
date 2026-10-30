@@ -1,8 +1,7 @@
-// What both /ng screens share, upright (`./Desk.tsx`) and the other orientations
-// (`./FullDesk.tsx`): the connection to the selected clone (`./session.ts`), the live server
-// state, and the input: the keys' touches, which type or move the pointer (`./keypad.ts`), a
-// trackpad with no keys (the whole screen of the other orientations), the modifiers, Fn, Caps
-// Lock, the key clicks, dictation, and the layout claim. The screens only lay things out.
+// What the /ng screen (`./FullDesk.tsx`) does under its layout: the connection to the selected
+// clone (`./session.ts`), the live server state, and the input: the keys' touches, which type or
+// move the pointer (`./keypad.ts`), a trackpad with no keys (the screen), the modifiers, Fn,
+// Caps Lock, the key clicks, dictation, and the layout claim. The screen only lays things out.
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import { formatLxcUsage } from "~/components/BoardRail";
@@ -25,8 +24,9 @@ import { type ModState, Modifiers } from "./modifiers";
 import { DUO_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
 import { MONITOR, type Session, openSession } from "./session";
 
-/** The iPhone Duo layout's one monitor, in pixels (`wire::iphone_duo_layout`). */
-export const DUO_MONITOR = { width: 1002, height: 808 };
+/** The iPhone Duo layout's one monitor, in pixels (`wire::iphone_duo_layout`): the size shown
+ *  until the server says the monitor's size. */
+const DUO_MONITOR = { width: 1002, height: 808 };
 
 /** After this page moved the cursor, the clone's own cursor reports are this far behind (ms),
  *  so they do not pull the drawn cursor back. */
@@ -39,9 +39,7 @@ type Size = { width: number; height: number };
 
 export function useRemote(
   box: RefObject<HTMLDivElement | null>,
-  /** The monitor size this screen claims with the layout; undefined keeps the phone's size. */
-  claimSize?: () => Size | undefined,
-  /** A pinch on the trackpad (the full screen's): the view's zoom changes by `factor`. */
+  /** A pinch on the trackpad (the screen's): the view's zoom changes by `factor`. */
   onZoom?: (factor: number) => void,
 ) {
   const session = useRef<Session | null>(null);
@@ -104,12 +102,11 @@ export function useRemote(
   const unread = live.state.hosts.filter((h) => h.unread && !h.archived && h.id !== live.state.selected).length;
 
   // The phone takes the clones' layout when it opens, comes to the front, or is touched; a
-  // click or a key in a desktop viewer window takes it back (`~/lib/layoutClaim.ts`)
-  const sizeRef = useRef(claimSize);
-  sizeRef.current = claimSize;
+  // click or a key in a desktop viewer window takes it back (`~/lib/layoutClaim.ts`). The claim
+  // keeps the phone's monitor size; Fit changes it (`claimMonitor`).
   const zoomRef = useRef(onZoom);
   zoomRef.current = onZoom;
-  const claim = useRef(layoutClaimer("phone", () => sizeRef.current?.())).current;
+  const claim = useRef(layoutClaimer("phone")).current;
   useEffect(() => {
     claim();
     const onVisible = () => document.visibilityState === "visible" && claim();
@@ -277,7 +274,7 @@ export function useRemote(
   if (!keypad.current) {
     keypad.current = new Keypad((o) => (o.t === "pad" ? setPadMode(o.on) : out(o)), timer);
   }
-  /** A trackpad with no keys, for good (the whole screen of the other orientations), where two
+  /** A trackpad with no keys, for good (the screen while the keyboard floats), where two
    *  fingers also pinch to zoom the view. */
   const trackpad = useRef<Keypad | null>(null);
   if (!trackpad.current) trackpad.current = new Keypad(out, timer, { alwaysPad: true, pinch: true });
@@ -298,12 +295,6 @@ export function useRemote(
     (kind: TouchKind, id: number, x: number, y: number) => feed(trackpad.current!, kind, id, null, x, y),
     [],
   );
-  const onButton = useCallback((code: number, pressed: boolean) => {
-    // Held, a button keeps the keys a trackpad, so the buttons stay on screen
-    keypad.current!.button(pressed);
-    button(code, pressed);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const terminal = spec?.content.mode === "terminal";
   const note = !connected
@@ -342,6 +333,5 @@ export function useRemote(
     sounds,
     onKeyTouch,
     onPadTouch,
-    onButton,
   };
 }

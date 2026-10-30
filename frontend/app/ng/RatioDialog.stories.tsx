@@ -21,7 +21,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** The default: 2 screen px per clone px, as upright. */
+/** The default: 2 screen px per clone px. */
 export const Default: Story = {};
 
 /** The folded phone (466 × 657), set to 1.5×. */

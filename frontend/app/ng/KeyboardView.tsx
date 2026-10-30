@@ -5,7 +5,6 @@ import type { DictationState } from "./dictation";
 import { GAP, keysLayout } from "./geometry";
 import { CAPS_LOCK, type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SLOP_PX } from "./keypad";
-import { type NgTab, type ServerUsage, ToolRow } from "./ToolRow";
 import type { ModState } from "./modifiers";
 
 /** Evdev mouse buttons. */
@@ -32,52 +31,29 @@ type Props = {
    *  is (CSS px, page coordinates). The container tells a tap from a hold or a pointer
    *  gesture (`./keypad.ts`). */
   onKeyTouch: (kind: TouchKind, id: number, key: Key | null, x: number, y: number) => void;
-  /** A mouse button goes down or up (evdev code). */
-  onButton: (button: number, pressed: boolean) => void;
-  /** The server's CPU, memory and disk, for the tool row; null until known. */
-  usage: ServerUsage | null;
-  /** The open tab, whose page shows in place of the keys and the mouse buttons; null for the
-   *  keyboard. */
-  tab: NgTab | null;
-  onTab: (tab: NgTab) => void;
-  /** A count on a tab (clones that stopped working unseen). */
-  badges?: Partial<Record<NgTab, number>>;
   /** The keys are in use as a trackpad: they fade to a trackpad's outline, and back. */
   pad: boolean;
   /** What the dictation key shows: off, starting, listening (red), a fault, or no dictation in
    *  this browser (dim). */
   dictation: DictationState;
-  /** The keys alone, with no tool row and no mouse buttons: the floating keyboard of the other
-   *  orientations (`./FullDesk.tsx`), where the whole screen is the trackpad. */
-  bare?: boolean;
 };
 
-/** The /ng keyboard area: a tool row under the screen (`./ToolRow.tsx`), a full keyboard of
- *  square keys under it, and the left, middle and right mouse buttons in the space below the
- *  keys; an open tab's page takes the place of the keys and the buttons. The keys are a touchpad too: a finger that moves on them moves the cursor, two
- *  scroll. Each finger works on its own, so a mouse button can stay down while another finger
- *  moves the cursor on the keys (a drag). The mouse buttons show only while the keys are a
- *  trackpad; in keyboard mode their space stays empty, so the keys do not move. */
+/** The /ng keyboard: a full keyboard of square keys (`./FullDesk.tsx` puts it over the clone's
+ *  screen or under it). The keys are a touchpad too: a finger that moves on them moves the
+ *  cursor, two scroll. */
 export const KeyboardView = memo(function KeyboardView(p: Props) {
-  const k = keysLayout(p.width, p.height, p.bottom, p.bare);
+  const k = keysLayout(p.width, p.height, p.bottom);
   const shift = SHIFTS.some((c) => p.mods.has(c));
   const rows = keyRows(p.fn);
   const touch = useKeysTouch(rows, p.onKeyTouch);
   return (
-    <div
-      className={`relative touch-none select-none ${p.bare ? "" : "bg-black"}`}
-      style={{ width: p.width, height: p.height }}
-    >
-      {p.bare ? null : <ToolRow box={k.tools} usage={p.usage} tab={p.tab} onTab={p.onTab} badges={p.badges} />}
-      {/* An open tab's page is the container's, over the space the keys leave (`k.page`) */}
+    <div className="relative touch-none select-none" style={{ width: p.width, height: p.height }}>
       {/* One handler for the whole key area, gaps too: a drag may start between keys */}
       {/* The trackpad the keys fade into: four corners of an outline. Touches go through it
           to the keys, which are the trackpad. */}
-      <PadOutline box={k.keys} shown={p.pad && !p.tab} />
+      <PadOutline box={k.keys} shown={p.pad} />
       <div
-        className={`absolute flex flex-col transition-opacity duration-200 ${p.tab ? "hidden" : ""} ${
-          p.pad ? "opacity-0" : "opacity-100"
-        }`}
+        className={`absolute flex flex-col transition-opacity duration-200 ${p.pad ? "opacity-0" : "opacity-100"}`}
         style={{ ...k.keys, gap: GAP }}
         onPointerDown={touch.down}
         onPointerMove={touch.move}
@@ -100,19 +76,6 @@ export const KeyboardView = memo(function KeyboardView(p: Props) {
             ))}
           </div>
         ))}
-      </div>
-      {/* Down to the bottom edge, home bar included: a tap there is a tap. Only in trackpad
-          mode; the keypad keeps that mode on while a button is held. */}
-      <div
-        aria-hidden={!p.pad}
-        className={`absolute flex transition-opacity duration-200 ${p.tab || p.bare ? "hidden" : ""} ${
-          p.pad ? "opacity-100" : "pointer-events-none opacity-0"
-        }`}
-        style={k.buttons}
-      >
-        <MouseButton label="Left" button={BTN_LEFT} onButton={p.onButton} />
-        <MouseButton label="Middle" button={BTN_MIDDLE} onButton={p.onButton} divider />
-        <MouseButton label="Right" button={BTN_RIGHT} onButton={p.onButton} divider />
       </div>
     </div>
   );
@@ -302,44 +265,3 @@ function PadOutline({ box, shown }: { box: KeysLayoutBox; shown: boolean }) {
 }
 
 type KeysLayoutBox = ReturnType<typeof keysLayout>["keys"];
-
-/** A mouse button: down while the finger is on it. No background; a thin line divides it from
- *  the one on its left. */
-function MouseButton({
-  label,
-  button,
-  onButton,
-  divider = false,
-}: {
-  label: string;
-  button: number;
-  onButton: Props["onButton"];
-  divider?: boolean;
-}) {
-  const [down, setDown] = useState(false);
-  const lift = () => {
-    if (!down) return;
-    setDown(false);
-    onButton(button, false);
-  };
-  return (
-    <div
-      role="button"
-      aria-label={`${label} button`}
-      aria-pressed={down}
-      className={`relative flex flex-1 items-center justify-center text-sm ${
-        down ? "text-white" : "text-neutral-500"
-      }`}
-      onPointerDown={(e) => {
-        capture(e);
-        setDown(true);
-        onButton(button, true);
-      }}
-      onPointerUp={lift}
-      onPointerCancel={lift}
-    >
-      {divider ? <div className="absolute inset-y-2 left-0 w-px bg-neutral-700" /> : null}
-      {label}
-    </div>
-  );
-}

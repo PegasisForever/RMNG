@@ -1,5 +1,5 @@
-// How many screen (device) pixels one pixel of the clone's monitor takes in the other
-// orientations (`./FullDesk.tsx`): the size Fit gives the monitor, and the largest the screen is
+// How many screen (device) pixels one pixel of the clone's monitor takes on the /ng screen
+// (`./FullDesk.tsx`): the size Fit gives the monitor, and the largest the screen is
 // shown at. This phone's own setting, kept in its browser storage, not on the server.
 import { PHONE_SCALE } from "./geometry";
 
@@ -8,7 +8,7 @@ export const PIXEL_RATIOS = [1, 1.25, 1.5, 2, 2.5, 3] as const;
 
 const KEY = "rmng.ng.pixelRatio";
 
-/** The phone's setting, or PHONE_SCALE (the upright one) when it has none. */
+/** The phone's setting, or PHONE_SCALE when it has none. */
 export function readPixelRatio(): number {
   try {
     const v = Number(localStorage.getItem(KEY));

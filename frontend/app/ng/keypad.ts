@@ -29,8 +29,8 @@
 // changing by PINCH_PX makes a pinch (`zoom`, the change as a factor; the clone gets nothing),
 // their middle moving by TWO_SLOP_PX a scroll. Without it, two fingers always scroll.
 //
-// `alwaysPad`: the keypad is a trackpad only, with no keys (the whole screen of the other
-// orientations, `./FullDesk.tsx`): trackpad mode from the start, for good.
+// `alwaysPad`: the keypad is a trackpad only, with no keys (the whole screen while the keyboard
+// is not docked, `./FullDesk.tsx`): trackpad mode from the start, for good.
 //
 // A drag that starts on Space is no pointer gesture: as on the iPhone keyboard, it moves the
 // text cursor, one arrow key for each ARROW_STEP_X (sideways) or ARROW_STEP_Y (up and down)

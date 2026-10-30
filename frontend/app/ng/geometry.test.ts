@@ -1,47 +1,40 @@
 import { describe, expect, test } from "bun:test";
 
-import { GAP, KEY_ASPECT, MIN_BUTTONS_H, TOOL_H, followAxis, keysLayout, phoneMonitorSize, screenFit } from "./geometry";
-
-// The unfolded iPhone Duo, upright: 669 px wide, a 412 px keyboard area, a 34 px home bar.
-const W = 669;
-const H = 412;
-const BOTTOM = 34;
+import { GAP, KEY_ASPECT, followAxis, keysLayout, phoneMonitorSize, screenFit } from "./geometry";
 
 describe("keysLayout", () => {
-  const k = keysLayout(W, H, BOTTOM);
+  // The unfolded iPhone Duo, upright: 669 px wide, a 34 px home bar
+  const k = keysLayout(669, 428, 34);
   const full = k.pitch - GAP;
 
   test("on the Duo the keys take the width", () => {
-    expect(k.keys.width).toBeCloseTo(W - 8, 5);
+    expect(k.keys.width).toBeCloseTo(669 - 8, 5);
     expect(full).toBeGreaterThan(53);
   });
 
-  test("412 px is too short for six square rows: the four lower stay square, the symbol and number rows give way", () => {
-    expect(k.rowHeights.slice(2)).toEqual([full, full, full, full]);
-    expect(k.rowHeights[0]).toBe(k.rowHeights[1]);
-    expect(k.rowHeights[0]).toBeLessThan(full);
-    expect(k.rowHeights[0]).toBeGreaterThan(40);
-  });
-
-  test("the tool row is at the top, the keys right under it, the mouse buttons below with 44 px at least", () => {
-    expect(k.tools.top).toBe(4);
-    expect(k.keys.top).toBe(4 + TOOL_H + GAP);
-    expect(k.buttons.top).toBeCloseTo(k.keys.top + k.keys.height + GAP, 9);
-    expect(k.buttons.top + k.buttons.height).toBe(H);
-    expect(k.buttons.height).toBeGreaterThanOrEqual(MIN_BUTTONS_H - 1e-9);
-    expect(k.buttons.width).toBe(W - 8);
-  });
-
   test("an area with room keeps every row square", () => {
-    const t = keysLayout(W, 444, BOTTOM);
+    const t = keysLayout(669, 444, 34);
     expect(t.rowHeights.every((h) => Math.abs(h - full * KEY_ASPECT) < 1e-9)).toBe(true);
   });
 
+  test("a shorter area: the four lower rows stay square, the symbol and number rows give way", () => {
+    const t = keysLayout(669, 380, 34);
+    expect(t.rowHeights.slice(2)).toEqual([full, full, full, full]);
+    expect(t.rowHeights[0]).toBe(t.rowHeights[1]);
+    expect(t.rowHeights[0]).toBeLessThan(full);
+  });
+
   test("a much shorter area makes the lower rows give way too, once the top two are at their least", () => {
-    const s = keysLayout(W, 300, BOTTOM);
+    const s = keysLayout(669, 260, 34);
     expect(s.rowHeights[0]).toBe(24);
     expect(s.rowHeights[2]).toBeLessThan(full);
-    expect(s.keys.width).toBeCloseTo(W - 8, 5);
+    expect(s.keys.width).toBeCloseTo(669 - 8, 5);
+  });
+
+  test("the keys go from the top down to the home bar", () => {
+    const f = keysLayout(951, 290, 21);
+    expect(f.keys.top).toBe(4);
+    expect(f.keys.top + f.keys.height).toBeCloseTo(290 - 4 - 21, 5);
   });
 });
 
@@ -71,15 +64,6 @@ describe("screenFit", () => {
       expect(f.width).toBeLessThanOrEqual(669 + 1e-9);
       expect(f.height).toBeLessThanOrEqual(h + 1e-9);
     }
-  });
-});
-
-describe("keysLayout bare (the floating keyboard)", () => {
-  test("keys only: from the top, down to the home bar, no tool row, no mouse buttons", () => {
-    const k = keysLayout(951, 290, 21, true);
-    expect(k.keys.top).toBe(4);
-    expect(k.tools.height).toBe(0);
-    expect(k.keys.top + k.keys.height).toBeCloseTo(290 - 4 - 21, 5);
   });
 });
 

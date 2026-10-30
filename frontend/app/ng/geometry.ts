@@ -1,17 +1,14 @@
-// Sizes on the /ng screen: the keyboard area (a tool row over the keys, at the bottom) and the
-// clone's screen above it, letterboxed when the area is not the monitor's shape.
+// Sizes on the /ng screen: the keyboard (at the bottom, over the clone's screen or under it) and
+// the clone's screen, letterboxed when its area is not the monitor's shape.
 import { ROWS, ROW_UNITS } from "./keyboard";
 
 /** Space between keys, and around the keyboard at the sides and the top, CSS px. */
 export const GAP = 4;
 const PAD = 4;
-/** The tool row's height, CSS px. */
+/** The tool row's height (over the pages), CSS px. */
 export const TOOL_H = 36;
 /** A key is at most this many times as tall as a 1-unit key is wide: square. */
 export const KEY_ASPECT = 1;
-/** The mouse buttons under the keys keep at least this height (with the home bar's, if
- *  that is more): the least touch target Apple gives. */
-export const MIN_BUTTONS_H = 44;
 /** The two top rows (symbols, numbers) give way first where the keys do not fit; they keep at
  *  least this height before the other rows give way too. */
 const MIN_TOP_ROW = 24;
@@ -26,27 +23,16 @@ export type KeysLayout = {
   /** Each row's height, top first: KEY_ASPECT × a 1-unit key's width, or less where the
    *  rows do not fit, the two top rows first. */
   rowHeights: number[];
-  /** The tool row: at the top of the area, under the screen. */
-  tools: Box;
-  /** The keys: right under the tool row; what is left of the area stays empty below them. */
+  /** The keys: at the top of the area; what is left of it stays empty below them. */
   keys: Box;
-  /** The mouse buttons: all the space under the keys, down to the screen's bottom edge. */
-  buttons: Box;
-  /** An open tab's page, in the keys' and the mouse buttons' place: under the tool row, down
-   *  to the home bar. */
-  page: Box;
 };
 
-/** Where things go in a keyboard area `width`×`height` with `bottom` kept for the home bar;
- *  with `bare`, the keys only (no tool row, no mouse buttons).
+/** Where the keys go in a keyboard area `width`×`height` with `bottom` kept for the home bar.
  *  The keys take the whole width and are square where the area has room for that. Where it
  *  has not, the symbol and number rows get shorter and the four rows under them stay square;
  *  only when the two are down to MIN_TOP_ROW do those get shorter too. */
-export function keysLayout(width: number, height: number, bottom: number, bare = false): KeysLayout {
-  // `bare`: the keys alone (the floating keyboard of the other orientations), down to `bottom`
-  const room = bare
-    ? height - PAD - PAD - bottom
-    : height - PAD - TOOL_H - GAP - GAP - Math.max(bottom, MIN_BUTTONS_H);
+export function keysLayout(width: number, height: number, bottom: number): KeysLayout {
+  const room = height - PAD - PAD - bottom;
   const pitch = (width - 2 * PAD + GAP) / ROW_UNITS;
   const full = (pitch - GAP) * KEY_ASPECT;
   const rowsRoom = room - (ROWS - 1) * GAP;
@@ -56,17 +42,7 @@ export function keysLayout(width: number, height: number, bottom: number, bare =
   const rowHeights = Array.from({ length: ROWS }, (_, i) => (i < TOP_ROWS ? top : lower));
   const w = ROW_UNITS * pitch - GAP;
   const h = rowHeights.reduce((a, b) => a + b, 0) + (ROWS - 1) * GAP;
-  const tools = { left: PAD, top: PAD, width: width - 2 * PAD, height: bare ? 0 : TOOL_H };
-  const keysTop = bare ? PAD : PAD + TOOL_H + GAP;
-  const buttonsTop = keysTop + h + GAP;
-  return {
-    pitch,
-    rowHeights,
-    tools,
-    keys: { left: PAD, top: keysTop, width: w, height: h },
-    buttons: { left: PAD, top: buttonsTop, width: width - 2 * PAD, height: height - buttonsTop },
-    page: { left: PAD, top: keysTop, width: width - 2 * PAD, height: height - bottom - keysTop },
-  };
+  return { pitch, rowHeights, keys: { left: PAD, top: PAD, width: w, height: h } };
 }
 
 export type ScreenFit = {
@@ -102,9 +78,8 @@ export function screenFit(
   return { scale, left: (areaW - width) / 2, top: (areaH - height) / 2, width, height };
 }
 
-/** Device px per monitor px on the phone, in every orientation: the iPhone Duo layout is shown
- *  at 2× upright, and the other orientations keep that, so text is the same size on the clone
- *  whichever way the phone is held. */
+/** Device px per monitor px on the phone, unless the phone's own setting says
+ *  (`./pixelRatio.ts`): 2, so text on the clone is as large as on the phone's own pages. */
 export const PHONE_SCALE = 2;
 
 /** The monitor for a screen of `width`×`height` CSS px at `dpr`: `scale` (PHONE_SCALE unless

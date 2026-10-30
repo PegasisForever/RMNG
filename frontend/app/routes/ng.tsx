@@ -1,12 +1,8 @@
 // `/ng`: the installed phone app (Add to Home Screen; `public/manifest.webmanifest` opens it
-// here). It is made for the folding iPhone, unfolded and held upright: the selected clone's
-// screen on top, the keyboard and the mouse controls below it (`~/ng/Desk.tsx`). Any other
-// way it is held (folded, sideways), and on any other screen, the clone's screen fills the
-// display, the display is a trackpad, and floating buttons open the keyboard and the pages
-// (`~/ng/FullDesk.tsx`). The update rules are in `~/ng/pwa.ts`.
+// here). The selected clone's screen fills the display, and floating buttons open the keyboard
+// and the pages (`~/ng/FullDesk.tsx`). The update rules are in `~/ng/pwa.ts`.
 import { useEffect, useRef, useState } from "react";
 
-import { Desk } from "~/ng/Desk";
 import { FullDesk } from "~/ng/FullDesk";
 import { attachPwa } from "~/ng/pwa";
 import { isTyping } from "~/ng/systemKeyboard";
@@ -36,7 +32,7 @@ function measure(probe: HTMLElement): Page {
   };
 }
 
-/** Whether the page is the unfolded screen held upright. */
+/** Whether the page is the unfolded iPhone Duo held upright (then it gets the whole screen). */
 const fits = ([w, h]: [number, number]) => w === SCREEN.width && PAGE_HEIGHTS.includes(h);
 
 export default function Ng() {
@@ -109,11 +105,11 @@ export default function Ng() {
         </div>
       ) : null}
       {secure && page ? (
-        ok ? (
-          <Desk width={SCREEN.width} height={SCREEN.height} bottom={page.bottom} />
-        ) : (
-          <FullDesk width={page.size[0]} height={page.size[1]} bottom={page.bottom} />
-        )
+        <FullDesk
+          width={ok ? SCREEN.width : page.size[0]}
+          height={ok ? SCREEN.height : page.size[1]}
+          bottom={page.bottom}
+        />
       ) : null}
     </div>
   );

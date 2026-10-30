@@ -1,45 +1,38 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { KeyboardView } from "./KeyboardView";
 import { SHIFTS } from "./keyboard";
 import type { DictationState } from "./dictation";
-import type { NgTab } from "./ToolRow";
 import type { ModState } from "./modifiers";
 
-/** The keyboard area on the unfolded iPhone Duo: 669 × 412, a 34 px home bar. The container
- *  tells taps from pointer gestures, so here a key only shows that it is touched. */
+/** The keyboard on the unfolded iPhone Duo, upright: 669 px wide, 45% of 951 px high, a 34 px
+ *  home bar. The container tells taps from pointer gestures, so here a key only shows that it is
+ *  touched. */
 function Frame(args: {
+  width: number;
   height: number;
+  bottom: number;
   fn: boolean;
   mods: [number, ModState][];
   caps: boolean;
-  tab: NgTab | null;
   pad: boolean;
   dictation: DictationState;
-  /** The floating keyboard of the other orientations: the keys only, the display's width. */
-  bare?: boolean;
-  width?: number;
 }) {
-  const [tab, setTab] = useState(args.tab);
   return (
-    <KeyboardView
-      width={args.width ?? 669}
-      height={args.height}
-      bottom={args.bare ? 21 : 34}
-      bare={args.bare}
-      fn={args.fn}
-      mods={new Map(args.mods)}
-      caps={args.caps}
-      onKeyTouch={fn()}
-      onButton={fn()}
-      usage={{ cpu: "23%", mem: "41.2GB", disk: "812.4GB" }}
-      tab={tab}
-      onTab={(t) => setTab((open) => (open === t ? null : t))}
-      pad={args.pad}
-      dictation={args.dictation}
-    />
+    <div className="bg-black">
+      <KeyboardView
+        width={args.width}
+        height={args.height}
+        bottom={args.bottom}
+        fn={args.fn}
+        mods={new Map(args.mods)}
+        caps={args.caps}
+        onKeyTouch={fn()}
+        pad={args.pad}
+        dictation={args.dictation}
+      />
+    </div>
   );
 }
 
@@ -47,7 +40,7 @@ const meta = {
   title: "ng/KeyboardView",
   component: Frame,
   parameters: { layout: "centered" },
-  args: { height: 412, fn: false, mods: [], caps: false, tab: null, pad: false, dictation: "off" },
+  args: { width: 669, height: 428, bottom: 34, fn: false, mods: [], caps: false, pad: false, dictation: "off" },
 } satisfies Meta<typeof Frame>;
 
 export default meta;
@@ -76,13 +69,5 @@ export const Dictating: Story = { args: { dictation: "listening" } };
 /** The keys in use as a trackpad: faded to a trackpad's outline. */
 export const Trackpad: Story = { args: { pad: true } };
 
-/** The Usage tab open: the keys and the mouse buttons make way. The page that takes their
- *  place is the container's; the pages have their own stories (ng/Pages). */
-export const UsageTab: Story = { args: { tab: "usage" } };
-
-/** The floating keyboard on a sideways phone (951 px wide, 45% of 648 px high): the keys only,
- *  the symbol and number rows short. */
-export const Floating: Story = { args: { bare: true, width: 951, height: 292 } };
-
-/** A shorter area: the keys get shorter, the mouse buttons keep what is left. */
-export const Short: Story = { args: { height: 330 } };
+/** On a sideways phone (951 px wide, 45% of 648 px high): the symbol and number rows short. */
+export const Sideways: Story = { args: { width: 951, height: 292, bottom: 21 } };
