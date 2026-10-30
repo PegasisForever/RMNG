@@ -300,10 +300,12 @@ struct RawWindow {
 struct RawExtra {
     #[serde(default)]
     is_enabled: bool,
+    // Cents, but sent as a decimal (`"used_credits": 0.0`) on some accounts. An `i64` here
+    // failed the whole reply to decode, so that account showed no usage at all.
     #[serde(default)]
-    used_credits: Option<i64>,
+    used_credits: Option<f64>,
     #[serde(default)]
-    monthly_limit: Option<i64>,
+    monthly_limit: Option<f64>,
     #[serde(default)]
     utilization: Option<f64>,
     #[serde(default)]
@@ -395,8 +397,8 @@ fn to_usage(acct: &StoredClaudeAccount, raw: RawUsage) -> ClaudeUsage {
         .extra_usage
         .filter(|e| e.is_enabled)
         .map(|e| ClaudeSpend {
-            used_cents: e.used_credits.unwrap_or(0),
-            limit_cents: e.monthly_limit,
+            used_cents: e.used_credits.unwrap_or(0.0).round() as i64,
+            limit_cents: e.monthly_limit.map(|c| c.round() as i64),
             pct: e.utilization.unwrap_or(0.0).round(),
             currency: e.currency.unwrap_or_else(|| "USD".into()),
             resets_at: e.resets_at,
@@ -492,7 +494,9 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 views.push(u);
             }
             Err(e) => {
-                let msg = e.to_string();
+                // The whole chain: reqwest alone says only "error decoding response body", which
+                // hid which field of the reply failed.
+                let msg = format!("{e:#}");
                 if msg.contains("429") {
                     any429 = true;
                 }
@@ -838,6 +842,37 @@ mod tests {
         assert_eq!(u.seven_day.unwrap().pct, 2.0);
         assert!(u.fable.is_none()); // no `limits` array → no fable window
         assert!(u.spend.is_none()); // extra usage disabled → no spend line
+    }
+
+    #[test]
+    fn parses_usage_with_decimal_extra_credits() {
+        // The real /oauth/usage response for test@talktomedi.com on 2026-10-30: extra usage
+        // on, `used_credits` a decimal. It used to fail with "error decoding response body".
+        let body = r#"{
+            "five_hour": {"utilization": 0.0, "resets_at": "2026-10-30T08:40:00.252423+00:00"},
+            "seven_day": {"utilization": 58.0, "resets_at": "2026-11-01T10:00:00.252438+00:00"},
+            "extra_usage": {"is_enabled": true, "monthly_limit": 4000, "used_credits": 0.0,
+                            "utilization": null, "currency": "USD", "decimal_places": 2}
+        }"#;
+        let raw: RawUsage = serde_json::from_str(body).unwrap();
+        let acct = StoredClaudeAccount {
+            id: "a@b|o".into(),
+            email: "a@b".into(),
+            account_uuid: "acct-uuid".into(),
+            org_uuid: "o".into(),
+            org_name: String::new(),
+            active: false,
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at: 0,
+            scopes: vec![],
+            last_refresh: None,
+        };
+        let u = to_usage(&acct, raw);
+        assert_eq!(u.seven_day.unwrap().pct, 58.0);
+        let spend = u.spend.expect("extra usage enabled → spend line");
+        assert_eq!(spend.used_cents, 0);
+        assert_eq!(spend.limit_cents, Some(4000));
     }
 
     #[test]

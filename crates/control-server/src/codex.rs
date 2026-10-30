@@ -668,7 +668,7 @@ async fn poll_inner(app: &App) -> Result<bool> {
                 }
             }
             Err(e) => {
-                let msg = e.to_string();
+                let msg = format!("{e:#}");
                 if msg.contains("429") {
                     any429 = true;
                 }
