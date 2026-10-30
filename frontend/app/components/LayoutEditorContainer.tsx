@@ -72,7 +72,7 @@ export function LayoutEditorContainer({
       setNote(`No viewer window is open for monitor ${i}. Open it, size it, then try again.`);
       return;
     }
-    const s = layout.pixelScale;
+    const s = layout.scales[i];
     const sizes = layout.monitors.map((m, k) => (k === i ? { width: size.width / s, height: size.height / s } : m));
     apply({ ...layout, monitors: resize(layout.monitors, sizes) });
   };

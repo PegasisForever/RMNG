@@ -44,7 +44,7 @@ export const Three: Story = {
         { width: 1440, height: 2560, x: 0, y: 0, primary: false },
         { width: 1920, height: 1200, x: 2400, y: 2160, primary: false },
       ],
-      pixelScale: 1.5,
+      scales: [1.5, 1, 1.25],
     },
   },
 };

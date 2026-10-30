@@ -22,9 +22,10 @@ export type ClientKind = "desktop" | "phone";
 /** What a client claims, besides who it is. */
 export type LayoutBody = { monitors: MonitorSpec[]; scrollMode: ScrollMode; scrollSpeed: number };
 
-/** The desktop browser's layout: what it claims, and how many screen pixels one clone pixel
- *  takes (for "Match window sizes"; this browser's alone). */
-export type DesktopLayout = LayoutBody & { pixelScale: number };
+/** The desktop browser's layout: what it claims, and for each monitor (`scales[i]` for
+ *  monitor i) how many screen pixels one clone pixel takes in its viewer window (this
+ *  browser's alone, not claimed). */
+export type DesktopLayout = LayoutBody & { scales: number[] };
 
 /** The pixel scales the dialog offers. */
 export const PIXEL_SCALES = [1, 1.25, 1.5, 2, 2.5, 3] as const;
@@ -38,8 +39,10 @@ export const DEFAULT_DESKTOP_LAYOUT: DesktopLayout = {
   ],
   scrollMode: "auto",
   scrollSpeed: 100,
-  pixelScale: 1,
+  scales: [1, 1],
 };
+
+const isScale = (v: unknown): v is number => (PIXEL_SCALES as readonly unknown[]).includes(v);
 
 const DESKTOP_KEY = "rmng.layout";
 
@@ -75,13 +78,16 @@ export function readDesktopLayout(): DesktopLayout | null {
   const raw = read(DESKTOP_KEY);
   if (!raw) return null;
   try {
-    const l = JSON.parse(raw) as Partial<DesktopLayout>;
+    // `pixelScale`: one scale for every monitor, as a build of 2026-10-29 kept it
+    const l = JSON.parse(raw) as Partial<DesktopLayout> & { pixelScale?: number };
     if (!Array.isArray(l.monitors) || !l.monitors.length) return null;
+    const monitors = normalize(l.monitors.slice(0, MAX_MONITORS));
+    const fallback = isScale(l.pixelScale) ? l.pixelScale : 1;
     return {
-      monitors: normalize(l.monitors.slice(0, MAX_MONITORS)),
+      monitors,
       scrollMode: l.scrollMode ?? "auto",
       scrollSpeed: Number.isFinite(l.scrollSpeed) ? l.scrollSpeed! : 100,
-      pixelScale: (PIXEL_SCALES as readonly number[]).includes(l.pixelScale!) ? l.pixelScale! : 1,
+      scales: monitors.map((_, i) => (isScale(l.scales?.[i]) ? l.scales![i] : fallback)),
     };
   } catch {
     return null;
@@ -103,7 +109,7 @@ export async function ensureDesktopLayout(): Promise<DesktopLayout> {
     const state = (await (await fetch("/api/state")).json()) as ControlState;
     const l = state.layout;
     if (l?.label === "desktop" && l.monitors.length) {
-      seed = { monitors: l.monitors, scrollMode: l.scrollMode, scrollSpeed: l.scrollSpeed, pixelScale: 1 };
+      seed = { monitors: l.monitors, scrollMode: l.scrollMode, scrollSpeed: l.scrollSpeed, scales: l.monitors.map(() => 1) };
     }
   } catch {
     // the default, then

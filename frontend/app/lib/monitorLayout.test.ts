@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { addMonitor, dropMonitor, makePrimary, normalize, primaryMap, removeMap, removeMonitor, resize } from "./monitorLayout";
+import { addMonitor, dropMonitor, makePrimary, normalize, primaryMap, removeMap, removeMonitor, renumber, rescale, resize } from "./monitorLayout";
 
 const mon = (width: number, height: number, x: number, y: number) => ({ width, height, x, y, primary: false });
 
@@ -93,6 +93,16 @@ describe("add, remove, primary", () => {
     expect(removeMap(3, 1)).toEqual([0, null, 1]);
     expect(primaryMap(3, 2)).toEqual([1, 2, 0]);
     expect(primaryMap(3, 1)).toEqual([1, 0, 2]);
+  });
+
+  test("per-monitor values follow the new numbers", () => {
+    expect(renumber(["a", "b", "c"], removeMap(3, 1))).toEqual(["a", "c"]);
+    expect(renumber(["a", "b", "c"], primaryMap(3, 2))).toEqual(["c", "a", "b"]);
+  });
+
+  test("a new pixel scale keeps the window's screen pixels", () => {
+    expect(rescale({ width: 2560, height: 1440 }, 1, 2)).toEqual({ width: 1280, height: 720 });
+    expect(rescale({ width: 1280, height: 720 }, 2, 1.5)).toEqual({ width: 1706.6666666666667, height: 960 });
   });
 
   test("the last monitor stays", () => {

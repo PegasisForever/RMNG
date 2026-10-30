@@ -166,6 +166,22 @@ export function primaryMap(n: number, i: number): number[] {
   return Array.from({ length: n }, (_, k) => (k === i ? 0 : k < i ? k + 1 : k));
 }
 
+/** Per-monitor values (`values[k]` for monitor k) after the monitors were renumbered
+ *  (`map[old]` is the new number; null: removed). */
+export function renumber<T>(values: T[], map: (number | null)[]): T[] {
+  const out: T[] = [];
+  map.forEach((to, k) => {
+    if (to !== null) out[to] = values[k];
+  });
+  return out;
+}
+
+/** The size monitor `m` gets when its pixel scale goes from `from` to `to`: its viewer window
+ *  keeps its size in screen pixels, so the clone pixels in it change. */
+export function rescale(m: { width: number; height: number }, from: number, to: number) {
+  return { width: (m.width * from) / to, height: (m.height * from) / to };
+}
+
 /** Monitor `i` becomes monitor 0, the primary one; the arrangement stays. */
 export function makePrimary(monitors: MonitorSpec[], i: number): MonitorSpec[] {
   if (i === 0) return monitors;

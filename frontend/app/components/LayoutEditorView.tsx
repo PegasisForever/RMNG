@@ -3,12 +3,13 @@
 //
 // - The arrangement: each monitor a box, moved only by drag and drop. While it is dragged it
 //   snaps to touch another monitor's edge, lined up with its edges or its center when close
-//   (`~/lib/monitorLayout.ts`); a dashed outline shows where the pointer is. In each box, three
-//   buttons: make it monitor 0 (the primary one), give it the size of its viewer window (in
-//   screen pixels divided by the pixel scale), and remove it (its viewer window closes).
-//   Sizes come only from the windows: there is no field to type one in.
+//   (`~/lib/monitorLayout.ts`); a dashed outline shows where the pointer is. In each box: its
+//   pixel scale (screen pixels per clone pixel in its viewer window; a new one changes its size
+//   at once, so the window's screen pixels stay as they were), and three buttons: make it
+//   monitor 0 (the primary one), give it the size of its viewer window (in screen pixels
+//   divided by its pixel scale), and remove it (its viewer window closes). Sizes come only from
+//   the windows and the scales: there is no field to type one in.
 // - Add a monitor, at the right; a viewer window opens for it.
-// - The pixel scale: screen pixels per clone pixel.
 // - How the viewer reads the wheel, and the scroll speed.
 //
 // While the dialog is open, each viewer window shows its monitor's number large in its middle
@@ -31,14 +32,20 @@ import {
   primaryMap,
   removeMap,
   removeMonitor,
+  renumber,
+  rescale,
+  resize,
   snapMonitor,
 } from "~/lib/monitorLayout";
 import type { MonitorSpec } from "~/lib/wire/MonitorSpec";
 import type { ScrollMode } from "~/lib/wire/ScrollMode";
 
-/** The arrangement's height, and the room around it, CSS px. */
-const VIEW_H = 230;
+/** The arrangement's height, and the room around it, CSS px. A box narrower or lower than
+ *  ROOMY_W × ROOMY_H puts its scale and its buttons on two lines, its number and size on one. */
+const VIEW_H = 260;
 const VIEW_PAD = 12;
+const ROOMY_W = 130;
+const ROOMY_H = 84;
 
 const SCROLL_MODES: { value: ScrollMode; label: string }[] = [
   { value: "auto", label: "Auto (mouse or trackpad, per event)" },
@@ -77,6 +84,7 @@ export function LayoutEditorView({
   onClose,
 }: LayoutEditorViewProps) {
   const mons = layout.monitors;
+  const scales = layout.scales;
 
   return (
     <ModalShell size="md" open={open} onExited={onClose}>
@@ -90,15 +98,25 @@ export function LayoutEditorView({
 
           <Arrangement
             monitors={mons}
+            scales={scales}
             matching={matching}
             onDrop={(i, x, y) => onChange({ ...layout, monitors: dropMonitor(mons, i, x, y) })}
-            onPrimary={(i) =>
-              onChange({ ...layout, monitors: makePrimary(mons, i) }, { t: "renumber", map: primaryMap(mons.length, i) })
+            onScale={(i, to) =>
+              onChange({
+                ...layout,
+                monitors: resize(mons, mons.map((m, k) => (k === i ? rescale(m, scales[i], to) : m))),
+                scales: scales.map((s, k) => (k === i ? to : s)),
+              })
             }
+            onPrimary={(i) => {
+              const map = primaryMap(mons.length, i);
+              onChange({ ...layout, monitors: makePrimary(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
+            }}
             onMatchWindow={onMatchWindow}
-            onRemove={(i) =>
-              onChange({ ...layout, monitors: removeMonitor(mons, i) }, { t: "renumber", map: removeMap(mons.length, i) })
-            }
+            onRemove={(i) => {
+              const map = removeMap(mons.length, i);
+              onChange({ ...layout, monitors: removeMonitor(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
+            }}
           />
           {note ? <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">{note}</p> : null}
 
@@ -106,27 +124,14 @@ export function LayoutEditorView({
             <button
               type="button"
               disabled={mons.length >= MAX_MONITORS}
-              onClick={() => onChange({ ...layout, monitors: addMonitor(mons) }, { t: "add", monitor: mons.length })}
+              onClick={() =>
+                onChange({ ...layout, monitors: addMonitor(mons), scales: [...scales, 1] }, { t: "add", monitor: mons.length })
+              }
               className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
             >
               <Plus aria-hidden className="size-3.5" />
               Add monitor
             </button>
-            <label className="ml-auto flex items-center gap-1.5 whitespace-nowrap text-xs text-slate-500 dark:text-slate-400">
-              Pixel scale
-              <select
-                aria-label="Pixel scale"
-                value={layout.pixelScale}
-                onChange={(e) => onChange({ ...layout, pixelScale: Number(e.target.value) })}
-                className={settingsInput.replace("w-full", "w-20")}
-              >
-                {PIXEL_SCALES.map((s) => (
-                  <option key={s} value={s}>
-                    {s}×
-                  </option>
-                ))}
-              </select>
-            </label>
           </div>
 
           <div className="mt-3 grid grid-cols-[1fr_7rem] gap-2">
@@ -176,15 +181,20 @@ export function LayoutEditorView({
  *  would land; the drop puts it there (`onDrop`, in monitor pixels). */
 function Arrangement({
   monitors,
+  scales,
   matching,
   onDrop,
+  onScale,
   onPrimary,
   onMatchWindow,
   onRemove,
 }: {
   monitors: MonitorSpec[];
+  /** Each monitor's pixel scale. */
+  scales: number[];
   matching: number | null;
   onDrop: (i: number, x: number, y: number) => void;
+  onScale: (i: number, scale: number) => void;
   onPrimary: (i: number) => void;
   onMatchWindow: (i: number) => void;
   onRemove: (i: number) => void;
@@ -202,7 +212,7 @@ function Arrangement({
     const w = Math.max(...ms.map((m) => m.x + m.width)) - x0;
     const h = Math.max(...ms.map((m) => m.y + m.height)) - y0;
     // Room around it to drag into
-    const scale = Math.min((areaW - 2 * VIEW_PAD) / (w * 1.4), (VIEW_H - 2 * VIEW_PAD) / (h * 1.4));
+    const scale = Math.min((areaW - 2 * VIEW_PAD) / (w * 1.2), (VIEW_H - 2 * VIEW_PAD) / (h * 1.2));
     return { scale, ox: (areaW - w * scale) / 2 - x0 * scale, oy: (VIEW_H - h * scale) / 2 - y0 * scale };
   };
   const [drag, setDrag] = useState<{ i: number; sx: number; sy: number; dx: number; dy: number } | null>(null);
@@ -239,6 +249,7 @@ function Arrangement({
         const raw = moving ? { x: m.x + drag.dx / f.scale, y: m.y + drag.dy / f.scale } : m;
         const at = (moving && snapMonitor(monitors, i, raw.x, raw.y)) || raw;
         const primary = i === 0;
+        const roomy = box.width >= ROOMY_W && box.height >= ROOMY_H;
         return (
           <div key={i}>
             {moving ? (
@@ -263,14 +274,34 @@ function Arrangement({
               onPointerUp={up}
               onPointerCancel={() => setDrag(null)}
             >
-              <span className="text-xs font-semibold text-slate-700 dark:text-slate-100">
-                {i}
-                {primary ? " ★" : ""}
+              <span className={`flex items-baseline gap-1 ${roomy ? "flex-col items-center gap-0" : ""}`}>
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-100">
+                  {i}
+                  {primary ? " ★" : ""}
+                </span>
+                <span className="text-[10px] tabular-nums text-slate-400">
+                  {m.width}×{m.height}
+                </span>
               </span>
-              <span className="text-[10px] tabular-nums text-slate-400">
-                {m.width}×{m.height}
-              </span>
-              <div className="mt-1 flex gap-0.5">
+              <div
+                className={`flex items-center justify-center gap-0.5 ${roomy ? "mt-1" : "mt-0.5 max-w-full flex-wrap"}`}
+              >
+                <select
+                  aria-label={`Pixel scale of monitor ${i}: screen pixels per clone pixel`}
+                  title="Pixel scale: screen pixels per clone pixel in its window"
+                  value={scales[i]}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onChange={(e) => onScale(i, Number(e.target.value))}
+                  className={`rounded border border-slate-300 bg-white px-0.5 py-0 text-[11px] tabular-nums text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 ${
+                    roomy ? "" : "basis-full"
+                  }`}
+                >
+                  {PIXEL_SCALES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}×
+                    </option>
+                  ))}
+                </select>
                 {primary ? null : (
                   <IconButton label="Make primary (monitor 0)" onClick={() => onPrimary(i)}>
                     <Star className="size-3.5" />
@@ -319,7 +350,7 @@ function IconButton({
       disabled={disabled}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={onClick}
-      className={`group relative rounded p-1 disabled:opacity-40 ${
+      className={`group relative rounded p-0.5 disabled:opacity-40 ${
         danger
           ? "text-rose-500 hover:bg-rose-100 dark:hover:bg-rose-950/60"
           : "text-slate-500 hover:bg-slate-200 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
