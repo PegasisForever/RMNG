@@ -1,9 +1,10 @@
 // This browser's own monitor layout, and its claims to the server.
 //
-// Each client keeps one layout of its own, in its browser storage: the desktop browser (the
-// dashboard and its viewer windows, `rmng.layout`) one of up to MAX_MONITORS monitors, the
-// `/ng` phone page one monitor (`~/ng/remote.ts`). The server keeps no list: it has only the
-// layout of the client used last (`POST /api/layout/claim`, `ControlState.layout`).
+// Each browser keeps one layout of its own, in its storage (`rmng.layout`), which all its
+// windows share: the dashboard, the viewer windows and the `/ng` windows. A browser that can
+// open windows of its own (a desktop: `canOpenWindows`) has up to MAX_MONITORS monitors, one
+// window each; a phone or a tablet has one, the `/ng` page. The server keeps no list: it has
+// only the layout of the client used last (`POST /api/layout/claim`, `ControlState.layout`).
 //
 // A client claims on each real action of the operator in it: a touch, a click, a key, a wheel,
 // the mouse moving, and the window being opened or coming to the front. Only while the window
@@ -19,20 +20,35 @@ import { MAX_MONITORS, normalize } from "./monitorLayout";
 
 export type ClientKind = "desktop" | "phone";
 
+/** Whether this browser can open windows of its own, one per monitor (and the pages, out of
+ *  `/ng`). A phone or a tablet opens a tab in their place, or nothing. */
+export function canOpenWindows(nav: Pick<Navigator, "userAgent" | "platform" | "maxTouchPoints"> = navigator): boolean {
+  const data = (nav as { userAgentData?: { mobile?: boolean } }).userAgentData;
+  if (data?.mobile) return false;
+  if (/Android|iPhone|iPad|iPod|Mobile/.test(nav.userAgent)) return false;
+  // An iPad says it is a Mac, but a Mac has no touch screen
+  return !(nav.platform === "MacIntel" && nav.maxTouchPoints > 1);
+}
+
+/** What this browser counts as: a desktop when it can open windows, else a phone. */
+export function clientKind(): ClientKind {
+  return canOpenWindows() ? "desktop" : "phone";
+}
+
 /** What a client claims, besides who it is. */
 export type LayoutBody = { monitors: MonitorSpec[]; scrollMode: ScrollMode; scrollSpeed: number };
 
-/** The desktop browser's layout: what it claims, and for each monitor (`scales[i]` for
- *  monitor i) how many screen pixels one clone pixel takes in its viewer window (this
- *  browser's alone, not claimed). */
-export type DesktopLayout = LayoutBody & { scales: number[] };
+/** This browser's layout: what it claims, and for each monitor (`scales[i]` for monitor i) how
+ *  many screen pixels one clone pixel takes in its window (this browser's alone, not
+ *  claimed). */
+export type BrowserLayout = LayoutBody & { scales: number[] };
 
 /** The pixel scales the dialog offers. */
 export const PIXEL_SCALES = [1, 1.25, 1.5, 2, 2.5, 3] as const;
 
 /** The desktop layout before this browser has one: the server's default (`wire::default_monitors`):
  *  two 2560×1440 side by side, the primary one on the right. */
-export const DEFAULT_DESKTOP_LAYOUT: DesktopLayout = {
+export const DEFAULT_DESKTOP_LAYOUT: BrowserLayout = {
   monitors: [
     { width: 2560, height: 1440, x: 2560, y: 0, primary: true },
     { width: 2560, height: 1440, x: 0, y: 0, primary: false },
@@ -73,13 +89,13 @@ export function clientId(kind: ClientKind): string {
   return id;
 }
 
-/** The desktop layout this browser keeps; null before it has one. */
-export function readDesktopLayout(): DesktopLayout | null {
+/** The layout this browser keeps; null before it has one. */
+export function readLayout(): BrowserLayout | null {
   const raw = read(DESKTOP_KEY);
   if (!raw) return null;
   try {
     // `pixelScale`: one scale for every monitor, as a build of 2026-10-29 kept it
-    const l = JSON.parse(raw) as Partial<DesktopLayout> & { pixelScale?: number };
+    const l = JSON.parse(raw) as Partial<BrowserLayout> & { pixelScale?: number };
     if (!Array.isArray(l.monitors) || !l.monitors.length) return null;
     const monitors = normalize(l.monitors.slice(0, MAX_MONITORS));
     const fallback = isScale(l.pixelScale) ? l.pixelScale : 1;
@@ -94,39 +110,51 @@ export function readDesktopLayout(): DesktopLayout | null {
   }
 }
 
-export function saveDesktopLayout(layout: DesktopLayout) {
+export function saveLayout(layout: BrowserLayout) {
   write(DESKTOP_KEY, JSON.stringify({ ...layout, monitors: normalize(layout.monitors) }));
 }
 
-/** This browser's desktop layout, made the first time from the layout in force when that is a
- *  desktop's (a browser that comes later starts where the last one left the clones; a server
- *  of an older build hands its active layout preset over that way), else the default. */
-export async function ensureDesktopLayout(): Promise<DesktopLayout> {
-  const have = readDesktopLayout();
-  if (have) return have;
-  let seed = DEFAULT_DESKTOP_LAYOUT;
-  try {
-    const state = (await (await fetch("/api/state")).json()) as ControlState;
-    const l = state.layout;
-    if (l?.label === "desktop" && l.monitors.length) {
-      seed = { monitors: l.monitors, scrollMode: l.scrollMode, scrollSpeed: l.scrollSpeed, scales: l.monitors.map(() => 1) };
+/** This browser's layout, made the first time from `seed` (the default: DEFAULT_DESKTOP_LAYOUT).
+ *  A desktop starts from the layout in force instead when that is a desktop's (a browser that
+ *  comes later starts where the last one left the clones; a server of an older build hands its
+ *  active layout preset over that way). A phone keeps one monitor. */
+export async function ensureLayout(
+  kind: ClientKind = "desktop",
+  seed: () => BrowserLayout = () => DEFAULT_DESKTOP_LAYOUT,
+): Promise<BrowserLayout> {
+  const have = readLayout();
+  if (have) {
+    if (kind === "desktop" || have.monitors.length === 1) return have;
+    const one = { ...have, monitors: have.monitors.slice(0, 1), scales: have.scales.slice(0, 1) };
+    saveLayout(one);
+    return one;
+  }
+  let first = seed();
+  if (kind === "desktop") {
+    try {
+      const state = (await (await fetch("/api/state")).json()) as ControlState;
+      const l = state.layout;
+      if (l?.label === "desktop" && l.monitors.length) {
+        first = { monitors: l.monitors, scrollMode: l.scrollMode, scrollSpeed: l.scrollSpeed, scales: l.monitors.map(() => 1) };
+      }
+    } catch {
+      // the seed, then
     }
-  } catch {
-    // the default, then
   }
   // Another window of this browser may have made it meanwhile
-  if (!readDesktopLayout()) saveDesktopLayout(seed);
-  return readDesktopLayout() ?? seed;
+  if (!readLayout()) saveLayout(first);
+  return readLayout() ?? first;
 }
 
-/** What the desktop browser claims: its stored layout, without the pixel scale; null before it
- *  has one (`ensureDesktopLayout`). */
-export function desktopClaim(): LayoutBody | null {
-  const l = readDesktopLayout();
+/** What this browser claims: its stored layout, without the pixel scales; null before it has
+ *  one (`ensureLayout`). */
+export function layoutClaim(): LayoutBody | null {
+  const l = readLayout();
   return l && { monitors: l.monitors, scrollMode: l.scrollMode, scrollSpeed: l.scrollSpeed };
 }
 
-/** The channel the dashboard asks the viewer windows of this browser for their sizes on. */
+/** The channel the Edit layout dialog talks to the monitor windows of this browser on (the
+ *  viewer windows and the `/ng` windows). */
 export const VIEWER_CHANNEL = "rmng-viewer";
 /** How often the open Edit layout dialog says so on VIEWER_CHANNEL, ms. */
 export const IDENTIFY_EVERY_MS = 1000;

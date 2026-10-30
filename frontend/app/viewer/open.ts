@@ -1,12 +1,12 @@
-import { DEFAULT_DESKTOP_LAYOUT, readDesktopLayout } from "~/lib/clientLayout";
+import { DEFAULT_DESKTOP_LAYOUT, readLayout } from "~/lib/clientLayout";
 
 /** Open one browser viewer window per monitor: of `monitors` (a view spec), or else of this
- *  browser's layout (`~/lib/clientLayout.ts`).
+ *  browser's layout (`~/lib/clientLayout.ts`), each at `page` (the viewer, or `/ng`).
  *  Each is a plain window at the browser's default place and size; the operator moves, sizes and
  *  fullscreens it. A window that is open already stays as it is. */
-export async function openViewerWindows(monitors?: { id: number }[]) {
+export async function openViewerWindows(monitors?: { id: number }[], page = "/viewer") {
   if (!monitors) {
-    const layout = readDesktopLayout() ?? DEFAULT_DESKTOP_LAYOUT;
+    const layout = readLayout() ?? DEFAULT_DESKTOP_LAYOUT;
     monitors = layout.monitors.map((_, id) => ({ id }));
   }
   let blocked = 0;
@@ -15,7 +15,7 @@ export async function openViewerWindows(monitors?: { id: number }[]) {
     // this name that is open already without reloading it.
     const w = window.open("", `rmng-viewer-${m.id}`, "popup");
     if (!w) blocked++;
-    else if (w.location.href === "about:blank") w.location.replace(`/viewer?monitor=${m.id}`);
+    else if (w.location.href === "about:blank") w.location.replace(`${page}?monitor=${m.id}`);
   }
   // Chrome and Safari block every pop-up after the first one of a click, and say so only with
   // a small icon in the address bar.

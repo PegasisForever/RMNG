@@ -87,12 +87,12 @@ export function screenFit(
   return { scale, left: (areaW - width) / 2, top: (areaH - height) / 2, width, height };
 }
 
-/** Device px per monitor px on the phone, unless the phone's own setting says
- *  (`./pixelRatio.ts`): 2, so text on the clone is as large as on the phone's own pages. */
+/** Device px per monitor px a phone starts with (its pixel scale, in its layout:
+ *  `./firstLayout.ts`): 2, so text on the clone is as large as on the phone's own pages. */
 export const PHONE_SCALE = 2;
 
-/** The monitor for a screen of `width`×`height` CSS px at `dpr`: `scale` (PHONE_SCALE unless
- *  the phone's own setting says) device px per monitor px, in even sizes (the encoder takes
+/** The monitor for a screen of `width`×`height` CSS px at `dpr`: `scale` (the window's pixel
+ *  scale) device px per monitor px, in even sizes (the encoder takes
  *  even sizes only). */
 export function phoneMonitorSize(
   width: number,

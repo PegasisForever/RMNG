@@ -702,8 +702,9 @@ which is what the loops were for.
 `{ "client": string, "label": string, "monitors": MonitorSpec[], "scrollMode": "auto" | "trackpad" | "mouse", "scrollSpeed": number }`
 
 The server keeps no list of layouts. Each client keeps its own layout in its browser storage
-(the desktop browser: up to 8 monitors, edited in the dashboard's Edit layout dialog; the `/ng`
-phone page: one monitor) and sends it on each real action of the operator in it (a touch, a
+(a desktop browser: up to 8 monitors, one window each; a phone or a tablet: one monitor, the
+`/ng` page; edited in the Edit layout dialog, which the dashboard opens and `/ng` opens on a long
+press of its Fit button) and sends it on each real action of the operator in it (a touch, a
 click, a key, a wheel, the mouse moving, the window opening or coming to the front), only while
 its window is in the foreground. The last layout sent is in force: it is stored as
 `ControlState.layout` and its scroll settings go to every viewer window (`scroll`). `client` is

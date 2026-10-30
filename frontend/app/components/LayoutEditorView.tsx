@@ -4,26 +4,29 @@
 // - The arrangement: each monitor a box, moved only by drag and drop. While it is dragged it
 //   snaps to touch another monitor's edge, lined up with its edges or its center when close
 //   (`~/lib/monitorLayout.ts`); a dashed outline shows where the pointer is. In each box: its
-//   pixel scale (screen pixels per clone pixel in its viewer window; a new one changes its size
-//   at once, so the window's screen pixels stay as they were), and three buttons: make it
-//   monitor 0 (the primary one), give it the size of its viewer window (in screen pixels
-//   divided by its pixel scale), and remove it (its viewer window closes). Sizes come only from
+//   pixel scale (screen pixels per clone pixel in its window; a new one changes its size
+//   at once, so the window's screen pixels stay as they were), and its buttons: make it
+//   monitor 0 (the primary one), open its window, give it the size of its window (in screen
+//   pixels divided by its pixel scale), and remove it (its window closes). Sizes come only from
 //   the windows and the scales: there is no field to type one in.
-// - Add a monitor, at the right; a viewer window opens for it.
+// - Add a monitor, at the right; a window opens for it.
 // - How the viewer reads the wheel, and the scroll speed.
 //
-// While the dialog is open, each viewer window shows its monitor's number large in its middle
+// A browser that cannot open windows (a phone: `canOpenWindows`) has one monitor, its own
+// screen: there is nothing to add, open or remove.
+//
+// While the dialog is open, each monitor window shows its monitor's number large in its middle
 // (the container tells them), so the boxes here can be matched to the windows.
 //
 // Pure: the layout comes in and every change goes out, with what it does to the monitors'
-// numbers (`LayoutChange`). The container saves and applies it, opens and renumbers the viewer
+// numbers (`LayoutChange`). The container saves and applies it, opens and renumbers the monitor
 // windows, and asks them for their sizes.
-import { Maximize2, Plus, Star, Trash2 } from "lucide-react";
+import { ExternalLink, Maximize2, Plus, Star, Trash2 } from "lucide-react";
 import { type PointerEvent, type ReactNode, useLayoutEffect, useRef, useState } from "react";
 
 import { ModalShell } from "~/components/ModalShell";
 import { settingsInput } from "~/components/SettingsFields";
-import { type DesktopLayout, PIXEL_SCALES } from "~/lib/clientLayout";
+import { type BrowserLayout, PIXEL_SCALES } from "~/lib/clientLayout";
 import {
   MAX_MONITORS,
   addMonitor,
@@ -59,11 +62,16 @@ export type LayoutChange = { t: "add"; monitor: number } | { t: "renumber"; map:
 
 export interface LayoutEditorViewProps {
   /** This browser's layout. */
-  layout: DesktopLayout;
+  layout: BrowserLayout;
   /** A change, applied at once. */
-  onChange: (layout: DesktopLayout, change?: LayoutChange) => void;
-  /** Give monitor `i` the size of its viewer window. */
+  onChange: (layout: BrowserLayout, change?: LayoutChange) => void;
+  /** Give monitor `i` the size of its window. */
   onMatchWindow: (i: number) => void;
+  /** Open monitor `i`'s window; absent where the browser cannot open windows (then there is
+   *  one monitor, and none can be added). */
+  onOpenWindow?: (i: number) => void;
+  /** The monitor of the window the dialog is open in, marked "here"; absent: none of them. */
+  here?: number;
   /** The monitor whose window is being asked for its size; null when none is. */
   matching: number | null;
   /** A short note on the last match that did nothing (no window open); null for none. */
@@ -78,11 +86,14 @@ export function LayoutEditorView({
   layout,
   onChange,
   onMatchWindow,
+  onOpenWindow,
+  here,
   matching,
   note,
   open = true,
   onClose,
 }: LayoutEditorViewProps) {
+  const windows = onOpenWindow !== undefined;
   const mons = layout.monitors;
   const scales = layout.scales;
 
@@ -92,8 +103,9 @@ export function LayoutEditorView({
         <>
           <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Edit layout</h3>
           <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            This browser&apos;s monitors. The clones get them while you use this browser, and another device&apos;s
-            while you use that one. Each viewer window shows its monitor&apos;s number while this is open.
+            {windows
+              ? "This browser's monitors. The clones get them while you use this browser, and another device's while you use that one. Each monitor's window shows its number while this is open."
+              : "This device's screen, as the clones get it while you use this device, and another device's while you use that one."}
           </p>
 
           <Arrangement
@@ -113,6 +125,8 @@ export function LayoutEditorView({
               onChange({ ...layout, monitors: makePrimary(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
             }}
             onMatchWindow={onMatchWindow}
+            onOpenWindow={onOpenWindow}
+            here={here}
             onRemove={(i) => {
               const map = removeMap(mons.length, i);
               onChange({ ...layout, monitors: removeMonitor(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
@@ -120,19 +134,21 @@ export function LayoutEditorView({
           />
           {note ? <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">{note}</p> : null}
 
-          <div className="mt-3 flex items-center gap-2">
-            <button
-              type="button"
-              disabled={mons.length >= MAX_MONITORS}
-              onClick={() =>
-                onChange({ ...layout, monitors: addMonitor(mons), scales: [...scales, 1] }, { t: "add", monitor: mons.length })
-              }
-              className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
-            >
-              <Plus aria-hidden className="size-3.5" />
-              Add monitor
-            </button>
-          </div>
+          {windows ? (
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                disabled={mons.length >= MAX_MONITORS}
+                onClick={() =>
+                  onChange({ ...layout, monitors: addMonitor(mons), scales: [...scales, 1] }, { t: "add", monitor: mons.length })
+                }
+                className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+              >
+                <Plus aria-hidden className="size-3.5" />
+                Add monitor
+              </button>
+            </div>
+          ) : null}
 
           <div className="mt-3 grid grid-cols-[1fr_7rem] gap-2">
             <label className="block">
@@ -177,7 +193,7 @@ export function LayoutEditorView({
   );
 }
 
-/** The monitors drawn to scale, each with its three buttons. A drag moves one, snapped where it
+/** The monitors drawn to scale, each with its buttons. A drag moves one, snapped where it
  *  would land; the drop puts it there (`onDrop`, in monitor pixels). */
 function Arrangement({
   monitors,
@@ -187,6 +203,8 @@ function Arrangement({
   onScale,
   onPrimary,
   onMatchWindow,
+  onOpenWindow,
+  here,
   onRemove,
 }: {
   monitors: MonitorSpec[];
@@ -197,6 +215,8 @@ function Arrangement({
   onScale: (i: number, scale: number) => void;
   onPrimary: (i: number) => void;
   onMatchWindow: (i: number) => void;
+  onOpenWindow?: (i: number) => void;
+  here?: number;
   onRemove: (i: number) => void;
 }) {
   const area = useRef<HTMLDivElement>(null);
@@ -274,6 +294,11 @@ function Arrangement({
               onPointerUp={up}
               onPointerCancel={() => setDrag(null)}
             >
+              {here === i ? (
+                <span className="absolute left-1 top-0.5 text-[9px] font-medium leading-none text-emerald-600 dark:text-emerald-400">
+                  here
+                </span>
+              ) : null}
               <span className={`flex items-baseline gap-1 ${roomy ? "flex-col items-center gap-0" : ""}`}>
                 <span className="text-xs font-semibold text-slate-700 dark:text-slate-100">
                   {i}
@@ -307,8 +332,13 @@ function Arrangement({
                     <Star className="size-3.5" />
                   </IconButton>
                 )}
+                {onOpenWindow ? (
+                  <IconButton label="Open its window" onClick={() => onOpenWindow(i)}>
+                    <ExternalLink className="size-3.5" />
+                  </IconButton>
+                ) : null}
                 <IconButton
-                  label={matching === i ? "Asking its window…" : "Match its viewer window's size"}
+                  label={matching === i ? "Asking its window…" : "Match its window's size"}
                   disabled={matching !== null}
                   onClick={() => onMatchWindow(i)}
                 >

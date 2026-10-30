@@ -665,8 +665,8 @@ inherits it (there's no per-install control-server payload any more; see
   corrects the template's baked-in `RMNG_MONITORS` boot value before anyone opens the clone.
   Existing clones are not touched: each keeps the layout it was last viewed with until the
   operator switches to it.
-- **Layouts** are each client's own (the dashboard's Edit layout dialog; the `/ng` page's
-  Fit). The client used last has its layout in force (`POST /api/layout/claim`): the selected
+- **Layouts** are each client's own (the Edit layout dialog, in the dashboard or on a long
+  press of the `/ng` page's Fit; Fit itself gives a monitor its window's size). The client used last has its layout in force (`POST /api/layout/claim`): the selected
   clone's daemon gets `ServerMsg::SetMonitors` and live-swaps to a fresh Mutter session with
   the new monitors (make-before-break, no GNOME restart, no app loss). Every other clone keeps
   its current monitors until the operator switches to it, so a layout change costs one session

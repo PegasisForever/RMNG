@@ -1,9 +1,13 @@
-// `/ng`: the installed phone app (Add to Home Screen; `public/manifest.webmanifest` opens it
-// here). The selected clone's screen fills the display, and floating buttons open the keyboard
-// and the pages (`~/ng/FullDesk.tsx`). The update rules are in `~/ng/pwa.ts`.
+// `/ng`: the selected clone's screen, on a phone (the installed app: Add to Home Screen;
+// `public/manifest.webmanifest` opens it here) and on a desktop, with touch or with a mouse and
+// a keyboard (`~/ng/FullDesk.tsx`). `?monitor=N` shows monitor N of this browser's layout (a
+// desktop has one window per monitor); `?pages` shows only the pages, in a window of their own
+// (`~/ng/PagesWindow.tsx`). The update rules are in `~/ng/pwa.ts`.
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 
 import { FullDesk } from "~/ng/FullDesk";
+import { PagesWindow } from "~/ng/PagesWindow";
 import { attachPwa } from "~/ng/pwa";
 import { isTyping } from "~/ng/systemKeyboard";
 
@@ -25,6 +29,17 @@ function measure(probe: HTMLElement): Page {
 }
 
 export default function Ng() {
+  const [params, setParams] = useSearchParams();
+  const monitor = Number(params.get("monitor") ?? 0) || 0;
+  const pagesOnly = params.has("pages");
+  const setMonitor = (next: number) =>
+    setParams(
+      (p) => {
+        p.set("monitor", String(next));
+        return p;
+      },
+      { replace: true },
+    );
   const probe = useRef<HTMLDivElement>(null);
   const [page, setPage] = useState<Page | null>(null);
   // Null until the effect has looked: the page has no `window` while it is built
@@ -88,8 +103,15 @@ export default function Ng() {
           </div>
         </div>
       ) : null}
-      {secure && page ? (
-        <FullDesk width={page.size[0]} height={page.size[1]} bottom={page.bottom} />
+      {secure && page && pagesOnly ? <PagesWindow width={page.size[0]} height={page.size[1]} /> : null}
+      {secure && page && !pagesOnly ? (
+        <FullDesk
+          width={page.size[0]}
+          height={page.size[1]}
+          bottom={page.bottom}
+          monitor={monitor}
+          onMonitor={setMonitor}
+        />
       ) : null}
     </div>
   );

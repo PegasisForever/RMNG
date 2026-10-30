@@ -105,8 +105,8 @@ import {
   DEFAULT_DESKTOP_LAYOUT,
   attachLayoutClaims,
   clientId,
-  desktopClaim,
-  ensureDesktopLayout,
+  layoutClaim,
+  ensureLayout,
 } from "~/lib/clientLayout";
 import { openViewerWindows } from "~/viewer/open";
 
@@ -177,10 +177,10 @@ export function DashboardContainer({
   const claims = useRef<ReturnType<typeof attachLayoutClaims> | null>(null);
   useEffect(() => {
     let gone = false;
-    void ensureDesktopLayout().then((l) => {
+    void ensureLayout().then((l) => {
       if (gone) return;
       setMonitorCount(l.monitors.length);
-      claims.current = attachLayoutClaims("desktop", desktopClaim);
+      claims.current = attachLayoutClaims("desktop", layoutClaim);
     });
     return () => {
       gone = true;

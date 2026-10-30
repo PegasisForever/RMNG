@@ -1,16 +1,22 @@
 // What the /ng screen (`./FullDesk.tsx`) does under its layout: the connection to the selected
-// clone (`./session.ts`), the live server state, and the input: the keys' touches, which type or
-// move the pointer (`./keypad.ts`), a trackpad with no keys (the screen), the modifiers, Fn,
-// Caps Lock, the key clicks, dictation, and the layout claim. The screen only lays things out.
+// clone (`./session.ts`), the live server state, and the input. In touch mode: the keys'
+// touches, which type or move the pointer (`./keypad.ts`), a trackpad with no keys (the screen),
+// the modifiers, Fn, Caps Lock, the key clicks and dictation. In mouse and keyboard mode
+// (`./inputMode.ts`): the viewer's own input and clipboard (`~/viewer/input.ts`). And the layout
+// claim. The screen only lays things out.
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import { formatLxcUsage } from "~/components/BoardRail";
-import { attachLayoutClaims, clientId } from "~/lib/clientLayout";
+import { type ClientKind, attachLayoutClaims, clientId, layoutClaim } from "~/lib/clientLayout";
 import { emptyState } from "~/lib/types";
 import { useLiveState } from "~/lib/useLiveState";
+import type { CursorMeta } from "~/lib/wire/CursorMeta";
 import type { CursorShape } from "~/lib/wire/CursorShape";
 import type { InputMsg } from "~/lib/wire/InputMsg";
+import type { ScrollMode } from "~/lib/wire/ScrollMode";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
+import { attachClipboard } from "~/viewer/clipboard";
+import { type Input, attachInput } from "~/viewer/input";
 import { CODE_TO_EVDEV } from "~/viewer/keycodes";
 import type { SoundReport } from "~/viewer/protocol";
 
@@ -21,8 +27,8 @@ import { Keypad, type KeypadOut } from "./keypad";
 import { KeySounds } from "./keySound";
 import { type ModState, Modifiers } from "./modifiers";
 import { PHONE_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
-import { savePhoneMonitor } from "./phoneMonitor";
-import { MONITOR, type Session, openSession } from "./session";
+import { type Session, openSession } from "./session";
+import { isPagesChord } from "./shortcut";
 
 /** The monitor size assumed until the server says the monitor's size. */
 const START_MONITOR = { width: 1002, height: 808 };
@@ -36,13 +42,31 @@ const AXIS_FINISH = 1;
 
 type Size = { width: number; height: number };
 
-export function useRemote(
-  box: RefObject<HTMLDivElement | null>,
-  /** The size of this phone's one monitor (`./phoneMonitor.ts`), asked at each claim. */
-  monitorSize: () => Size,
+export function useRemote({
+  box,
+  overlay,
+  monitor,
+  kind,
+  mouse,
+  onZoom,
+  onChord,
+}: {
+  /** Where the picture goes. */
+  box: RefObject<HTMLDivElement | null>;
+  /** The drawn cursor of mouse mode, where the CSS cursor cannot show it (`~/viewer/input.ts`). */
+  overlay: RefObject<HTMLImageElement | null>;
+  /** The monitor of this browser's layout this window shows. */
+  monitor: number;
+  /** What this browser claims as (`~/lib/clientLayout.ts`). */
+  kind: ClientKind;
+  /** Mouse and keyboard mode, with nothing over the screen: the page's mouse and keys go to the
+   *  clone. */
+  mouse: boolean;
   /** A pinch on the trackpad (the screen's): the view's zoom changes by `factor`. */
-  onZoom?: (factor: number) => void,
-) {
+  onZoom?: (factor: number) => void;
+  /** The pages' chord was pressed (`./shortcut.ts`), in mouse mode. */
+  onChord: () => void;
+}) {
   const session = useRef<Session | null>(null);
   const [spec, setSpec] = useState<ViewSpec | null>(null);
   const [connected, setConnected] = useState(false);
@@ -58,27 +82,44 @@ export function useRemote(
   const [caps, setCaps] = useState(false);
   /** How the clone's sound plays here, for the Usage page. */
   const [soundReport, setSoundReport] = useState<SoundReport | null>(null);
-  /** The layout's scroll speed, percent: the server says it when the socket opens. */
-  const scrollSpeed = useRef(PHONE_SCROLL_SPEED);
+  /** The layout's scroll mode and speed, percent: the server says them when the socket opens. */
+  const scroll = useRef<{ mode: ScrollMode; speed: number }>({ mode: "auto", speed: PHONE_SCROLL_SPEED });
   /** The cursor where this page last put it, and when. */
   const cursor = useRef({ ...pos, movedAt: -Infinity });
 
-  /** The clone's monitor 0, the one shown (START_MONITOR until the server says). */
-  const shown = spec?.monitors[0];
-  const monitor: Size = shown ? { width: shown.width, height: shown.height } : START_MONITOR;
-  const monitorRef = useRef(monitor);
-  monitorRef.current = monitor;
+  /** The clone's monitor shown (START_MONITOR until the server says). */
+  const shown = spec?.monitors.find((m) => m.id === monitor);
+  const screen: Size = shown ? { width: shown.width, height: shown.height } : START_MONITOR;
+  const monitorRef = useRef(screen);
+  monitorRef.current = screen;
   /** Device px per monitor px now (the screen sets it), for the cursor moves. */
   const scale = useRef(1);
 
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
   const send = (msg: InputMsg) => session.current?.send(msg);
 
+  /** Mouse mode's input and clipboard while they are attached, and what they are told when
+   *  they attach: the last view spec, cursor and connection state. */
+  const viewer = useRef<{ input: Input; clip: ReturnType<typeof attachClipboard> } | null>(null);
+  const last = useRef<{ spec: ViewSpec | null; cursor: CursorMeta | null; connected: boolean }>({
+    spec: null,
+    cursor: null,
+    connected: false,
+  });
+  /** A new session each time the monitor changes: mouse mode attaches to its canvas. */
+  const [sessionNo, setSessionNo] = useState(0);
+
   useEffect(() => {
     if (!box.current) return;
-    session.current = openSession(box.current, {
-      onSpec: setSpec,
+    session.current = openSession(box.current, monitor, {
+      onSpec(s) {
+        setSpec(s);
+        last.current.spec = s;
+        viewer.current?.input.setLayout(s.content.mode === "desktop" ? s.monitors : []);
+      },
       onCursor(c) {
+        last.current.cursor = c;
+        viewer.current?.input.onCursor(c);
         if (c.hidden) setHidden(true);
         else if (c.shape) {
           setHidden(false);
@@ -88,40 +129,74 @@ export function useRemote(
         cursor.current = { x: c.x, y: c.y, movedAt: cursor.current.movedAt };
         setPos({ x: c.x, y: c.y });
       },
-      onConnected: setConnected,
-      onScrollSpeed: (speed) => (scrollSpeed.current = speed),
+      onConnected(c) {
+        setConnected(c);
+        last.current.connected = c;
+        viewer.current?.clip.setConnected(c);
+      },
+      onScroll(mode, speed) {
+        scroll.current = { mode, speed };
+        viewer.current?.input.setScroll(mode, speed);
+      },
+      onClipboard: (msg) => viewer.current?.clip.onMessage(msg),
+      onClipboardData: (d) => viewer.current?.clip.onData(d),
       onSoundReport: setSoundReport,
     });
+    setSessionNo((n) => n + 1);
     return () => {
       session.current?.detach();
       session.current = null;
+      last.current = { spec: null, cursor: null, connected: false };
     };
-  }, [box]);
+  }, [box, monitor]);
+
+  // Mouse mode: the page's mouse and keys go to the clone, as in the viewer
+  const chordRef = useRef(onChord);
+  chordRef.current = onChord;
+  useEffect(() => {
+    const s = session.current;
+    if (!mouse || !s || !overlay.current) return;
+    const clip = attachClipboard({ send: s.sendClipboard, sendData: s.sendClipboardData });
+    const input = attachInput({
+      canvas: s.canvas,
+      overlay: overlay.current,
+      monitor,
+      send: s.send,
+      onGesture: () => clip.onGesture(),
+      pasteByEvent: () => clip.pasteByEvent(),
+      // The screen sizes the picture (`./FullDesk.tsx`)
+      onResize: () => {},
+      chord: { is: (e) => isPagesChord(e), run: () => chordRef.current() },
+    });
+    const { spec: sp, cursor: c, connected: on } = last.current;
+    if (sp) input.setLayout(sp.content.mode === "desktop" ? sp.monitors : []);
+    if (c) input.onCursor(c);
+    input.setScroll(scroll.current.mode, scroll.current.speed);
+    clip.setConnected(on);
+    viewer.current = { input, clip };
+    return () => {
+      viewer.current = null;
+      input.detach();
+      clip.detach();
+    };
+  }, [mouse, monitor, sessionNo, overlay]);
 
   const usage = formatLxcUsage(live.lxcStats);
   /** Clones that stopped working and nobody has looked at yet: a count on the Clones tab. */
   const unread = live.state.hosts.filter((h) => h.unread && !h.archived && h.id !== live.state.selected).length;
 
-  // The phone's layout is in force when it opens, comes to the front, or is touched, while it
-  // is in the foreground; an action in another client takes the clones (`~/lib/clientLayout.ts`)
+  // This browser's layout is in force when the page opens, comes to the front, or is used,
+  // while it is in the foreground; an action in another client takes the clones
+  // (`~/lib/clientLayout.ts`)
   const zoomRef = useRef(onZoom);
   zoomRef.current = onZoom;
-  const sizeRef = useRef(monitorSize);
-  sizeRef.current = monitorSize;
   const claims = useRef<ReturnType<typeof attachLayoutClaims> | null>(null);
   useEffect(() => {
-    claims.current = attachLayoutClaims("phone", () => ({
-      monitors: [{ ...sizeRef.current(), x: 0, y: 0, primary: true }],
-      scrollMode: "auto",
-      scrollSpeed: PHONE_SCROLL_SPEED,
-    }));
+    claims.current = attachLayoutClaims(kind, layoutClaim);
     return () => claims.current?.detach();
-  }, []);
-  /** Give the clone's monitor this size now, and keep it (the screen's "fit" button). */
-  const claimMonitor = useCallback((size: Size) => {
-    savePhoneMonitor(size);
-    claims.current?.claim(true);
-  }, []);
+  }, [kind]);
+  /** Put the stored layout in force now: it changed. */
+  const claim = useCallback(() => claims.current?.claim(true), []);
 
   /** The modifiers, made once (`./modifiers.ts`): what they decide goes to the clone. */
   const modifiers = useRef<Modifiers | null>(null);
@@ -238,11 +313,11 @@ export function useRemote(
         const y = clampTo(c.y + o.dy * g, m.height);
         cursor.current = { x, y, movedAt: performance.now() };
         setPos({ x, y });
-        send({ kind: "pointer_move", monitor_id: MONITOR, x, y });
+        send({ kind: "pointer_move", monitor_id: monitor, x, y });
         break;
       }
       case "scroll": {
-        const gain = scrollGain(scrollSpeed.current);
+        const gain = scrollGain(scroll.current.speed);
         send({ kind: "axis_continuous", dx: o.dx * gain, dy: o.dy * gain, flags: AXIS_FINGER });
         break;
       }
@@ -308,15 +383,17 @@ export function useRemote(
       ? "No clone is selected."
       : terminal
         ? "This clone has no desktop."
-        : live.state.layout && live.state.layout.client !== clientId("phone")
-          ? `In use on ${live.state.layout.label === "phone" ? "another phone" : "the desktop"}. Touch to use it here.`
+        : live.state.layout && live.state.layout.client !== clientId(kind)
+          ? `In use on ${live.state.layout.label === kind ? "another" : "the"} ${live.state.layout.label}. ${
+              mouse ? "Click" : "Touch"
+            } to use it here.`
           : null;
 
   return {
     session,
     live,
     spec,
-    monitor,
+    monitor: screen,
     connected,
     terminal,
     note,
@@ -333,7 +410,7 @@ export function useRemote(
     soundReport,
     usage,
     unread,
-    claimMonitor,
+    claim,
     sounds,
     onKeyTouch,
     onPadTouch,

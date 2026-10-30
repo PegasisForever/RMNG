@@ -1,4 +1,4 @@
-import { Settings } from "lucide-react";
+import { ExternalLink, Settings } from "lucide-react";
 import { type PointerEvent, type ReactNode } from "react";
 
 import { GAP } from "./geometry";
@@ -28,11 +28,13 @@ type Props = {
   onTab: (tab: NgTab) => void;
   /** A count on a tab's button. */
   badges?: Partial<Record<NgTab, number>>;
+  /** Move the pages to a window of their own; absent where the browser cannot open one. */
+  onPopOut?: () => void;
 };
 
 /** The /ng tool row, under the screen: the server's CPU, memory and disk, then tabs that act
  *  as tabs do. One is open at most, and its page takes the keyboard's place. */
-export function ToolRow({ box, usage, tab, onTab, badges }: Props) {
+export function ToolRow({ box, usage, tab, onTab, badges, onPopOut }: Props) {
   return (
     <div className="absolute flex" style={{ ...box, gap: GAP }}>
       <Stat label="CPU" value={usage?.cpu} />
@@ -54,6 +56,17 @@ export function ToolRow({ box, usage, tab, onTab, badges }: Props) {
           ) : null}
         </TabButton>
       ))}
+      {onPopOut ? (
+        <button
+          type="button"
+          aria-label="Open the pages in a window of their own"
+          title="Open the pages in a window of their own"
+          onClick={onPopOut}
+          className="flex w-9 shrink-0 items-center justify-center rounded-md bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
+        >
+          <ExternalLink size={16} strokeWidth={1.75} aria-hidden />
+        </button>
+      ) : null}
     </div>
   );
 }

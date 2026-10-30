@@ -1,9 +1,10 @@
-// The three buttons of the /ng screen (`./FullDesk.tsx`), always on top in the screen's top-right
+// The three buttons of the /ng screen (`./FullDesk.tsx`), on top in the screen's top-right
 // corner: the pages (usage, tickets, clones, notes, settings), the keyboard, and the fit, which
-// gives the clone's monitor this screen's size. A tap on the keyboard shows or hides the floating
+// gives the clone's monitor this window's size. A tap on the keyboard shows or hides the floating
 // keyboard; a long press docks it (always shown) or undocks it. A long press on the fit opens the
-// pixel ratio setting. A button whose thing is open is lit; the docked keyboard's has a bar under
-// its icon; the fit is dim when the monitor fits already.
+// Edit layout dialog. A button whose thing is open is lit; the docked keyboard's has a bar under
+// its icon; the fit is dim when the monitor fits already. A right click is a long press, for a
+// mouse. In mouse and keyboard mode they show only with the pages, and with no keyboard button.
 import { Expand, Keyboard, LayoutGrid } from "lucide-react";
 import { type ReactNode, useRef } from "react";
 
@@ -13,6 +14,7 @@ export const FLOAT_GAP = 8;
 
 export function FloatingButtons({
   pagesOpen,
+  keyboard = true,
   keyboardOpen,
   keyboardDocked,
   fits,
@@ -24,6 +26,8 @@ export function FloatingButtons({
   onFitSettings,
 }: {
   pagesOpen: boolean;
+  /** The keyboard's button shows (not in mouse and keyboard mode). */
+  keyboard?: boolean;
   keyboardOpen: boolean;
   /** The keyboard is docked: always shown, under the clone's screen. */
   keyboardDocked: boolean;
@@ -36,11 +40,12 @@ export function FloatingButtons({
   /** A long press on the keyboard: dock it, or undock it. */
   onKeyboardDock: () => void;
   onFit: () => void;
-  /** A long press on Fit: the setting of its pixel ratio. */
+  /** A long press on Fit: the Edit layout dialog. */
   onFitSettings: () => void;
 }) {
   return (
     <div
+      data-ng-buttons
       className="absolute z-50 flex"
       style={{
         gap: FLOAT_GAP,
@@ -56,17 +61,19 @@ export function FloatingButtons({
           </span>
         ) : null}
       </Round>
+      {keyboard ? (
+        <Round
+          label={keyboardDocked ? "Keyboard, docked" : "Keyboard"}
+          on={keyboardOpen}
+          onClick={onKeyboard}
+          onLongPress={onKeyboardDock}
+        >
+          <Keyboard aria-hidden className="size-5" />
+          {keyboardDocked ? <span aria-hidden className="absolute bottom-2 h-0.5 w-5 rounded-full bg-current" /> : null}
+        </Round>
+      ) : null}
       <Round
-        label={keyboardDocked ? "Keyboard, docked" : "Keyboard"}
-        on={keyboardOpen}
-        onClick={onKeyboard}
-        onLongPress={onKeyboardDock}
-      >
-        <Keyboard aria-hidden className="size-5" />
-        {keyboardDocked ? <span aria-hidden className="absolute bottom-2 h-0.5 w-5 rounded-full bg-current" /> : null}
-      </Round>
-      <Round
-        label={fits ? "The clone fits this screen" : "Fit the clone to this screen"}
+        label={fits ? "The clone fits this window. Hold for the layout" : "Fit the clone to this window. Hold for the layout"}
         dim={fits}
         onClick={() => !fits && onFit()}
         onLongPress={onFitSettings}
@@ -105,9 +112,9 @@ function Round({
       type="button"
       aria-label={label}
       aria-pressed={on}
-      onPointerDown={() => {
+      onPointerDown={(e) => {
         long.current = false;
-        if (!onLongPress) return;
+        if (!onLongPress || e.button !== 0) return;
         stop();
         timer.current = setTimeout(() => {
           long.current = true;
@@ -117,7 +124,14 @@ function Round({
       onPointerUp={stop}
       onPointerCancel={stop}
       onPointerLeave={stop}
-      onContextMenu={(e) => e.preventDefault()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        // A mouse's right click: the long press at once
+        if (onLongPress && e.button === 2) {
+          stop();
+          onLongPress();
+        }
+      }}
       onClick={() => {
         if (!long.current) onClick();
         long.current = false;

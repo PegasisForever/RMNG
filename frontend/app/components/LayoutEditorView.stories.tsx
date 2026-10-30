@@ -3,10 +3,10 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { LayoutEditorView } from "./LayoutEditorView";
-import { DEFAULT_DESKTOP_LAYOUT, type DesktopLayout } from "~/lib/clientLayout";
+import { DEFAULT_DESKTOP_LAYOUT, type BrowserLayout } from "~/lib/clientLayout";
 
 /** The dialog on its own draft: drags, size edits, add and remove really change it. */
-function Frame(args: { layout: DesktopLayout; note: string | null; matching: number | null }) {
+function Frame(args: { layout: BrowserLayout; note: string | null; matching: number | null }) {
   const [layout, setLayout] = useState(args.layout);
   return (
     <LayoutEditorView

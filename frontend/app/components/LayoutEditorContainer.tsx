@@ -1,18 +1,18 @@
 // The Edit layout dialog's container: this browser's layout, each change saved and in force at
-// once (`onApplied`: the dashboard claims it); the viewer windows, one opened for a new monitor,
-// the others told their new numbers, and all told to show their numbers while the dialog is
-// open (on `VIEWER_CHANNEL`); and their sizes, asked there too.
+// once (`onApplied`: the page claims it); the monitor windows (the viewer's, or `/ng`'s), one
+// opened for a new monitor, the others told their new numbers, and all told to show their
+// numbers while the dialog is open (on `VIEWER_CHANNEL`); and their sizes, asked there too.
 import { useEffect, useState } from "react";
 
 import { type LayoutChange, LayoutEditorView } from "~/components/LayoutEditorView";
 import {
   DEFAULT_DESKTOP_LAYOUT,
-  type DesktopLayout,
+  type BrowserLayout,
   IDENTIFY_EVERY_MS,
   VIEWER_CHANNEL,
   type ViewerChannelMsg,
-  readDesktopLayout,
-  saveDesktopLayout,
+  readLayout,
+  saveLayout,
 } from "~/lib/clientLayout";
 import { resize } from "~/lib/monitorLayout";
 import { openViewerWindows } from "~/viewer/open";
@@ -40,19 +40,28 @@ function askWindowSizes(): Promise<Map<number, { width: number; height: number }
 export function LayoutEditorContainer({
   onApplied,
   onClose,
+  page = "/viewer",
+  windows = true,
+  here,
 }: {
   /** The layout changed and is saved: put it in force. */
-  onApplied: (layout: DesktopLayout) => void;
+  onApplied: (layout: BrowserLayout) => void;
   onClose: () => void;
+  /** The page each monitor's window shows. */
+  page?: string;
+  /** The browser can open windows (`canOpenWindows`); else it has one monitor, this page. */
+  windows?: boolean;
+  /** The monitor of the window the dialog is open in, when it is a monitor's window. */
+  here?: number;
 }) {
-  const [layout, setLayout] = useState<DesktopLayout>(() => readDesktopLayout() ?? DEFAULT_DESKTOP_LAYOUT);
-  const apply = (next: DesktopLayout, change?: LayoutChange) => {
+  const [layout, setLayout] = useState<BrowserLayout>(() => readLayout() ?? DEFAULT_DESKTOP_LAYOUT);
+  const apply = (next: BrowserLayout, change?: LayoutChange) => {
     setLayout(next);
-    saveDesktopLayout(next);
+    saveLayout(next);
     onApplied(next);
     if (change?.t === "add") {
       // In the click itself, so the browser lets the window open
-      void openViewerWindows([{ id: change.monitor }]);
+      void openViewerWindows([{ id: change.monitor }], page);
     } else if (change?.t === "renumber") {
       const ch = new BroadcastChannel(VIEWER_CHANNEL);
       const msg: ViewerChannelMsg = { t: "renumber", map: change.map };
@@ -60,7 +69,7 @@ export function LayoutEditorContainer({
       ch.close();
     }
   };
-  /** Give monitor `i` the size of its viewer window, at the pixel scale. */
+  /** Give monitor `i` the size of its window, at the pixel scale. */
   const [matching, setMatching] = useState<number | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const matchWindow = async (i: number) => {
@@ -69,7 +78,7 @@ export function LayoutEditorContainer({
     const size = (await askWindowSizes()).get(i);
     setMatching(null);
     if (!size) {
-      setNote(`No viewer window is open for monitor ${i}. Open it, size it, then try again.`);
+      setNote(`No window is open for monitor ${i}. Open it, size it, then try again.`);
       return;
     }
     const s = layout.scales[i];
@@ -95,6 +104,8 @@ export function LayoutEditorContainer({
       layout={layout}
       onChange={apply}
       onMatchWindow={matchWindow}
+      here={here}
+      onOpenWindow={windows ? (i) => void openViewerWindows([{ id: i }], page) : undefined}
       matching={matching}
       note={note}
       onClose={onClose}

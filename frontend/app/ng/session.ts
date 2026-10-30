@@ -1,19 +1,27 @@
-// The /ng page's connection to the selected clone: the browser viewer's socket for monitor 0,
-// run by the viewer's own worker (`~/viewer/worker.ts`: socket, decode, drawing, and the
-// clone's sound, which `~/viewer/sound.ts` plays from the first touch). The monitor is the
-// phone's layout's (`./phoneMonitor.ts`); the page sizes the box it is shown in
-// (`./geometry.ts`). Input does not come from the page's events here, as it does in the viewer:
-// the on-screen keyboard and buttons send it (`send`).
+// The /ng page's connection to the selected clone: the browser viewer's socket for one monitor
+// of this browser's layout (`~/lib/clientLayout.ts`), run by the viewer's own worker
+// (`~/viewer/worker.ts`: socket, decode, drawing, and, for monitor 0, the clone's sound, which
+// `~/viewer/sound.ts` plays from the first touch). The page sizes the box it is shown in
+// (`./geometry.ts`). In touch mode the input does not come from the page's events, as it does in
+// the viewer: the on-screen keyboard and the trackpad send it (`send`). In mouse and keyboard
+// mode the viewer's own input takes the page's events on `canvas` (`~/viewer/input.ts`), and the
+// clipboard is shared (`~/viewer/clipboard.ts`).
+import type { ClipboardMsg } from "~/lib/wire/ClipboardMsg";
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
 import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { TouchMsg } from "~/lib/wire/TouchMsg";
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
+import type { ScrollMode } from "~/lib/wire/ScrollMode";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
-import type { SoundReport, WorkerIn, WorkerOut } from "~/viewer/protocol";
+import type { ClipboardBytes, SoundReport, WorkerIn, WorkerOut } from "~/viewer/protocol";
 import { attachSound } from "~/viewer/sound";
 
 export interface Session {
+  /** The canvas the picture is drawn on (its placeholder: it takes the page's events). */
+  canvas: HTMLCanvasElement;
   send(msg: InputMsg): void;
+  sendClipboard(msg: ClipboardMsg): void;
+  sendClipboardData(d: ClipboardBytes): void;
   /** A finger on the screen, as a touch screen's touch. */
   touch(msg: TouchMsg): void;
   /** The box is now `width`×`height` device pixels. */
@@ -27,21 +35,24 @@ export interface SessionEvents {
   onConnected(connected: boolean): void;
   /** The sound's report, once a second while it plays (`~/viewer/sound.ts`). */
   onSoundReport(r: SoundReport): void;
-  /** The active layout's scroll speed, percent (the server's `scroll` message). */
-  onScrollSpeed(speed: number): void;
+  /** The active layout's scroll mode and speed, percent (the server's `scroll` message). */
+  onScroll(mode: ScrollMode, speed: number): void;
+  /** The clone's clipboard: a message, and a reply's bytes. */
+  onClipboard(msg: ClipboardMsg): void;
+  onClipboardData(d: ClipboardBytes): void;
 }
 
 /** The phone's sound buffer range, in 10 ms packets. */
 const PHONE_SOUND_MIN = 4;
 const PHONE_SOUND_MAX = 15;
 
-/** The monitor shown, and the only one input goes to. */
-export const MONITOR = 0;
+/** The monitor whose window plays the clone's sound, so two windows never play it twice. */
+const SOUND_MONITOR = 0;
 
-/** Show monitor 0 of the selected clone in `box`, which the canvas fills, scaled to fit its
+/** Show `monitor` of the selected clone in `box`, which the canvas fills, scaled to fit its
  *  device pixels (`resize`). Always on the canvas: on an iPhone it ran better than the video
  *  track the viewer uses in Safari. */
-export function openSession(box: HTMLElement, events: SessionEvents): Session {
+export function openSession(box: HTMLElement, monitor: number, events: SessionEvents): Session {
   const canvas = document.createElement("canvas");
   canvas.className = "absolute inset-0 block h-full w-full";
   box.append(canvas);
@@ -62,16 +73,20 @@ export function openSession(box: HTMLElement, events: SessionEvents): Session {
         events.onSpec(msg);
         break;
       case "cursor":
-        if (msg.monitor_id === MONITOR) events.onCursor(msg);
+        if (msg.monitor_id === monitor) events.onCursor(msg);
         break;
       case "scroll":
-        events.onScrollSpeed(msg.speed);
+        events.onScroll(msg.mode, msg.speed);
+        break;
+      case "clipboard":
+        events.onClipboard(msg);
         break;
     }
   };
   worker.onmessage = (e: MessageEvent<WorkerOut>) => {
     const m = e.data;
     if (m.type === "message") onServerMessage(m.msg);
+    else if (m.type === "clipboard") events.onClipboardData(m.data);
     else if (m.type === "connected") events.onConnected(m.connected);
   };
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
@@ -79,27 +94,33 @@ export function openSession(box: HTMLElement, events: SessionEvents): Session {
     {
       type: "init",
       canvas: offscreen,
-      url: `${scheme}//${location.host}/api/viewer?monitor=${MONITOR}`,
-      monitor: MONITOR,
+      url: `${scheme}//${location.host}/api/viewer?monitor=${monitor}`,
+      monitor,
       track: false,
     },
     [offscreen],
   );
-  // The only monitor, so the only window: it plays the clone's sound. Over the phone's Wi-Fi
-  // packets come less evenly than to a desktop, and the phone also decodes the video: a deeper
-  // jitter buffer (40 to 150 ms) and iOS's longer output buffer, so the sound does not crack.
-  const sound = attachSound(post, {
-    latencyHint: "playback",
-    limits: { min: PHONE_SOUND_MIN, max: PHONE_SOUND_MAX },
-    onReport: events.onSoundReport,
-  });
+  // Over a phone's Wi-Fi packets come less evenly than to a desktop, and the phone also decodes
+  // the video: a deeper jitter buffer (40 to 150 ms) and iOS's longer output buffer, so the
+  // sound does not crack.
+  const sound =
+    monitor === SOUND_MONITOR
+      ? attachSound(post, {
+          latencyHint: "playback",
+          limits: { min: PHONE_SOUND_MIN, max: PHONE_SOUND_MAX },
+          onReport: events.onSoundReport,
+        })
+      : null;
 
   return {
+    canvas,
     send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
+    sendClipboard: (msg) => post({ type: "send", msg: { t: "clipboard", ...msg } }),
+    sendClipboardData: (d) => post({ type: "clipboard", data: d }, [d.bytes.buffer]),
     touch: (msg) => post({ type: "send", msg: { t: "touch", ...msg } }),
     resize: (width, height) => post({ type: "resize", width, height }),
     detach() {
-      sound.detach();
+      sound?.detach();
       worker.terminate();
       canvas.remove();
     },

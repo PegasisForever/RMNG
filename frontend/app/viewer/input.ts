@@ -308,6 +308,10 @@ interface InputOptions {
   pasteByEvent(): boolean;
   /** The canvas's size in device pixels changed: the worker draws at this size. */
   onResize(width: number, height: number): void;
+  /** A chord of the page's own (`~/ng/shortcut.ts`), which does not go to the clone. Super's
+   *  press is held back until the next key or click then: a Super pressed and let go alone
+   *  opens GNOME's overview, so the chord's Super must never reach the clone. */
+  chord?: { is(e: KeyboardEvent): boolean; run(): void };
 }
 
 export interface Input {
@@ -341,6 +345,8 @@ export function attachInput(o: InputOptions): Input {
   let scrollMode: ScrollMode = "auto";
   let scrollScale = 1;
   let scrollEnd: ReturnType<typeof setTimeout> | undefined;
+  /** Super's press, held back while the page's chord may follow (`InputOptions.chord`). */
+  let heldSuper: number | null = null;
   /** A paste chord's key press, held until the paste event it fires has made its offer. */
   let heldPaste: { keycode: number; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Where a paste chord's paste goes. Safari pastes only into something editable, and fires
@@ -373,6 +379,7 @@ export function attachInput(o: InputOptions): Input {
     // A held paste key was never pressed in the clone.
     if (heldPaste) clearTimeout(heldPaste.timer);
     heldPaste = null;
+    heldSuper = null;
     pasteSink.blur();
     for (const k of keys) send({ kind: "key_code", keycode: k, pressed: false });
     for (const b of buttons) send({ kind: "button", button: b, pressed: false });
@@ -457,9 +464,28 @@ export function attachInput(o: InputOptions): Input {
   /** A key typed into the page's own terminal (xterm.js reads keys from a textarea). */
   const forPage = (e: KeyboardEvent) => e.target instanceof HTMLTextAreaElement;
 
+  /** Send Super's held press: another key or a click came, so it is no chord's. */
+  function flushSuper() {
+    if (heldSuper === null) return;
+    keys.add(heldSuper);
+    send({ kind: "key_code", keycode: heldSuper, pressed: true });
+    heldSuper = null;
+  }
+
+  const isSuper = (e: KeyboardEvent) => e.code === "MetaLeft" || e.code === "MetaRight";
+
   function onKeyDown(e: KeyboardEvent) {
+    if (forPage(e)) return;
+    if (o.chord?.is(e)) {
+      e.preventDefault();
+      if (e.repeat) return;
+      // Its keys never reach the clone; what else is held is let go there
+      releaseAll();
+      o.chord.run();
+      return;
+    }
     // No monitor (terminal mode): a key outside xterm must not reach the clone's desktop.
-    if (forPage(e) || !size) return;
+    if (!size) return;
     o.onGesture();
     // Local chords, not forwarded. Their Ctrl and Alt already went to the clone, so release
     // them (and everything else held) first.
@@ -488,6 +514,11 @@ export function attachInput(o: InputOptions): Input {
     if (!paste) e.preventDefault();
     // The clone runs its own key repeat, so the browser's repeats are not sent.
     if (e.repeat) return;
+    if (o.chord && isSuper(e) && !keys.has(k)) {
+      heldSuper = k;
+      return;
+    }
+    flushSuper();
     // Held already: on macOS no keyup comes for a key released while Command is down, so a
     // second Cmd+C is a second press of a C the clone still holds. Release it first.
     if (keys.has(k)) send({ kind: "key_code", keycode: k, pressed: false });
@@ -523,6 +554,13 @@ export function attachInput(o: InputOptions): Input {
     const k = evdevFor(e.code, isMac);
     if (k === undefined) return;
     e.preventDefault();
+    if (heldSuper === k) {
+      // Super alone: its tap goes to the clone now
+      heldSuper = null;
+      send({ kind: "key_code", keycode: k, pressed: true });
+      send({ kind: "key_code", keycode: k, pressed: false });
+      return;
+    }
     if (heldPaste?.keycode === k) flushPaste();
     if (!keys.delete(k)) return;
     send({ kind: "key_code", keycode: k, pressed: false });
@@ -566,6 +604,7 @@ export function attachInput(o: InputOptions): Input {
   function onMouseDown(e: MouseEvent) {
     e.preventDefault(); // no middle-button autoscroll, no text selection
     o.onGesture();
+    flushSuper();
     const b = BUTTONS[e.button];
     // A click is the gesture Chrome wants after the user left the lock with Esc.
     if (needGesture) {
@@ -586,6 +625,7 @@ export function attachInput(o: InputOptions): Input {
 
   function onWheel(e: WheelEvent) {
     e.preventDefault(); // no page scroll, no Ctrl+wheel zoom
+    flushSuper();
     const w = e as WheelEvent & { wheelDeltaX: number; wheelDeltaY: number };
     const msgs = wheelMessages(w, rem, {
       fingers: scrollEnd !== undefined,
