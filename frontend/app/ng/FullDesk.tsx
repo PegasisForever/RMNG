@@ -203,21 +203,18 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
     setHint(true);
     setPeek(true);
     let intro = true;
-    let atTop = false;
+    /** The mouse is by the buttons' row (the start's time ends without sending them away). */
+    let near = false;
     const t = setTimeout(() => {
       intro = false;
       setHint(false);
-      if (!atTop) setPeek(false);
+      if (!near) setPeek(false);
     }, HINT_MS);
     const onMove = (e: globalThis.PointerEvent) => {
       if (e.pointerType !== "mouse") return;
-      if (e.clientY <= TOP_EDGE_PX) {
-        atTop = true;
-        setPeek(true);
-      } else if (e.clientY > BUTTONS_ZONE_PX) {
-        atTop = false;
-        if (!intro) setPeek(false);
-      }
+      near = e.clientY <= BUTTONS_ZONE_PX;
+      if (e.clientY <= TOP_EDGE_PX) setPeek(true);
+      else if (!near && !intro) setPeek(false);
     };
     window.addEventListener("pointermove", onMove, { capture: true, passive: true });
     return () => {
