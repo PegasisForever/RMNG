@@ -40,10 +40,11 @@
         border: 0;
         display: block;
       }
-      /* The home bar's inset: a frame sees none of its own */
+      /* The clock bar's and the home bar's insets: a frame sees none of its own */
       #inset {
         position: fixed;
         inset: 0;
+        padding-top: env(safe-area-inset-top);
         padding-bottom: env(safe-area-inset-bottom);
         visibility: hidden;
         pointer-events: none;
@@ -67,6 +68,10 @@
           /** The home bar's inset, CSS px. */
           insetBottom: function () {
             return parseFloat(getComputedStyle(document.getElementById("inset")).paddingBottom) || 0;
+          },
+          /** The clock bar's inset, CSS px. */
+          insetTop: function () {
+            return parseFloat(getComputedStyle(document.getElementById("inset")).paddingTop) || 0;
           },
         };
         var frame = document.createElement("iframe");

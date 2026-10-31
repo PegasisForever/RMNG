@@ -16,10 +16,10 @@
 //     layout dialog: the pixel scales, and on a desktop the other monitors and their windows.
 //   With the keyboard floating (or hidden), the whole display is a trackpad. Two fingers that
 //   pinch on it zoom the view (1× to MAX_ZOOM); the clone gets nothing. The view follows the
-//   cursor (`followAxis`): zoomed in, or with the keyboard up, it moves just enough to keep the
-//   cursor in sight. With the keyboard docked, it is always shown at the bottom, the clone's
-//   screen fits in the area above it, and that area is a touch screen: each finger goes to the
-//   clone as a touch.
+//   cursor (`followAxis`): zoomed in, with the keyboard up, or with the cursor under the
+//   buttons' row, it moves just enough to keep the cursor in sight. With the keyboard docked,
+//   it is always shown at the bottom, the clone's screen fits in the area above it, and that
+//   area is a touch screen: each finger goes to the clone as a touch.
 // - Mouse and keyboard: the mouse, the keys and the clipboard go to the clone as in the viewer
 //   (`~/viewer/input.ts`). The same buttons, less the keyboard's, show when the mode starts,
 //   then slide up out of the window; the mouse at the window's top edge brings them back. A
@@ -84,9 +84,10 @@ const PAGES_WINDOW = "rmng-pages";
 const PAGES_WINDOW_FEATURES = "popup,width=560,height=900";
 
 type Props = {
-  /** The display, CSS px, and the home bar's safe-area inset. */
+  /** The display, CSS px, and the clock bar's and the home bar's safe-area insets. */
   width: number;
   height: number;
+  top: number;
   bottom: number;
   /** The monitor this window shows. */
   monitor: number;
@@ -96,7 +97,7 @@ type Props = {
 
 type Size = { width: number; height: number };
 
-export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
+export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Props) {
   const box = useRef<HTMLDivElement>(null);
   const overlay = useRef<HTMLImageElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -269,7 +270,10 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
   // no keyboard over it
   const still = dockedNow || mouse;
   const x = still ? fit.left : followAxis(prev.x, cx, w, width, width, CURSOR_MARGIN);
-  const y = still ? fit.top : followAxis(prev.y, cy, h, visible, height, CURSOR_MARGIN);
+  // In touch mode the buttons are always there: the cursor stays below their row too, and the
+  // screen moves down for it, its start no lower than the row's end (black above it)
+  const buttonsEnd = top + FLOAT_GAP * 2 + FLOAT_BUTTON;
+  const y = still ? fit.top : followAxis(prev.y, cy, h, visible, height, CURSOR_MARGIN, buttonsEnd);
   at.current = { x, y, shown };
 
   // The phone's keyboard lifts the pages so all of the open one is above it

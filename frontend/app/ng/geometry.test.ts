@@ -109,6 +109,25 @@ describe("followAxis", () => {
   });
 });
 
+describe("followAxis under the floating buttons", () => {
+  // A screen as tall as the display (951), the buttons' row down to 60
+  test("the cursor under the buttons moves the screen down, its start no lower than the row's end", () => {
+    expect(followAxis(0, 300, 951, 951, 951, 32, 60)).toBe(0);
+    expect(followAxis(0, 40, 951, 951, 951, 32, 60)).toBeCloseTo(60 + 32 - 40);
+    expect(followAxis(0, 0, 951, 951, 951, 32, 60)).toBe(60);
+  });
+
+  test("it comes back up with the cursor as the cursor leaves the row, then rests where it was", () => {
+    expect(followAxis(60, 70, 951, 951, 951, 32, 60)).toBeCloseTo(60 + 32 - 70);
+    expect(followAxis(22, 100, 951, 951, 951, 32, 60)).toBe(0);
+    expect(followAxis(60, 500, 951, 951, 951, 32, 60)).toBe(0);
+  });
+
+  test("a screen in the middle with room above it does not move", () => {
+    expect(followAxis(0, 0, 539, 648, 648, 32, 40)).toBeCloseTo(54.5);
+  });
+});
+
 describe("phoneMonitorSize at another scale", () => {
   test("1 device px per monitor px: the display's own pixels", () => {
     expect(phoneMonitorSize(951, 648, 3, 1)).toEqual({ width: 2852, height: 1944 });

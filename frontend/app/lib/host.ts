@@ -5,7 +5,9 @@
 // window and not to the frame. The shell's own API (`rmngShell`) is only what the app cannot read
 // from its window directly.
 
-type Shell = { version: number; insetBottom(): number };
+/** The shell's API. `insetTop` came after version 1's first shell: an older shell open since
+ *  then has none. */
+type Shell = { version: number; insetBottom(): number; insetTop?(): number };
 
 /** The shell's window, when this page is in its frame. */
 export function shellWindow(): (Window & { rmngShell: Shell }) | null {

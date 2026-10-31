@@ -22,13 +22,14 @@ export function meta() {
 const VIEWPORT =
   "width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover";
 
-type Page = { size: [number, number]; bottom: number };
+type Page = { size: [number, number]; top: number; bottom: number };
 
 function measure(probe: HTMLElement): Page {
   // A frame has no home bar inset of its own: the shell's window has it
   const shell = shellWindow();
   return {
     size: [window.innerWidth, window.innerHeight],
+    top: Math.round(shell ? (shell.rmngShell.insetTop?.() ?? 0) : parseFloat(getComputedStyle(probe).paddingTop) || 0),
     bottom: Math.round(shell ? shell.rmngShell.insetBottom() : parseFloat(getComputedStyle(probe).paddingBottom) || 0),
   };
 }
@@ -102,7 +103,7 @@ export default function Ng() {
 
   return (
     <div className="fixed inset-0 touch-none select-none overflow-hidden bg-black text-white">
-      <div ref={probe} className="pointer-events-none absolute inset-0 pb-[env(safe-area-inset-bottom)]" />
+      <div ref={probe} className="pointer-events-none absolute inset-0 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]" />
       {message && page ? (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-8 text-center text-slate-500">
           <div>{message}</div>
@@ -116,6 +117,7 @@ export default function Ng() {
         <FullDesk
           width={page.size[0]}
           height={page.size[1]}
+          top={page.top}
           bottom={page.bottom}
           monitor={monitor}
           onMonitor={setMonitor}

@@ -105,13 +105,15 @@ export function phoneMonitorSize(
 }
 
 /** Where the clone's screen goes on one axis (its start, CSS px), so the cursor stays in view:
- *  `content` px long on a display `full` px long, of which the first `visible` px are not under
- *  the keyboard; the cursor `cursor` px from the screen's start; `prev` where it was. It moves
+ *  `content` px long on a display `full` px long, of which the px from `start` to `visible` are
+ *  in view (not under the floating buttons before `start`, nor under the keyboard after
+ *  `visible`); the cursor `cursor` px from the screen's start; `prev` where it was. It moves
  *  as little as it can: not at all while the cursor stays `margin` inside the view.
  *
- *  A screen shorter than the display sits in its middle, and moves (up) only as far as needed to
- *  keep the cursor above the keyboard; a longer one (zoomed in) moves anywhere between its two
- *  ends lining up with the view's. */
+ *  A screen shorter than the display sits in its middle, and moves only as far as needed to
+ *  keep the cursor above the keyboard and below the buttons: down no further than its start at
+ *  `start`, and only while the cursor is that close to the top. A longer one (zoomed in) moves
+ *  anywhere between its ends lining up with the view's. */
 export function followAxis(
   prev: number,
   cursor: number,
@@ -119,12 +121,16 @@ export function followAxis(
   visible: number,
   full: number,
   margin: number,
+  start = 0,
 ): number {
-  const hi = content <= full ? (full - content) / 2 : 0;
-  const lo = Math.min(hi, visible - content);
-  let at = Math.min(hi, Math.max(lo, prev));
+  /** Where it rests: in the middle, or (longer) its start at the display's. It goes lower only
+   *  while the cursor needs it, so it comes back up as the cursor leaves the buttons' row. */
+  const rest = content <= full ? (full - content) / 2 : 0;
+  const hi = Math.max(rest, start);
+  const lo = Math.min(rest, visible - content);
+  let at = Math.min(rest, Math.max(lo, prev));
   const c = at + cursor;
-  if (c < margin) at += margin - c;
+  if (c < start + margin) at += start + margin - c;
   else if (c > visible - margin) at -= c - (visible - margin);
   return Math.min(hi, Math.max(lo, at));
 }
