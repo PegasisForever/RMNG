@@ -44,7 +44,7 @@ export type LayoutBody = { monitors: MonitorSpec[]; scrollMode: ScrollMode; scro
 export type BrowserLayout = LayoutBody & { scales: number[] };
 
 /** The pixel scales the dialog offers. */
-export const PIXEL_SCALES = [1, 1.25, 1.5, 2, 2.5, 3] as const;
+export const PIXEL_SCALES = [1, 1.25, 1.5, 1.75, 2, 2.5, 3] as const;
 
 /** The desktop layout before this browser has one: the server's default (`wire::default_monitors`):
  *  two 2560×1440 side by side, the primary one on the right. */
