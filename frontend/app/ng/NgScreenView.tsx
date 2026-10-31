@@ -87,7 +87,7 @@ export type NgScreenViewProps = {
     content: ReactNode;
     panelRef?: Ref<HTMLDivElement>;
   };
-  /** The floating buttons; null: hidden (mouse mode, pages closed). */
+  /** The floating buttons (`away`: slid up out of the window); null: none. */
   buttons: Parameters<typeof FloatingButtons>[0] | null;
   /** A dialog over everything (the Edit layout dialog). */
   dialog?: ReactNode;

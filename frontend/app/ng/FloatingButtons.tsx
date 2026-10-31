@@ -4,7 +4,8 @@
 // keyboard; a long press docks it (always shown) or undocks it. A long press on the fit opens the
 // Edit layout dialog. A button whose thing is open is lit; the docked keyboard's has a bar under
 // its icon; the fit is dim when the monitor fits already. A right click is a long press, for a
-// mouse. In mouse and keyboard mode they show only with the pages, and with no keyboard button.
+// mouse. In mouse and keyboard mode they have no keyboard button, and they slide up out of the
+// window when they are not in use (`away`; `./FullDesk.tsx` says when).
 // Where the browser has fullscreen, a fourth button turns it on and off (the page's own
 // fullscreen: only that one hands the system's chords, such as Super+Space, to the page).
 import { Expand, Keyboard, LayoutGrid, Maximize, Minimize } from "lucide-react";
@@ -27,6 +28,7 @@ export function FloatingButtons({
   onFit,
   onFitSettings,
   fullscreen,
+  away = false,
 }: {
   pagesOpen: boolean;
   /** The keyboard's button shows (not in mouse and keyboard mode). */
@@ -47,15 +49,20 @@ export function FloatingButtons({
   onFitSettings: () => void;
   /** Fullscreen: on or not, and the switch; absent where the browser has none. */
   fullscreen?: { on: boolean; toggle: () => void };
+  /** Slid up out of the window, and out of reach. */
+  away?: boolean;
 }) {
   return (
     <div
       data-ng-buttons
-      className="absolute z-50 flex"
+      inert={away}
+      className="absolute z-50 flex transition-transform duration-300 ease-out"
       style={{
         gap: FLOAT_GAP,
         top: `calc(env(safe-area-inset-top) + ${FLOAT_GAP}px)`,
         right: `calc(env(safe-area-inset-right) + ${FLOAT_GAP}px)`,
+        // Up by their height, the room above them, and their shadow
+        transform: away ? `translateY(calc(-100% - env(safe-area-inset-top) - ${FLOAT_GAP * 3}px))` : undefined,
       }}
     >
       <Round label="Pages" on={pagesOpen} onClick={onPages}>

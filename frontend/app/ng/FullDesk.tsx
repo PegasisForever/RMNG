@@ -21,8 +21,10 @@
 //   screen fits in the area above it, and that area is a touch screen: each finger goes to the
 //   clone as a touch.
 // - Mouse and keyboard: the mouse, the keys and the clipboard go to the clone as in the viewer
-//   (`~/viewer/input.ts`). No buttons float over the screen: a chord (`./shortcut.ts`) shows the
-//   pages, with the buttons above them, and hides them again; so does a click beside them.
+//   (`~/viewer/input.ts`). The same buttons, less the keyboard's, show when the mode starts,
+//   then slide up out of the window; the mouse at the window's top edge brings them back. A
+//   chord (`./shortcut.ts`) shows the pages, with the buttons above them, and hides them again;
+//   so does a click beside them.
 //
 // Where the browser can open windows, the pages can move to a window of their own (`?pages`).
 //
@@ -45,6 +47,7 @@ import { useViewerChannel } from "~/lib/useViewerChannel";
 import { toggleFullscreen } from "~/viewer/input";
 
 import { firstLayout, startScale } from "./firstLayout";
+import { FLOAT_BUTTON, FLOAT_GAP } from "./FloatingButtons";
 import { followAxis, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
 import { useInputMode } from "./inputMode";
 import { HANDLE_H } from "./KeyboardHandle";
@@ -70,8 +73,12 @@ const MIN_KEYS_H = 160;
 const MAX_KEYS_PART = 0.8;
 /** Touch slots a touch screen offers, fingers at once. */
 const TOUCH_SLOTS = 10;
-/** How long the chord's hint shows when mouse and keyboard mode starts, ms. */
+/** How long the buttons and the hint show when mouse and keyboard mode starts, ms. */
 const HINT_MS = 4000;
+/** Mouse mode: the mouse this close to the window's top (CSS px) brings the buttons in; below
+ *  their row, and this much more, it sends them away again. */
+const TOP_EDGE_PX = 2;
+const BUTTONS_ZONE_PX = FLOAT_GAP * 2 + FLOAT_BUTTON + 24;
 /** The pages' own window: its name, and its size when it opens. */
 const PAGES_WINDOW = "rmng-pages";
 const PAGES_WINDOW_FEATURES = "popup,width=560,height=900";
@@ -116,6 +123,8 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
   const [layoutOpen, setLayoutOpen] = useState(false);
   /** The chord's hint, while mouse and keyboard mode is new. */
   const [hint, setHint] = useState(false);
+  /** Mouse mode: the buttons are in the window (the mode is new, or the mouse is at the top). */
+  const [peek, setPeek] = useState(false);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
   const [fullscreen, setFullscreen] = useState<boolean | null>(null);
   useEffect(() => {
@@ -185,13 +194,36 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Mouse and keyboard mode starts: say how to reach the pages, for a while
+  // Mouse and keyboard mode starts: the buttons and the hint show for a while, then the buttons
+  // slide up out of the window. The mouse at the window's top edge brings them back; below
+  // their row it sends them away again.
   useEffect(() => {
     if (!mouse) return;
     setZoom(1);
     setHint(true);
-    const t = setTimeout(() => setHint(false), HINT_MS);
-    return () => clearTimeout(t);
+    setPeek(true);
+    let intro = true;
+    let atTop = false;
+    const t = setTimeout(() => {
+      intro = false;
+      setHint(false);
+      if (!atTop) setPeek(false);
+    }, HINT_MS);
+    const onMove = (e: globalThis.PointerEvent) => {
+      if (e.pointerType !== "mouse") return;
+      if (e.clientY <= TOP_EDGE_PX) {
+        atTop = true;
+        setPeek(true);
+      } else if (e.clientY > BUTTONS_ZONE_PX) {
+        atTop = false;
+        if (!intro) setPeek(false);
+      }
+    };
+    window.addEventListener("pointermove", onMove, { capture: true, passive: true });
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("pointermove", onMove, { capture: true });
+    };
   }, [mouse]);
 
   // The Edit layout dialog finds this window by its name and its number
@@ -361,7 +393,7 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
         dictation: r.dictation,
         heard: r.heard,
         note: r.note,
-        hint: hint && !pages ? `${pagesChordLabel()} shows the pages` : null,
+        hint: hint && !pages ? `The top edge shows the buttons, ${pagesChordLabel()} the pages` : null,
       }}
       pages={{
         open: pages,
@@ -382,25 +414,23 @@ export function FullDesk({ width, height, bottom, monitor, onMonitor }: Props) {
           />
         ),
       }}
-      // In mouse mode the buttons show only with the pages
-      buttons={
-        !mouse || pages
-          ? {
-              pagesOpen: pages,
-              keyboard: !mouse,
-              keyboardOpen: keysShown,
-              keyboardDocked: docked,
-              fits,
-              badge: r.unread,
-              onPages: () => setPages((p) => !p),
-              onKeyboard: () => !docked && setKeyboard((k) => !k),
-              onKeyboardDock: toggleDock,
-              onFit: () => fitTo(target),
-              onFitSettings: () => setLayoutOpen(true),
-              fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
-            }
-          : null
-      }
+      buttons={{
+        pagesOpen: pages,
+        keyboard: !mouse,
+        keyboardOpen: keysShown,
+        keyboardDocked: docked,
+        fits,
+        badge: r.unread,
+        onPages: () => setPages((p) => !p),
+        onKeyboard: () => !docked && setKeyboard((k) => !k),
+        onKeyboardDock: toggleDock,
+        onFit: () => fitTo(target),
+        onFitSettings: () => setLayoutOpen(true),
+        fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
+        // In mouse mode, out of the window unless the mouse brought them in, or the pages or
+        // the dialog are open
+        away: mouse && !peek && !pages && !layoutOpen,
+      }}
       dialog={
         layoutOpen ? (
           <LayoutEditorContainer

@@ -147,12 +147,20 @@ const desktop = {
   mode: "mouse" as const,
   screen: { x: 0, y: 0, width: DESKTOP.width, height: DESKTOP.height },
   cursor: null,
-  buttons: null,
+  buttons: buttons({ keyboard: false, away: true }),
 };
 
-/** Only the clone's screen; the note says how to show the pages, for a while. */
-export const Desktop: Story = {
-  args: { ...desktop, notes: { ...notes, hint: "Ctrl Alt Space shows the pages" } },
+/** Only the clone's screen: the buttons slid up out of the window. */
+export const Desktop: Story = { args: { ...desktop } };
+
+/** The mode just started, or the mouse is at the window's top edge: the buttons are in (no
+ *  keyboard button); at the start, the note says how to reach them and the pages. */
+export const DesktopButtonsIn: Story = {
+  args: {
+    ...desktop,
+    buttons: buttons({ keyboard: false }),
+    notes: { ...notes, hint: "The top edge shows the buttons, Ctrl Alt Space the pages" },
+  },
 };
 
 /** The chord showed the pages, at the right, with the buttons above them (no keyboard button)
@@ -232,20 +240,34 @@ export const PhoneInteractive: Story = {
   },
 };
 
-/** The chord's place: the button shows or hides the pages, as Ctrl+Alt+Space does. */
+/** The mouse at the display's top edge brings the buttons in; below them it sends them away.
+ *  The button at the bottom left stands for Ctrl+Alt+Space: it shows or hides the pages. */
 export const DesktopInteractive: Story = {
   args: { ...desktop },
   render: function Render(args) {
     const [open, setOpen] = useState(false);
     const [tab, setTab] = useState<NgTab>("clones");
+    const [peek, setPeek] = useState(false);
     return (
       <>
-        <NgScreenView
-          {...args}
-          notes={{ ...notes, hint: open ? null : "Ctrl Alt Space shows the pages" }}
-          pages={pages({ open, tab, onTab: setTab, content: pageFor(tab), onPopOut: fn() })}
-          buttons={open ? buttons({ pagesOpen: true, keyboard: false, onPages: () => setOpen(false) }) : null}
-        />
+        <div
+          onPointerMove={(e) => {
+            const top = e.clientY - e.currentTarget.getBoundingClientRect().top;
+            if (top <= 2) setPeek(true);
+            else if (top > 84) setPeek(false);
+          }}
+        >
+          <NgScreenView
+            {...args}
+            pages={pages({ open, tab, onTab: setTab, content: pageFor(tab), onPopOut: fn() })}
+            buttons={buttons({
+              pagesOpen: open,
+              keyboard: false,
+              onPages: () => setOpen((o) => !o),
+              away: !open && !peek,
+            })}
+          />
+        </div>
         <button
           type="button"
           onClick={() => setOpen((o) => !o)}
