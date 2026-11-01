@@ -178,7 +178,7 @@ export function AccountCard({
         <button
           type="button"
           onClick={() => onReplace(a)}
-          className={`ng-glass ng-glass-control mt-1.5 w-full ${R_PIECE} py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400`}
+          className={`mt-1.5 w-full ${R_PIECE} border border-black/15 bg-white/50 py-1.5 text-xs font-medium text-rose-600 hover:bg-white/80 active:bg-white/90 dark:border-white/15 dark:bg-white/5 dark:text-rose-400 dark:hover:bg-white/10 dark:active:bg-white/15`}
         >
           Token expired. Sign in again
         </button>

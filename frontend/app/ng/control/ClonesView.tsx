@@ -65,6 +65,7 @@ import {
   boxOf,
   CARD,
   CARD_BOX,
+  CARD_FILL_ON_GLASS,
   CARD_LIST,
   DesktopMenu,
   DIVIDE,
@@ -73,6 +74,7 @@ import {
   HERE,
   isMouseClick,
   NO_DRAG,
+  NO_WORD_SELECT,
   ON_GLASS,
   Page,
   PageHeader,
@@ -223,16 +225,13 @@ export function ClonesView(p: ClonesViewProps) {
       onRenamingChange: (on: boolean) => setRenamingClone(on ? c.id : null),
       sshPublicHost: "",
       isChild: child,
-      fill: {
-        idle: "bg-transparent hover:bg-black/[0.03] dark:hover:bg-white/5",
-        selected: "bg-emerald-500/10 dark:bg-emerald-400/10",
-      },
+      fill: CARD_FILL_ON_GLASS,
       renameField: `mt-1.5 w-full px-1.5 py-0.5 text-sm font-medium ${FIELD}`,
       touchScroll: true,
       onMenuTouch: () => setSheet(c),
     });
     return (
-      <div className={`overflow-hidden ${CARD_BOX} ${p.notesId === clone.id ? BOX : ""}`}>
+      <div {...NO_WORD_SELECT} className={`overflow-hidden ${CARD_BOX} ${p.notesId === clone.id ? BOX : ""}`}>
         <SidebarClone
           {...props(clone, false)}
           childCount={kids.length}
@@ -563,7 +562,7 @@ export function CloneRow({
   );
 
   return (
-    <li className={`flex items-stretch ${selected ? HERE : notes ? BOX : ""}`}>
+    <li {...NO_WORD_SELECT} className={`flex items-stretch ${selected ? HERE : notes ? BOX : ""}`}>
       {renaming ? (
         <div className={`flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pr-2 ${child ? "pl-8" : "pl-3"}`}>
           {marks}

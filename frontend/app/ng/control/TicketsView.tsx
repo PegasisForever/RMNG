@@ -43,6 +43,7 @@ import {
   boxOf,
   CARD,
   CARD_BOX,
+  CARD_FILL_ON_GLASS,
   CARD_LIST,
   DesktopMenu,
   DIVIDE,
@@ -50,6 +51,7 @@ import {
   HeaderButton,
   isMouseClick,
   NO_DRAG,
+  NO_WORD_SELECT,
   ON_GLASS,
   NO_SCROLLBARS,
   Page,
@@ -158,14 +160,14 @@ export function TicketsView(p: TicketsViewProps) {
   const card = (t: LinearTicket, drag?: Record<string, unknown>) => (
     <div
       {...drag}
+      {...NO_WORD_SELECT}
       onClick={() => p.onOpen(t)}
-      className={`cursor-grab overflow-hidden ${CARD_BOX} ${
-        p.open?.id === t.id ? "!border-neutral-900 dark:!border-white" : ""
-      }`}
+      className={`cursor-grab overflow-hidden ${CARD_BOX}`}
     >
       <TicketCardBody
         ticket={t}
         selected={p.open?.id === t.id}
+        fill={CARD_FILL_ON_GLASS}
         onCreateClone={() => p.onCreateClone(t)}
         onOpenInLinear={p.onOpenInLinear}
         onCopyBranchName={(b) => void p.onCopy(b)}

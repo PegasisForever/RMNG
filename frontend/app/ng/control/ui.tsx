@@ -55,6 +55,23 @@ export const CARD_FILL = "bg-white dark:bg-white/[0.06]";
 /** A card on a column (an account, a ticket, a clone): one edge, one fill, for all three. Light:
  *  white at 60 %, so the column's glass shows through a little. */
 export const CARD_BOX = `${CARD} bg-white/60 dark:bg-white/[0.07]`;
+/** On a card: a second click (a double click) selects no word under the pointer, which the
+ *  browser does by default; the double click is the card's (it opens the clone). Capture, so a
+ *  drag's own mouse-down handler on the card is left as it is. */
+export const NO_WORD_SELECT = {
+  onMouseDownCapture: (e: ReactMouseEvent) => {
+    // Not in a text box on the card (the rename field): there a double click selects a word
+    if (e.detail > 1 && !(e.target as Element).closest("input, textarea")) e.preventDefault();
+  },
+};
+
+/** A card's row on glass, idle and selected (the clone on the screen, the ticket beside the
+ *  board): the dashboard cards' `fill`, one for clones and tickets alike. */
+export const CARD_FILL_ON_GLASS = {
+  idle: "bg-transparent hover:bg-black/[0.03] dark:hover:bg-white/5",
+  selected: "bg-emerald-500/10 dark:bg-emerald-400/10",
+};
+
 /** Where the dashboard's own parts (a clone's card, a ticket's card, the ticket panel) sit on
  *  the glass: their slate greys become readable ones on it (`../glass.css`, `.ng-on-glass`). */
 export const ON_GLASS = "ng-on-glass";

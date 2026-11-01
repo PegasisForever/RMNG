@@ -332,6 +332,7 @@ export function TicketCardBody({
   onCancel,
   onMoveToBacklog,
   onMenuTouch,
+  fill,
 }: {
   ticket: LinearTicket;
   /** Selected: the panel on the right is showing this ticket. The tint alone says so. No
@@ -351,11 +352,19 @@ export function TicketCardBody({
   onMoveToBacklog?: () => void;
   /** A tap with a finger on the ⋮ calls this in place of the dropdown (`OverflowMenu`). */
   onMenuTouch?: () => void;
+  /** The fills of a card on glass (/ng), idle and selected, as a clone's card has them
+   *  (`SidebarClone`'s `fill`); selected also takes the clone card's left accent, so the two
+   *  read as one kind of selection. Absent: the dashboard's tint. */
+  fill?: { idle: string; selected: string };
 }) {
   const labels = ticket.labels ?? [];
   return (
     <article
-      className={`px-2.5 py-2 ${selected ? "bg-emerald-50 dark:bg-emerald-950" : ""}`}
+      className={
+        fill
+          ? `border-l-2 py-2 pl-2 pr-2.5 ${selected ? `border-l-emerald-400 ${fill.selected}` : `border-l-transparent ${fill.idle}`}`
+          : `px-2.5 py-2 ${selected ? "bg-emerald-50 dark:bg-emerald-950" : ""}`
+      }
     >
       {/* State, priority, then labels: the row Linear itself draws, in its own marks. No
           owner on it: every ticket here belongs to one of the operator's own API keys, so
