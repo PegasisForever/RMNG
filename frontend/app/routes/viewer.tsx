@@ -307,7 +307,7 @@ export default function Viewer() {
           {note.text}
         </p>
       ) : null}
-      {identify ? <MonitorNumber monitor={monitor} /> : null}
+      <MonitorNumber monitor={identify ? monitor : null} />
       {/* Only outside fullscreen: the operator leaves fullscreen with the window's own controls.
           It never takes focus, so keys keep going to the clone. */}
       {fullscreen ? null : (

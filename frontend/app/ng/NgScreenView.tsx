@@ -265,7 +265,7 @@ export function NgScreenView({
         ) : null}
       </div>
       {dialog}
-      {identify !== null ? <MonitorNumber monitor={identify} /> : null}
+      <MonitorNumber monitor={identify} />
     </div>
   );
 }
