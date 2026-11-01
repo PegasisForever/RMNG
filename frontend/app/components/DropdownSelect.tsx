@@ -9,6 +9,7 @@ import { ChevronDown } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { AnchoredList } from "~/components/AnchoredList";
 import { useModalEscape } from "~/lib/useModalEscape";
 
 /** One row in the menu: a pickable option, or a non-selectable section header. */
@@ -58,7 +59,9 @@ export function DropdownSelect({
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Element;
+      // The list is on the body (`AnchoredList`): a press in it is not outside
+      if (!root.current?.contains(t) && !t.closest?.("[data-anchored-list]")) setOpen(false);
     };
     document.addEventListener("pointerdown", onDown);
     return () => document.removeEventListener("pointerdown", onDown);
@@ -94,17 +97,19 @@ export function DropdownSelect({
       </button>
 
       {open ? (
-        <DropdownMenu
-          menuId={menuId}
-          rows={rows}
-          value={value}
-          label={label ?? shown}
-          onPick={(picked) => {
-            onChange(picked);
-            setOpen(false);
-          }}
-          onDismiss={() => setOpen(false)}
-        />
+        <AnchoredList anchor={root.current}>
+          <DropdownMenu
+            menuId={menuId}
+            rows={rows}
+            value={value}
+            label={label ?? shown}
+            onPick={(picked) => {
+              onChange(picked);
+              setOpen(false);
+            }}
+            onDismiss={() => setOpen(false)}
+          />
+        </AnchoredList>
       ) : null}
     </div>
   );
@@ -149,6 +154,7 @@ function DropdownMenu({
     <ul
       ref={list}
       role="listbox"
+      data-anchored-list
       tabIndex={-1}
       aria-label={label}
       aria-activedescendant={`${menuId}-${active}`}
@@ -167,7 +173,7 @@ function DropdownMenu({
         // moving focus into a list the operator has already stepped past.
         if (e.key === "Tab") onDismiss();
       }}
-      className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-slate-200 bg-white py-1 shadow-lg outline-none dark:border-slate-600 dark:bg-slate-800"
+      className="max-h-64 w-full overflow-y-auto rounded-md border border-slate-200 bg-white py-1 shadow-lg outline-none dark:border-slate-600 dark:bg-slate-800"
     >
       {rows.map((row, i) =>
         isOption(row) ? (

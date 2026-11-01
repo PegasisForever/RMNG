@@ -240,7 +240,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented || !controlPanelRef.current) return;
-      if (document.querySelector("[data-modal], [role=dialog], [role=menu]")) return;
+      if (document.querySelector("[data-modal], [role=dialog], [role=menu], [role=listbox]")) return;
       const t = e.target;
       if (t instanceof HTMLElement && (t.isContentEditable || t.matches("input, textarea, select"))) {
         t.blur();
@@ -428,14 +428,14 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       (document.activeElement as HTMLElement).blur();
     }
     // With a mouse, a click beside the control panel and the buttons puts the control panel away. A menu of
-    // theirs (a card's ⋯) and a dialog of theirs are drawn on the body, out of their box, and
-    // are theirs all the same.
+    // theirs (a card's ⋯), a dropdown's list and a dialog of theirs are drawn on the body, out
+    // of their box, and are theirs all the same.
     if (
       mouse &&
       controlPanel &&
       !layoutOpen &&
       !panelRef.current?.contains(target) &&
-      !target.closest("[data-ng-buttons], [data-ng-side], [role=menu], [data-modal]")
+      !target.closest("[data-ng-buttons], [data-ng-side], [role=menu], [role=listbox], [data-modal]")
     ) {
       setControlPanel(false);
     }

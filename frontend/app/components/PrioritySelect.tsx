@@ -12,6 +12,7 @@ import { ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { PRIORITY_LABEL, PriorityIcon } from "~/components/TicketColumn";
+import { AnchoredList } from "~/components/AnchoredList";
 import { useModalEscape } from "~/lib/useModalEscape";
 
 /** The scale in the order Linear reads it: unranked first, then urgent down to low. */
@@ -41,7 +42,9 @@ export function PrioritySelect({
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
-      if (!root.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Element;
+      // The list is on the body (`AnchoredList`): a press in it is not outside
+      if (!root.current?.contains(t) && !t.closest?.("[data-anchored-list]")) setOpen(false);
     };
     document.addEventListener("pointerdown", onDown);
     return () => document.removeEventListener("pointerdown", onDown);
@@ -73,14 +76,16 @@ export function PrioritySelect({
       </button>
 
       {open ? (
-        <PriorityMenu
-          value={value}
-          onPick={(level) => {
-            onChange(level);
-            setOpen(false);
-          }}
-          onDismiss={() => setOpen(false)}
-        />
+        <AnchoredList anchor={root.current}>
+          <PriorityMenu
+            value={value}
+            onPick={(level) => {
+              onChange(level);
+              setOpen(false);
+            }}
+            onDismiss={() => setOpen(false)}
+          />
+        </AnchoredList>
       ) : null}
     </div>
   );
@@ -114,6 +119,7 @@ function PriorityMenu({
     <ul
       ref={list}
       role="listbox"
+      data-anchored-list
       tabIndex={-1}
       aria-label="Priority"
       aria-activedescendant={`priority-option-${PRIORITY_LEVELS[active]}`}
@@ -133,7 +139,7 @@ function PriorityMenu({
         // focus into a list the operator has already stepped past.
         if (e.key === "Tab") onDismiss();
       }}
-      className="absolute z-10 mt-1 w-full overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-lg outline-none dark:border-slate-600 dark:bg-slate-800"
+      className="w-full overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-lg outline-none dark:border-slate-600 dark:bg-slate-800"
     >
       {PRIORITY_LEVELS.map((level, i) => (
         <li
