@@ -1,8 +1,11 @@
 # /ng's glass
 
-The surfaces that float over the clone's screen in `/ng` are made of one material: dark glass.
-The clone's screen stays the subject; the glass lets its colors show through, blurred, so the
+The surfaces that float over the clone's screen in `/ng` are made of one material: glass. The
+clone's screen stays the subject; the glass lets its colors show through, blurred, so the
 operator keeps a sense of what is under a button or a dialog. What is on the glass is flat.
+
+Glass is light or dark as the OS says (`/ng` sets no theme of its own; Storybook: the Theme in
+the toolbar). Light glass is white with dark text; dark glass is grey with light text.
 
 The classes are in `./glass.css`. The samples are the Storybook story `ng/Design/Glass`.
 
@@ -26,26 +29,43 @@ tooltip, a dialog's panel, the monitor's number. What is on a surface (text, ico
 boxes, buttons in a dialog) is flat: solid or translucent fills, 1 px borders, no blur, no rim,
 no sheen, no shadow, no glow.
 
-| Class | Use it for | What it is |
-|---|---|---|
-| `ng-glass` | Every surface. | Dark tint (30 %), blur 8 px, rim, sheen, short shadow, white text. |
-| `ng-glass-thick` | A surface with text to read: a dialog, a tooltip, the monitor's number. | Tint 50 %, blur 14 px, a long shadow. |
-| `ng-glass-control` | A surface that is itself a control (a floating button). | More light under the mouse; sinks on a press; a white outline on keyboard focus; 45 % when disabled. |
-| `ng-glass-lit` | A control whose thing is open (the pages shown, fullscreen on). | Frosted white glass, dark text. |
+| Class | Use it for | Light | Dark |
+|---|---|---|---|
+| `ng-glass` | Every surface: rim, sheen, short shadow. Blur 8 px. | White tint 35 %, dark text, a hairline edge. | Grey tint 30 %, white text. |
+| `ng-glass-thick` | A surface with text to read: a dialog, a tooltip, the monitor's number. Blur 14 px, a long shadow. | White tint 55 %. | Grey tint 50 %. |
+| `ng-glass-control` | A surface that is itself a control (a floating button): more light under the mouse; sinks on a press; an outline on keyboard focus; 45 % when disabled. | Dark outline. | White outline. |
+| `ng-glass-lit` | A control whose thing is open (the pages shown, fullscreen on): the other look's glass. | Dark glass, white text. | Frosted white glass, dark text. |
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
 ## Flat content
 
-| Part | Classes |
-|---|---|
-| A hollow (the monitors' arrangement) | `rounded-xl border border-white/10 bg-black/25` |
-| A field, a select | `rounded-lg border border-white/10 bg-black/30`; focus: `border-white/30` |
-| A box (a monitor) | `rounded-lg border border-white/20 bg-neutral-800` |
-| A marked box (the primary monitor) | `rounded-lg border border-emerald-400/80 bg-emerald-950` |
-| A button | `rounded-lg border border-white/15 bg-white/5`, mouse over: `bg-white/10` |
-| The button that ends the task (Done) | `rounded-lg bg-emerald-600`, mouse over: `bg-emerald-500` |
-| A small icon button | `rounded-md text-white/60`, mouse over: `bg-white/10 text-white` |
+Each color has its light value and its `dark:` value.
+
+| Part | Light | Dark |
+|---|---|---|
+| Main text | `text-neutral-900` | `text-white` |
+| Secondary text | `text-black/60` | `text-white/60` |
+| Least text | `text-black/40` | `text-white/40` |
+| A note (a warning) | `text-amber-700` | `text-amber-300` |
+| Green text ("here") | `text-emerald-700` | `text-emerald-300` |
+| A hollow (the monitors' arrangement) | `rounded-xl border-black/10 bg-white/40` | `border-white/10 bg-black/25` |
+| A field, a select | `rounded-lg border-black/10 bg-white/60`, focus `border-black/30` | `border-white/10 bg-black/30`, focus `border-white/30` |
+| A box (a monitor) | `rounded-lg border-black/15 bg-white` | `border-white/20 bg-neutral-800` |
+| A marked box (the primary monitor) | `rounded-lg border-emerald-500 bg-emerald-50` | `border-emerald-400/80 bg-emerald-950` |
+| A button | `rounded-lg border-black/15 bg-white/50`, mouse over `bg-white/80` | `border-white/15 bg-white/5`, mouse over `bg-white/10` |
+| The button that ends the task (Done) | `rounded-lg bg-emerald-600 text-white`, mouse over `bg-emerald-500` | the same |
+| A small icon button | `rounded-md text-black/55`, mouse over `bg-black/5` | `text-white/60`, mouse over `bg-white/10` |
+| A remove button | `text-rose-600` | `text-rose-400` |
+
+## Color
+
+- Neutral grey only: no blue in the greys (`/ng` is black and grey).
+- One accent, green (Tailwind emerald): the primary monitor, Done, "here". Never on a glass
+  surface itself: no green rim, no green glow.
+- A count is a small solid dot: green for "to do", red (`rose-500`) for "went wrong". It has its
+  own top highlight and a shadow, as a drop of colored glass.
+- A danger action (remove) is red text, never a red surface.
 
 ## Shape
 

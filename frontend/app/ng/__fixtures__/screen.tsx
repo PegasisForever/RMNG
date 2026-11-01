@@ -26,11 +26,12 @@ export const PHONE = { width: 393, height: 852, bottom: 34 };
 export const PHONE_SIDEWAYS = { width: 852, height: 393, bottom: 21 };
 export const DESKTOP = { width: 1440, height: 900, bottom: 0 };
 
-/** The display's frame, its size from the story's `width` and `height`, in /ng's dark greys. It
- *  holds what is fixed (a dialog) as the display would (a transform makes it their box). */
+/** The display's frame, its size from the story's `width` and `height`, in /ng's greys, light or
+ *  dark by the Theme in the toolbar (the app: by the OS). It holds what is fixed (a dialog) as
+ *  the display would (a transform makes it their box). */
 export const inDisplay: Decorator = (Story, ctx) => (
   <div
-    className="ng-theme dark relative overflow-hidden bg-black text-white"
+    className="ng-theme relative overflow-hidden bg-black text-neutral-900 dark:text-white"
     style={{ width: ctx.args.width as number, height: ctx.args.height as number, transform: "translateZ(0)" }}
   >
     <Story />
