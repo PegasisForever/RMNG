@@ -22,7 +22,6 @@
 // BlockNote, which is browser-only and lazily loaded.
 import { Check, ExternalLink, GitBranch, Link2, type LucideIcon, Plus } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import TextareaAutosize from "react-textarea-autosize";
 
 import { MenuChoice, MenuNote, OverflowMenu } from "~/components/OverflowMenu";
 import { LabelPill, PriorityIcon, StateIcon, STATE_LABEL } from "~/components/TicketColumn";
@@ -337,23 +336,36 @@ function EditableTitle({
     );
   }
   return (
-    <TextareaAutosize
-      value={draft}
-      aria-label="Ticket title"
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          e.currentTarget.blur();
-        }
-        if (e.key === "Escape") {
-          setDraft(ticket.title);
-          e.currentTarget.blur();
-        }
-      }}
-      className="w-full resize-none rounded bg-transparent text-xl font-semibold leading-snug text-slate-900 outline-none hover:bg-slate-500/5 focus:bg-slate-500/5 dark:text-slate-100"
-    />
+    // Its height is the text's, by layout: a hidden copy of the text in the same grid cell sizes
+    // the cell, and the field fills it. A height measured once (an autosize) goes wrong when
+    // the font arrives or the card's width changes after it, and the title then scrolls inside
+    // a box too short for it.
+    <div className="grid">
+      <div
+        aria-hidden
+        className="invisible whitespace-pre-wrap break-words px-0 text-xl font-semibold leading-snug [grid-area:1/1]"
+      >
+        {draft}{" "}
+      </div>
+      <textarea
+        value={draft}
+        rows={1}
+        aria-label="Ticket title"
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            e.currentTarget.blur();
+          }
+          if (e.key === "Escape") {
+            setDraft(ticket.title);
+            e.currentTarget.blur();
+          }
+        }}
+        className="w-full resize-none overflow-hidden whitespace-pre-wrap break-words rounded bg-transparent p-0 text-xl font-semibold leading-snug text-slate-900 outline-none [grid-area:1/1] hover:bg-slate-500/5 focus:bg-slate-500/5 dark:text-slate-100"
+      />
+    </div>
   );
 }
 
