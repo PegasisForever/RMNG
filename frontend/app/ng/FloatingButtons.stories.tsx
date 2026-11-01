@@ -1,15 +1,17 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
+import { FakeDesktop } from "./__fixtures__/screen";
 import { FloatingButtons } from "./FloatingButtons";
 
-/** Over a sideways phone's display (951 × 648), in its top-right corner. */
+/** Over a sideways phone's display (951 × 648), in its top-right corner, over a desktop. */
 const meta = {
   title: "ng/FloatingButtons",
   component: FloatingButtons,
   decorators: [
     (Story) => (
-      <div className="relative bg-neutral-700" style={{ width: 951, height: 648 }}>
+      <div className="relative bg-black" style={{ width: 951, height: 648 }}>
+        <FakeDesktop />
         <Story />
       </div>
     ),

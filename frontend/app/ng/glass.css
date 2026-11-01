@@ -1,0 +1,166 @@
+/* /ng's glass: the material of the surfaces that float over the clone's screen (a button, a
+   tooltip, a dialog's panel). Only the surface: what is on it is flat. The rules are in
+   `./GLASS.md`; the samples are the `ng/Design/Glass` story.
+
+   One light, high above the top of the display. So, on every piece:
+   - the rim (a 1 px edge, `::before`) is brightest at the top and fades down the sides, with a
+     little light bounced back on the bottom edge;
+   - a sheen lights the top of the face and fades out before the middle;
+   - the shadow falls under the piece;
+   - a pressed control sinks: no sheen, dark at its top inside.
+
+   Two looks, by the app's `dark` variant (the OS's setting, or a `.dark` ancestor): light glass
+   with dark text, dark glass with light text. Each look is a palette (`--g-*`); the pieces and
+   their states take from it (`--glass-*`), so a variant changes only what it must. In the components
+   layer: a Tailwind utility on the same element wins, except `shadow-*` and `ring-*`, which put
+   back all of `box-shadow` (do not use them on glass). */
+@layer components {
+  .ng-glass {
+    /* The light look's palette */
+    --g-thin: rgb(255 255 255 / 0.35);
+    --g-thick: rgb(255 255 255 / 0.55);
+    --g-sheen: rgb(255 255 255 / 0.45);
+    --g-rim-top: rgb(255 255 255 / 0.95);
+    --g-rim-side: rgb(255 255 255 / 0.35);
+    --g-rim-bottom: rgb(255 255 255 / 0.55);
+    --g-inner: inset 0 -1px 0 rgb(0 0 0 / 0.05);
+    /* A hairline round the piece: white glass on a white window needs an edge */
+    --g-drop: 0 0 0 0.5px rgb(0 0 0 / 0.1), 0 1px 2px rgb(0 0 0 / 0.1), 0 6px 16px -4px rgb(0 0 0 / 0.2);
+    --g-drop-long: 0 0 0 0.5px rgb(0 0 0 / 0.1), 0 2px 4px rgb(0 0 0 / 0.08), 0 24px 56px -12px rgb(0 0 0 / 0.3);
+    --g-text: rgb(0 0 0 / 0.85);
+    --g-scheme: light;
+    --g-hover-over: rgb(255 255 255 / 0.3);
+    --g-hover-rim: rgb(255 255 255);
+    --g-press-over: rgb(0 0 0 / 0.05);
+    --g-press-inner: inset 0 2px 4px rgb(0 0 0 / 0.15);
+    --g-focus: rgb(0 0 0 / 0.6);
+    /* Lit, in the light look: dark glass */
+    --g-lit-tint: rgb(23 23 23 / 0.82);
+    --g-lit-sheen: rgb(255 255 255 / 0.14);
+    --g-lit-rim-top: rgb(255 255 255 / 0.45);
+    --g-lit-rim-side: rgb(255 255 255 / 0.1);
+    --g-lit-rim-bottom: rgb(255 255 255 / 0.15);
+    --g-lit-inner: inset 0 -1px 0 rgb(0 0 0 / 0.25);
+    --g-lit-text: rgb(255 255 255 / 0.95);
+
+    @variant dark {
+      --g-thin: rgb(23 23 23 / 0.3);
+      --g-thick: rgb(23 23 23 / 0.5);
+      --g-sheen: rgb(255 255 255 / 0.14);
+      --g-rim-top: rgb(255 255 255 / 0.42);
+      --g-rim-side: rgb(255 255 255 / 0.08);
+      --g-rim-bottom: rgb(255 255 255 / 0.14);
+      --g-inner: inset 0 -1px 0 rgb(0 0 0 / 0.25);
+      --g-drop: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 16px -4px rgb(0 0 0 / 0.45);
+      --g-drop-long: 0 2px 4px rgb(0 0 0 / 0.3), 0 24px 56px -12px rgb(0 0 0 / 0.65);
+      --g-text: rgb(255 255 255 / 0.92);
+      --g-scheme: dark;
+      --g-hover-over: rgb(255 255 255 / 0.1);
+      --g-hover-rim: rgb(255 255 255 / 0.65);
+      --g-press-over: rgb(0 0 0 / 0.08);
+      --g-press-inner: inset 0 2px 5px rgb(0 0 0 / 0.35);
+      --g-focus: rgb(255 255 255 / 0.75);
+      /* Lit, in the dark look: frosted white */
+      --g-lit-tint: rgb(245 245 245 / 0.86);
+      --g-lit-sheen: rgb(255 255 255 / 0.6);
+      --g-lit-rim-top: rgb(255 255 255);
+      --g-lit-rim-side: rgb(255 255 255 / 0.45);
+      --g-lit-rim-bottom: rgb(255 255 255 / 0.6);
+      --g-lit-inner: inset 0 -1px 0 rgb(0 0 0 / 0.12);
+      --g-lit-text: rgb(0 0 0 / 0.88);
+    }
+
+    --glass-tint: var(--g-thin);
+    --glass-blur: 8px;
+    --glass-sheen: var(--g-sheen);
+    --glass-over: transparent;
+    --glass-rim-top: var(--g-rim-top);
+    --glass-rim-side: var(--g-rim-side);
+    --glass-rim-bottom: var(--g-rim-bottom);
+    --glass-inner: var(--g-inner);
+    --glass-drop: var(--g-drop);
+    position: relative;
+    color: var(--g-text);
+    color-scheme: var(--g-scheme);
+    background:
+      linear-gradient(to bottom, var(--glass-sheen), transparent min(55%, 140px)),
+      linear-gradient(var(--glass-over), var(--glass-over)),
+      var(--glass-tint);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.8);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.8);
+    box-shadow: var(--glass-inner), var(--glass-drop);
+  }
+  .ng-glass::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    padding: 1px;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(
+      to bottom,
+      var(--glass-rim-top),
+      var(--glass-rim-side) min(50%, 120px),
+      var(--glass-rim-side) calc(100% - 8px),
+      var(--glass-rim-bottom)
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box exclude,
+      linear-gradient(#000 0 0);
+  }
+
+  /* A surface with text to read (a dialog, a tooltip, the monitor's number): more tint, more
+     blur, a long shadow. */
+  .ng-glass-thick {
+    --glass-tint: var(--g-thick);
+    --glass-blur: 14px;
+    --glass-drop: var(--g-drop-long);
+  }
+
+  /* On: a control whose thing is open. The other look's glass: dark in the light look, frosted
+     white in the dark one. */
+  .ng-glass-lit {
+    --glass-tint: var(--g-lit-tint);
+    --glass-sheen: var(--g-lit-sheen);
+    --glass-rim-top: var(--g-lit-rim-top);
+    --glass-rim-side: var(--g-lit-rim-side);
+    --glass-rim-bottom: var(--g-lit-rim-bottom);
+    --glass-inner: var(--g-lit-inner);
+    color: var(--g-lit-text);
+  }
+
+  /* A control: a mouse over it adds light, a press sinks it. */
+  .ng-glass-control {
+    cursor: pointer;
+    transition:
+      transform 150ms ease-out,
+      opacity 150ms ease-out;
+  }
+  @media (hover: hover) {
+    .ng-glass-control:hover:not(:disabled) {
+      --glass-over: var(--g-hover-over);
+      --glass-rim-top: var(--g-hover-rim);
+    }
+    .ng-glass-lit.ng-glass-control:hover:not(:disabled) {
+      --glass-rim-top: var(--g-lit-rim-top);
+    }
+  }
+  .ng-glass-control:active:not(:disabled) {
+    transform: scale(0.96);
+    --glass-sheen: transparent;
+    --glass-over: var(--g-press-over);
+    --glass-inner: var(--g-press-inner);
+  }
+  .ng-glass-control:focus-visible {
+    outline: 2px solid var(--g-focus);
+    outline-offset: 2px;
+  }
+  .ng-glass-control:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+}

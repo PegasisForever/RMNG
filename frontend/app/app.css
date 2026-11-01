@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* /ng's glass (`ng/GLASS.md`) */
+@import "./ng/glass.css";
 
 /* `dark:*` applies when the OS is in dark mode (the app is auto/device-driven, no
    toggle) OR when a `.dark` ancestor is present. The media query keeps the real app

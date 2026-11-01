@@ -139,6 +139,28 @@ export const PhoneSideways: Story = {
   },
 };
 
+/** A long press on Fit: the Edit layout dialog, with the phone's one monitor (no windows to
+ *  open, none to add). */
+export const PhoneLayoutDialog: Story = {
+  args: {
+    dialog: (
+      <LayoutEditorView
+        layout={{
+          ...DEFAULT_DESKTOP_LAYOUT,
+          monitors: [{ width: 590, height: 1278, x: 0, y: 0, primary: true }],
+          scales: [2],
+        }}
+        onChange={fn()}
+        onMatchWindow={fn()}
+        matching={null}
+        note={null}
+        onClose={fn()}
+        glass
+      />
+    ),
+  },
+};
+
 // ---- mouse and keyboard mode, on a desktop ----
 
 const desktop = {
@@ -195,6 +217,7 @@ export const DesktopLayoutDialog: Story = {
         matching={null}
         note={null}
         onClose={fn()}
+        glass
       />
     ),
   },

@@ -24,6 +24,7 @@ export function LayoutEditorContainer({
   page = "/viewer",
   windows = true,
   here,
+  glass = false,
 }: {
   /** The layout changed and is saved: put it in force. */
   onApplied: (layout: BrowserLayout) => void;
@@ -34,6 +35,8 @@ export function LayoutEditorContainer({
   windows?: boolean;
   /** The monitor of the window the dialog is open in, when it is a monitor's window. */
   here?: number;
+  /** In `/ng`'s glass. */
+  glass?: boolean;
 }) {
   const [layout, setLayout] = useState<BrowserLayout>(() => readLayout() ?? DEFAULT_DESKTOP_LAYOUT);
   const apply = (next: BrowserLayout, change?: LayoutChange) => {
@@ -90,6 +93,7 @@ export function LayoutEditorContainer({
       matching={matching}
       note={note}
       onClose={onClose}
+      glass={glass}
     />
   );
 }

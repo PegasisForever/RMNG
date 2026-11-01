@@ -18,6 +18,9 @@
 // While the dialog is open, each monitor window shows its monitor's number large in its middle
 // (the container tells them), so the boxes here can be matched to the windows.
 //
+// In `/ng` its panel is glass and its content flat (`~/ng/GLASS.md`, the `glass` prop);
+// elsewhere it is the dashboard's panel.
+//
 // Pure: the layout comes in and every change goes out, with what it does to the monitors'
 // numbers (`LayoutChange`). The container saves and applies it, opens and renumbers the monitor
 // windows, and asks them for their sizes.
@@ -56,6 +59,56 @@ const SCROLL_MODES: { value: ScrollMode; label: string }[] = [
   { value: "mouse", label: "Mouse wheel" },
 ];
 
+/** The dialog's classes, in the dashboard's look and in `/ng`'s (on glass, flat). */
+const LOOKS = {
+  plain: {
+    title: "text-sm font-semibold text-slate-900 dark:text-slate-100",
+    text: "text-slate-500 dark:text-slate-400",
+    faint: "text-slate-400 dark:text-slate-500",
+    note: "text-amber-600 dark:text-amber-400",
+    area: "rounded-md border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-900",
+    ghost: "rounded border border-dashed border-slate-400 dark:border-slate-500",
+    box: "rounded border-[1.5px] border-slate-400 bg-white dark:border-slate-600 dark:bg-slate-800",
+    primaryBox: "rounded border-[1.5px] border-emerald-500 bg-emerald-50 dark:bg-emerald-950",
+    here: "text-emerald-600 dark:text-emerald-400",
+    number: "text-slate-700 dark:text-slate-100",
+    size: "text-slate-400",
+    scale:
+      "rounded border border-slate-300 bg-white px-0.5 py-0 text-[11px] tabular-nums text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300",
+    icon: "rounded p-0.5 text-slate-500 hover:bg-slate-200 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100",
+    danger: "rounded p-0.5 text-rose-500 hover:bg-rose-100 dark:hover:bg-rose-950/60",
+    tip: "rounded bg-slate-900 px-1.5 py-0.5 text-white shadow dark:bg-slate-100 dark:text-slate-900",
+    add: "inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800",
+    label: "text-slate-500 dark:text-slate-400",
+    input: settingsInput,
+    done: "rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700",
+  },
+  glass: {
+    title: "text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-white",
+    text: "text-black/60 dark:text-white/60",
+    faint: "text-black/40 dark:text-white/40",
+    note: "text-amber-700 dark:text-amber-300",
+    area: "rounded-xl border border-black/10 bg-white/40 dark:border-white/10 dark:bg-black/25",
+    ghost: "rounded-lg border border-dashed border-black/40 dark:border-white/40",
+    box: "rounded-lg border border-black/15 bg-white dark:border-white/20 dark:bg-neutral-800",
+    primaryBox: "rounded-lg border border-emerald-500 bg-emerald-50 dark:border-emerald-400/80 dark:bg-emerald-950",
+    here: "text-emerald-700 dark:text-emerald-300",
+    number: "text-neutral-900 dark:text-white",
+    size: "text-black/50 dark:text-white/50",
+    scale:
+      "rounded-md border border-black/15 bg-white px-0.5 py-0 text-[11px] tabular-nums text-black/80 dark:border-white/15 dark:bg-neutral-900 dark:text-white/80",
+    icon: "rounded-md p-0.5 text-black/55 hover:bg-black/5 hover:text-black dark:text-white/60 dark:hover:bg-white/10 dark:hover:text-white",
+    danger: "rounded-md p-0.5 text-rose-600 hover:bg-rose-500/15 dark:text-rose-400 dark:hover:bg-rose-500/20 dark:hover:text-rose-300",
+    tip: "rounded-md bg-neutral-900 px-1.5 py-0.5 text-white dark:bg-neutral-950",
+    add: "inline-flex items-center gap-1 rounded-lg border border-black/15 bg-white/50 px-3 py-1.5 text-xs font-medium text-neutral-900 hover:bg-white/80 disabled:opacity-40 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10",
+    label: "text-black/60 dark:text-white/60",
+    input:
+      "w-full rounded-lg border border-black/10 bg-white/60 px-2.5 py-1.5 text-sm text-neutral-900 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30",
+    done: "rounded-lg bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500",
+  },
+};
+type Look = (typeof LOOKS)["plain"];
+
 /** What a change does to the monitors' numbers: a monitor added (its number), or monitors
  *  renumbered (`map[old]` is the new number; null: removed). */
 export type LayoutChange = { t: "add"; monitor: number } | { t: "renumber"; map: (number | null)[] };
@@ -80,6 +133,8 @@ export interface LayoutEditorViewProps {
   open?: boolean;
   /** The dialog has gone (after its exit). */
   onClose: () => void;
+  /** In `/ng`'s glass, over the clone's screen. */
+  glass?: boolean;
 }
 
 export function LayoutEditorView({
@@ -92,23 +147,26 @@ export function LayoutEditorView({
   note,
   open = true,
   onClose,
+  glass = false,
 }: LayoutEditorViewProps) {
+  const look = glass ? LOOKS.glass : LOOKS.plain;
   const windows = onOpenWindow !== undefined;
   const mons = layout.monitors;
   const scales = layout.scales;
 
   return (
-    <ModalShell size="md" open={open} onExited={onClose}>
+    <ModalShell size="md" open={open} onExited={onClose} glass={glass}>
       {(close) => (
         <>
-          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Edit layout</h3>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          <h3 className={look.title}>Edit layout</h3>
+          <p className={`mt-1 text-xs ${look.text}`}>
             {windows
               ? "This browser's monitors. The clones get them while you use this browser, and another device's while you use that one. Each monitor's window shows its number while this is open."
               : "This device's screen, as the clones get it while you use this device, and another device's while you use that one."}
           </p>
 
           <Arrangement
+            look={look}
             monitors={mons}
             scales={scales}
             matching={matching}
@@ -132,7 +190,7 @@ export function LayoutEditorView({
               onChange({ ...layout, monitors: removeMonitor(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
             }}
           />
-          {note ? <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">{note}</p> : null}
+          {note ? <p className={`mt-1 text-[11px] ${look.note}`}>{note}</p> : null}
 
           {windows ? (
             <div className="mt-3 flex items-center gap-2">
@@ -142,7 +200,7 @@ export function LayoutEditorView({
                 onClick={() =>
                   onChange({ ...layout, monitors: addMonitor(mons), scales: [...scales, 1] }, { t: "add", monitor: mons.length })
                 }
-                className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                className={look.add}
               >
                 <Plus aria-hidden className="size-3.5" />
                 Add monitor
@@ -152,11 +210,11 @@ export function LayoutEditorView({
 
           <div className="mt-3 grid grid-cols-[1fr_7rem] gap-2">
             <label className="block">
-              <span className="mb-0.5 block text-xs font-medium text-slate-500 dark:text-slate-400">Scroll</span>
+              <span className={`mb-0.5 block text-xs font-medium ${look.label}`}>Scroll</span>
               <select
                 value={layout.scrollMode}
                 onChange={(e) => onChange({ ...layout, scrollMode: e.target.value as ScrollMode })}
-                className={settingsInput}
+                className={look.input}
               >
                 {SCROLL_MODES.map((m) => (
                   <option key={m.value} value={m.value}>
@@ -166,23 +224,23 @@ export function LayoutEditorView({
               </select>
             </label>
             <label className="block">
-              <span className="mb-0.5 block text-xs font-medium text-slate-500 dark:text-slate-400">Speed %</span>
+              <span className={`mb-0.5 block text-xs font-medium ${look.label}`}>Speed %</span>
               <input
                 type="number"
                 step={5}
                 value={layout.scrollSpeed}
                 onChange={(e) => onChange({ ...layout, scrollSpeed: Number(e.target.value) || 0 })}
-                className={settingsInput}
+                className={look.input}
               />
             </label>
           </div>
 
           <div className="mt-4 flex items-center justify-end gap-2">
-            <span className="mr-auto text-[11px] text-slate-400 dark:text-slate-500">Changes apply at once.</span>
+            <span className={`mr-auto text-[11px] ${look.faint}`}>Changes apply at once.</span>
             <button
               type="button"
               onClick={() => close()}
-              className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+              className={look.done}
             >
               Done
             </button>
@@ -196,6 +254,7 @@ export function LayoutEditorView({
 /** The monitors drawn to scale, each with its buttons. A drag moves one, snapped where it
  *  would land; the drop puts it there (`onDrop`, in monitor pixels). */
 function Arrangement({
+  look,
   monitors,
   scales,
   matching,
@@ -207,6 +266,7 @@ function Arrangement({
   here,
   onRemove,
 }: {
+  look: Look;
   monitors: MonitorSpec[];
   /** Each monitor's pixel scale. */
   scales: number[];
@@ -259,7 +319,7 @@ function Arrangement({
       ref={area}
       role="group"
       aria-label="Monitor arrangement"
-      className="relative mt-3 w-full touch-none select-none rounded-md border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-900"
+      className={`relative mt-3 w-full touch-none select-none ${look.area}`}
       style={{ height: VIEW_H }}
     >
       {monitors.map((m, i) => {
@@ -275,18 +335,14 @@ function Arrangement({
             {moving ? (
               <div
                 aria-hidden
-                className="pointer-events-none absolute rounded border border-dashed border-slate-400 dark:border-slate-500"
+                className={`pointer-events-none absolute ${look.ghost}`}
                 style={{ left: f.ox + raw.x * f.scale, top: f.oy + raw.y * f.scale, ...box }}
               />
             ) : null}
             <div
               aria-label={`Monitor ${i}${primary ? " (primary)" : ""}`}
-              className={`absolute flex cursor-grab flex-col items-center justify-center rounded border-[1.5px] ${
+              className={`${primary ? look.primaryBox : look.box} absolute flex cursor-grab flex-col items-center justify-center ${
                 moving ? "z-10 cursor-grabbing opacity-90" : ""
-              } ${
-                primary
-                  ? "border-emerald-500 bg-emerald-50 dark:bg-emerald-950"
-                  : "border-slate-400 bg-white dark:border-slate-600 dark:bg-slate-800"
               }`}
               style={{ left: f.ox + at.x * f.scale, top: f.oy + at.y * f.scale, ...box }}
               onPointerDown={down(i)}
@@ -295,16 +351,16 @@ function Arrangement({
               onPointerCancel={() => setDrag(null)}
             >
               {here === i ? (
-                <span className="absolute left-1 top-0.5 text-[9px] font-medium leading-none text-emerald-600 dark:text-emerald-400">
+                <span className={`absolute left-1.5 top-1 text-[9px] font-medium leading-none ${look.here}`}>
                   here
                 </span>
               ) : null}
               <span className={`flex items-baseline gap-1 ${roomy ? "flex-col items-center gap-0" : ""}`}>
-                <span className="text-xs font-semibold text-slate-700 dark:text-slate-100">
+                <span className={`text-xs font-semibold ${look.number}`}>
                   {i}
                   {primary ? " ★" : ""}
                 </span>
-                <span className="text-[10px] tabular-nums text-slate-400">
+                <span className={`text-[10px] tabular-nums ${look.size}`}>
                   {m.width}×{m.height}
                 </span>
               </span>
@@ -317,9 +373,7 @@ function Arrangement({
                   value={scales[i]}
                   onPointerDown={(e) => e.stopPropagation()}
                   onChange={(e) => onScale(i, Number(e.target.value))}
-                  className={`rounded border border-slate-300 bg-white px-0.5 py-0 text-[11px] tabular-nums text-slate-600 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 ${
-                    roomy ? "" : "basis-full"
-                  }`}
+                  className={`${look.scale} ${roomy ? "" : "basis-full"}`}
                 >
                   {PIXEL_SCALES.map((s) => (
                     <option key={s} value={s}>
@@ -328,16 +382,17 @@ function Arrangement({
                   ))}
                 </select>
                 {primary ? null : (
-                  <IconButton label="Make primary (monitor 0)" onClick={() => onPrimary(i)}>
+                  <IconButton look={look} label="Make primary (monitor 0)" onClick={() => onPrimary(i)}>
                     <Star className="size-3.5" />
                   </IconButton>
                 )}
                 {onOpenWindow ? (
-                  <IconButton label="Open its window" onClick={() => onOpenWindow(i)}>
+                  <IconButton look={look} label="Open its window" onClick={() => onOpenWindow(i)}>
                     <ExternalLink className="size-3.5" />
                   </IconButton>
                 ) : null}
                 <IconButton
+                  look={look}
                   label={matching === i ? "Asking its window…" : "Match its window's size"}
                   disabled={matching !== null}
                   onClick={() => onMatchWindow(i)}
@@ -345,7 +400,7 @@ function Arrangement({
                   <Maximize2 className="size-3.5" />
                 </IconButton>
                 {monitors.length > 1 ? (
-                  <IconButton label="Remove this monitor" danger onClick={() => onRemove(i)}>
+                  <IconButton look={look} label="Remove this monitor" danger onClick={() => onRemove(i)}>
                     <Trash2 className="size-3.5" />
                   </IconButton>
                 ) : null}
@@ -361,12 +416,14 @@ function Arrangement({
 /** A small icon button in a monitor's box, its label in a tooltip above it on hover. A press on
  *  it starts no drag. */
 function IconButton({
+  look,
   label,
   danger = false,
   disabled = false,
   onClick,
   children,
 }: {
+  look: Look;
   label: string;
   danger?: boolean;
   disabled?: boolean;
@@ -380,16 +437,12 @@ function IconButton({
       disabled={disabled}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={onClick}
-      className={`group relative rounded p-0.5 disabled:opacity-40 ${
-        danger
-          ? "text-rose-500 hover:bg-rose-100 dark:hover:bg-rose-950/60"
-          : "text-slate-500 hover:bg-slate-200 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
-      }`}
+      className={`group relative disabled:opacity-40 ${danger ? look.danger : look.icon}`}
     >
       {children}
       <span
         role="tooltip"
-        className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-1 -translate-x-1/2 whitespace-nowrap rounded bg-slate-900 px-1.5 py-0.5 text-[10px] font-medium text-white opacity-0 shadow transition-opacity group-hover:opacity-100 dark:bg-slate-100 dark:text-slate-900"
+        className={`pointer-events-none absolute bottom-full left-1/2 z-20 mb-1 -translate-x-1/2 whitespace-nowrap text-[10px] font-medium opacity-0 transition-opacity group-hover:opacity-100 ${look.tip}`}
       >
         {label}
       </span>

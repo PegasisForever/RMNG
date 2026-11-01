@@ -70,6 +70,10 @@ const PANEL: Record<ModalSize, string> = {
 const PANEL_CHROME =
   "rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800";
 
+/** The same in `/ng`'s glass (`~/ng/GLASS.md`), and its backdrop: darker, with no blur (the
+ *  panel blurs what is under it). */
+const GLASS_CHROME = "ng-glass ng-glass-thick rounded-2xl";
+
 /** Where a dialog goes. `window`: over the whole page, on a dimmed backdrop. `inline`: it
  *  fills the nearest positioned box instead, with no backdrop and no frame. The phone app
  *  (`/ng`) shows its pages in the space of its keyboard, and a dialog opened from one of them
@@ -99,17 +103,17 @@ export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boole
 }
 
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
-export function backdropClass(layer: ModalLayer, closing: boolean): string {
+export function backdropClass(layer: ModalLayer, closing: boolean, glass = false): string {
   return (
-    `fixed inset-0 ${LAYER[layer]} flex items-center justify-center bg-slate-900/30 p-4 ` +
+    `fixed inset-0 ${LAYER[layer]} flex items-center justify-center ${glass ? "bg-black/20 dark:bg-black/35" : "bg-slate-900/30"} p-4 ` +
     (closing ? MODAL_ANIMATION.backdrop.exit : MODAL_ANIMATION.backdrop.enter)
   );
 }
 
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
-export function panelClass(size: ModalSize, closing: boolean): string {
+export function panelClass(size: ModalSize, closing: boolean, glass = false): string {
   return (
-    `${PANEL_CHROME} ${PANEL[size]} ` +
+    `${glass ? GLASS_CHROME : PANEL_CHROME} ${PANEL[size]} ` +
     (closing ? MODAL_ANIMATION.panel.exit : MODAL_ANIMATION.panel.enter)
   );
 }
@@ -130,6 +134,8 @@ export interface ModalShellProps {
   dismissible?: boolean;
   size?: ModalSize;
   layer?: ModalLayer;
+  /** In `/ng`'s glass (`~/ng/GLASS.md`), over the clone's screen; else the dashboard's panel. */
+  glass?: boolean;
   /** The dialog's own markup, given the shell's door out. */
   children: (close: ModalClose) => ReactNode;
 }
@@ -140,6 +146,7 @@ export function ModalShell({
   dismissible = true,
   size = "sm",
   layer = "base",
+  glass = false,
   children,
 }: ModalShellProps) {
   const { closing, beginExit } = useModalExit();
@@ -180,10 +187,10 @@ export function ModalShell({
   }
 
   return (
-    <div className={backdropClass(layer, closing)}>
+    <div className={backdropClass(layer, closing, glass)}>
       {/* Backdrop is inert — clicking it must not close the dialog, because a stray click
           outside must never discard a half-filled form. Cancel and Escape are the ways out. */}
-      <div className={panelClass(size, closing)}>{children(close)}</div>
+      <div className={panelClass(size, closing, glass)}>{children(close)}</div>
     </div>
   );
 }

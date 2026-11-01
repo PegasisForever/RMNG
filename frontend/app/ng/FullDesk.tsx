@@ -470,6 +470,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
             page="/ng"
             windows={windows}
             here={monitor}
+            glass
             onApplied={(l) => {
               setLayout(l);
               r.claim();

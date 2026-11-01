@@ -14,7 +14,7 @@
 // - Monitors (a desktop whose layout has monitors with no window open): opens their windows,
 //   with how many there are on it.
 //
-// A button whose thing is open is lit. A right click is a long press, for a mouse. With a mouse
+// They are glass (`./GLASS.md`); a button whose thing is open is lit. A right click is a long press, for a mouse. With a mouse
 // each button says what it does, and what its long press does, in a tooltip under it. In mouse
 // and keyboard mode they slide out of the window to the right when they are not in use (`away`;
 // `./FullDesk.tsx` says when).
@@ -131,11 +131,12 @@ export function FloatingButtons({
   );
 }
 
-/** A count in a button's top-right corner, on `className`'s color. */
+/** A count in a button's top-right corner, on `className`'s color: a drop of colored glass
+ *  (`./GLASS.md`). */
 function Count({ n, className }: { n: number; className: string }) {
   return (
     <span
-      className={`absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none text-white ${className}`}
+      className={`absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.4),0_1px_2px_rgb(0_0_0/0.45)] ${className}`}
     >
       {n}
     </span>
@@ -169,51 +170,50 @@ function Round({
   const long = useRef(false);
   const stop = () => clearTimeout(timer.current);
   return (
-    <button
-      type="button"
-      aria-label={label}
-      aria-pressed={on}
-      onPointerDown={(e) => {
-        long.current = false;
-        if (!onLongPress || e.button !== 0) return;
-        stop();
-        timer.current = setTimeout(() => {
-          long.current = true;
-          onLongPress();
-        }, LONG_PRESS_MS);
-      }}
-      onPointerUp={stop}
-      onPointerCancel={stop}
-      onPointerLeave={stop}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        // A mouse's right click: the long press at once
-        if (onLongPress && e.button === 2) {
+    // The tooltip is the button's sibling: in the button, its blur would see only the button
+    <div className="group relative">
+      <button
+        type="button"
+        aria-label={label}
+        aria-pressed={on}
+        onPointerDown={(e) => {
+          long.current = false;
+          if (!onLongPress || e.button !== 0) return;
           stop();
-          onLongPress();
-        }
-      }}
-      onClick={() => {
-        if (!long.current) onClick();
-        long.current = false;
-      }}
-      className={`group relative flex items-center justify-center rounded-full border shadow-lg backdrop-blur-md ${
-        on
-          ? "border-neutral-200 bg-neutral-100 text-black"
-          : "border-white/15 bg-black/55 text-white active:bg-neutral-700"
-      }`}
-      style={{ width: FLOAT_BUTTON, height: FLOAT_BUTTON, WebkitTouchCallout: "none" }}
-    >
-      <span className={`contents ${dim ? "[&>*]:opacity-40" : ""}`}>{children}</span>
+          timer.current = setTimeout(() => {
+            long.current = true;
+            onLongPress();
+          }, LONG_PRESS_MS);
+        }}
+        onPointerUp={stop}
+        onPointerCancel={stop}
+        onPointerLeave={stop}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          // A mouse's right click: the long press at once
+          if (onLongPress && e.button === 2) {
+            stop();
+            onLongPress();
+          }
+        }}
+        onClick={() => {
+          if (!long.current) onClick();
+          long.current = false;
+        }}
+        className={`ng-glass ng-glass-control flex items-center justify-center rounded-full ${on ? "ng-glass-lit" : ""}`}
+        style={{ width: FLOAT_BUTTON, height: FLOAT_BUTTON, WebkitTouchCallout: "none" }}
+      >
+        <span className={`contents ${dim ? "[&>*]:opacity-40" : ""}`}>{children}</span>
+      </button>
       {/* Under the button, from its right edge, so it stays in the window; only with a mouse
           (Tailwind's hover needs a device that hovers) */}
       <span
         role="tooltip"
-        className="pointer-events-none absolute right-0 top-full z-10 mt-2 flex flex-col items-end whitespace-nowrap rounded-md bg-neutral-900/95 px-2 py-1 text-xs text-white opacity-0 shadow-lg ring-1 ring-white/10 transition-opacity group-hover:opacity-100 group-hover:delay-300"
+        className="ng-glass ng-glass-thick pointer-events-none absolute right-0 top-full z-10 mt-2 flex flex-col items-end whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs opacity-0 transition-opacity group-hover:opacity-100 group-hover:delay-300"
       >
         <span>{label}</span>
-        {hold ? <span className="text-neutral-400">Right-click or hold: {hold}</span> : null}
+        {hold ? <span className="text-black/55 dark:text-white/60">Right-click or hold: {hold}</span> : null}
       </span>
-    </button>
+    </div>
   );
 }
