@@ -1,7 +1,9 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
+import { hosts } from "~/components/__fixtures__/clones";
 import { linearTickets, teamLabels, teamStates, ticketDetailed } from "~/components/__fixtures__/tickets";
+import { openTickets } from "~/lib/tickets";
 import { linearWorkspaces } from "~/components/__fixtures__/workspaces";
 import { TicketPanel } from "~/components/TicketPanel";
 
@@ -14,7 +16,8 @@ const meta = {
   decorators: [inPageFrame],
   parameters: { layout: "centered" },
   args: {
-    tickets: linearTickets,
+    // As the container gives them: open, no clone made for them yet, each once
+    tickets: openTickets(linearTickets, hosts),
     loading: false,
     error: null,
     open: null,

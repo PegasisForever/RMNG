@@ -176,37 +176,32 @@ export function placeMenu(
 /** The trigger's own styling, which only a custom trigger sets. The ⋮ button brings its own. */
 const PLAIN_TRIGGER = "flex cursor-pointer items-center rounded disabled:opacity-50";
 
-export function OverflowMenu({
-  label,
-  disabled = false,
-  trigger,
+/** A menu's panel, portalled to the body at fixed coordinates off `at` (its trigger's box):
+ *  placed to stay inside the window (`placeMenu`), closed by a click outside it, Escape, a
+ *  scroll that would strand it, or an item (`useMenuClose`). `className`: its surface, the
+ *  dashboard's glass when absent. */
+export function MenuPanel({
+  at,
   align = "right",
+  onClose,
+  className,
+  ignore,
   children,
 }: {
-  /** What the trigger announces, e.g. `actions for WE-301`. */
-  label: string;
-  disabled?: boolean;
-  /** What the trigger draws, in place of the ⋮ glyph. Takes the open flag, so a trigger can
-   *  show that its own menu is up. The button and everything wired to it stay the same. */
-  trigger?: (open: boolean) => ReactNode;
-  /** Which edge the panel lines up with. A card's ⋮ sits at its right corner and the panel
-   *  hangs left off it; a menu under a column title hangs the other way. */
+  at: Box;
   align?: "left" | "right";
+  onClose: () => void;
+  className?: string;
+  /** Its trigger: a press on it is the trigger's to handle, not a click outside. */
+  ignore?: { current: HTMLElement | null };
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
-  // The trigger's box in viewport coordinates, measured on the click that opens the menu.
-  // Null until then, which is also what keeps the first frame from flashing it at the origin.
-  const [at, setAt] = useState<Box | null>(null);
   // Where the panel actually goes, which takes measuring the panel itself — see the layout
   // effect below. It renders hidden for the one pass that measurement needs.
-  const [place, setPlace] = useState<{
-    top: number;
-    left: number;
-    maxHeight: number;
-  } | null>(null);
-  const ref = useRef<HTMLDivElement>(null);
+  const [place, setPlace] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
 
   // Placing the panel needs its size, and its size is only known once it is in the document.
   // A layout effect runs before the browser paints, so the unplaced pass is never seen.
@@ -216,7 +211,6 @@ export function OverflowMenu({
   // short after the window grew. The observer re-places a menu whose rows arrive late — the
   // ones that open on a note and fill in from Linear.
   useLayoutEffect(() => {
-    if (!open || !at) return;
     const el = menuRef.current;
     if (!el) return;
     const measure = () => {
@@ -233,19 +227,19 @@ export function OverflowMenu({
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [open, at, align]);
+  }, [at, align]);
 
   useEffect(() => {
-    if (!open) return;
+    const close = () => closeRef.current();
     const onDoc = (e: MouseEvent) => {
       const target = e.target as Node;
-      // The panel is portalled out of `ref`, so it has to be asked separately — otherwise
-      // this closes on mousedown and the item's own click never lands.
-      if (ref.current?.contains(target) || menuRef.current?.contains(target)) return;
-      setOpen(false);
+      // The panel is portalled out of its trigger, so it has to be asked separately —
+      // otherwise this closes on mousedown and the item's own click never lands.
+      if (ignore?.current?.contains(target) || menuRef.current?.contains(target)) return;
+      close();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") close();
     };
     // A fixed panel cannot follow its trigger, so scrolling the column out from under it
     // closes it rather than leaving it stranded mid-board.
@@ -256,7 +250,7 @@ export function OverflowMenu({
     // A resize passes `window` as its target, which is not a Node and so never matches.
     const onScroll = (e: Event) => {
       if (e.target instanceof Node && menuRef.current?.contains(e.target)) return;
-      setOpen(false);
+      close();
     };
     document.addEventListener("mousedown", onDoc);
     document.addEventListener("keydown", onKey);
@@ -268,7 +262,58 @@ export function OverflowMenu({
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", onScroll);
     };
-  }, [open]);
+  }, [ignore]);
+
+  return createPortal(
+    <CloseContext.Provider value={onClose}>
+      <div
+        ref={menuRef}
+        role="menu"
+        style={{
+          top: place ? place.top : at.bottom + GAP,
+          left: place ? place.left : at.left,
+          maxHeight: place?.maxHeight,
+          visibility: place ? undefined : "hidden",
+        }}
+        className={`fixed z-50 w-56 overflow-y-auto py-1 ${
+          className ?? `rounded-md ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`
+        }`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {children}
+      </div>
+    </CloseContext.Provider>,
+    document.body,
+  );
+}
+
+export function OverflowMenu({
+  label,
+  disabled = false,
+  trigger,
+  align = "right",
+  onTouch,
+  children,
+}: {
+  /** What the trigger announces, e.g. `actions for WE-301`. */
+  label: string;
+  disabled?: boolean;
+  /** What the trigger draws, in place of the ⋮ glyph. Takes the open flag, so a trigger can
+   *  show that its own menu is up. The button and everything wired to it stay the same. */
+  trigger?: (open: boolean) => ReactNode;
+  /** Which edge the panel lines up with. A card's ⋮ sits at its right corner and the panel
+   *  hangs left off it; a menu under a column title hangs the other way. */
+  align?: "left" | "right";
+  /** A tap with a finger (or a pen) calls this in place of opening the panel: the /ng pages
+   *  open their own sheet of large tiles on a touch screen. Absent ⇒ the panel opens. */
+  onTouch?: () => void;
+  children: ReactNode;
+}) {
+  // The trigger's box in viewport coordinates, measured on the click that opens the menu; null
+  // while the menu is closed.
+  const [at, setAt] = useState<Box | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  const open = at !== null;
 
   return (
     <div ref={ref} className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -278,13 +323,16 @@ export function OverflowMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={disabled}
+        // Neither a pointer, a mouse nor a touch sensor starts dragging the card under it
         onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onTouchStart={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
+          const kind = (e.nativeEvent as PointerEvent).pointerType;
+          if (onTouch && (kind === "touch" || kind === "pen")) return onTouch();
           const box = e.currentTarget.getBoundingClientRect();
-          setAt({ top: box.top, bottom: box.bottom, left: box.left, right: box.right });
-          setPlace(null);
-          setOpen((o) => !o);
+          setAt(open ? null : { top: box.top, bottom: box.bottom, left: box.left, right: box.right });
         }}
         className={
           trigger
@@ -296,27 +344,11 @@ export function OverflowMenu({
       >
         {trigger ? trigger(open) : <EllipsisVertical className="size-4" />}
       </button>
-      {open && at
-        ? createPortal(
-            <CloseContext.Provider value={() => setOpen(false)}>
-              <div
-                ref={menuRef}
-                role="menu"
-                style={{
-                  top: place ? place.top : at.bottom + GAP,
-                  left: place ? place.left : at.left,
-                  maxHeight: place?.maxHeight,
-                  visibility: place ? undefined : "hidden",
-                }}
-                className={`fixed z-50 w-56 overflow-y-auto rounded-md py-1 ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`}
-                onClick={(e) => e.stopPropagation()}
-              >
-                {children}
-              </div>
-            </CloseContext.Provider>,
-            document.body,
-          )
-        : null}
+      {at ? (
+        <MenuPanel at={at} align={align} onClose={() => setAt(null)} ignore={ref}>
+          {children}
+        </MenuPanel>
+      ) : null}
     </div>
   );
 }

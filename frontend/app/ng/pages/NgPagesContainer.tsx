@@ -87,6 +87,7 @@ import { type Move, moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
 import { ErrorLine, PAGES_GLASS } from "./ui";
+import { BoardDnd } from "./BoardDnd";
 import { NarrowLayout } from "./NarrowLayout";
 import { UsageView } from "./UsageView";
 import { WIDE_MIN, WideLayout } from "./WideLayout";
@@ -325,10 +326,10 @@ export function NgPagesContainer({
   // ---- clones ----
   /** Into a column; into an archive column archives it and out of one restores it, as the
    *  board's drop does. A refused call puts the card back. */
-  const moveToColumn = (clone: Clone, columnId: string) => {
+  const moveToColumn = (clone: Clone, columnId: string, at?: number) => {
     const before = columns;
     const resolved = resolveColumns(columns, state.hosts);
-    const index = resolved.find((c) => c.id === columnId)?.cloneIds.length ?? 0;
+    const index = at ?? resolved.find((c) => c.id === columnId)?.cloneIds.length ?? 0;
     applyColumns(moveCard(resolved, clone.id, columnId, index));
     const archive = archivesOnDrop(columns, columnId);
     if (archive === (clone.archived === true)) return;
@@ -481,6 +482,30 @@ export function NgPagesContainer({
         return <PortForwardModal clone={d.clone} sshPublicHost={sshHost} onClose={closeDialog} onCopy={copyText} />;
     }
   };
+  // ---- drag and drop (`./BoardDnd.tsx`) ----
+  const lanes = resolveColumns(columns, state.hosts).map((c) => ({ id: c.id, cloneIds: c.cloneIds }));
+  const dropClone = (cloneId: string, columnId: string, index: number) => {
+    const clone = clonesById.get(cloneId);
+    if (clone) moveToColumn(clone, columnId, index);
+  };
+  const dropTicketOnColumn = (ticketId: string, columnId: string) => {
+    const t = findTicket(ticketId, visibleTickets);
+    if (t) open({ kind: "clone", ticketUrl: t.url, columnId });
+  };
+  /** A page with what drags in it: the clones between their columns, the tickets in order. */
+  const withDnd = (t: NgTab, node: ReactNode): ReactNode =>
+    t === "clones" ? (
+      <BoardDnd lanes={lanes} onMoveCard={dropClone}>
+        {node}
+      </BoardDnd>
+    ) : t === "tickets" ? (
+      <BoardDnd tickets={visibleTickets.map((x) => x.id)} onReorderTickets={applyTicketOrder}>
+        {node}
+      </BoardDnd>
+    ) : (
+      node
+    );
+
   /** The Notes page, or (`only`, wide) one of its two parts in a side panel of its own. */
   const notesView = (only?: NotesPane) => (
     <NotesView
@@ -557,7 +582,8 @@ export function NgPagesContainer({
             notesId={notesId}
             onSelect={selectClone}
             onNewClone={(columnId) => open({ kind: "clone", ticketUrl: "", columnId })}
-            onMoveToColumn={moveToColumn}
+            onMoveToColumn={(clone, columnId) => moveToColumn(clone, columnId)}
+            onRenameColumn={(id, title) => applyColumns(columns.map((c) => (c.id === id ? { ...c, title } : c)))}
             onMove={moveInColumn}
             onOpenInLinear={(url) => window.open(url, "_blank", "noopener,noreferrer")}
             onChangeAccount={(clone) => open({ kind: "account", clone })}
@@ -601,10 +627,17 @@ export function NgPagesContainer({
               onPopOut={onPopOut}
               rail={page("usage", true)}
               board={
-                <>
+                // One drag area for both: a ticket dropped on a clone column makes a clone
+                <BoardDnd
+                  lanes={lanes}
+                  tickets={visibleTickets.map((x) => x.id)}
+                  onMoveCard={dropClone}
+                  onReorderTickets={applyTicketOrder}
+                  onTicketToColumn={dropTicketOnColumn}
+                >
                   {page("tickets", true)}
                   {page("clones", true)}
-                </>
+                </BoardDnd>
               }
               // An open ticket takes the side panel, as on the dashboard; the clone's notes come
               // back when it closes
@@ -632,7 +665,7 @@ export function NgPagesContainer({
               className="absolute inset-0 flex select-text flex-col overflow-hidden [&_button]:select-none"
             >
               {error ? <ErrorLine message={error} onDismiss={() => setError(null)} /> : null}
-              <div className="relative min-h-0 flex-1">{page(t)}</div>
+              <div className="relative min-h-0 flex-1">{withDnd(t, page(t))}</div>
               {dialog?.on === t ? dialogView(dialog.d) : null}
             </div>
           ))}

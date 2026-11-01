@@ -6,8 +6,18 @@
 // The pages are flat content (`../GLASS.md`): on the glass of their panel over the clone's
 // screen, or on the solid ground of their own window. Each color has its light value and its
 // `dark:` one; the names below are the ones the pages share.
-import { ChevronLeft, type LucideIcon, X } from "lucide-react";
-import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { Check, ChevronLeft, type LucideIcon, X } from "lucide-react";
+import {
+  createContext,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+
+import { type Box, MenuDivider, MenuItem, MenuPanel } from "~/components/OverflowMenu";
 
 /** The pages' panel over the clone's screen: glass with a denser tint than the buttons' (as the
  *  keyboard's), as it is full of small text that must read over a black window or a white one. */
@@ -128,7 +138,7 @@ export function HeaderButton({
   showLabel?: boolean;
   primary?: boolean;
   disabled?: boolean;
-  onClick: () => void;
+  onClick: (e: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
   return (
     <button
@@ -289,3 +299,48 @@ export function ActionSheet({
     </div>
   );
 }
+
+/** A click from a mouse (or the keyboard), not a finger or a pen: it opens a menu as the
+ *  dashboard's ⋮ does (`DesktopMenu`), not a sheet of large tiles. */
+export function isMouseClick(e: ReactMouseEvent) {
+  const kind = (e.nativeEvent as PointerEvent).pointerType;
+  return kind !== "touch" && kind !== "pen";
+}
+
+/** The box of what was clicked, for a menu to hang off it. */
+export function boxOf(e: ReactMouseEvent): Box {
+  const r = e.currentTarget.getBoundingClientRect();
+  return { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
+}
+
+/** The same groups as an `ActionSheet`, as the dashboard's ⋮ menu draws them, off `at`. */
+export function DesktopMenu({ at, groups, onClose }: { at: Box; groups: SheetGroup[]; onClose: () => void }) {
+  const shown = groups.filter((g) => g.actions.length > 0);
+  return (
+    <MenuPanel at={at} onClose={onClose}>
+      {shown.map((g, i) => (
+        <div key={i}>
+          {i > 0 ? <MenuDivider /> : null}
+          {g.title ? <p className="px-3 pb-0.5 pt-1 text-[11px] font-medium text-slate-400 dark:text-slate-500">{g.title}</p> : null}
+          {g.actions.map((a) =>
+            a.current ? (
+              <p key={a.label} className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 dark:text-slate-500">
+                <a.icon aria-hidden className="size-4 shrink-0" />
+                <span className="flex-1">{a.label}</span>
+                <Check aria-hidden className="size-3.5" />
+              </p>
+            ) : (
+              <MenuItem key={a.label} icon={a.icon} label={a.label} danger={a.danger} onClick={() => void a.onSelect()} />
+            ),
+          )}
+        </div>
+      ))}
+    </MenuPanel>
+  );
+}
+
+/** Stops a press from starting a drag of the card it is in (a mouse's, a finger's). */
+export const NO_DRAG = {
+  onMouseDown: (e: ReactMouseEvent) => e.stopPropagation(),
+  onTouchStart: (e: { stopPropagation: () => void }) => e.stopPropagation(),
+};

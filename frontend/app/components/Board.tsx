@@ -49,7 +49,7 @@ import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 
 /** A column as drawn. Ids are column ids. */
-type Lane = { id: string; cloneIds: string[] };
+export type Lane = { id: string; cloneIds: string[] };
 
 export interface BoardProps {
   /** The operator's columns, in display order. */
@@ -137,7 +137,7 @@ export interface BoardProps {
  *  to the end and back on every gap the pointer crosses.
  *
  *  The fallbacks cover the keyboard sensor, which has no pointer at all. */
-const collisionDetection: CollisionDetection = (args) => {
+export const collisionDetection: CollisionDetection = (args) => {
   const pointer = pointerWithin(args);
   const at = args.pointerCoordinates;
   const column = pointer.length === 1 ? args.droppableRects.get(pointer[0].id) : undefined;
@@ -157,7 +157,7 @@ const collisionDetection: CollisionDetection = (args) => {
 
 /** The lane holding `cardId`, or the lane whose own id it is (dropping on a column's empty
  *  body reports the column). */
-function laneOf(lanes: Lane[], id: string): Lane | undefined {
+export function laneOf(lanes: Lane[], id: string): Lane | undefined {
   return lanes.find((lane) => lane.id === id) ?? lanes.find((lane) => lane.cloneIds.includes(id));
 }
 
@@ -206,9 +206,9 @@ export function arrange(lanes: Lane[], activeId: string, overId: string): Lane[]
  *
  *  Under the `PointerSensor`'s own 5px activation distance, so it costs nothing a drag has
  *  not already paid for, and small enough that reordering still feels immediate. */
-const REARRANGE_MIN_TRAVEL = 4;
+export const REARRANGE_MIN_TRAVEL = 4;
 
-function settle(prev: Lane[], next: Lane[]): Lane[] {
+export function settle(prev: Lane[], next: Lane[]): Lane[] {
   if (prev === next) return prev;
   if (prev.length !== next.length) return next;
   const unchanged = prev.every((lane, i) => {

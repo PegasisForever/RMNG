@@ -267,6 +267,14 @@ export interface SidebarCloneProps {
    *  expanded sub clones). Absent ⇒ the row is static (children, archived rows, Storybook).
    *  Carries no keyboard activator: a card drags with the pointer only (see `BoardCard`). */
   dragListeners?: DraggableSyntheticListeners;
+  /** The row's own fill, at rest (with its hover) and selected, in place of the dashboard's
+   *  solid white and green: the /ng pages draw the card on glass. */
+  fill?: { idle: string; selected: string };
+  /** A finger can scroll the column over the card (the drag waits for a long press), so the
+   *  card does not take every touch for itself (`touch-none`). */
+  touchScroll?: boolean;
+  /** A tap with a finger on the ⋮ calls this in place of the dropdown (`OverflowMenu`). */
+  onMenuTouch?: () => void;
 }
 
 /** A single overflow-menu item that copies `command` to the clipboard and shows a
@@ -331,6 +339,7 @@ function CloneMenu({
   muted,
   mutedByParent,
   onToggleMute,
+  onTouch,
 }: {
   cloneId: string;
   managed: boolean;
@@ -353,9 +362,10 @@ function CloneMenu({
   muted: boolean;
   mutedByParent: boolean;
   onToggleMute?: () => void;
+  onTouch?: () => void;
 }) {
   return (
-    <OverflowMenu label={`actions for ${cloneId}`} disabled={busy}>
+    <OverflowMenu label={`actions for ${cloneId}`} disabled={busy} onTouch={onTouch}>
       {linearUrl ? (
         <>
           <MenuItem
@@ -432,6 +442,9 @@ export function SidebarClone({
   expanded = false,
   onToggleExpand,
   dragListeners,
+  fill,
+  touchScroll = false,
+  onMenuTouch,
 }: SidebarCloneProps) {
   const busy = op?.status === "running";
   // Linear's own title and link when the browser resolved the ticket, and what the clone
@@ -503,7 +516,7 @@ export function SidebarClone({
       aria-pressed={selected}
       onClick={onSelect}
       title={clone.id}
-      className={`group flex touch-none items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
+      className={`group flex ${touchScroll ? "" : "touch-none"} items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
         // Sub clone rows are indented under their parent; top-level rows keep the normal gutter.
         isChild ? "pl-6" : "pl-1.5"
       } ${draggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"} ${
@@ -515,8 +528,8 @@ export function SidebarClone({
         // this row hides it completely, and white is what leaves the selected tint and the
         // hover as the only colour in a column.
         selected
-          ? "border-l-emerald-400 bg-emerald-50 dark:bg-emerald-950"
-          : "bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-800"
+          ? `border-l-emerald-400 ${fill?.selected ?? "bg-emerald-50 dark:bg-emerald-950"}`
+          : (fill?.idle ?? "bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-800")
       } ${
         // In the air, the frame's glass is the card's surface, so the row gives up its own
         // fill, including the selected tint, which is opaque and would seal the card shut.
@@ -603,6 +616,7 @@ export function SidebarClone({
             muted={muted}
             mutedByParent={mutedByParent}
             onToggleMute={onToggleMute}
+            onTouch={onMenuTouch}
           />
         </div>
 

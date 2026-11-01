@@ -21,6 +21,9 @@ import TicketsStories from "../pages/TicketsView.stories";
 import { TicketsView } from "../pages/TicketsView";
 import UsageStories from "../pages/UsageView.stories";
 import { UsageView } from "../pages/UsageView";
+import { resolveColumns, withDefaults } from "~/lib/board";
+
+import { BoardDnd } from "../pages/BoardDnd";
 import { NarrowLayout } from "../pages/NarrowLayout";
 import { WIDE_MIN, WideLayout } from "../pages/WideLayout";
 import { type NgTab, ROW_STATS_MIN, type ServerUsage } from "../ToolRow";
@@ -130,6 +133,26 @@ const settingsArgs = SettingsStories.args as Parameters<typeof SettingsView>[0];
 /** Each tab's page, with its own story's data. `server`: the server's numbers at the top of
  *  Usage (the tool row has no room for them). */
 export function pageFor(tab: NgTab, server = false): ReactNode {
+  return withDnd(tab, page(tab, server));
+}
+
+/** The clone columns of the Clones page's story, for the drags. */
+const lanes = () =>
+  resolveColumns(withDefaults(clonesArgs.columns), clonesArgs.clones).map((c) => ({ id: c.id, cloneIds: c.cloneIds }));
+
+/** What drags on a page, as the container has it (a drop is only logged). */
+function withDnd(tab: NgTab, node: ReactNode): ReactNode {
+  if (tab === "clones") return <BoardDnd lanes={lanes()} onMoveCard={fn()}>{node}</BoardDnd>;
+  if (tab === "tickets")
+    return (
+      <BoardDnd tickets={ticketsArgs.tickets.map((t) => t.id)} onReorderTickets={fn()}>
+        {node}
+      </BoardDnd>
+    );
+  return node;
+}
+
+function page(tab: NgTab, server: boolean): ReactNode {
   switch (tab) {
     case "usage":
       return <Panel>{<UsageView {...usageArgs} server={server ? usage : undefined} />}</Panel>;
@@ -173,10 +196,16 @@ export function pagesFor({
           onPopOut={onPopOut}
           rail={<UsageView {...usageArgs} rail />}
           board={
-            <>
+            <BoardDnd
+              lanes={lanes()}
+              tickets={ticketsArgs.tickets.map((t) => t.id)}
+              onMoveCard={fn()}
+              onReorderTickets={fn()}
+              onTicketToColumn={fn()}
+            >
               <TicketsView {...ticketsArgs} column />
-              <ClonesView {...clonesArgs} columnsLayout />
-            </>
+              <ClonesView {...clonesArgs} columnsLayout onRenameColumn={fn()} />
+            </BoardDnd>
           }
           side={{ notes: <NotesView {...notesArgs} only="notes" />, chat: <NotesView {...notesArgs} only="chat" /> }}
           settings={<SettingsView {...settingsArgs} />}

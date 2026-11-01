@@ -8,8 +8,12 @@
 // "+" on a section makes a clone in that column. Columns are renamed, added and ordered in
 // Settings, Board, as on the desktop.
 //
-// Wide (`columns`), the sections are the board's columns side by side, with a card per clone,
-// as the dashboard has them.
+// Wide (`columnsLayout`), the sections are the board's columns side by side, with the
+// dashboard's own card per clone (`SidebarClone`), on the pages' glass.
+//
+// As on the dashboard: a clone drags within its column or into another one (`./BoardDnd.tsx`:
+// a mouse at once, a finger after a long press), a double-click on a column's title renames it,
+// and a mouse's click on ⋯ opens the dashboard's menu; a finger's opens the sheet.
 //
 // Pure: everything comes in as props, every action goes out as a callback.
 import {
@@ -32,7 +36,10 @@ import {
   Trash2,
   UserCog,
 } from "lucide-react";
-import { useState } from "react";
+import { type MouseEvent, useState } from "react";
+
+import type { Box } from "~/components/OverflowMenu";
+import { SidebarClone } from "~/components/SidebarClone";
 
 import chatgptLogo from "~/assets/chatgpt.svg";
 import claudeLogo from "~/assets/claude.svg";
@@ -47,8 +54,28 @@ import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import { workspaceBadge } from "~/lib/workspace";
 
+import { DragItem, DropColumn, useBoardDnd } from "./BoardDnd";
 import { type Move, movesFor } from "./order";
-import { ActionSheet, BOX, CARD, CARD_FILL, DIVIDE, useColumnFrame, EmptyLine, HERE, LINE, Page, PageHeader, PRESS, type SheetGroup, TEXT, TEXT_2, TEXT_3 } from "./ui";
+import {
+  ActionSheet,
+  BOX,
+  boxOf,
+  CARD,
+  DesktopMenu,
+  DIVIDE,
+  EmptyLine,
+  HERE,
+  isMouseClick,
+  NO_DRAG,
+  Page,
+  PageHeader,
+  PRESS,
+  type SheetGroup,
+  TEXT,
+  TEXT_2,
+  TEXT_3,
+  useColumnFrame,
+} from "./ui";
 
 export interface ClonesViewProps {
   /** The board's columns (`ControlState.boardColumns`); empty gives the defaults. */
@@ -82,6 +109,8 @@ export interface ClonesViewProps {
   onDelete: (clone: Clone) => void;
   /** The board's columns side by side (wide), not one list with a section each. */
   columnsLayout?: boolean;
+  /** A column's new title (a double-click on it). Absent: titles are not renamed here. */
+  onRenameColumn?: (columnId: string, title: string) => void;
 }
 
 const MOVE_ACTION = {
@@ -92,9 +121,20 @@ const MOVE_ACTION = {
 
 export function ClonesView(p: ClonesViewProps) {
   const frame = useColumnFrame();
+  const dnd = useBoardDnd();
   const [sheet, setSheet] = useState<Clone | null>(null);
+  /** The dashboard's menu, opened by a mouse, and where. */
+  const [menu, setMenu] = useState<{ clone: Clone; at: Box } | null>(null);
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const columns = resolveColumns(withDefaults(p.columns), p.clones);
+  // While a clone is in the air, the columns as it would leave them
+  const columns = resolveColumns(withDefaults(p.columns), p.clones).map((c) => ({
+    ...c,
+    cloneIds: dnd?.lanes?.find((l) => l.id === c.id)?.cloneIds ?? c.cloneIds,
+  }));
+  /** One clone is made at a time: the columns' "New clone" waits while one is. */
+  const cloning = p.operations.some((o) => o.kind === "clone" && o.status === "running");
+  const openMenu = (clone: Clone, e: MouseEvent) => (isMouseClick(e) ? setMenu({ clone, at: boxOf(e) }) : setSheet(clone));
   const byId = cloneIndex(p.clones);
   const muted = mutedSet(p.mutedClones);
   const { childrenByParent } = subCloneTree(p.clones);
@@ -124,15 +164,73 @@ export function ClonesView(p: ClonesViewProps) {
         notes={clone.id === p.notesId}
         muted={muted.has(clone.id) || isMutedByParent(clone, byId, muted)}
         child={child}
-        card={p.columnsLayout === true}
         childCount={kids.length}
         expanded={expanded.has(clone.id)}
         onToggleExpand={() => toggle(clone.id)}
         onSelect={() => p.onSelect(clone)}
-        onMenu={() => setSheet(clone)}
+        onMenu={(e) => openMenu(clone, e)}
       />
     );
   };
+
+  /** The dashboard's card for a clone (wide), with its sub clones in the same frame. */
+  const card = (clone: Clone, drag?: Record<string, unknown>) => {
+    const kids = childrenByParent.get(clone.id) ?? [];
+    const props = (c: Clone, child: boolean) => ({
+      clone: c,
+      ticket: p.cloneTickets[c.id],
+      stats: p.stats[c.id],
+      tokens: p.cloneTokens[c.id],
+      op: running.get(c.id),
+      selected: c.id === p.selectedId,
+      onSelect: () => p.onSelect(c),
+      onDelete: () => p.onDelete(c),
+      onChangeAccount: () => p.onChangeAccount(c),
+      onRebase: () => p.onRebase(c),
+      onPortForward: () => p.onPortForward(c),
+      onArchive: () => p.onArchive(c),
+      onUnarchive: () => p.onUnarchive(c),
+      onCopySshCommand: () => p.onCopySsh(c),
+      onOpenInLinear: p.onOpenInLinear,
+      muted: muted.has(c.id),
+      mutedByParent: isMutedByParent(c, byId, muted),
+      onToggleMute: () => p.onToggleMute(c),
+      sshPublicHost: "",
+      isChild: child,
+      fill: {
+        idle: "bg-transparent hover:bg-black/[0.03] dark:hover:bg-white/5",
+        selected: "bg-emerald-500/10 dark:bg-emerald-400/10",
+      },
+      touchScroll: true,
+      onMenuTouch: () => setSheet(c),
+    });
+    return (
+      <div className={`overflow-hidden ${CARD} bg-white/80 dark:bg-white/[0.07] ${p.notesId === clone.id ? BOX : ""}`}>
+        <SidebarClone
+          {...props(clone, false)}
+          childCount={kids.length}
+          expanded={expanded.has(clone.id)}
+          onToggleExpand={() => toggle(clone.id)}
+          dragListeners={drag as Parameters<typeof SidebarClone>[0]["dragListeners"]}
+        />
+        {expanded.has(clone.id)
+          ? kids.map((k) => (
+              <div key={k.id} className="border-t border-black/10 dark:border-white/10">
+                <SidebarClone {...props(k, true)} />
+              </div>
+            ))
+          : null}
+      </div>
+    );
+  };
+  // What follows the pointer while a clone is dragged
+  if (dnd) {
+    dnd.overlays.current.clone = (id) => {
+      const clone = byId.get(id);
+      if (!clone) return null;
+      return p.columnsLayout ? card(clone) : <ul>{row(clone, false)}</ul>;
+    };
+  }
 
   const groupsFor = (clone: Clone): SheetGroup[] => {
     const managed = clone.managed === true;
@@ -197,39 +295,88 @@ export function ClonesView(p: ClonesViewProps) {
     return groups;
   };
 
-  const sheetView = sheet ? (
-    <ActionSheet
-      title={p.cloneTickets[sheet.id]?.title ?? sheet.displayName ?? sheet.id}
-      groups={groupsFor(sheet)}
-      onClose={() => setSheet(null)}
-    />
-  ) : null;
-  const rows = (column: (typeof columns)[number]) =>
+  const sheetView = (
+    <>
+      {sheet ? (
+        <ActionSheet
+          title={p.cloneTickets[sheet.id]?.title ?? sheet.displayName ?? sheet.id}
+          groups={groupsFor(sheet)}
+          onClose={() => setSheet(null)}
+        />
+      ) : null}
+      {menu ? <DesktopMenu at={menu.at} groups={groupsFor(menu.clone)} onClose={() => setMenu(null)} /> : null}
+    </>
+  );
+  /** A column's clones: each one with its sub clones, as one thing that drags. */
+  const items = (column: (typeof columns)[number]) =>
     column.cloneIds.flatMap((id) => {
       const clone = byId.get(id);
       if (!clone) return [];
       const kids = expanded.has(id) ? (childrenByParent.get(id) ?? []) : [];
-      return [row(clone, false), ...kids.map((k) => row(k, true))];
+      const busy = running.has(id);
+      return [
+        <DragItem key={id} id={id} disabled={busy}>
+          {(drag) =>
+            p.columnsLayout ? (
+              card(clone, drag)
+            ) : (
+              <ul {...drag} className={`divide-y ${DIVIDE}`}>
+                {row(clone, false)}
+                {kids.map((k) => row(k, true))}
+              </ul>
+            )
+          }
+        </DragItem>,
+      ];
     });
   const newClone = (column: (typeof columns)[number]) => (
     <button
       type="button"
       onClick={() => p.onNewClone(column.id)}
+      disabled={cloning}
       aria-label={`New clone in ${column.title}`}
-      className={`flex h-7 items-center gap-1 rounded-md px-2 text-xs font-medium normal-case tracking-normal ${TEXT_2} ${PRESS}`}
+      title={`Create a clone in ${column.title}`}
+      className={`flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium normal-case tracking-normal disabled:opacity-40 ${TEXT_2} ${PRESS}`}
     >
       <Plus aria-hidden className="size-3.5" />
       New clone
     </button>
   );
-  const heading = (column: (typeof columns)[number]) => (
-    <>
-      <span className="truncate">{column.title}</span>
-      <span className={`tabular-nums ${TEXT_3}`}>{column.cloneIds.length}</span>
-      <span className="flex-1" />
-      {newClone(column)}
-    </>
-  );
+  const heading = (column: (typeof columns)[number]) =>
+    renaming?.id === column.id ? (
+      <form
+        className="flex min-w-0 flex-1 items-center gap-1 normal-case tracking-normal"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const next = renaming.title.trim();
+          if (next && next !== column.title) p.onRenameColumn?.(column.id, next);
+          setRenaming(null);
+        }}
+      >
+        <input
+          autoFocus
+          value={renaming.title}
+          onChange={(e) => setRenaming({ id: column.id, title: e.target.value })}
+          onKeyDown={(e) => e.key === "Escape" && setRenaming(null)}
+          onBlur={() => setRenaming(null)}
+          aria-label="Column name"
+          className={`min-w-0 flex-1 rounded-md border border-black/10 bg-white/60 px-2 py-0.5 text-sm font-normal focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:focus:border-white/30 ${TEXT}`}
+        />
+      </form>
+    ) : (
+      <>
+        <span
+          className="truncate"
+          title={p.onRenameColumn ? "Double-click to rename" : undefined}
+          onDoubleClick={() => p.onRenameColumn && setRenaming({ id: column.id, title: column.title })}
+        >
+          {column.title}
+        </span>
+        <span className={`tabular-nums ${TEXT_3}`}>{column.cloneIds.length}</span>
+        <span className="flex-1" />
+        {newClone(column)}
+      </>
+    );
 
   if (p.columnsLayout) {
     return (
@@ -241,7 +388,18 @@ export function ClonesView(p: ClonesViewProps) {
             className={`flex h-full w-72 shrink-0 flex-col ${frame}`}
           >
             <h3 className={`flex h-10 shrink-0 items-center gap-2 pl-3 pr-1 text-sm font-semibold ${TEXT}`}>{heading(column)}</h3>
-            <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5">{rows(column)}</ul>
+            <DropColumn
+              id={column.id}
+              items={column.cloneIds}
+              className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5"
+            >
+              {items(column)}
+              {column.cloneIds.length === 0 ? (
+                <p className={`rounded-lg border border-dashed border-black/15 p-4 text-center text-xs dark:border-white/15 ${TEXT_3}`}>
+                  Drop a clone here.
+                </p>
+              ) : null}
+            </DropColumn>
           </section>
         ))}
         {sheetView}
@@ -256,15 +414,15 @@ export function ClonesView(p: ClonesViewProps) {
           <EmptyLine>No clones yet. Make one with the + of a column.</EmptyLine>
         ) : null}
         {columns.map((column) => (
-          <section key={column.id} aria-label={column.title}>
+          <DropColumn key={column.id} id={column.id} items={column.cloneIds} as="section">
             {/* Frosted over the rows that scroll beneath it */}
             <h3
               className={`sticky top-0 z-10 flex h-8 items-center gap-2 bg-white/50 pl-3 pr-1 text-[11px] font-semibold uppercase tracking-wide backdrop-blur-md dark:bg-black/30 ${TEXT_2}`}
             >
               {heading(column)}
             </h3>
-            <ul className={`divide-y ${DIVIDE}`}>{rows(column)}</ul>
-          </section>
+            <ul className={`divide-y ${DIVIDE}`}>{items(column)}</ul>
+          </DropColumn>
         ))}
       </Page>
       {sheetView}
@@ -284,7 +442,6 @@ export function CloneRow({
   notes,
   muted,
   child,
-  card = false,
   childCount,
   expanded,
   onToggleExpand,
@@ -302,13 +459,11 @@ export function CloneRow({
   notes: boolean;
   muted: boolean;
   child: boolean;
-  /** A card in a column (wide), not a row in a list. */
-  card?: boolean;
   childCount: number;
   expanded: boolean;
   onToggleExpand: () => void;
   onSelect: () => void;
-  onMenu: () => void;
+  onMenu: (e: MouseEvent<HTMLButtonElement>) => void;
 }) {
   const title = ticket?.title ?? clone.displayName ?? clone.id;
   const usage = clone.archived ? null : (formatCloneUsage(stats) ?? { cpu: "0%", mem: "0.0GB" });
@@ -349,6 +504,7 @@ export function CloneRow({
     childCount > 0 ? (
       <button
         type="button"
+        {...NO_DRAG}
         onClick={onToggleExpand}
         aria-expanded={expanded}
         aria-label={`${expanded ? "Hide" : "Show"} ${childCount} sub clones`}
@@ -361,6 +517,7 @@ export function CloneRow({
   const menu = (
     <button
       type="button"
+      {...NO_DRAG}
       onClick={onMenu}
       disabled={busy}
       aria-label={`Actions for ${clone.id}`}
@@ -369,46 +526,6 @@ export function CloneRow({
       <Ellipsis aria-hidden className="size-4" />
     </button>
   );
-
-  if (card) {
-    // The dashboard's card: the accounts on top, then the ticket and its title on lines of
-    // their own, then the numbers
-    return (
-      <li className={`overflow-hidden ${CARD} ${child ? "ml-4" : ""} ${selected ? HERE : notes ? BOX : CARD_FILL}`}>
-        <div className="flex items-stretch">
-          <button
-            type="button"
-            onClick={onSelect}
-            aria-current={selected ? "true" : undefined}
-            className={`min-w-0 flex-1 px-2.5 py-2 text-left ${PRESS}`}
-          >
-            {clone.managed ? (
-              <span className={`flex flex-col gap-0.5 text-[11px] ${TEXT_3}`}>
-                <span className="flex items-center gap-2">
-                  <Account logo={claudeLogo} email={clone.claudeAccountEmail} selection={clone.claudeSelection} group={clone.group ?? clone.claudeGroup} />
-                </span>
-                <span className="flex items-center gap-2">
-                  <Account logo={chatgptLogo} invert email={clone.codexAccountEmail} selection={clone.codexSelection} group={clone.group ?? clone.codexGroup} />
-                </span>
-              </span>
-            ) : null}
-            <span className={`flex items-start gap-1.5 ${clone.managed ? "mt-1.5" : ""}`}>
-              <span className="flex h-5 shrink-0 items-center gap-1.5">{marks}</span>
-              <span className={`line-clamp-2 min-w-0 text-sm leading-5 ${TEXT}`}>{title}</span>
-            </span>
-            <span className={`mt-1 flex items-center justify-between gap-2 text-[11px] ${TEXT_3}`}>
-              {tokensLine}
-              {state}
-            </span>
-          </button>
-          <span className="flex shrink-0 flex-col">
-            {menu}
-            {subs}
-          </span>
-        </div>
-      </li>
-    );
-  }
 
   return (
     <li className={`flex items-stretch ${selected ? HERE : notes ? BOX : ""}`}>

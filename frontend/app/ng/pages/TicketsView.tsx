@@ -6,8 +6,13 @@
 // column is Move up / Move down / Move to top in that sheet. A drag onto a clone column
 // (which makes a clone) is "Create a clone" in the sheet.
 //
-// Wide (`column`), the list is the board's first column, as on the dashboard, and the open
-// ticket shows beside the board (the container puts `detail` there).
+// Wide (`column`), the list is the board's first column, with the dashboard's own card per
+// ticket (`TicketCardBody`) on the pages' glass, and the open ticket shows beside the board
+// (the container puts `detail` there).
+//
+// As on the dashboard: a ticket drags within the list, or (wide) onto a clone column, which
+// makes a clone for it (`./BoardDnd.tsx`: a mouse at once, a finger after a long press); a
+// mouse's click on ⋯ opens the dashboard's menu, a finger's the sheet.
 //
 // Pure: the open ticket's panel comes in as a slot (`detail`), because the real one loads its
 // description editor lazily, in the browser only.
@@ -23,15 +28,35 @@ import {
   Link2,
   Plus,
 } from "lucide-react";
-import { type ReactNode, useState } from "react";
+import { type MouseEvent, type ReactNode, useState } from "react";
 
-import { LabelPill, PriorityIcon, StateIcon } from "~/components/TicketColumn";
+import type { Box } from "~/components/OverflowMenu";
+import { LabelPill, PriorityIcon, StateIcon, TicketCardBody } from "~/components/TicketColumn";
 import type { LinearWorkspace } from "~/lib/linear/types";
-import { branchNameOf, type LinearTicket } from "~/lib/tickets";
+import { branchNameOf, type LinearTicket, TICKET_COLUMN_ID, ticketDragId } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
 
+import { DragItem, DropColumn, useBoardDnd } from "./BoardDnd";
 import { type Move, movesFor } from "./order";
-import { ActionSheet, CARD, CARD_FILL, DIVIDE, EmptyLine, HeaderButton, LINE, useColumnFrame, Page, PageHeader, PRESS, type SheetGroup, TEXT, TEXT_2, TEXT_3 } from "./ui";
+import {
+  ActionSheet,
+  boxOf,
+  CARD,
+  DesktopMenu,
+  DIVIDE,
+  EmptyLine,
+  HeaderButton,
+  isMouseClick,
+  NO_DRAG,
+  Page,
+  PageHeader,
+  PRESS,
+  type SheetGroup,
+  TEXT,
+  TEXT_2,
+  TEXT_3,
+  useColumnFrame,
+} from "./ui";
 
 export interface TicketsViewProps {
   /** Open tickets no clone has, in the operator's order (`openTickets`, `orderTickets`). */
@@ -69,8 +94,19 @@ const MOVE_ACTION = {
 
 export function TicketsView(p: TicketsViewProps) {
   const frame = useColumnFrame();
+  const dnd = useBoardDnd();
   const [sheet, setSheet] = useState<LinearTicket | "workspaces" | null>(null);
+  /** The dashboard's menu, opened by a mouse, and where. */
+  const [menu, setMenu] = useState<{ of: LinearTicket | "workspaces"; at: Box } | null>(null);
+  const openMenu = (of: LinearTicket | "workspaces", e: MouseEvent) =>
+    isMouseClick(e) ? setMenu({ of, at: boxOf(e) }) : setSheet(of);
+  // While one is in the air, the tickets in the order it would leave them
+  const byId = new Map(p.tickets.map((t) => [t.id, t]));
+  const tickets = dnd?.ticketOrder
+    ? dnd.ticketOrder.flatMap((id) => (byId.has(id) ? [byId.get(id)!] : []))
+    : p.tickets;
   const ids = p.tickets.map((t) => t.id);
+  const dragIds = tickets.map((t) => ticketDragId(t.id));
 
   const groupsFor = (t: LinearTicket): SheetGroup[] => [
     {
@@ -94,29 +130,65 @@ export function TicketsView(p: TicketsViewProps) {
     },
   ];
 
-  const sheetView =
-    sheet === "workspaces" ? (
-      <ActionSheet
-        title="Open a Linear workspace"
-        groups={[
-          {
-            actions: p.workspaces.map((w) => ({
-              icon: ExternalLink,
-              label: w.name,
-              onSelect: () => p.onOpenWorkspace(w),
-            })),
-          },
-        ]}
-        onClose={() => setSheet(null)}
+  const workspaceGroups: SheetGroup[] = [
+    { actions: p.workspaces.map((w) => ({ icon: ExternalLink, label: w.name, onSelect: () => p.onOpenWorkspace(w) })) },
+  ];
+  const sheetView = (
+    <>
+      {sheet === "workspaces" ? (
+        <ActionSheet title="Open a Linear workspace" groups={workspaceGroups} onClose={() => setSheet(null)} />
+      ) : sheet ? (
+        <ActionSheet title={`${sheet.id} ${sheet.title}`} groups={groupsFor(sheet)} onClose={() => setSheet(null)} />
+      ) : null}
+      {menu ? (
+        <DesktopMenu
+          at={menu.at}
+          groups={menu.of === "workspaces" ? workspaceGroups : groupsFor(menu.of)}
+          onClose={() => setMenu(null)}
+        />
+      ) : null}
+    </>
+  );
+
+  /** The dashboard's card for a ticket (wide); the click opens it beside the board. */
+  const card = (t: LinearTicket, drag?: Record<string, unknown>) => (
+    <div
+      {...drag}
+      onClick={() => p.onOpen(t)}
+      className={`cursor-grab overflow-hidden ${CARD} bg-white/80 dark:bg-white/[0.07] ${
+        p.open?.id === t.id ? "!border-neutral-900 dark:!border-white" : ""
+      }`}
+    >
+      <TicketCardBody
+        ticket={t}
+        selected={p.open?.id === t.id}
+        onCreateClone={() => p.onCreateClone(t)}
+        onOpenInLinear={p.onOpenInLinear}
+        onCopyBranchName={(b) => void p.onCopy(b)}
+        onCopyTicketLink={(u) => void p.onCopy(u)}
+        onCancel={() => p.onCancel(t)}
+        onMoveToBacklog={() => p.onMoveToBacklog(t)}
+        onMenuTouch={() => setSheet(t)}
       />
-    ) : sheet ? (
-      <ActionSheet title={`${sheet.id} ${sheet.title}`} groups={groupsFor(sheet)} onClose={() => setSheet(null)} />
-    ) : null;
+    </div>
+  );
+  const row = (t: LinearTicket, drag?: Record<string, unknown>) => (
+    <div {...drag}>
+      <TicketRow ticket={t} onOpen={() => p.onOpen(t)} onMenu={(e) => openMenu(t, e)} />
+    </div>
+  );
+  // What follows the pointer while a ticket is dragged
+  if (dnd) {
+    dnd.overlays.current.ticket = (id) => {
+      const t = byId.get(id);
+      return t ? (p.column ? card(t) : row(t)) : null;
+    };
+  }
 
   const buttons = (
     <>
       {p.workspaces.length ? (
-        <HeaderButton icon={ExternalLink} label="Linear" showLabel onClick={() => setSheet("workspaces")} />
+        <HeaderButton icon={ExternalLink} label="Linear" showLabel onClick={(e) => openMenu("workspaces", e)} />
       ) : null}
       {p.onNewTicket ? <HeaderButton icon={Plus} label="New ticket" showLabel primary onClick={p.onNewTicket} /> : null}
     </>
@@ -136,22 +208,19 @@ export function TicketsView(p: TicketsViewProps) {
           {buttons}
         </h3>
         {p.error ? <p className="px-3 pb-1 text-xs text-rose-600 dark:text-rose-400">{p.error}</p> : null}
-        {p.tickets.length === 0 ? (
-          empty
-        ) : (
-          <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5">
-            {p.tickets.map((t) => (
-              <TicketRow
-                key={t.id}
-                ticket={t}
-                card
-                open={p.open?.id === t.id}
-                onOpen={() => p.onOpen(t)}
-                onMenu={() => setSheet(t)}
-              />
-            ))}
-          </ul>
-        )}
+        <DropColumn
+          id={TICKET_COLUMN_ID}
+          items={dragIds}
+          className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5"
+        >
+          {tickets.length === 0
+            ? empty
+            : tickets.map((t) => (
+                <DragItem key={t.id} id={ticketDragId(t.id)}>
+                  {(drag) => card(t, drag)}
+                </DragItem>
+              ))}
+        </DropColumn>
         {sheetView}
       </section>
     );
@@ -165,7 +234,7 @@ export function TicketsView(p: TicketsViewProps) {
           fill
           header={
             <PageHeader title="Tickets" sub={open.id} onBack={p.onBack}>
-              <HeaderButton icon={Ellipsis} label={`Actions for ${open.id}`} onClick={() => setSheet(open)} />
+              <HeaderButton icon={Ellipsis} label={`Actions for ${open.id}`} onClick={(e) => openMenu(open, e)} />
             </PageHeader>
           }
         >
@@ -186,14 +255,16 @@ export function TicketsView(p: TicketsViewProps) {
           </PageHeader>
         }
       >
-        {p.tickets.length === 0 ? (
+        {tickets.length === 0 ? (
           empty
         ) : (
-          <ul className={`divide-y ${DIVIDE}`}>
-            {p.tickets.map((t) => (
-              <TicketRow key={t.id} ticket={t} onOpen={() => p.onOpen(t)} onMenu={() => setSheet(t)} />
+          <DropColumn id={TICKET_COLUMN_ID} items={dragIds} className={`divide-y ${DIVIDE}`}>
+            {tickets.map((t) => (
+              <DragItem key={t.id} id={ticketDragId(t.id)}>
+                {(drag) => row(t, drag)}
+              </DragItem>
             ))}
-          </ul>
+          </DropColumn>
         )}
       </Page>
       {sheetView}
@@ -204,28 +275,16 @@ export function TicketsView(p: TicketsViewProps) {
 /** One ticket in the list: its marks and labels over the identifier and title. */
 export function TicketRow({
   ticket,
-  card = false,
-  open = false,
   onOpen,
   onMenu,
 }: {
   ticket: LinearTicket;
-  /** A card in the board's column (wide), not a row in a list. */
-  card?: boolean;
-  /** Its panel is open beside the board. */
-  open?: boolean;
   onOpen: () => void;
-  onMenu: () => void;
+  onMenu: (e: MouseEvent<HTMLButtonElement>) => void;
 }) {
   return (
-    <li
-      className={`flex items-stretch ${
-        card
-          ? `overflow-hidden ${CARD} ${CARD_FILL} ${open ? "!border-neutral-900 dark:!border-white" : ""}`
-          : ""
-      }`}
-    >
-      <button type="button" onClick={onOpen} aria-current={open ? "true" : undefined} className={`min-w-0 flex-1 px-3 py-2 text-left ${PRESS}`}>
+    <div className="flex items-stretch">
+      <button type="button" onClick={onOpen} className={`min-w-0 flex-1 px-3 py-2 text-left ${PRESS}`}>
         <span className="flex flex-wrap items-center gap-1.5">
           <StateIcon state={ticket.state} label={ticket.stateName ?? undefined} />
           {ticket.priority ? <PriorityIcon level={ticket.priority} /> : null}
@@ -246,12 +305,13 @@ export function TicketRow({
       </button>
       <button
         type="button"
+        {...NO_DRAG}
         onClick={onMenu}
         aria-label={`Actions for ${ticket.id}`}
         className={`flex w-11 shrink-0 items-center justify-center ${TEXT_2} ${PRESS}`}
       >
         <Ellipsis aria-hidden className="size-4" />
       </button>
-    </li>
+    </div>
   );
 }

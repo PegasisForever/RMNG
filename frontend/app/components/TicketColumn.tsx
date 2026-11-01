@@ -265,6 +265,7 @@ function TicketMenu({
   onCopyTicketLink,
   onCancel,
   onMoveToBacklog,
+  onTouch,
 }: {
   ticket: LinearTicket;
   onCreateClone?: () => void;
@@ -273,9 +274,10 @@ function TicketMenu({
   onCopyTicketLink?: (url: string) => void;
   onCancel?: () => void;
   onMoveToBacklog?: () => void;
+  onTouch?: () => void;
 }) {
   return (
-    <OverflowMenu label={`actions for ${ticket.id}`}>
+    <OverflowMenu label={`actions for ${ticket.id}`} onTouch={onTouch}>
       {onCreateClone ? (
         <MenuItem icon={Plus} label="Create a clone…" onClick={onCreateClone} />
       ) : null}
@@ -329,6 +331,7 @@ export function TicketCardBody({
   onCopyTicketLink,
   onCancel,
   onMoveToBacklog,
+  onMenuTouch,
 }: {
   ticket: LinearTicket;
   /** Selected: the panel on the right is showing this ticket. The tint alone says so. No
@@ -346,6 +349,8 @@ export function TicketCardBody({
   onCopyTicketLink?: (url: string) => void;
   onCancel?: () => void;
   onMoveToBacklog?: () => void;
+  /** A tap with a finger on the ⋮ calls this in place of the dropdown (`OverflowMenu`). */
+  onMenuTouch?: () => void;
 }) {
   const labels = ticket.labels ?? [];
   return (
@@ -377,6 +382,7 @@ export function TicketCardBody({
             onCopyTicketLink={onCopyTicketLink}
             onCancel={onCancel}
             onMoveToBacklog={onMoveToBacklog}
+            onTouch={onMenuTouch}
           />
         </div>
       </div>
