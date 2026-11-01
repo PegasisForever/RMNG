@@ -261,7 +261,13 @@ export function SidePanels({
 
   return (
     // The notes, the chat and a ticket scroll with no bars, as the board's row does
-    <div ref={box} className={`pointer-events-none relative flex h-full flex-col gap-2 ${NO_SCROLLBARS} ${ON_GLASS}`} style={{ width }}>
+    // Text in them can be selected and typed (WebKit inherits the screen's `select-none`), not
+    // on their buttons
+    <div
+      ref={box}
+      className={`pointer-events-none relative flex h-full select-text flex-col gap-2 [&_button]:select-none ${NO_SCROLLBARS} ${ON_GLASS}`}
+      style={{ width }}
+    >
       {/* The band: over the panels' left edge, more in than out, as the shadow reads as the
           panel's. Over the panels' blur (a stacking context each) only with a z of its own */}
       <div

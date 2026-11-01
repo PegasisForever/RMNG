@@ -341,12 +341,12 @@ export function ChatView({
           </div>
         ) : null}
         {/* The composer starts one line tall, level with the buttons beside it (all 34 px),
-            and grows with what is typed up to eight lines before it scrolls. `items-end` keeps
-            the buttons on its bottom line as it grows. Its height is the text's by layout: a
+            and grows with what is typed up to eight lines before it scrolls. `items-center` keeps
+            the buttons in the middle of its height as it grows. Its height is the text's by layout: a
             hidden copy of the text in the same grid cell sizes the cell (no more than eight
             lines), and the field fills it. The copy holds the text, not the placeholder, so
             an empty field is one line on a narrow card too; the placeholder is cut with "…". */}
-        <div className="flex items-end gap-2">
+        <div className="flex items-center gap-2">
           <div className="grid min-w-0 flex-1">
             <div
               aria-hidden

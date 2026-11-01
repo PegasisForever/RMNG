@@ -277,7 +277,8 @@ export function holdInput(held: HeldInput, msg: InputMsg, now: number): HeldInpu
 /** Chrome's Keyboard Lock API, the browser window's (`~/lib/host.ts`); not in TypeScript's DOM
  *  types. */
 const keyboard = () =>
-  (hostWindow().navigator as Navigator & { keyboard?: { lock(): Promise<void>; unlock(): void } }).keyboard;
+  (hostWindow().navigator as Navigator & { keyboard?: { lock(keys?: string[]): Promise<void>; unlock(): void } })
+    .keyboard;
 
 /** The document whose fullscreen this page uses: the /ng shell's around it, or its own. */
 const fullscreenDoc = () => hostWindow().document;
@@ -829,6 +830,14 @@ export function attachInput(o: InputOptions): Input {
       fullscreenDoc().removeEventListener("fullscreenchange", onFullscreen);
       window.removeEventListener("paste", onPaste);
       if (locked()) document.exitPointerLock();
+      // The keys are the page's again (its control panel, a text box): every key locked would
+      // keep the browser's own (Cmd+C, Cmd+V on a Mac) from it. Only the chord's stay locked,
+      // so the system still gives the chord to the page in fullscreen.
+      const kb = keyboard();
+      if (kb && fullscreenDoc().fullscreenElement) {
+        kb.unlock();
+        if (o.chord) void kb.lock([...o.chord.holds, "Space"]).catch(() => {});
+      }
     },
   };
 }
