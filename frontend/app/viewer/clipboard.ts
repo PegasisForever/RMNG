@@ -23,7 +23,7 @@
 //
 // The on-screen keyboard has two keys for this, which work in every browser: one writes the
 // clone's clipboard to the local one (`toLocal`), the other offers the local clipboard to the
-// clone (`toClone`). Each starts in its tap, the only time Safari lets a page use the clipboard.
+// clone and gives its text, for the page to type in (`toClone`). Each starts in its tap, the only time Safari lets a page use the clipboard.
 //
 // All monitor windows share two values in localStorage: a hash of the last local content seen
 // (so focusing another window does not offer the same content again), and the pending offer.
@@ -185,8 +185,9 @@ interface PageClipboard {
    *  clipboard's own content. Fails when the clone's clipboard is empty or does not come. */
   toLocal(): Promise<"written" | "same">;
   /** In a tap or a click: offer the local clipboard to the clone (Safari first shows its Paste
-   *  button). "empty": there is nothing to offer. Fails when the browser refuses the read. */
-  toClone(): Promise<"sent" | "empty">;
+   *  button), and give its plain text (null: it has none, as an image). Null: there is nothing
+   *  to offer. Fails when the browser refuses the read. */
+  toClone(): Promise<{ text: string | null } | null>;
   detach(): void;
 }
 
@@ -370,15 +371,15 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
     });
   }
 
-  async function toClone(): Promise<"sent" | "empty"> {
+  async function toClone(): Promise<{ text: string | null } | null> {
     if (!connected) throw new Error("not connected");
     // The read first, while the tap lets the page read
     const blobs = await readLocal();
     if (!blobs) throw new Error("the browser did not let the page read the clipboard");
-    if (!blobs.size) return "empty";
+    if (!blobs.size) return null;
     localStorage.setItem(SEEN_KEY, await digest(blobs));
     offerLocal(blobs);
-    return "sent";
+    return { text: (await blobs.get("text/plain")?.text()) ?? null };
   }
 
   async function serve(serial: number, mime: string) {

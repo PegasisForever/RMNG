@@ -24,8 +24,9 @@ export type Key = {
   /** The dictation key: it starts and stops dictation (`./dictation.ts`), and sends nothing
    *  itself (`code` is 0). */
   dictate?: boolean;
-  /** A clipboard key: it copies the clone's clipboard to this device's ("toLocal") or this
-   *  device's to the clone's ("toClone"), and sends nothing itself (`code` is 0). */
+  /** A clipboard key: it copies the clone's clipboard to this device's ("toLocal"), or this
+   *  device's to the clone's and types its text there ("toClone"). It sends no key code itself
+   *  (`code` is 0). */
   clip?: "toLocal" | "toClone";
   /** Drawn as this icon in place of its label. */
   icon?: "tab" | "enter" | "shift" | "win" | "mic" | "clip-down" | "clip-up";
@@ -60,10 +61,10 @@ const NUMBER_ROW = even([BACKQUOTE, ...DIGITS.slice(1), DIGITS[0], key("Backspac
 const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown", "↓"), key("ArrowRight", "→")];
 
 /** The clipboard keys: the clone's clipboard down to this device's (the keyboard is under the
- *  clone's screen), and this device's up to the clone's. */
+ *  clone's screen), and this device's up to the clone's, its text typed in. */
 const CLIP_KEYS: Key[] = [
   { id: "ClipToLocal", code: 0, label: "Copy the clone's clipboard here", units: 1, clip: "toLocal", icon: "clip-down" },
-  { id: "ClipToClone", code: 0, label: "Copy this clipboard to the clone", units: 1, clip: "toClone", icon: "clip-up" },
+  { id: "ClipToClone", code: 0, label: "Type this clipboard into the clone", units: 1, clip: "toClone", icon: "clip-up" },
 ];
 
 /** The number row under Fn: Home, PgUp, PgDn and End on 1 to 4, the clipboard keys on 5 and 6,

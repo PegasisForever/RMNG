@@ -51,6 +51,9 @@ const AXIS_FINGER = 4;
 const AXIS_FINISH = 1;
 /** How long the note of a clipboard key stays. */
 const CLIP_NOTE_MS = 4000;
+/** The most characters the clipboard key types into the clone: a key press each, so a longer
+ *  text is only offered, for a paste. */
+const TYPE_MAX_CHARS = 10_000;
 
 type Size = { width: number; height: number };
 
@@ -315,13 +318,7 @@ export function useRemote({
     dictate.current = new Dictation({
       state: setDictation,
       interim: setHeard,
-      final: (text) => {
-        if (terminalRef.current) return termApi.current?.input(text);
-        for (const keysym of textToKeysyms(text)) {
-          send({ kind: "key", keysym, pressed: true });
-          send({ kind: "key", keysym, pressed: false });
-        }
-      },
+      final: (text) => typeText(text),
     });
   }
   useEffect(() => {
@@ -334,6 +331,16 @@ export function useRemote({
     const keys = codes.map((c) => CODE_TO_EVDEV[c]);
     for (const keycode of keys) send({ kind: "key_code", keycode, pressed: true });
     for (const keycode of [...keys].reverse()) send({ kind: "key_code", keycode, pressed: false });
+  };
+
+  /** Type `text` into the clone: into the terminal of a headless one, else as key presses
+   *  (`textToKeysyms`), so the clone's keyboard layout does not matter. */
+  const typeText = (text: string) => {
+    if (terminalRef.current) return termApi.current?.input(text);
+    for (const keysym of textToKeysyms(text)) {
+      send({ kind: "key", keysym, pressed: true });
+      send({ kind: "key", keysym, pressed: false });
+    }
   };
 
   /** Say what a clipboard key did, for CLIP_NOTE_MS. */
@@ -353,8 +360,18 @@ export function useRemote({
         (e: Error) => sayClip(`Not copied: ${e.message}.`),
       );
     } else {
+      // The clipboard goes to the clone's clipboard, and its text is typed in
       clip.toClone().then(
-        (r) => sayClip(r === "empty" ? "This device's clipboard is empty." : "Copied this clipboard to the clone."),
+        (r) => {
+          if (!r) return sayClip("This device's clipboard is empty.");
+          const text = r.text?.replace(/\r\n?/g, "\n") ?? "";
+          if (!text) return sayClip("Copied this clipboard to the clone. Paste it there with Ctrl+V.");
+          if (text.length > TYPE_MAX_CHARS) {
+            return sayClip("Copied this clipboard to the clone. It is too long to type: paste it there with Ctrl+V.");
+          }
+          typeText(text);
+          sayClip("Typed this clipboard into the clone.");
+        },
         (e: Error) => sayClip(`Not copied: ${e.message}.`),
       );
     }

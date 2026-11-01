@@ -45,7 +45,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 - Zero-copy hardware H.264 pipeline (VA-API encode on the server)
 - Web app in Chrome or Safari: H.264 over a WebSocket, decoded with WebCodecs
 - One browser window per monitor (`/?monitor=N`). You move and size each window yourself. Each window has a Fullscreen button at the top right (with a mouse, move to the window's right edge to show the buttons). Its fullscreen hides the browser's address bar (macOS fullscreen does not). Keys in a monitor's window: F11 fullscreen, Ctrl+Alt+G lock the pointer, Ctrl+Alt+P release it, Super+Space (Option+Space on a Mac) show or hide the control panel (off a Mac, only in the page's fullscreen: the system keeps the chord elsewhere). On a Mac, Cmd acts as Ctrl in the clone and Ctrl acts as Super.
-- Phones and tablets: the same app, with an on-screen keyboard and a trackpad (Add to Home Screen installs it). On the keyboard, Fn then 5 copies the clone's clipboard to the phone, and Fn then 6 copies the phone's clipboard to the clone
+- Phones and tablets: the same app, with an on-screen keyboard and a trackpad (Add to Home Screen installs it). On the keyboard, Fn then 5 copies the clone's clipboard to the phone, and Fn then 6 copies the phone's clipboard to the clone and types its text there
 - 60fps on local network
 - Multi-monitor
 - Sound of the selected clone, in the monitor 0 window (Opus, about 70–110 ms behind the clone on the LAN), from the first click or key in that window
