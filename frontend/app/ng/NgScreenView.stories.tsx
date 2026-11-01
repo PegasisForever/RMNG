@@ -35,6 +35,7 @@ const buttons = (over: Partial<NonNullable<NgScreenViewProps["buttons"]>> = {}):
   onKeyboardDock: fn(),
   onLayout: fn(),
   fullscreen: { on: false, toggle: fn() },
+  pagesKeys: "Super + Space (in fullscreen)",
   ...over,
 });
 

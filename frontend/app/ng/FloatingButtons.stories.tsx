@@ -28,6 +28,7 @@ const meta = {
     onKeyboardDock: fn(),
     onLayout: fn(),
     fullscreen: { on: false, toggle: fn() },
+    pagesKeys: "Super + Space (in fullscreen)",
   },
 } satisfies Meta<typeof FloatingButtons>;
 

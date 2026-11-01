@@ -39,6 +39,7 @@ export function FloatingButtons({
   onLayout,
   fullscreen,
   monitors,
+  pagesKeys,
   away = false,
 }: {
   pagesOpen: boolean;
@@ -63,6 +64,9 @@ export function FloatingButtons({
   /** The layout's monitors with no window open (their numbers), and the opening of their
    *  windows; absent when there are none, or the browser opens no windows. */
   monitors?: { missing: number[]; onOpen: () => void };
+  /** The key chord that shows and hides the pages (`./shortcut.ts`), for the Pages button's
+   *  tooltip; absent: none said. */
+  pagesKeys?: string;
   /** Slid out of the window to the right, and out of reach. */
   away?: boolean;
 }) {
@@ -90,7 +94,12 @@ export function FloatingButtons({
           <Count n={monitors.missing.length} className="bg-emerald-500" />
         </Round>
       ) : null}
-      <Round label={pagesOpen ? "Hide the pages" : "Pages: usage, tickets, clones, notes, settings"} on={pagesOpen} onClick={onPages}>
+      <Round
+        label={pagesOpen ? "Hide the pages" : "Pages: usage, tickets, clones, notes, settings"}
+        keys={pagesKeys}
+        on={pagesOpen}
+        onClick={onPages}
+      >
         <LayoutGrid aria-hidden className="size-5" />
         {badge ? <Count n={badge} className="bg-rose-500" /> : null}
       </Round>
@@ -149,6 +158,7 @@ const LONG_PRESS_MS = 500;
 function Round({
   label,
   hold,
+  keys,
   on = false,
   dim = false,
   onClick,
@@ -158,6 +168,8 @@ function Round({
   label: string;
   /** What the long press does, for the tooltip. */
   hold?: string;
+  /** The keys that do the same, for the tooltip. */
+  keys?: string;
   on?: boolean;
   dim?: boolean;
   onClick: () => void;
@@ -213,6 +225,7 @@ function Round({
       >
         <span>{label}</span>
         {hold ? <span className="text-black/55 dark:text-white/60">Right-click or hold: {hold}</span> : null}
+        {keys ? <span className="text-black/55 dark:text-white/60">Keys: {keys}</span> : null}
       </span>
     </div>
   );

@@ -71,7 +71,7 @@ import { NgPagesContainer } from "./pages/NgPagesContainer";
 import { WIDE_MIN } from "./pages/WideLayout";
 import { clampTo } from "./pointer";
 import { useRemote } from "./remote";
-import { isPagesChord } from "./shortcut";
+import { isPagesChord, pagesChordLabel } from "./shortcut";
 import { isTyping, useLift } from "./systemKeyboard";
 import type { NgTab } from "./ToolRow";
 
@@ -539,6 +539,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         onKeyboardDock: toggleDock,
         onLayout: () => setLayoutOpen(true),
         fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
+        pagesKeys: pagesChordLabel(),
         monitors: missing.length ? { missing, onOpen: openMissing } : undefined,
         // In mouse mode, out of the window unless the mouse brought them in (or the side
         // panels, which bring them too), or the pages or the dialog are open

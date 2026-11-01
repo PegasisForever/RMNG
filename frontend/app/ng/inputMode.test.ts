@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { modeAfter } from "./inputMode";
-import { isPagesChord } from "./shortcut";
+import { isPagesChord, pagesChordLabel } from "./shortcut";
 
 describe("modeAfter", () => {
   test("a finger or a pen is touch; a mouse click is mouse", () => {
@@ -49,5 +49,13 @@ describe("isPagesChord", () => {
     expect(isPagesChord(key({ metaKey: true }, "KeyA"), "linux")).toBe(false);
     expect(isPagesChord(key({}), "linux")).toBe(false);
     expect(isPagesChord(key({ metaKey: true, altKey: true }), "windows")).toBe(false);
+  });
+});
+
+describe("pagesChordLabel", () => {
+  test("Option + Space on a Mac; Super or Windows + Space elsewhere, in fullscreen", () => {
+    expect(pagesChordLabel("mac")).toBe("⌥ Option + Space");
+    expect(pagesChordLabel("linux")).toBe("Super + Space (in fullscreen)");
+    expect(pagesChordLabel("windows")).toBe("Windows + Space (in fullscreen)");
   });
 });

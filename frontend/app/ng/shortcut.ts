@@ -21,6 +21,13 @@ export function isPagesChord(e: Chord, os: Os = currentOs()): boolean {
   return os === "mac" ? e.altKey && !e.metaKey : e.metaKey && !e.altKey;
 }
 
+/** The chord as the operator presses it on `os`, for the Pages button's tooltip. Off a Mac
+ *  the system keeps it outside the page's fullscreen, so the label says where it works. */
+export function pagesChordLabel(os: Os = currentOs()): string {
+  if (os === "mac") return "⌥ Option + Space";
+  return `${os === "windows" ? "Windows" : "Super"} + Space (in fullscreen)`;
+}
+
 /** The keys (DOM codes) of the chord's modifier on `os`. */
 export function pagesChordHolds(os: Os = currentOs()): readonly string[] {
   return os === "mac" ? ["AltLeft", "AltRight"] : ["MetaLeft", "MetaRight"];
