@@ -5,7 +5,7 @@
 //   app draws the picture on a canvas in `boxRef`; a story puts a `picture` there instead.
 // - Touch mode's surface: the whole display as a trackpad, or, with the keyboard docked, the
 //   area above it as a touch screen. Mouse mode has none: the mouse goes to the canvas.
-// - The notes over the screen: what dictation hears or the chord's hint at the bottom, and why
+// - The notes over the screen: what dictation hears at the bottom, and why
 //   there is no screen to use in the middle.
 // - The keyboard at the bottom (touch mode), with the bar that sets its height.
 // - The pages: the tool row and the open page (`pages.content`), at the right under the buttons.
@@ -71,8 +71,8 @@ export type NgScreenViewProps = {
     onHeight: (height: number) => void;
     onHeightDone: () => void;
   } | null;
-  /** Said over the screen: dictation's state and words, why there is no screen, the chord. */
-  notes: { dictation: DictationState; heard: string; note: string | null; hint: string | null };
+  /** Said over the screen: dictation's state and words, why there is no screen. */
+  notes: { dictation: DictationState; heard: string; note: string | null };
   /** The pages: shown or not, the tab, the tool row's numbers and counts, the page itself, how
    *  far the phone's keyboard lifts them, and the move to a window of their own (absent where
    *  the browser opens none). */
@@ -206,17 +206,15 @@ export function NgScreenView({
   );
 }
 
-/** What is said over the clone's screen: the words dictation hears, or the chord's hint (at the
- *  bottom, `bottom` px up), and a note when there is no screen to use (in the middle). Touches
- *  go through all of them. */
+/** What is said over the clone's screen: the words dictation hears (at the bottom, `bottom` px
+ *  up), and a note when there is no screen to use (in the middle). Touches go through both. */
 function ScreenNotes({
   dictation,
   heard,
   note,
-  hint,
   bottom,
 }: NgScreenViewProps["notes"] & { bottom: number }) {
-  const low = dictation === "listening" || heard ? heard || "Listening…" : hint;
+  const low = dictation === "listening" || heard ? heard || "Listening…" : null;
   return (
     <>
       {low ? (

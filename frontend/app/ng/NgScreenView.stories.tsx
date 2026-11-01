@@ -50,7 +50,7 @@ const keyboard = (d: typeof PHONE, docked = false): NgScreenViewProps["keyboard"
   onHeightDone: fn(),
 });
 
-const notes = { dictation: "off" as const, heard: "", note: null, hint: null };
+const notes = { dictation: "off" as const, heard: "", note: null };
 
 /** A phone, upright: the clone's screen fills the display. */
 const meta = {
@@ -153,14 +153,9 @@ const desktop = {
 export const Desktop: Story = { args: { ...desktop } };
 
 /** The mode just started, or the mouse is at the window's right edge by the buttons' row: the
- *  buttons are in (no keyboard button); at the start, the note says how to reach them and the
- *  pages. */
+ *  buttons are in (no keyboard button). */
 export const DesktopButtonsIn: Story = {
-  args: {
-    ...desktop,
-    buttons: buttons({ keyboard: false, fit: undefined }),
-    notes: { ...notes, hint: "The right edge at the top shows the buttons; in fullscreen, Super Space the pages" },
-  },
+  args: { ...desktop, buttons: buttons({ keyboard: false, fit: undefined }) },
 };
 
 /** First open of the site with a layout of three monitors: this window shows monitor 0, and

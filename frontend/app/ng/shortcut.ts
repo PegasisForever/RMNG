@@ -25,8 +25,3 @@ export function isPagesChord(e: Chord, os: Os = currentOs()): boolean {
 export function pagesChordHolds(os: Os = currentOs()): readonly string[] {
   return os === "mac" ? ["AltLeft", "AltRight"] : ["MetaLeft", "MetaRight"];
 }
-
-/** The chord as the operator presses it on `os`. */
-export function pagesChordLabel(os: Os = currentOs()): string {
-  return os === "mac" ? "⌥ Space" : "Super Space";
-}

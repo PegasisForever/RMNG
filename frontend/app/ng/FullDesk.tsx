@@ -60,7 +60,7 @@ import { NgScreenView, pagesBox } from "./NgScreenView";
 import { NgPagesContainer } from "./pages/NgPagesContainer";
 import { clampTo } from "./pointer";
 import { useRemote } from "./remote";
-import { isPagesChord, pagesChordLabel } from "./shortcut";
+import { isPagesChord } from "./shortcut";
 import { isTyping, useLift } from "./systemKeyboard";
 import type { NgTab } from "./ToolRow";
 
@@ -76,8 +76,8 @@ const MIN_KEYS_H = 160;
 const MAX_KEYS_PART = 0.8;
 /** Touch slots a touch screen offers, fingers at once. */
 const TOUCH_SLOTS = 10;
-/** How long the buttons and the hint show when mouse and keyboard mode starts, ms. */
-const HINT_MS = 4000;
+/** How long the buttons show when mouse and keyboard mode starts, ms. */
+const INTRO_MS = 4000;
 /** Mouse mode: the mouse this close to the window's right edge (CSS px), by the buttons' row,
  *  brings the buttons in; this much (CSS px) away from their row, it sends them away again. */
 const RIGHT_EDGE_PX = 2;
@@ -125,8 +125,6 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const [pages, setPages] = useState(false);
   const [tab, setTab] = useState<NgTab>("clones");
   const [layoutOpen, setLayoutOpen] = useState(false);
-  /** The chord's hint, while mouse and keyboard mode is new. */
-  const [hint, setHint] = useState(false);
   /** Mouse mode: the buttons are in the window (the mode is new, or the mouse is at the top). */
   const [peek, setPeek] = useState(false);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
@@ -208,13 +206,12 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   /** The buttons' row ends this far down (CSS px): under the clock bar, a gap, the buttons, a gap. */
   const rowEnd = useRef(0);
   rowEnd.current = top + FLOAT_GAP * 2 + FLOAT_BUTTON;
-  // Mouse and keyboard mode starts: the buttons and the hint show for a while, then the buttons
-  // slide out of the window to the right. The mouse at the window's right edge, as high as
-  // their row, brings them back; away from their row it sends them away again.
+  // Mouse and keyboard mode starts: the buttons show for a while, then they slide out of the
+  // window to the right. The mouse at the window's right edge, as high as their row, brings
+  // them back; away from their row it sends them away again.
   useEffect(() => {
     if (!mouse) return;
     setZoom(1);
-    setHint(true);
     setPeek(true);
     let intro = true;
     /** The mouse is at the buttons' row, or by it. Their row's width is the page's to say. */
@@ -227,9 +224,8 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     let near = isNear(pointer.current);
     const t = setTimeout(() => {
       intro = false;
-      setHint(false);
       if (!near) setPeek(false);
-    }, HINT_MS);
+    }, INTRO_MS);
     const onMove = (e: globalThis.PointerEvent) => {
       if (e.pointerType !== "mouse") return;
       const at = { x: e.clientX, y: e.clientY };
@@ -430,7 +426,6 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         dictation: r.dictation,
         heard: r.heard,
         note: r.note,
-        hint: hint && !pages ? `The right edge at the top shows the buttons; in fullscreen, ${pagesChordLabel()} the pages` : null,
       }}
       pages={{
         open: pages,
