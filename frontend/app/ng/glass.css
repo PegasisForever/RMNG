@@ -208,6 +208,11 @@
 }
 /* Light only: in dark the parts' own `dark:` fill is the one that shows */
 @media (prefers-color-scheme: light) {
+  /* A grey fill (an idle clone's dot): a light solid grey, not the 50 % black its shade is as
+     text */
+  .ng-on-glass .bg-slate-400:not(.dark *) {
+    background-color: oklch(78% 0 0);
+  }
   .ng-on-glass .bg-white:not(.dark *) {
     background-color: rgb(255 255 255 / 0.6);
   }
