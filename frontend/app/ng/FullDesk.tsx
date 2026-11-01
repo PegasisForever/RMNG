@@ -26,7 +26,8 @@
 //   chord (`./shortcut.ts`) shows the pages, with the buttons above them, and hides them again;
 //   so does a click beside them.
 //
-// Where the browser can open windows, the pages can move to a window of their own (`?pages`).
+// Where the browser can open windows, the pages can move to a window of their own (`?pages`),
+// and a button opens the windows of the layout's other monitors while any is not open.
 //
 // It runs in the frame of the /ng shell (`public/ng-shell.html`) where the browser has
 // fullscreen: the fullscreen, the key lock, the window's name and address are the shell's
@@ -43,7 +44,8 @@ import { LayoutEditorContainer } from "~/components/LayoutEditorContainer";
 import { type BrowserLayout, clientKind, ensureLayout, readLayout, saveLayout } from "~/lib/clientLayout";
 import { resize } from "~/lib/monitorLayout";
 import { hostWindow } from "~/lib/host";
-import { useViewerChannel } from "~/lib/useViewerChannel";
+import { useOpenMonitors, useViewerChannel } from "~/lib/useViewerChannel";
+import { openViewerWindows } from "~/viewer/open";
 import { toggleFullscreen } from "~/viewer/input";
 
 import { firstLayout, startScale } from "./firstLayout";
@@ -195,6 +197,13 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  /** Where the pointer was last, CSS px from the top. */
+  const pointerY = useRef(Infinity);
+  useEffect(() => {
+    const onMove = (e: globalThis.PointerEvent) => (pointerY.current = e.clientY);
+    window.addEventListener("pointermove", onMove, { capture: true, passive: true });
+    return () => window.removeEventListener("pointermove", onMove, { capture: true });
+  }, []);
   // Mouse and keyboard mode starts: the buttons and the hint show for a while, then the buttons
   // slide up out of the window. The mouse at the window's top edge brings them back; below
   // their row it sends them away again.
@@ -204,8 +213,9 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     setHint(true);
     setPeek(true);
     let intro = true;
-    /** The mouse is by the buttons' row (the start's time ends without sending them away). */
-    let near = false;
+    /** The mouse is by the buttons' row (the start's time ends without sending them away). The
+     *  move that started the mode came before this listener: it is in `pointerY`. */
+    let near = pointerY.current <= BUTTONS_ZONE_PX;
     const t = setTimeout(() => {
       intro = false;
       setHint(false);
@@ -230,6 +240,22 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     // Several windows: each says its monitor in its title
     hostWindow().document.title = windows && monitor > 0 ? `RMNG monitor ${monitor}` : "RMNG";
   }, [windows, monitor]);
+  // A desktop layout of several monitors: which have a window open, so a button can open the
+  // others' (the first open of the site shows monitor 0 only)
+  const many = windows && (layout?.monitors.length ?? 0) > 1;
+  const openMonitors = useOpenMonitors(many);
+  const missing =
+    many && layout && openMonitors.open
+      ? layout.monitors.map((_, i) => i).filter((i) => i !== monitor && !openMonitors.open!.has(i))
+      : [];
+  const openMissing = () => {
+    // One window a click where the browser blocks the rest: the button stays for them
+    void openViewerWindows(
+      missing.map((id) => ({ id })),
+      "/ng",
+      false,
+    ).then(() => setTimeout(openMonitors.look, 1500));
+  };
   const identify = useViewerChannel(
     monitor,
     // The size Fit would give, at the pixel scale, so a match gives just that
@@ -428,6 +454,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         onFit: () => fitTo(target),
         onFitSettings: () => setLayoutOpen(true),
         fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
+        monitors: missing.length ? { missing, onOpen: openMissing } : undefined,
         // In mouse mode, out of the window unless the mouse brought them in, or the pages or
         // the dialog are open
         away: mouse && !peek && !pages && !layoutOpen,

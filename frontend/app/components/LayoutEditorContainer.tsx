@@ -15,27 +15,8 @@ import {
   saveLayout,
 } from "~/lib/clientLayout";
 import { resize } from "~/lib/monitorLayout";
+import { askWindowSizes } from "~/lib/useViewerChannel";
 import { openViewerWindows } from "~/viewer/open";
-
-/** How long the viewer windows get to say their sizes. */
-const ANSWER_MS = 400;
-
-/** The viewer windows' sizes, by monitor, in screen pixels. */
-function askWindowSizes(): Promise<Map<number, { width: number; height: number }>> {
-  return new Promise((resolve) => {
-    const sizes = new Map<number, { width: number; height: number }>();
-    const ch = new BroadcastChannel(VIEWER_CHANNEL);
-    ch.onmessage = (e: MessageEvent<ViewerChannelMsg>) => {
-      if (e.data.t === "size") sizes.set(e.data.monitor, { width: e.data.width, height: e.data.height });
-    };
-    const ask: ViewerChannelMsg = { t: "ask-size" };
-    ch.postMessage(ask);
-    setTimeout(() => {
-      ch.close();
-      resolve(sizes);
-    }, ANSWER_MS);
-  });
-}
 
 export function LayoutEditorContainer({
   onApplied,

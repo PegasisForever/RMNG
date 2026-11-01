@@ -43,3 +43,7 @@ export const Unread: Story = { args: { badge: 2, pagesOpen: true } };
 
 /** The keyboard is docked: lit, with a bar under its icon. */
 export const KeyboardDocked: Story = { args: { keyboardOpen: true, keyboardDocked: true } };
+
+/** A desktop layout of three monitors, two with no window open: the button at the left opens
+ *  them. */
+export const MonitorsToOpen: Story = { args: { monitors: { missing: [1, 2], onOpen: fn() } } };

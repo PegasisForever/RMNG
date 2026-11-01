@@ -163,6 +163,12 @@ export const DesktopButtonsIn: Story = {
   },
 };
 
+/** First open of the site with a layout of three monitors: this window shows monitor 0, and
+ *  the button at the left opens the other two. */
+export const DesktopMonitorsToOpen: Story = {
+  args: { ...desktop, buttons: buttons({ keyboard: false, monitors: { missing: [1, 2], onOpen: fn() } }) },
+};
+
 /** The chord showed the pages, at the right, with the buttons above them (no keyboard button)
  *  and the button that moves them to a window of their own. */
 export const DesktopPages: Story = {

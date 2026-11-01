@@ -7,8 +7,10 @@
 // mouse. In mouse and keyboard mode they have no keyboard button, and they slide up out of the
 // window when they are not in use (`away`; `./FullDesk.tsx` says when).
 // Where the browser has fullscreen, a fourth button turns it on and off (the page's own
-// fullscreen: only that one hands the system's chords, such as Super+Space, to the page).
-import { Expand, Keyboard, LayoutGrid, Maximize, Minimize } from "lucide-react";
+// fullscreen: only that one hands the system's chords, such as Super+Space, to the page). On a
+// desktop whose layout has monitors with no window open, a button at the left opens their
+// windows, with how many there are on it.
+import { Expand, Keyboard, LayoutGrid, Maximize, Minimize, Monitor } from "lucide-react";
 import { type ReactNode, useRef } from "react";
 
 /** One button's size, and the space between them, CSS px. */
@@ -28,6 +30,7 @@ export function FloatingButtons({
   onFit,
   onFitSettings,
   fullscreen,
+  monitors,
   away = false,
 }: {
   pagesOpen: boolean;
@@ -49,6 +52,9 @@ export function FloatingButtons({
   onFitSettings: () => void;
   /** Fullscreen: on or not, and the switch; absent where the browser has none. */
   fullscreen?: { on: boolean; toggle: () => void };
+  /** The layout's monitors with no window open (their numbers), and the opening of their
+   *  windows; absent when there are none, or the browser opens no windows. */
+  monitors?: { missing: number[]; onOpen: () => void };
   /** Slid up out of the window, and out of reach. */
   away?: boolean;
 }) {
@@ -65,13 +71,20 @@ export function FloatingButtons({
         transform: away ? `translateY(calc(-100% - env(safe-area-inset-top) - ${FLOAT_GAP * 3}px))` : undefined,
       }}
     >
+      {monitors?.missing.length ? (
+        <Round
+          label={`Open the window${monitors.missing.length > 1 ? "s" : ""} of monitor${
+            monitors.missing.length > 1 ? "s" : ""
+          } ${monitors.missing.join(", ")}`}
+          onClick={monitors.onOpen}
+        >
+          <Monitor aria-hidden className="size-5" />
+          <Count n={monitors.missing.length} className="bg-emerald-500" />
+        </Round>
+      ) : null}
       <Round label="Pages" on={pagesOpen} onClick={onPages}>
         <LayoutGrid aria-hidden className="size-5" />
-        {badge ? (
-          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-semibold leading-none text-white">
-            {badge}
-          </span>
-        ) : null}
+        {badge ? <Count n={badge} className="bg-rose-500" /> : null}
       </Round>
       {keyboard ? (
         <Round
@@ -98,6 +111,17 @@ export function FloatingButtons({
         <Expand aria-hidden className="size-5" />
       </Round>
     </div>
+  );
+}
+
+/** A count in a button's top-right corner, on `className`'s color. */
+function Count({ n, className }: { n: number; className: string }) {
+  return (
+    <span
+      className={`absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-semibold leading-none text-white ${className}`}
+    >
+      {n}
+    </span>
   );
 }
 

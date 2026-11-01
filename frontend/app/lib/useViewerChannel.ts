@@ -1,9 +1,61 @@
-// A monitor window's side of VIEWER_CHANNEL (`./clientLayout.ts`): the viewer windows and the
+// VIEWER_CHANNEL (`./clientLayout.ts`). A monitor window's side: the viewer windows and the
 // `/ng` windows answer the Edit layout dialog with their size, follow their monitor when the
-// monitors are renumbered, and show their monitor's number while the dialog is open.
+// monitors are renumbered, and show their monitor's number while the dialog is open. The
+// asking side: the windows' sizes, and which monitors have a window open.
 import { useEffect, useRef, useState } from "react";
 
 import { IDENTIFY_EVERY_MS, VIEWER_CHANNEL, type ViewerChannelMsg } from "./clientLayout";
+
+/** How long the monitor windows get to say their sizes. */
+const ANSWER_MS = 400;
+/** How often `useOpenMonitors` asks, ms. */
+const LOOK_EVERY_MS = 2000;
+
+/** The monitor windows' sizes (this window's too), by monitor, in screen pixels. */
+export function askWindowSizes(): Promise<Map<number, { width: number; height: number }>> {
+  return new Promise((resolve) => {
+    const sizes = new Map<number, { width: number; height: number }>();
+    const ch = new BroadcastChannel(VIEWER_CHANNEL);
+    ch.onmessage = (e: MessageEvent<ViewerChannelMsg>) => {
+      if (e.data.t === "size") sizes.set(e.data.monitor, { width: e.data.width, height: e.data.height });
+    };
+    const ask: ViewerChannelMsg = { t: "ask-size" };
+    ch.postMessage(ask);
+    setTimeout(() => {
+      ch.close();
+      resolve(sizes);
+    }, ANSWER_MS);
+  });
+}
+
+/** The monitors that have a window open in this browser, asked every LOOK_EVERY_MS while
+ *  `on` and this window shows, and at once on `look()`; null until the first answer. */
+export function useOpenMonitors(on: boolean): { open: ReadonlySet<number> | null; look: () => void } {
+  const [open, setOpen] = useState<ReadonlySet<number> | null>(null);
+  const lookRef = useRef(() => {});
+  useEffect(() => {
+    if (!on) {
+      setOpen(null);
+      return;
+    }
+    let gone = false;
+    const look = () => {
+      if (document.visibilityState !== "visible") return;
+      void askWindowSizes().then((sizes) => {
+        if (!gone) setOpen(new Set(sizes.keys()));
+      });
+    };
+    lookRef.current = look;
+    look();
+    const timer = setInterval(look, LOOK_EVERY_MS);
+    return () => {
+      gone = true;
+      clearInterval(timer);
+      lookRef.current = () => {};
+    };
+  }, [on]);
+  return { open, look: () => lookRef.current() };
+}
 
 /** Whether the window should show its monitor's number now (the dialog is open). */
 export function useViewerChannel(
