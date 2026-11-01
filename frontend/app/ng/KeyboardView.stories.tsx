@@ -1,14 +1,16 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
-import { KeyboardView } from "./KeyboardView";
+import { FakeDesktop } from "./__fixtures__/screen";
+import { KeyboardView, keyboardPanel } from "./KeyboardView";
 import { SHIFTS } from "./keyboard";
 import type { DictationState } from "./dictation";
 import type { ModState } from "./modifiers";
 
 /** The keyboard on a large phone, upright: 669 px wide, 45% of 951 px high, a 34 px
  *  home bar. The container tells taps from pointer gestures, so here a key only shows that it is
- *  touched. */
+ *  touched. It is on its panel: glass over a desktop, or solid when docked. It follows the
+ *  toolbar's Theme. */
 function Frame(args: {
   width: number;
   height: number;
@@ -18,20 +20,24 @@ function Frame(args: {
   caps: boolean;
   pad: boolean;
   dictation: DictationState;
+  docked: boolean;
 }) {
   return (
-    <div className="bg-black">
-      <KeyboardView
-        width={args.width}
-        height={args.height}
-        bottom={args.bottom}
-        fn={args.fn}
-        mods={new Map(args.mods)}
-        caps={args.caps}
-        onKeyTouch={fn()}
-        pad={args.pad}
-        dictation={args.dictation}
-      />
+    <div className="relative bg-black" style={{ width: args.width, height: args.height + 120 }}>
+      {args.docked ? null : <FakeDesktop />}
+      <div className={`absolute bottom-0 left-0 ${keyboardPanel(args.docked)}`}>
+        <KeyboardView
+          width={args.width}
+          height={args.height}
+          bottom={args.bottom}
+          fn={args.fn}
+          mods={new Map(args.mods)}
+          caps={args.caps}
+          onKeyTouch={fn()}
+          pad={args.pad}
+          dictation={args.dictation}
+        />
+      </div>
     </div>
   );
 }
@@ -40,7 +46,7 @@ const meta = {
   title: "ng/KeyboardView",
   component: Frame,
   parameters: { layout: "centered" },
-  args: { width: 669, height: 428, bottom: 34, fn: false, mods: [], caps: false, pad: false, dictation: "off" },
+  args: { width: 669, height: 428, bottom: 34, fn: false, mods: [], caps: false, pad: false, dictation: "off", docked: false },
 } satisfies Meta<typeof Frame>;
 
 export default meta;
@@ -68,6 +74,9 @@ export const Dictating: Story = { args: { dictation: "listening" } };
 
 /** The keys in use as a trackpad: faded to a trackpad's outline. */
 export const Trackpad: Story = { args: { pad: true } };
+
+/** Docked under the screen: a solid panel, nothing to see through it. */
+export const Docked: Story = { args: { docked: true } };
 
 /** On a sideways phone (951 px wide, 45% of 648 px high): the symbol and number rows short. */
 export const Sideways: Story = { args: { width: 951, height: 292, bottom: 21 } };

@@ -25,18 +25,25 @@ Do not put a light or a shadow anywhere else: no shadow above a piece, no glow f
 ## Glass is the surface only
 
 Glass is the surface of a piece that floats over the clone's screen: a floating button, a
-tooltip, a dialog's panel, the monitor's number. What is on a surface (text, icons, fields,
+tooltip, a dialog's panel, the monitor's number, a note over the screen ("Connecting…", the
+words dictation hears), the keyboard's panel. What is on a surface (text, icons, fields,
 boxes, buttons in a dialog) is flat: solid or translucent fills, 1 px borders, no blur, no rim,
 no sheen, no shadow, no glow.
 
 | Class | Use it for | Light | Dark |
 |---|---|---|---|
 | `ng-glass` | Every surface: rim, sheen, short shadow. Blur 8 px. | White tint 35 %, dark text, a hairline edge. | Grey tint 30 %, white text. |
-| `ng-glass-thick` | A surface with text to read: a dialog, a tooltip, the monitor's number. Blur 14 px, a long shadow. | White tint 55 %. | Grey tint 50 %. |
+| `ng-glass-thick` | A surface with text to read: a dialog, a tooltip, the monitor's number, a note. Blur 14 px, a long shadow. | White tint 55 %. | Grey tint 50 %. |
 | `ng-glass-control` | A surface that is itself a control (a floating button): more light under the mouse; sinks on a press; an outline on keyboard focus; 45 % when disabled. | Dark outline. | White outline. |
 | `ng-glass-lit` | A control whose thing is open (the pages shown, fullscreen on): the other look's glass. | Dark glass, white text. | Frosted white glass, dark text. |
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
+
+The keyboard (`./KeyboardView.tsx`, `keyboardPanel`) is the one surface with a denser tint: it is
+large and full of keys, so each key must show over a white window or a black one. Light: grey
+(`neutral-300`) at 70 %, as a phone's light keyboard; dark: grey at 82 %. Docked, the keyboard
+is under the screen, not over it, so it is a solid panel in the same colors (`bg-neutral-300` /
+`bg-neutral-950`), with no blur.
 
 ## Flat content
 
@@ -57,6 +64,12 @@ Each color has its light value and its `dark:` value.
 | The button that ends the task (Done) | `rounded-lg bg-emerald-600 text-white`, mouse over `bg-emerald-500` | the same |
 | A small icon button | `rounded-md text-black/55`, mouse over `bg-black/5` | `text-white/60`, mouse over `bg-white/10` |
 | A remove button | `text-rose-600` | `text-rose-400` |
+| A key | `rounded-md border-black/10 bg-white/85 text-neutral-900` | `border-transparent bg-white/15 text-white` |
+| A pressed key | `bg-black/15` | `bg-white/35` |
+| A key that is on (Shift, Ctrl, Fn, Caps Lock) | `bg-neutral-800 text-white` (the other look) | `bg-neutral-100 text-neutral-900` |
+| The dictation key, listening | `bg-rose-600 text-white` | the same |
+| The keyboard's height bar | `bg-black/25`, held `bg-black/70` | `bg-white/30`, held `bg-white` |
+| The trackpad's corners (the keys as a trackpad) | `border-black/35` | `border-white/40` |
 
 ## Color
 

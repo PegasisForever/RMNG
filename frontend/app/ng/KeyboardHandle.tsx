@@ -58,7 +58,7 @@ export function KeyboardHandle({
     >
       <span
         aria-hidden
-        className={`h-1 rounded-full transition-all duration-150 ${armed ? "w-16 bg-neutral-100" : "w-10 bg-neutral-600"}`}
+        className={`h-1 rounded-full transition-all duration-150 ${armed ? "w-16 bg-black/70 dark:bg-white" : "w-10 bg-black/25 dark:bg-white/30"}`}
       />
     </div>
   );

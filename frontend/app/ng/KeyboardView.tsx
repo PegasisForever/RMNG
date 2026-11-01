@@ -82,7 +82,17 @@ export const KeyboardView = memo(function KeyboardView(p: KeyboardViewProps) {
   );
 });
 
-const KEY = "relative flex shrink-0 items-center justify-center rounded-md leading-none";
+/** The panel the keys are on: glass while it floats over the clone's screen, with a denser tint
+ *  (grey in the light look) so that each key shows over a white window or a black one; a solid
+ *  panel in the same colors while it is docked under the screen, where there is nothing to see
+ *  through it (`./GLASS.md`). */
+export function keyboardPanel(docked: boolean) {
+  return docked
+    ? "bg-neutral-300 text-neutral-900 dark:bg-neutral-950 dark:text-white"
+    : "ng-glass ng-glass-thick [--glass-tint:rgb(212_212_212/0.7)] dark:[--glass-tint:rgb(23_23_23/0.82)]";
+}
+
+const KEY = "relative flex shrink-0 items-center justify-center rounded-md border border-black/10 leading-none dark:border-transparent";
 
 /** What a key shows it is: a modifier's state, Fn on, or Caps Lock on (lit like a Shift that is
  *  down). Caps Lock's state is the page's count of its presses, so a clone that turns it on or
@@ -93,9 +103,13 @@ function keyState(key: Key, p: KeyboardViewProps): ModState | undefined {
   return p.mods.get(key.code);
 }
 
+/** A key is flat content on the keyboard's panel (`./GLASS.md`), in the light or the dark look.
+ *  A key that is on (a modifier, Fn, Caps Lock) takes the other look, as lit glass does. */
+const KEY_UP = "bg-white/85 text-neutral-900 dark:bg-white/15 dark:text-white";
+
 function tone(down: boolean, active = false) {
-  if (active) return "bg-neutral-200 text-black";
-  return down ? "bg-neutral-600 text-white" : "bg-neutral-800 text-neutral-100";
+  if (active) return "bg-neutral-800 text-white dark:bg-neutral-100 dark:text-neutral-900";
+  return down ? "bg-black/15 text-neutral-900 dark:bg-white/35 dark:text-white" : KEY_UP;
 }
 
 /** A touch stays with the element it went down on by itself; a mouse is captured so that it
@@ -211,11 +225,11 @@ function KeyButton({
 /** The dictation key in each state: red while it listens, darker red while it starts, a red
  *  struck-out mic for a fault, dim where the browser has no dictation. */
 const DICTATION_TONE: Record<DictationState, string> = {
-  off: "bg-neutral-800 text-neutral-100",
-  starting: "bg-rose-900 text-rose-100",
+  off: KEY_UP,
+  starting: "bg-rose-200 text-rose-900 dark:bg-rose-900 dark:text-rose-100",
   listening: "bg-rose-600 text-white",
-  error: "bg-neutral-800 text-rose-400",
-  unsupported: "bg-neutral-900 text-neutral-600",
+  error: "bg-white/85 text-rose-600 dark:bg-white/15 dark:text-rose-400",
+  unsupported: "bg-white/30 text-black/30 dark:bg-white/5 dark:text-white/30",
 };
 
 function DictationIcon({ state, size }: { state: DictationState; size: number }) {
@@ -251,7 +265,7 @@ function WinLogo({ size }: { size: number }) {
 
 /** The trackpad's outline: an L at each corner of the key area. It fades in and out. */
 function PadOutline({ box, shown }: { box: KeysLayoutBox; shown: boolean }) {
-  const corner = "absolute h-6 w-6 border-neutral-500";
+  const corner = "absolute h-6 w-6 border-black/35 dark:border-white/40";
   return (
     <div
       aria-hidden

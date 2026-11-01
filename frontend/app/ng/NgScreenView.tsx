@@ -22,7 +22,7 @@ import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
 import { GAP, TOOL_H } from "./geometry";
 import type { InputMode } from "./inputMode";
 import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
-import { KeyboardView, type KeyboardViewProps, type TouchKind } from "./KeyboardView";
+import { KeyboardView, type KeyboardViewProps, type TouchKind, keyboardPanel } from "./KeyboardView";
 import { type NgTab, type ServerUsage, ToolRow } from "./ToolRow";
 
 /** The pages are at most this wide (CSS px), at the right, under the buttons. */
@@ -167,7 +167,7 @@ export function NgScreenView({
 
       {keyboard ? (
         <div
-          className={`absolute bottom-0 left-0 ${keyboard.docked ? "bg-black" : "bg-black/75 backdrop-blur-xl"}`}
+          className={`absolute bottom-0 left-0 ${keyboardPanel(keyboard.docked)}`}
           style={{ width, height: keysH }}
         >
           <KeyboardHandle height={keysH} onHeight={keyboard.onHeight} onDone={keyboard.onHeightDone} />
@@ -219,14 +219,14 @@ function ScreenNotes({
     <>
       {low ? (
         <p className="pointer-events-none absolute inset-x-0 flex justify-center px-6" style={{ bottom }}>
-          <span className="max-w-full truncate rounded-full bg-black/60 px-4 py-2 text-sm text-neutral-100 backdrop-blur-md">
+          <span className="ng-glass ng-glass-thick max-w-full truncate rounded-full px-4 py-2 text-sm">
             {low}
           </span>
         </p>
       ) : null}
       {note ? (
         <p className="pointer-events-none absolute inset-0 flex items-center justify-center p-6">
-          <span className="rounded-full bg-black/50 px-4 py-2 text-center text-sm text-neutral-100 backdrop-blur-md">
+          <span className="ng-glass ng-glass-thick rounded-full px-4 py-2 text-center text-sm">
             {note}
           </span>
         </p>
