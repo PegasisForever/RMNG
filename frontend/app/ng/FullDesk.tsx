@@ -25,7 +25,8 @@
 //   then slide out of the window to the right; the mouse at the window's right edge, by their
 //   row, brings them back. On a large screen (the pages' wide layout), the mouse at the right
 //   edge under their row brings in the side panels, the clone's notes and its assistant, over
-//   the screen; the mouse and the keys are theirs then, and a move away sends them out. A
+//   the screen, and the buttons with them; the mouse and the keys are theirs then, and a move
+//   away sends both out. A
 //   chord (`./shortcut.ts`) shows the pages, with the buttons above them, and hides them again;
 //   so does a click beside them.
 //
@@ -538,9 +539,9 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         onLayout: () => setLayoutOpen(true),
         fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
         monitors: missing.length ? { missing, onOpen: openMissing } : undefined,
-        // In mouse mode, out of the window unless the mouse brought them in, or the pages or
-        // the dialog are open
-        away: mouse && !peek && !pages && !layoutOpen,
+        // In mouse mode, out of the window unless the mouse brought them in (or the side
+        // panels, which bring them too), or the pages or the dialog are open
+        away: mouse && !peek && !sidePeek && !pages && !layoutOpen,
       }}
       dialog={
         layoutOpen ? (

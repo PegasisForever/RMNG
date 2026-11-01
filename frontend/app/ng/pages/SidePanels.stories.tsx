@@ -87,6 +87,7 @@ function Side({
           onCancelScheduled={fn()}
           now={chatNow}
           locale={chatLocale}
+          glass
         />
       }
       onBackToScreen={archived ? fn() : undefined}

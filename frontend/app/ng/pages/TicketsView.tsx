@@ -48,6 +48,7 @@ import {
   HeaderButton,
   isMouseClick,
   NO_DRAG,
+  NO_SCROLLBARS,
   Page,
   PageHeader,
   PRESS,
@@ -229,7 +230,8 @@ export function TicketsView(p: TicketsViewProps) {
   if (p.open) {
     const open = p.open;
     return (
-      <div className="relative h-full">
+      // The ticket scrolls with no bar
+      <div className={`relative h-full ${NO_SCROLLBARS}`}>
         <Page
           fill
           header={

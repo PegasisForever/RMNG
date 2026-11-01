@@ -32,6 +32,10 @@ no sheen, no shadow, no glow. One exception: the button that asks the operator t
 card (an account's "Token expired. Sign in again") is a glass control
 (`ng-glass ng-glass-control rounded-lg`), with red text (`text-rose-600` / `text-rose-400`), so
 it stands out of the flat card as a thing to press.
+The assistant's chat bubbles are glass too (`ng-glass`; the operator's own in the other look,
+`ng-glass ng-glass-lit`), as messages that float in the panel; its field and buttons are the
+flat ones below, translucent, not solid. The side panels, the notes, the chat and an open
+ticket scroll with no bar showing (`NO_SCROLLBARS`, `./pages/ui.tsx`).
 
 | Class | Use it for | Light | Dark |
 |---|---|---|---|

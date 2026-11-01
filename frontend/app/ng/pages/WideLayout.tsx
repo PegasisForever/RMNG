@@ -30,7 +30,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { PopOutButton, type ServerUsage } from "../ToolRow";
-import { COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, TEXT, TEXT_2 } from "./ui";
+import { COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, NO_SCROLLBARS, TEXT, TEXT_2 } from "./ui";
 import { ServerStats } from "./UsageView";
 
 /** At least this wide (CSS px), the pages take this layout. */
@@ -260,7 +260,8 @@ export function SidePanels({
     `flex-1 grow-0 transition-[flex-basis] duration-300 ease-[cubic-bezier(0.34,1.25,0.64,1)] ${on ? "basis-3/4" : "basis-1/4"}`;
 
   return (
-    <div ref={box} className="pointer-events-none relative flex h-full flex-col gap-2" style={{ width }}>
+    // The notes, the chat and a ticket scroll with no bars, as the board's row does
+    <div ref={box} className={`pointer-events-none relative flex h-full flex-col gap-2 ${NO_SCROLLBARS}`} style={{ width }}>
       {/* The band: over the panels' left edge, more in than out, as the shadow reads as the
           panel's. Over the panels' blur (a stacking context each) only with a z of its own */}
       <div

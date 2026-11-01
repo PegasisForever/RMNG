@@ -51,6 +51,7 @@ export const Assistant: Story = {
         onCancelScheduled={fn()}
         now={chatNow}
         locale={chatLocale}
+        glass
       />
     ),
   },

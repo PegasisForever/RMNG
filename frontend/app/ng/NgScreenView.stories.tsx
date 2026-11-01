@@ -355,7 +355,7 @@ export const DesktopInteractive: Story = {
               keyboard: false,
               fit: undefined,
               onPages: () => setOpen((o) => !o),
-              away: !open && !peek,
+              away: !open && !peek && !side,
             })}
           />
         </div>

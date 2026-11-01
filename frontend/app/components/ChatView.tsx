@@ -6,10 +6,13 @@
 // The clock (`now`) feeds the schedule picker's `min` and the "Today 15:30" labels. The
 // locale (`locale`) decides whether that label reads "15:30" or "3:30 PM". Both are required,
 // so a story renders identically on every load and on every machine.
+//
+// `glass` draws it in /ng's glass (`~/ng/GLASS.md`), on a glass panel over the clone's screen:
+// the bubbles are glass of their own (the operator's in the other look, as a lit control), and
+// the field and the boxes are translucent rather than solid.
 import { CalendarClock, Clock, LoaderCircle, SendHorizontal, Square } from "lucide-react";
 import { useEffect, useRef } from "react";
 import Markdown, { type Components } from "react-markdown";
-import TextareaAutosize from "react-textarea-autosize";
 import remarkGfm from "remark-gfm";
 
 import type { ChatMessage } from "~/lib/types";
@@ -76,7 +79,52 @@ export interface ChatViewProps {
   /** BCP 47 tag the date labels format under ("en-GB" ⇒ "Today 15:00"). Required for the
    *  same reason as `now`: the container resolves the operator's locale, never this. */
   locale: string;
+  /** In /ng's glass, on a glass panel over the clone's screen. */
+  glass?: boolean;
 }
+
+/** The pane's look: the dashboard's solid one, or /ng's glass. */
+type Look = typeof SOLID;
+
+const SOLID = {
+  user: "bg-emerald-600 text-white",
+  assistant: "border border-slate-200 bg-white text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100",
+  working: "border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800",
+  faint: "text-slate-400 dark:text-slate-500",
+  quiet: "text-slate-500 dark:text-slate-400",
+  line: "border-slate-200 dark:border-slate-700",
+  note: "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400",
+  item: "border-slate-300 bg-slate-50 dark:border-slate-600 dark:bg-slate-800",
+  itemText: "text-slate-600 dark:text-slate-300",
+  field:
+    "border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500",
+  button: "border-slate-300 text-slate-500 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-700",
+  buttonOn:
+    "border-emerald-600 bg-emerald-50 text-emerald-700 dark:border-emerald-500 dark:bg-emerald-950/40 dark:text-emerald-400",
+  code: "",
+};
+
+/** `~/ng/GLASS.md`: glass bubbles, and its flat content (a field, a button, a box) on the panel. */
+const GLASS: Look = {
+  user: "ng-glass ng-glass-lit",
+  assistant: "ng-glass text-neutral-900 dark:text-white",
+  working: "ng-glass",
+  faint: "text-black/40 dark:text-white/40",
+  quiet: "text-black/60 dark:text-white/60",
+  line: "border-black/10 dark:border-white/10",
+  note: "bg-black/5 text-black/60 dark:bg-white/5 dark:text-white/60",
+  item: "border-black/10 bg-white/50 dark:border-white/10 dark:bg-white/5",
+  itemText: "text-black/60 dark:text-white/60",
+  field:
+    "border-black/10 bg-white/60 text-neutral-900 placeholder:text-black/40 focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-white/40 dark:focus:border-white/30",
+  button: "border-black/15 bg-white/50 text-black/60 hover:bg-white/80 dark:border-white/15 dark:bg-white/5 dark:text-white/60 dark:hover:bg-white/10",
+  buttonOn: "ng-glass-lit border-transparent",
+  // Code in a bubble: a translucent box, not the solid slate one
+  code: "[&_code]:bg-black/5 [&_pre]:bg-black/5 dark:[&_code]:bg-white/10 dark:[&_pre]:bg-white/10",
+};
+
+/** A composer button: the height of the one-line field beside it (34 px), so the two line up. */
+const SQUARE = "flex size-[34px] shrink-0 items-center justify-center rounded-md border";
 
 // The assistant answers in markdown. There is no typography plugin in this app, so each element
 // gets its own few classes here. Raw HTML in a reply is not rendered (react-markdown's default).
@@ -123,16 +171,14 @@ export function isQueued(m: ChatMessage): boolean {
   return m.id.startsWith("queued-");
 }
 
-function Bubble({ m }: { m: ChatMessage }) {
+function Bubble({ m, look }: { m: ChatMessage; look: Look }) {
   const isUser = m.role === "user";
   const queued = isQueued(m);
   return (
     <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
       <div
-        className={`max-w-[88%] min-w-0 break-words rounded-2xl px-3 py-2 text-sm ${
-          isUser
-            ? `whitespace-pre-wrap bg-emerald-600 text-white ${queued ? "opacity-60" : ""}`
-            : "border border-slate-200 bg-white text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+        className={`max-w-[88%] min-w-0 break-words rounded-2xl px-3 py-2 text-sm ${look.code} ${
+          isUser ? `whitespace-pre-wrap ${look.user} ${queued ? "opacity-60" : ""}` : look.assistant
         }`}
       >
         {isUser ? (
@@ -144,7 +190,7 @@ function Bubble({ m }: { m: ChatMessage }) {
         )}
       </div>
       {queued ? (
-        <span className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
+        <span className={`mt-0.5 text-xs ${look.faint}`}>
           Queued: the assistant reads it at its next step
         </span>
       ) : null}
@@ -171,7 +217,9 @@ export function ChatView({
   onCancelScheduled,
   now,
   locale,
+  glass = false,
 }: ChatViewProps) {
+  const look = glass ? GLASS : SOLID;
   const scrollRef = useRef<HTMLDivElement>(null);
   const picking = scheduleAt !== "";
 
@@ -193,23 +241,23 @@ export function ChatView({
         className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
       >
         {loading ? (
-          <p className="text-sm text-slate-400 dark:text-slate-500">Loading…</p>
+          <p className={`text-sm ${look.faint}`}>Loading…</p>
         ) : messages.length === 0 ? (
-          <p className="text-sm text-slate-400 dark:text-slate-500">
+          <p className={`text-sm ${look.faint}`}>
             {archived
               ? "This clone is archived. Its chat history is retained."
               : "Ask the assistant anything — it can control this clone's desktop."}
           </p>
         ) : (
-          messages.map((m) => <Bubble key={m.id} m={m} />)
+          messages.map((m) => <Bubble key={m.id} m={m} look={look} />)
         )}
         {busy ? (
           <div className="flex justify-start">
-            <div className="max-w-[88%] rounded-2xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800">
-              <span className="text-slate-400 dark:text-slate-500">assistant is working…</span>
+            <div className={`max-w-[88%] rounded-2xl px-3 py-2 text-sm ${look.working}`}>
+              <span className={look.faint}>assistant is working…</span>
               {activity ? (
                 <span
-                  className="mt-1 block break-words font-mono text-xs leading-snug text-slate-500 dark:text-slate-400"
+                  className={`mt-1 block break-words font-mono text-xs leading-snug ${look.quiet}`}
                   title={activity}
                 >
                   {activity}
@@ -226,22 +274,22 @@ export function ChatView({
         </div>
       ) : null}
       {archived ? (
-        <div className="border-t border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400">
+        <div className={`border-t px-3 py-1.5 text-xs ${look.line} ${look.note}`}>
           Unarchive this clone to message the assistant.
         </div>
       ) : null}
 
       {scheduled.length > 0 ? (
-        <ul className="max-h-32 space-y-1 overflow-y-auto border-t border-slate-200 px-2 py-1.5 dark:border-slate-700">
+        <ul className={`max-h-32 space-y-1 overflow-y-auto border-t px-2 py-1.5 ${look.line}`}>
           {scheduled.map((m) => (
             <li
               key={m.id}
-              className="flex items-center gap-2 rounded-md border border-slate-300 bg-slate-50 px-2 py-1 text-xs dark:border-slate-600 dark:bg-slate-800"
+              className={`flex items-center gap-2 rounded-md border px-2 py-1 text-xs ${look.item}`}
             >
               <span className="shrink-0 font-medium text-emerald-700 dark:text-emerald-400">
                 {formatWhen(Number(m.at), now, locale)}
               </span>
-              <span className="min-w-0 flex-1 truncate text-slate-600 dark:text-slate-300" title={m.text}>
+              <span className={`min-w-0 flex-1 truncate ${look.itemText}`} title={m.text}>
                 {m.text}
               </span>
               <button
@@ -258,7 +306,7 @@ export function ChatView({
       ) : null}
 
       <form
-        className="flex flex-col gap-2 border-t border-slate-200 p-2 dark:border-slate-700"
+        className={`flex flex-col gap-2 border-t p-2 ${look.line}`}
         onSubmit={(e) => {
           e.preventDefault();
           submit();
@@ -266,7 +314,7 @@ export function ChatView({
       >
         {picking ? (
           <div className="flex items-center gap-2">
-            <label className="shrink-0 text-xs text-slate-500 dark:text-slate-400" htmlFor="chat-schedule-at">
+            <label className={`shrink-0 text-xs ${look.quiet}`} htmlFor="chat-schedule-at">
               Send at
             </label>
             <input
@@ -275,48 +323,56 @@ export function ChatView({
               value={scheduleAt}
               min={epochMsToLocalInput(now)}
               onChange={(e) => onScheduleAtChange(e.target.value)}
-              className="min-w-0 flex-1 rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
+              className={`min-w-0 flex-1 rounded-md border px-2 py-1 text-sm focus:outline-none ${look.field}`}
             />
             <button
               type="button"
               onClick={() => onScheduleAtChange("")}
-              className="shrink-0 rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
+              className={`shrink-0 rounded-md border px-2 py-1 text-xs ${look.button}`}
             >
               Cancel
             </button>
           </div>
         ) : null}
-        {/* The composer starts one line tall, level with the buttons beside it, and grows
-            with what is typed up to eight lines before it scrolls. `items-end` keeps the
-            buttons on the bottom line as it grows. `TextareaAutosize` measures the content
-            against a hidden copy of the field, which is the only way to get the height
-            right for wrapped text without reading it back from a layout pass. */}
+        {/* The composer starts one line tall, level with the buttons beside it (all 34 px),
+            and grows with what is typed up to eight lines before it scrolls. `items-end` keeps
+            the buttons on its bottom line as it grows. Its height is the text's by layout: a
+            hidden copy of the text in the same grid cell sizes the cell (no more than eight
+            lines), and the field fills it. The copy holds the text, not the placeholder, so
+            an empty field is one line on a narrow card too; the placeholder is cut with "…". */}
         <div className="flex items-end gap-2">
-          <TextareaAutosize
-            value={input}
-            onChange={(e) => onInputChange(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                submit();
+          <div className="grid min-w-0 flex-1">
+            <div
+              aria-hidden
+              className="invisible max-h-[174px] overflow-hidden whitespace-pre-wrap break-words border px-2 py-1.5 text-sm leading-5 [grid-area:1/1]"
+            >
+              {input}{" "}
+            </div>
+            <textarea
+              value={input}
+              rows={1}
+              onChange={(e) => onInputChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder={
+                archived
+                  ? "Unarchive to message the assistant"
+                  : picking
+                    ? "Message to deliver later…  (Enter to schedule)"
+                    : busy
+                      ? "Steer the assistant while it works…  (Enter to send)"
+                      : "Message the assistant…  (Enter to send)"
               }
-            }}
-            minRows={1}
-            maxRows={8}
-            placeholder={
-              archived
-                ? "Unarchive to message the assistant"
-                : picking
-                  ? "Message to deliver later…  (Enter to schedule)"
-                  : busy
-                    ? "Steer the assistant while it works…  (Enter to send)"
-                    : "Message the assistant…  (Enter to send)"
-            }
-            // Typing stays enabled while the assistant works: a message then steers it, the
-            // way a new Slack message in its thread does.
-            disabled={archived}
-            className="min-w-0 flex-1 resize-none rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none disabled:opacity-60 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
-          />
+              // Typing stays enabled while the assistant works: a message then steers it, the
+              // way a new Slack message in its thread does.
+              disabled={archived}
+              className={`min-w-0 resize-none overflow-y-auto whitespace-pre-wrap break-words rounded-md border px-2 py-1.5 text-sm leading-5 [grid-area:1/1] placeholder:truncate focus:outline-none disabled:opacity-60 ${look.field}`}
+            />
+          </div>
           <button
             type="button"
             onClick={() => onScheduleAtChange(picking ? "" : epochMsToLocalInput(now + 15 * 60 * 1000))}
@@ -324,11 +380,7 @@ export function ChatView({
             title={picking ? "Send now instead" : "Schedule this message for later"}
             aria-label={picking ? "Send now instead" : "Schedule this message for later"}
             aria-pressed={picking}
-            className={`shrink-0 rounded-md border p-2 disabled:opacity-40 ${
-              picking
-                ? "border-emerald-600 bg-emerald-50 text-emerald-700 dark:border-emerald-500 dark:bg-emerald-950/40 dark:text-emerald-400"
-                : "border-slate-300 text-slate-500 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-400 dark:hover:bg-slate-700"
-            }`}
+            className={`${SQUARE} disabled:opacity-40 ${picking ? look.buttonOn : look.button}`}
           >
             <Clock className="size-4" />
           </button>
@@ -338,7 +390,7 @@ export function ChatView({
               disabled={archived || !input.trim() || !scheduleAt}
               title="Schedule this message"
               aria-label="Schedule this message"
-              className="shrink-0 rounded-md bg-emerald-600 p-2 text-white hover:bg-emerald-700 disabled:opacity-40"
+              className={`${SQUARE} border-transparent bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40`}
             >
               <CalendarClock className="size-4" />
             </button>
@@ -351,7 +403,7 @@ export function ChatView({
                   disabled={stopping}
                   title={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
                   aria-label={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
-                  className="shrink-0 rounded-md bg-red-600 p-2 text-white hover:bg-red-700 disabled:opacity-50"
+                  className={`${SQUARE} border-transparent bg-red-600 text-white hover:bg-red-700 disabled:opacity-50`}
                 >
                   {/* The spinner is the only way an icon-only button can say the stop is in
                       flight, now that "Stopping…" is not there to read. */}
@@ -367,7 +419,7 @@ export function ChatView({
                 disabled={archived || !input.trim()}
                 title={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
                 aria-label={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
-                className="shrink-0 rounded-md bg-emerald-600 p-2 text-white hover:bg-emerald-700 disabled:opacity-40"
+                className={`${SQUARE} border-transparent bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40`}
               >
                 <SendHorizontal className="size-4" />
               </button>

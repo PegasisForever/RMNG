@@ -31,6 +31,8 @@ export const COLUMN_GLASS = "ng-glass ng-glass-thick ng-glass-flat rounded-2xl o
 
 /** Over the whole clone's screen while the pages are open, under them and the floating buttons:
  *  it blurs and darkens the screen. It takes no touch or click. */
+/** Everything inside scrolls with no bar showing (the side panels, the notes, a ticket). */
+export const NO_SCROLLBARS = "[&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden";
 export const PAGES_BACKDROP = "pointer-events-none bg-black/25 backdrop-blur-md dark:bg-black/40";
 export const COLUMN_SOLID =
   "overflow-hidden rounded-xl border border-black/10 bg-black/[0.03] dark:border-white/10 dark:bg-white/[0.03]";

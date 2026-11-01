@@ -18,7 +18,7 @@ import { CloneStatusDot, statusLabel } from "~/components/mobile/CloneStatus";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
-import { EmptyLine, HeaderButton, Page, PageHeader, Segmented, TEXT, TEXT_3 } from "./ui";
+import { EmptyLine, HeaderButton, NO_SCROLLBARS, Page, PageHeader, Segmented, TEXT, TEXT_3 } from "./ui";
 
 /** Which of the two shows. */
 export type NotesPane = "notes" | "chat";
@@ -82,36 +82,39 @@ export function NotesView({
     );
   }
   return (
-    <Page
-      fill
-      header={
-        <PageHeader
-          title={
-            <span className="flex items-center gap-1.5">
-              <CloneStatusDot clone={clone} />
-              <span className="truncate">{ticket?.title ?? clone.displayName ?? clone.id}</span>
-            </span>
-          }
-          sub={`${clone.id} · ${statusLabel(clone)}`}
-        >
-          {onBackToScreen ? <HeaderButton label="Back to screen" onClick={onBackToScreen} /> : null}
-          {only ? null : <Segmented
-            options={[
-              { value: "notes", label: notesLabel },
-              { value: "chat", label: "Assistant" },
-            ]}
-            value={pane}
-            onChange={onPaneChange}
-          />}
-        </PageHeader>
-      }
-    >
-      {/* The notes are one long scroll; the chat is a column with its composer at the bottom */}
-      {only === "notes" || pane === "notes" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain py-2">{notes}</div>
-      ) : (
-        chat
-      )}
-    </Page>
+    // The notes and the chat scroll with no bars
+    <div className={`h-full ${NO_SCROLLBARS}`}>
+      <Page
+        fill
+        header={
+          <PageHeader
+            title={
+              <span className="flex items-center gap-1.5">
+                <CloneStatusDot clone={clone} />
+                <span className="truncate">{ticket?.title ?? clone.displayName ?? clone.id}</span>
+              </span>
+            }
+            sub={`${clone.id} · ${statusLabel(clone)}`}
+          >
+            {onBackToScreen ? <HeaderButton label="Back to screen" onClick={onBackToScreen} /> : null}
+            {only ? null : <Segmented
+              options={[
+                { value: "notes", label: notesLabel },
+                { value: "chat", label: "Assistant" },
+              ]}
+              value={pane}
+              onChange={onPaneChange}
+            />}
+          </PageHeader>
+        }
+      >
+        {/* The notes are one long scroll; the chat is a column with its composer at the bottom */}
+        {only === "notes" || pane === "notes" ? (
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain py-2">{notes}</div>
+        ) : (
+          chat
+        )}
+      </Page>
+    </div>
   );
 }

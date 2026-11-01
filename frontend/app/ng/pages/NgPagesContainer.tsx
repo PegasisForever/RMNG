@@ -539,7 +539,7 @@ export function NgPagesContainer({
       chat={
         notesClone ? (
           <Suspense fallback={<Loading label="Loading chat…" />}>
-            <ChatContainer key={notesClone.id} cloneId={notesClone.id} archived={notesClone.archived === true} />
+            <ChatContainer key={notesClone.id} cloneId={notesClone.id} archived={notesClone.archived === true} glass />
           </Suspense>
         ) : null
       }
