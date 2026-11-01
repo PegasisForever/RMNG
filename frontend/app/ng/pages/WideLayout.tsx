@@ -17,7 +17,16 @@
 //
 // Pure: each part comes in as a slot (`./NgPagesContainer.tsx` fills them).
 import { MonitorCog, Settings } from "lucide-react";
-import { type ReactNode, useState } from "react";
+
+import { clampSideWidth, SIDE_DEFAULT } from "~/lib/sidePanelWidth";
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 
 import { PopOutButton, type ServerUsage } from "../ToolRow";
@@ -32,9 +41,10 @@ export const WIDE_MIN = 1000;
 /** A button in the rail's header. */
 const RAIL_BUTTON = `border-black/10 bg-white/50 hover:bg-white/80 dark:border-white/10 dark:bg-white/[0.06] dark:hover:bg-white/10 ${TEXT_2}`;
 
-const PANEL = `ng-glass ng-glass-thick rounded-2xl pointer-events-auto flex min-h-0 flex-col overflow-hidden transition-[flex-grow] duration-300 ease-out`;
+const PANEL = `ng-glass ng-glass-thick rounded-2xl pointer-events-auto flex min-h-0 flex-col overflow-hidden`;
 
 export function WideLayout({
+  width,
   glass,
   usage,
   settingsOpen,
@@ -45,8 +55,11 @@ export function WideLayout({
   board,
   side,
   sideAt,
+  onSideWidthCommit,
   settings,
 }: {
+  /** The layout's width, CSS px: the side panels' width is a part of it. */
+  width: number;
   /** Over the clone's screen: each column is glass. */
   glass: boolean;
   usage: ServerUsage | null;
@@ -64,9 +77,38 @@ export function WideLayout({
   side: SideProps;
   /** The screen's box for the side panels; absent: they float over the row's right end. */
   sideAt?: HTMLElement | null;
+  /** A drag, a key or a double click set the side panels' width (a part, %). */
+  onSideWidthCommit: (pct: number) => void;
   settings: ReactNode;
 }) {
   const frame = glass ? COLUMN_GLASS : COLUMN_SOLID;
+  // The side panels' width: the container's (stored) to start, then this one's while it is set
+  const [pct, setPct] = useState(side.widthPct);
+  const pctRef = useRef(side.widthPct);
+  useEffect(() => {
+    pctRef.current = side.widthPct;
+    setPct(side.widthPct);
+  }, [side.widthPct]);
+  const setSidePct = (next: number) => {
+    pctRef.current = clampSideWidth(next);
+    setPct(pctRef.current);
+  };
+  const sideW = sideWidthPx(width, pct);
+  const hasSide = !!side.ticket || side.notes !== null;
+  const panels = (
+    <SidePanels
+      ticket={side.ticket}
+      notes={side.notes}
+      chat={side.chat}
+      width={sideW}
+      onWidth={(px) => setSidePct((px / width) * 100)}
+      onWidthDone={() => onSideWidthCommit(pctRef.current)}
+      onWidthReset={() => {
+        setSidePct(SIDE_DEFAULT);
+        onSideWidthCommit(SIDE_DEFAULT);
+      }}
+    />
+  );
 
   const railColumn = (
     <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${frame}`}>
@@ -131,30 +173,106 @@ export function WideLayout({
             {railColumn}
             {board}
             {/* Room to bring the last column out from under the side panels */}
-            <div aria-hidden className="w-96 shrink-0" />
+            {hasSide ? <div aria-hidden className="shrink-0" style={{ width: sideW }} /> : null}
           </div>
         </div>
         {sideAt === undefined ? (
           <div className={`absolute inset-y-0 ${glass ? "right-2" : "right-0"}`}>
-            <SidePanels {...side} />
+            {panels}
           </div>
         ) : sideAt ? (
-          createPortal(<SidePanels {...side} />, sideAt)
+          createPortal(panels, sideAt)
         ) : null}
       </div>
     </ColumnFrameProvider>
   );
 }
 
-type SideProps = { ticket?: ReactNode; notes: ReactNode; chat: ReactNode };
+type SideProps = {
+  /** An open ticket: it takes the whole side. */
+  ticket?: ReactNode;
+  /** The clone's notes card; null when no clone is selected (then no side panels, as on the
+   *  dashboard). */
+  notes: ReactNode | null;
+  chat: ReactNode;
+  /** The side's width, a part (%) of the layout's, as the dashboard's (`~/lib/sidePanelWidth`). */
+  widthPct: number;
+};
 
-/** The side panels, the full height of their box: the open ticket, or the clone's notes over its
- *  assistant. Each is glass of its own, with its blur and its shadow. */
-export function SidePanels({ ticket, notes, chat }: SideProps) {
+/** The side panels' width, CSS px: `pct` of the layout's `width`, no less than 20rem. */
+export const sideWidthPx = (width: number, pct: number) => Math.round(Math.max((width * pct) / 100, 320));
+
+/** The side panels, the full height of their box, as the dashboard's (`~/components/AppShellV2.tsx`):
+ *  the open ticket, or the clone's notes over its assistant. The one touched or focused last
+ *  takes three quarters of the height, with an ease that goes past and comes back. A band on
+ *  their left edge sets their width: a drag, the arrow keys, a double click back to the start.
+ *  Each panel is glass of its own, with its blur and its shadow. */
+export function SidePanels({
+  ticket,
+  notes,
+  chat,
+  width,
+  onWidth,
+  onWidthDone,
+  onWidthReset,
+}: Omit<SideProps, "widthPct"> & {
+  /** CSS px. */
+  width: number;
+  /** The new width during a drag, CSS px from the panels' right edge to the pointer. */
+  onWidth: (px: number) => void;
+  onWidthDone: () => void;
+  onWidthReset: () => void;
+}) {
   /** The side panel touched last: three parts of the height to its one. */
   const [focus, setFocus] = useState<"notes" | "chat">("notes");
+  const box = useRef<HTMLDivElement>(null);
+  if (!ticket && notes === null) return null;
+
+  /** Drag the left edge; the pointer is the band's, so the board's drags never see it. Where
+   *  in the band it was taken stays under the pointer. */
+  const startResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const band = e.currentTarget;
+    band.focus();
+    band.setPointerCapture(e.pointerId);
+    const r = box.current!.getBoundingClientRect();
+    const grab = e.clientX - r.left;
+    const track = (m: globalThis.PointerEvent) => onWidth(r.right - (m.clientX - grab));
+    const stop = () => {
+      band.removeEventListener("pointermove", track);
+      band.removeEventListener("pointerup", stop);
+      band.removeEventListener("pointercancel", stop);
+      onWidthDone();
+    };
+    band.addEventListener("pointermove", track);
+    band.addEventListener("pointerup", stop);
+    band.addEventListener("pointercancel", stop);
+  };
+  const nudge = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const step = e.key === "ArrowLeft" ? 24 : e.key === "ArrowRight" ? -24 : 0;
+    if (!step) return;
+    e.preventDefault();
+    onWidth(width + step);
+    onWidthDone();
+  };
+  /** Each card's share of the height; the ease goes past its end and comes back. */
+  const half = (on: boolean) =>
+    `flex-1 grow-0 transition-[flex-basis] duration-300 ease-[cubic-bezier(0.34,1.25,0.64,1)] ${on ? "basis-3/4" : "basis-1/4"}`;
+
   return (
-    <div className="pointer-events-none flex h-full w-96 flex-col gap-2">
+    <div ref={box} className="pointer-events-none relative flex h-full flex-col gap-2" style={{ width }}>
+      {/* The band: over the panels' left edge, more in than out, as the shadow reads as the
+          panel's. Over the panels' blur (a stacking context each) only with a z of its own */}
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Side panel width"
+        tabIndex={0}
+        onPointerDown={startResize}
+        onKeyDown={nudge}
+        onDoubleClick={onWidthReset}
+        className="pointer-events-auto absolute inset-y-0 -left-1.5 z-10 w-4 cursor-col-resize touch-none select-none outline-none"
+      />
       {ticket ? (
         <section aria-label="Ticket" className={`flex-1 ${PANEL}`}>
           {ticket}
@@ -163,15 +281,17 @@ export function SidePanels({ ticket, notes, chat }: SideProps) {
         <>
           <section
             aria-label="Notes"
+            onFocusCapture={() => setFocus("notes")}
             onPointerDownCapture={() => setFocus("notes")}
-            className={`${focus === "notes" ? "flex-[3]" : "flex-1"} ${PANEL}`}
+            className={`${half(focus === "notes")} ${PANEL}`}
           >
             {notes}
           </section>
           <section
             aria-label="Assistant"
+            onFocusCapture={() => setFocus("chat")}
             onPointerDownCapture={() => setFocus("chat")}
-            className={`${focus === "chat" ? "flex-[3]" : "flex-1"} ${PANEL}`}
+            className={`${half(focus === "chat")} ${PANEL}`}
           >
             {chat}
           </section>

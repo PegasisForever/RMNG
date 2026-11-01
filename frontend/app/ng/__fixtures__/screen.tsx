@@ -26,7 +26,8 @@ import { resolveColumns, withDefaults } from "~/lib/board";
 
 import { BoardDnd } from "../pages/BoardDnd";
 import { NarrowLayout } from "../pages/NarrowLayout";
-import { SidePanels, WIDE_MIN, WideLayout } from "../pages/WideLayout";
+import { SidePanels, sideWidthPx, WIDE_MIN, WideLayout } from "../pages/WideLayout";
+import { SIDE_DEFAULT } from "~/lib/sidePanelWidth";
 import { type NgTab, ROW_STATS_MIN, type ServerUsage } from "../ToolRow";
 
 /** The displays: CSS px, and the home bar's inset. */
@@ -188,7 +189,16 @@ function page(tab: NgTab, server: boolean): ReactNode {
 
 /** The side panels, wide: the clone's notes over its assistant, with the Notes page's data. */
 export function sideFor(): ReactNode {
-  return <SidePanels notes={<NotesView {...notesArgs} only="notes" />} chat={<NotesView {...notesArgs} only="chat" />} />;
+  return (
+    <SidePanels
+      notes={<NotesView {...notesArgs} only="notes" />}
+      chat={<NotesView {...notesArgs} only="chat" />}
+      width={sideWidthPx(DESKTOP.width, SIDE_DEFAULT)}
+      onWidth={fn()}
+      onWidthDone={fn()}
+      onWidthReset={fn()}
+    />
+  );
 }
 
 /** The pages as the container lays them out `width` CSS px wide: the tool row over a tab's page,
@@ -213,6 +223,7 @@ export function pagesFor({
     return (
       <div className={`flex h-full flex-col ${glass ? "" : "p-2"}`}>
         <WideLayout
+          width={width}
           glass={glass}
           usage={usage}
           settingsOpen={tab === "settings"}
@@ -232,7 +243,12 @@ export function pagesFor({
               <ClonesView {...clonesArgs} columnsLayout onRenameColumn={fn()} />
             </BoardDnd>
           }
-          side={{ notes: <NotesView {...notesArgs} only="notes" />, chat: <NotesView {...notesArgs} only="chat" /> }}
+          side={{
+            notes: <NotesView {...notesArgs} only="notes" />,
+            chat: <NotesView {...notesArgs} only="chat" />,
+            widthPct: SIDE_DEFAULT,
+          }}
+          onSideWidthCommit={fn()}
           settings={<SettingsView {...settingsArgs} />}
         />
       </div>

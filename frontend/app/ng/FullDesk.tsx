@@ -265,7 +265,9 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     if (!mouse || !wide) return setSidePeek(false);
     const onMove = (e: globalThis.PointerEvent) => {
       if (e.pointerType !== "mouse") return;
-      if (e.clientX >= window.innerWidth - RIGHT_EDGE_PX && e.clientY > rowEnd.current) return setSidePeek(true);
+      // Only when there are panels to bring: none while no clone is selected
+      const edge = e.clientX >= window.innerWidth - RIGHT_EDGE_PX && e.clientY > rowEnd.current;
+      if (edge && document.querySelector("[data-ng-side] section")) return setSidePeek(true);
       const w = document.querySelector<HTMLElement>("[data-ng-side]")?.offsetWidth ?? 0;
       if (e.buttons === 0 && e.clientX < window.innerWidth - FLOAT_GAP - w - SIDE_MARGIN_PX) setSidePeek(false);
     };

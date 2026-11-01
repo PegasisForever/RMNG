@@ -22,6 +22,7 @@ import { useSettingsPanel } from "~/components/SettingsPanelContainer";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
 import { useAccountOrder } from "~/lib/accountOrder";
+import { rememberSideWidth, SIDE_DEFAULT, storedSideWidth } from "~/lib/sidePanelWidth";
 import {
   activate,
   archiveClone,
@@ -165,6 +166,13 @@ export function NgPagesContainer({
       .catch((e: Error) => setError(e.message));
   }, []);
 
+  // Wide: the side panels' width, the dashboard's (one stored width for both), read after mount
+  const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT);
+  useEffect(() => {
+    const stored = storedSideWidth();
+    if (stored !== null) setSideWidth(stored);
+  }, []);
+
   // The pages opened so far stay mounted (see the top of this file)
   const [visited, setVisited] = useState<ReadonlySet<NgTab>>(new Set());
   useEffect(() => {
@@ -268,8 +276,10 @@ export function NgPagesContainer({
   const notesTicketMeta = useTeamMeta(presets, notesTicket);
 
   /** Put a clone on the screen; the pages stay open (the operator closes them). An archived one
-   *  has no screen, so its notes open instead. */
+   *  has no screen, so its notes open instead. Wide, as on the dashboard, an open ticket closes:
+   *  the side panels are the clone's again. */
   const selectClone = (clone: Clone) => {
+    if (width >= WIDE_MIN) setOpenTicketId(null);
     if (clone.archived) {
       setNotesId(clone.id);
       onTab("notes");
@@ -313,7 +323,7 @@ export function NgPagesContainer({
     if (!notesClone) return null;
     if (notesClone.linearTicket && notesTicket) return ticketPanel(notesTicket, notesTicketMeta, true);
     const editor = (
-      <Suspense fallback={<Loading label="Loading notes…" />}>
+      <Suspense fallback={<Loading label="Loading editor…" />}>
         <NotesEditorContainer key={notesClone.id} cloneId={notesClone.id} />
       </Suspense>
     );
@@ -522,6 +532,8 @@ export function NgPagesContainer({
       onPaneChange={setNotesPane}
       notesLabel={notesClone?.linearTicket ? "Ticket" : "Notes"}
       notes={notesSlot()}
+      // Wide, the clone's own ticket fills its card (`notesSlot` gives it then)
+      ticketCard={only === "notes" && notesClone?.linearTicket && notesTicket ? notesSlot() : undefined}
       chat={
         notesClone ? (
           <Suspense fallback={<Loading label="Loading chat…" />}>
@@ -631,6 +643,7 @@ export function NgPagesContainer({
           ) : null}
           <div className="min-h-0 flex-1">
             <WideLayout
+              width={width}
               glass={glass}
               usage={usage}
               settingsOpen={tab === "settings"}
@@ -655,11 +668,16 @@ export function NgPagesContainer({
               // back when it closes, and when the pages close (the side panels without the pages
               // are the clone's)
               side={{
-                ticket: openTicket && tab ? page("tickets") : undefined,
-                notes: notesView("notes"),
+                ticket: openTicket && tab ? ticketPanel(openTicket, openTicketMeta, false) : undefined,
+                notes: notesClone ? notesView("notes") : null,
                 chat: notesView("chat"),
+                widthPct: sideWidth,
               }}
               sideAt={sideAt}
+              onSideWidthCommit={(pct) => {
+                setSideWidth(pct);
+                rememberSideWidth(pct);
+              }}
               settings={page("settings")}
             />
           </div>
