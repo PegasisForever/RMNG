@@ -2,7 +2,7 @@
 // chat. The desktop stacks the two in its side panel; this page is too short for two, so a
 // switch in the header shows one at a time, and the other stays as it was.
 //
-// Wide (`stacked`), it is the dashboard's side panel: the notes over the chat, both shown.
+// Wide (`only`), it is one of the dashboard's two side panels: the notes, or the assistant.
 //
 // It is about the clone on the screen above. An archived clone has no screen, so a tap on one
 // in the Clones page opens its notes here, and the header then says so and offers the way
@@ -16,7 +16,7 @@ import { CloneStatusDot, statusLabel } from "~/components/mobile/CloneStatus";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
-import { EmptyLine, HeaderButton, LINE, Page, PageHeader, Segmented, TEXT_3 } from "./ui";
+import { EmptyLine, HeaderButton, Page, PageHeader, Segmented } from "./ui";
 
 /** Which of the two shows. */
 export type NotesPane = "notes" | "chat";
@@ -33,8 +33,8 @@ export interface NotesViewProps {
   chat: ReactNode;
   /** The page is on an archived clone, not the one on the screen: the way back to that one. */
   onBackToScreen?: () => void;
-  /** The notes over the chat, both shown (wide), not one at a time. */
-  stacked?: boolean;
+  /** This one only, in a panel of its own (wide), with no switch. */
+  only?: NotesPane;
 }
 
 export function NotesView({
@@ -46,12 +46,19 @@ export function NotesView({
   notes,
   chat,
   onBackToScreen,
-  stacked = false,
+  only,
 }: NotesViewProps) {
   if (!clone) {
     return (
-      <Page header={<PageHeader title="Notes and assistant" />}>
+      <Page header={<PageHeader title={only === "chat" ? "Assistant" : only === "notes" ? notesLabel : "Notes and assistant"} />}>
         <EmptyLine>No clone is selected. Pick one in Clones.</EmptyLine>
+      </Page>
+    );
+  }
+  if (only === "chat") {
+    return (
+      <Page fill header={<PageHeader title="Assistant" sub={ticket?.title ?? clone.displayName ?? clone.id} />}>
+        {chat}
       </Page>
     );
   }
@@ -69,7 +76,7 @@ export function NotesView({
           sub={`${clone.id} · ${statusLabel(clone)}`}
         >
           {onBackToScreen ? <HeaderButton label="Back to screen" onClick={onBackToScreen} /> : null}
-          {stacked ? null : <Segmented
+          {only ? null : <Segmented
             options={[
               { value: "notes", label: notesLabel },
               { value: "chat", label: "Assistant" },
@@ -81,15 +88,7 @@ export function NotesView({
       }
     >
       {/* The notes are one long scroll; the chat is a column with its composer at the bottom */}
-      {stacked ? (
-        <>
-          <div className="min-h-0 flex-[3] overflow-y-auto overscroll-y-contain py-2">{notes}</div>
-          <div className={`flex min-h-0 flex-[2] flex-col border-t ${LINE}`}>
-            <h3 className={`shrink-0 px-3 pt-2 text-[11px] font-semibold uppercase tracking-wide ${TEXT_3}`}>Assistant</h3>
-            {chat}
-          </div>
-        </>
-      ) : pane === "notes" ? (
+      {only === "notes" || pane === "notes" ? (
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain py-2">{notes}</div>
       ) : (
         chat

@@ -7,12 +7,27 @@
 // screen, or on the solid ground of their own window. Each color has its light value and its
 // `dark:` one; the names below are the ones the pages share.
 import { ChevronLeft, type LucideIcon, X } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from "react";
 
 /** The pages' panel over the clone's screen: glass with a denser tint than the buttons' (as the
  *  keyboard's), as it is full of small text that must read over a black window or a white one. */
 export const PAGES_GLASS =
   "ng-glass ng-glass-thick rounded-2xl [--glass-tint:rgb(245_245_245/0.8)] dark:[--glass-tint:rgb(23_23_23/0.78)]";
+
+/** A column of the wide pages (`./WideLayout.tsx`) on its own: glass of its own over the clone's
+ *  screen; a flat hollow on the solid ground of the pages' window. */
+export const COLUMN_GLASS = `${PAGES_GLASS} overflow-hidden`;
+export const COLUMN_SOLID =
+  "overflow-hidden rounded-xl border border-black/10 bg-black/[0.03] dark:border-white/10 dark:bg-white/[0.03]";
+const ColumnFrame = createContext(COLUMN_SOLID);
+/** The wide layout says which frame its columns wear. */
+export const ColumnFrameProvider = ColumnFrame.Provider;
+export const useColumnFrame = () => useContext(ColumnFrame);
+
+/** A card in a column (a clone, a ticket): its edge, and its fill (white on the column, light on
+ *  a dark one) when nothing else fills it. */
+export const CARD = "rounded-lg border border-black/10 dark:border-white/10";
+export const CARD_FILL = "bg-white dark:bg-white/[0.06]";
 
 /** Main text, secondary text, the least text. */
 export const TEXT = "text-neutral-900 dark:text-white";

@@ -470,6 +470,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         content: (
           <NgPagesContainer
             width={panel.width}
+            glass
             usage={r.usage}
             badges={r.unread ? { clones: r.unread } : undefined}
             onPopOut={windows ? () => void popOut() : undefined}

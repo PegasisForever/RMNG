@@ -26,6 +26,7 @@ import { GAP } from "./geometry";
 import type { InputMode } from "./inputMode";
 import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
 import { PAGES_GLASS } from "./pages/ui";
+import { WIDE_MIN } from "./pages/WideLayout";
 import { KeyboardView, type KeyboardViewProps, type TouchKind, keyboardPanel } from "./KeyboardView";
 
 /** The pages are at most this wide (CSS px), at the right, under the buttons. A large screen
@@ -188,8 +189,9 @@ export function NgScreenView({
         className={`absolute z-40 transition-transform duration-300 ease-out ${pages.open ? "" : "hidden"}`}
         style={{ ...panel, transform: `translateY(${-pages.lift}px)` }}
       >
-        {/* Glass (`./GLASS.md`); what is fixed in it (a sheet, a dialog) takes its space */}
-        <div className={`absolute inset-0 overflow-hidden ${PAGES_GLASS}`}>{pages.content}</div>
+        {/* Narrow, on one glass panel (`./GLASS.md`); wide, each column is glass of its own, with
+            nothing round them all. What is fixed in it (a sheet, a dialog) takes its space. */}
+        <div className={`absolute inset-0 ${panel.width >= WIDE_MIN ? "" : `overflow-hidden ${PAGES_GLASS}`}`}>{pages.content}</div>
       </div>
 
       {buttons ? <FloatingButtons {...buttons} /> : null}

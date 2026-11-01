@@ -1,6 +1,7 @@
 // The /ng pages in a window of their own (`/ng?pages`), opened from the pages' tool row on a
 // desktop (`./FullDesk.tsx`): the tool row and the pages (or, wide, the dashboard's layout) fill
-// the window, on a solid ground. It shows no clone and claims no layout. Choosing a clone puts it on the screens and keeps the page here.
+// the window, on a solid ground. It shows no clone and claims no layout. Choosing a clone puts
+// it on the screens and keeps the page here.
 import { useRef, useState } from "react";
 
 import { emptyState } from "~/lib/types";
@@ -20,6 +21,7 @@ export function PagesWindow({ width }: { width: number; height: number }) {
     <div className="absolute inset-0 bg-neutral-100 dark:bg-neutral-950">
       <NgPagesContainer
         width={width}
+        glass={false}
         usage={formatLxcUsage(live.lxcStats)}
         badges={unread ? { clones: unread } : undefined}
         tab={tab}

@@ -86,7 +86,7 @@ import { NotesView, type NotesPane } from "./NotesView";
 import { type Move, moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
-import { ErrorLine } from "./ui";
+import { ErrorLine, PAGES_GLASS } from "./ui";
 import { NarrowLayout } from "./NarrowLayout";
 import { UsageView } from "./UsageView";
 import { WIDE_MIN, WideLayout } from "./WideLayout";
@@ -113,6 +113,7 @@ type Dialog =
 
 export function NgPagesContainer({
   width,
+  glass,
   tab,
   onTab,
   usage,
@@ -124,6 +125,9 @@ export function NgPagesContainer({
 }: {
   /** The pages' width, CSS px: narrow (tabs) or wide (the dashboard's layout). */
   width: number;
+  /** Over the clone's screen: wide, each column is glass of its own (narrow, the screen's view
+   *  puts the whole pages on one glass panel). Not in the pages' own window. */
+  glass: boolean;
   /** The server's CPU, memory and disk; null until they arrive. */
   usage: ServerUsage | null;
   /** A count on a tab. */
@@ -477,6 +481,27 @@ export function NgPagesContainer({
         return <PortForwardModal clone={d.clone} sshPublicHost={sshHost} onClose={closeDialog} onCopy={copyText} />;
     }
   };
+  /** The Notes page, or (`only`, wide) one of its two parts in a side panel of its own. */
+  const notesView = (only?: NotesPane) => (
+    <NotesView
+      only={only}
+      clone={notesClone}
+      ticket={notesClone ? liveCloneTickets[notesClone.id] : undefined}
+      pane={notesPane}
+      onPaneChange={setNotesPane}
+      notesLabel={notesClone?.linearTicket ? "Ticket" : "Notes"}
+      notes={notesSlot()}
+      chat={
+        notesClone ? (
+          <Suspense fallback={<Loading label="Loading chat…" />}>
+            <ChatContainer key={notesClone.id} cloneId={notesClone.id} archived={notesClone.archived === true} />
+          </Suspense>
+        ) : null
+      }
+      onBackToScreen={notesId && notesId !== state.selected ? () => setNotesId(null) : undefined}
+    />
+  );
+
   /** A page, as the tabs show it, or (`wide`) as its part of the dashboard's layout. */
   const page = (t: NgTab, wide = false): ReactNode => {
     switch (t) {
@@ -550,25 +575,7 @@ export function NgPagesContainer({
           />
         );
       case "notes":
-        return (
-          <NotesView
-            stacked={wide}
-            clone={notesClone}
-            ticket={notesClone ? liveCloneTickets[notesClone.id] : undefined}
-            pane={notesPane}
-            onPaneChange={setNotesPane}
-            notesLabel={notesClone?.linearTicket ? "Ticket" : "Notes"}
-            notes={notesSlot()}
-            chat={
-              notesClone ? (
-                <Suspense fallback={<Loading label="Loading chat…" />}>
-                  <ChatContainer key={notesClone.id} cloneId={notesClone.id} archived={notesClone.archived === true} />
-                </Suspense>
-              ) : null
-            }
-            onBackToScreen={notesId && notesId !== state.selected ? () => setNotesId(null) : undefined}
-          />
-        );
+        return notesView();
       case "settings":
         return <SettingsView {...settings} />;
     }
@@ -576,13 +583,18 @@ export function NgPagesContainer({
 
   if (width >= WIDE_MIN) {
     return (
-      // Fixed things in it (a sheet, a dialog) take its whole space: the glass of the panel
-      // over the screen, or the window
+      // Fixed things in it (a sheet, a dialog) take its whole space: the pages' box over the
+      // screen, or the window
       <ModalPlacementProvider value="window">
-        <div className="flex h-full select-text flex-col gap-2 p-2 [&_button]:select-none">
-          {error ? <ErrorLine message={error} onDismiss={() => setError(null)} /> : null}
+        <div className={`flex h-full select-text flex-col gap-2 [&_button]:select-none ${glass ? "" : "p-2"}`}>
+          {error ? (
+            <div className={glass ? `shrink-0 overflow-hidden ${PAGES_GLASS}` : "shrink-0 overflow-hidden rounded-xl"}>
+              <ErrorLine message={error} onDismiss={() => setError(null)} />
+            </div>
+          ) : null}
           <div className="min-h-0 flex-1">
             <WideLayout
+              glass={glass}
               usage={usage}
               settingsOpen={tab === "settings"}
               onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
@@ -596,7 +608,7 @@ export function NgPagesContainer({
               }
               // An open ticket takes the side panel, as on the dashboard; the clone's notes come
               // back when it closes
-              side={openTicket ? page("tickets") : page("notes", true)}
+              side={{ ticket: openTicket ? page("tickets") : undefined, notes: notesView("notes"), chat: notesView("chat") }}
               settings={page("settings")}
             />
           </div>

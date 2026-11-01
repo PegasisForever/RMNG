@@ -48,7 +48,7 @@ import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import { workspaceBadge } from "~/lib/workspace";
 
 import { type Move, movesFor } from "./order";
-import { ActionSheet, BOX, DIVIDE, EmptyLine, HERE, LINE, Page, PageHeader, PRESS, type SheetGroup, TEXT, TEXT_2, TEXT_3 } from "./ui";
+import { ActionSheet, BOX, CARD, CARD_FILL, DIVIDE, useColumnFrame, EmptyLine, HERE, LINE, Page, PageHeader, PRESS, type SheetGroup, TEXT, TEXT_2, TEXT_3 } from "./ui";
 
 export interface ClonesViewProps {
   /** The board's columns (`ControlState.boardColumns`); empty gives the defaults. */
@@ -91,6 +91,7 @@ const MOVE_ACTION = {
 } as const;
 
 export function ClonesView(p: ClonesViewProps) {
+  const frame = useColumnFrame();
   const [sheet, setSheet] = useState<Clone | null>(null);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const columns = resolveColumns(withDefaults(p.columns), p.clones);
@@ -237,7 +238,7 @@ export function ClonesView(p: ClonesViewProps) {
           <section
             key={column.id}
             aria-label={column.title}
-            className={`flex h-full w-72 shrink-0 flex-col rounded-xl border ${LINE} bg-black/[0.03] dark:bg-white/[0.03]`}
+            className={`flex h-full w-72 shrink-0 flex-col ${frame}`}
           >
             <h3 className={`flex h-10 shrink-0 items-center gap-2 pl-3 pr-1 text-sm font-semibold ${TEXT}`}>{heading(column)}</h3>
             <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5">{rows(column)}</ul>
@@ -373,11 +374,7 @@ export function CloneRow({
     // The dashboard's card: the accounts on top, then the ticket and its title on lines of
     // their own, then the numbers
     return (
-      <li
-        className={`overflow-hidden rounded-lg border ${LINE} ${child ? "ml-4" : ""} ${
-          selected ? HERE : notes ? BOX : "bg-white/70 dark:bg-white/[0.06]"
-        }`}
-      >
+      <li className={`overflow-hidden ${CARD} ${child ? "ml-4" : ""} ${selected ? HERE : notes ? BOX : CARD_FILL}`}>
         <div className="flex items-stretch">
           <button
             type="button"

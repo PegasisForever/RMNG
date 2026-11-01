@@ -148,12 +148,15 @@ export function pageFor(tab: NgTab, server = false): ReactNode {
  *  or (wide) the dashboard's layout. */
 export function pagesFor({
   width,
+  glass = true,
   tab,
   onTab = fn(),
   badges,
   onPopOut,
 }: {
   width: number;
+  /** Over the clone's screen (wide: each column glass), not in the pages' own window. */
+  glass?: boolean;
   tab: NgTab;
   onTab?: (tab: NgTab) => void;
   badges?: Partial<Record<NgTab, number>>;
@@ -161,8 +164,9 @@ export function pagesFor({
 }): ReactNode {
   if (width >= WIDE_MIN) {
     return (
-      <div className="flex h-full flex-col p-2">
+      <div className={`flex h-full flex-col ${glass ? "" : "p-2"}`}>
         <WideLayout
+          glass={glass}
           usage={usage}
           settingsOpen={tab === "settings"}
           onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
@@ -174,7 +178,7 @@ export function pagesFor({
               <ClonesView {...clonesArgs} columnsLayout />
             </>
           }
-          side={<NotesView {...notesArgs} stacked />}
+          side={{ notes: <NotesView {...notesArgs} only="notes" />, chat: <NotesView {...notesArgs} only="chat" /> }}
           settings={<SettingsView {...settingsArgs} />}
         />
       </div>

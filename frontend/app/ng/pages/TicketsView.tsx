@@ -31,7 +31,7 @@ import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
 
 import { type Move, movesFor } from "./order";
-import { ActionSheet, DIVIDE, EmptyLine, HeaderButton, LINE, Page, PageHeader, PRESS, type SheetGroup, TEXT, TEXT_2, TEXT_3 } from "./ui";
+import { ActionSheet, CARD, CARD_FILL, DIVIDE, EmptyLine, HeaderButton, LINE, useColumnFrame, Page, PageHeader, PRESS, type SheetGroup, TEXT, TEXT_2, TEXT_3 } from "./ui";
 
 export interface TicketsViewProps {
   /** Open tickets no clone has, in the operator's order (`openTickets`, `orderTickets`). */
@@ -68,6 +68,7 @@ const MOVE_ACTION = {
 } as const;
 
 export function TicketsView(p: TicketsViewProps) {
+  const frame = useColumnFrame();
   const [sheet, setSheet] = useState<LinearTicket | "workspaces" | null>(null);
   const ids = p.tickets.map((t) => t.id);
 
@@ -126,7 +127,7 @@ export function TicketsView(p: TicketsViewProps) {
     return (
       <section
         aria-label="Tickets"
-        className={`flex h-full w-72 shrink-0 flex-col rounded-xl border ${LINE} bg-black/[0.03] dark:bg-white/[0.03]`}
+        className={`flex h-full w-72 shrink-0 flex-col ${frame}`}
       >
         <h3 className={`flex h-10 shrink-0 items-center gap-1.5 pl-3 pr-1 text-sm font-semibold ${TEXT}`}>
           Tickets
@@ -220,7 +221,7 @@ export function TicketRow({
     <li
       className={`flex items-stretch ${
         card
-          ? `overflow-hidden rounded-lg border ${open ? "border-neutral-900 dark:border-white" : `${LINE} bg-white/70 dark:bg-white/[0.06]`}`
+          ? `overflow-hidden ${CARD} ${CARD_FILL} ${open ? "!border-neutral-900 dark:!border-white" : ""}`
           : ""
       }`}
     >
