@@ -45,6 +45,10 @@ export const useColumnFrame = () => useContext(ColumnFrame);
  *  a dark one) when nothing else fills it. */
 export const CARD = "rounded-lg border border-black/10 dark:border-white/10";
 export const CARD_FILL = "bg-white dark:bg-white/[0.06]";
+/** A card on a column (an account, a ticket, a clone): one edge, one fill, for all three. */
+export const CARD_BOX = `${CARD} bg-white/80 dark:bg-white/[0.07]`;
+/** A column's list of cards: its inset and the gap between them, for all three columns. */
+export const CARD_LIST = "space-y-1.5 px-1.5 pb-1.5";
 
 /** Main text, secondary text, the least text. */
 export const TEXT = "text-neutral-900 dark:text-white";

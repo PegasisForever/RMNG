@@ -29,7 +29,7 @@ import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { SoundReport } from "~/viewer/protocol";
 
 import type { ServerUsage } from "../ToolRow";
-import { BOX, EmptyLine, HeaderButton, LINE, Page, PageHeader, TEXT, TEXT_2, TEXT_3 } from "./ui";
+import { BOX, CARD_BOX, EmptyLine, HeaderButton, LINE, Page, PageHeader, TEXT, TEXT_2, TEXT_3 } from "./ui";
 
 export interface UsageViewProps {
   /** Both providers' accounts (`ControlState.claudeAccounts`). */
@@ -93,7 +93,8 @@ export function UsageView({
         </PageHeader>
       }
     >
-      <div className="space-y-3 p-2">
+      {/* The rail's cards sit as the board's columns' do (`CARD_LIST`'s inset) */}
+      <div className={`space-y-3 ${rail ? "px-1.5 pb-1.5 pt-1" : "p-2"}`}>
         {server !== undefined ? <ServerStats usage={server} /> : null}
         {running.length ? (
           <section aria-label="Running jobs" className="space-y-1.5">
@@ -158,7 +159,7 @@ export function AccountCard({
    *  provider's own words) does not show. */
   const signedOut = a.assignable === false;
   return (
-    <article className={`min-w-0 rounded-lg border px-2.5 py-2 ${LINE} ${BOX}`}>
+    <article className={`min-w-0 px-2.5 py-2 ${CARD_BOX}`}>
       <div className="flex items-center gap-1.5">
         <img
           src={codex ? chatgptLogo : claudeLogo}

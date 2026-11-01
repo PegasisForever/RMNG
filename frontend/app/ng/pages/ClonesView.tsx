@@ -64,6 +64,8 @@ import {
   BOX,
   boxOf,
   CARD,
+  CARD_BOX,
+  CARD_LIST,
   DesktopMenu,
   DIVIDE,
   EmptyLine,
@@ -228,7 +230,7 @@ export function ClonesView(p: ClonesViewProps) {
       onMenuTouch: () => setSheet(c),
     });
     return (
-      <div className={`overflow-hidden ${CARD} bg-white/80 dark:bg-white/[0.07] ${p.notesId === clone.id ? BOX : ""}`}>
+      <div className={`overflow-hidden ${CARD_BOX} ${p.notesId === clone.id ? BOX : ""}`}>
         <SidebarClone
           {...props(clone, false)}
           childCount={kids.length}
@@ -415,7 +417,7 @@ export function ClonesView(p: ClonesViewProps) {
             <DropColumn
               id={column.id}
               items={column.cloneIds}
-              className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5"
+              className={`min-h-0 flex-1 overflow-y-auto overscroll-y-contain ${CARD_LIST}`}
             >
               {items(column)}
               {column.cloneIds.length === 0 ? (

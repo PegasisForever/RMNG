@@ -42,6 +42,8 @@ import {
   ActionSheet,
   boxOf,
   CARD,
+  CARD_BOX,
+  CARD_LIST,
   DesktopMenu,
   DIVIDE,
   EmptyLine,
@@ -156,7 +158,7 @@ export function TicketsView(p: TicketsViewProps) {
     <div
       {...drag}
       onClick={() => p.onOpen(t)}
-      className={`cursor-grab overflow-hidden ${CARD} bg-white/80 dark:bg-white/[0.07] ${
+      className={`cursor-grab overflow-hidden ${CARD_BOX} ${
         p.open?.id === t.id ? "!border-neutral-900 dark:!border-white" : ""
       }`}
     >
@@ -212,7 +214,7 @@ export function TicketsView(p: TicketsViewProps) {
         <DropColumn
           id={TICKET_COLUMN_ID}
           items={dragIds}
-          className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5"
+          className={`min-h-0 flex-1 overflow-y-auto overscroll-y-contain ${CARD_LIST}`}
         >
           {tickets.length === 0
             ? empty

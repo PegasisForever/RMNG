@@ -185,7 +185,7 @@ function AccountTag({
           {email}
         </span>
       ) : (
-        <span className="truncate italic text-slate-300 dark:text-slate-600">
+        <span className="truncate italic text-slate-500 dark:text-slate-400">
           {selection === "none" ? "no token" : "unassigned"}
         </span>
       )}
