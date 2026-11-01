@@ -49,13 +49,15 @@ lines are white or black at a low one. No solid white or blue box is left.
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
-The control panel is flat glass (`ng-glass-flat`) on a shared backdrop: narrow, its one panel
-(`./control/ui.tsx`, `CONTROL_PANEL_GLASS`); wide, each column, with no panel round them. Each side panel
+Narrow, the control panel is one panel of a dialog's glass (`./control/ui.tsx`, `CONTROL_PANEL_GLASS`:
+thick, its own blur and long shadow), on a backdrop that only darkens the screen
+(`CONTROL_PANEL_DIM`, `bg-black/20` / `bg-black/35`), as a glass dialog is. Wide, it is flat glass
+(`ng-glass-flat`) on a shared backdrop: each column, with no panel round them. Each side panel
 over the columns is the usual thick glass, with its own blur and long shadow, as it floats over
 them. With a mouse on a large screen, the side panels also slide in over the clone's screen
-without the control panel (the mouse at the right edge): the same thick glass, with no backdrop. While the control panel is open, a backdrop over the whole screen (under the control panel and the
+without the control panel (the mouse at the right edge): the same thick glass, with no backdrop. While the wide control panel is open, a backdrop over the whole screen (under the control panel and the
 floating buttons) blurs and darkens it (`CONTROL_PANEL_BACKDROP`, `bg-black/25` / `bg-black/40`, blur
-12 px); it fades in and out with the control panel (200 ms), and takes no touch or click. In the control panel's own window there is no clone's
+12 px). Each backdrop fades in and out with the control panel (200 ms), and takes no touch or click. In the control panel's own window there is no clone's
 screen under them: the same flat content sits on a solid ground (`bg-neutral-100` /
 `bg-neutral-950`), with no glass. A sheet or a dialog over the control panel is solid
 (`bg-neutral-100` / `bg-neutral-900`): over a dimmed page, glass would look murky.

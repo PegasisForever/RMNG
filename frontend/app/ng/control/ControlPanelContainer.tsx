@@ -92,7 +92,7 @@ import { NotesView, type NotesPane } from "./NotesView";
 import { type Move, moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
-import { ErrorLine, CONTROL_PANEL_GLASS } from "./ui";
+import { COLUMN_GLASS, ErrorLine } from "./ui";
 import { BoardDnd } from "./BoardDnd";
 import { NarrowLayout } from "./NarrowLayout";
 import { UsageView } from "./UsageView";
@@ -705,7 +705,7 @@ export function ControlPanelContainer({
       <ModalPlacementProvider value="window">
         <div className={`flex h-full select-text flex-col gap-2 [&_button]:select-none ${glass ? "" : "p-2"}`}>
           {error ? (
-            <div className={glass ? `mx-2 shrink-0 overflow-hidden ${CONTROL_PANEL_GLASS}` : "shrink-0 overflow-hidden rounded-xl"}>
+            <div className={glass ? `mx-2 shrink-0 ${COLUMN_GLASS}` : "shrink-0 overflow-hidden rounded-xl"}>
               <ErrorLine message={error} onDismiss={() => setError(null)} />
             </div>
           ) : null}

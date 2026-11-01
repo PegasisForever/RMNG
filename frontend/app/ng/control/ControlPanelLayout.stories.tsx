@@ -5,7 +5,7 @@ import { fn } from "storybook/test";
 import { FakeDesktop } from "../__fixtures__/desktop";
 import { controlPanelFor } from "../__fixtures__/screen";
 import type { NgTab } from "../ToolRow";
-import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_GLASS } from "./ui";
+import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_DIM, CONTROL_PANEL_GLASS } from "./ui";
 import { WIDE_MIN } from "./WideLayout";
 
 /** The /ng control panel, in each of its layouts, as its container lays it out: narrow, the tool row over a
@@ -26,7 +26,7 @@ function ControlPanel({ width, height, surface, tab: first }: { width: number; h
       style={{ width: width >= WIDE_MIN ? width : width + 16, height: height + 16 }}
     >
       <FakeDesktop />
-      <div className={`absolute inset-0 ${CONTROL_PANEL_BACKDROP}`} />
+      <div className={`absolute inset-0 ${width >= WIDE_MIN ? CONTROL_PANEL_BACKDROP : CONTROL_PANEL_DIM}`} />
       {/* Narrow, one glass panel; wide, each column is glass of its own */}
       <div className={`relative h-full ${width >= WIDE_MIN ? "" : `overflow-hidden ${CONTROL_PANEL_GLASS}`}`}>{content}</div>
     </div>

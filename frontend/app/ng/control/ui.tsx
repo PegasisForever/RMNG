@@ -19,10 +19,10 @@ import {
 
 import { type Box, MenuDivider, MenuItem, MenuPanel } from "~/components/OverflowMenu";
 
-/** The control panel's panel over the clone's screen (narrow): glass with no blur or shadow of its own,
- *  as the wide control panel's columns are (`ng-glass-flat`): the backdrop under the control panel
- *  (`CONTROL_PANEL_BACKDROP`) blurs and darkens the screen for them. */
-export const CONTROL_PANEL_GLASS = "ng-glass ng-glass-thick ng-glass-flat rounded-2xl";
+/** The control panel's panel over the clone's screen (narrow): a dialog's glass, with its own blur
+ *  and long shadow, on a backdrop that only darkens the screen (`CONTROL_PANEL_DIM`), as a
+ *  dialog's does. */
+export const CONTROL_PANEL_GLASS = "ng-glass ng-glass-thick rounded-2xl";
 
 /** A column of the wide control panel (`./WideLayout.tsx`) on its own: over the clone's screen, glass
  *  with no blur or shadow of its own (`ng-glass-flat`: the backdrop under the control panel blurs and
@@ -31,9 +31,12 @@ export const COLUMN_GLASS = "ng-glass ng-glass-thick ng-glass-flat rounded-2xl o
 
 /** Everything inside scrolls with no bar showing (the side panels, the notes, a ticket). */
 export const NO_SCROLLBARS = "[&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden";
-/** Over the whole clone's screen while the control panel is open, under it and the floating buttons:
- *  it blurs and darkens the screen. It takes no touch or click. */
+/** Over the whole clone's screen while the wide control panel is open, under it and the floating
+ *  buttons: it blurs and darkens the screen for all its columns. It takes no touch or click. */
 export const CONTROL_PANEL_BACKDROP = "pointer-events-none bg-black/25 backdrop-blur-md dark:bg-black/40";
+/** The same under the narrow control panel: it only darkens the screen, as a glass dialog's backdrop
+ *  does (`ModalShell`); the panel blurs what is behind it itself. */
+export const CONTROL_PANEL_DIM = "pointer-events-none bg-black/20 dark:bg-black/35";
 export const COLUMN_SOLID =
   "overflow-hidden rounded-xl border border-black/10 bg-black/[0.03] dark:border-white/10 dark:bg-white/[0.03]";
 const ColumnFrame = createContext(COLUMN_SOLID);

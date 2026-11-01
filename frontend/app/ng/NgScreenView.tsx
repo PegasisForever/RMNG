@@ -37,7 +37,7 @@ import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
 import { GAP, type Insets } from "./geometry";
 import type { InputMode } from "./inputMode";
 import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
-import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_GLASS } from "./control/ui";
+import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_DIM, CONTROL_PANEL_GLASS } from "./control/ui";
 import { WIDE_MIN } from "./control/WideLayout";
 import { KeyboardView, type KeyboardViewProps, type TouchKind, keyboardPanel } from "./KeyboardView";
 
@@ -219,7 +219,7 @@ export function NgScreenView({
       {controlPanelShown ? (
         <div
           aria-hidden
-          className={`absolute inset-0 z-30 ${CONTROL_PANEL_BACKDROP} ${
+          className={`absolute inset-0 z-30 ${panel.width >= WIDE_MIN ? CONTROL_PANEL_BACKDROP : CONTROL_PANEL_DIM} ${
             controlPanel.open ? MODAL_ANIMATION.backdrop.enter : MODAL_ANIMATION.backdrop.exit
           }`}
         />
