@@ -101,7 +101,7 @@ export function UsageView({
             <h3 className={`px-1 text-[11px] font-medium ${TEXT_3}`}>Running jobs · {running.length}</h3>
             <div className={grid}>
               {running.map((op) => (
-                <OperationProgress key={op.id} op={op} />
+                <OperationProgress key={op.id} op={op} box={CARD_BOX} />
               ))}
             </div>
           </section>
