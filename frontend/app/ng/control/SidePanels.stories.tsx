@@ -70,7 +70,6 @@ function Side({
       only={only}
       clone={clone}
       pane={only}
-      onPaneChange={fn()}
       notesLabel={content === "cloneTicket" ? "Ticket" : "Notes"}
       notes={notes}
       ticketCard={content === "cloneTicket" ? <Ticket ticket={ticketSubIssue} own /> : undefined}

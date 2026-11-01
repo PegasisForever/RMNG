@@ -1,6 +1,6 @@
-// The /ng Notes page: the clone's notes (or the ticket it was made from) and its assistant
-// chat. The desktop stacks the two in its side panel; this page is too short for two, so a
-// switch in the header shows one at a time, and the other stays as it was.
+// The /ng Notes and Assistant tabs: the clone's notes (or the ticket it was made from), and its
+// assistant chat. The desktop stacks the two in its side panel; a narrow page is too short for
+// two, so each is a tab of its own (`pane`).
 //
 // Wide (`only`), it is one of the dashboard's two side cards, as the dashboard draws them
 // (`~/components/AppShellV2.tsx`): the clone's name over its notes, or its ticket filling the
@@ -19,7 +19,7 @@ import { cloneTitle } from "~/lib/cloneTitle";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
-import { EmptyLine, HeaderButton, NO_SCROLLBARS, Page, PageHeader, Segmented, TEXT, TEXT_3 } from "./ui";
+import { EmptyLine, HeaderButton, NO_SCROLLBARS, Page, PageHeader, TEXT, TEXT_3 } from "./ui";
 
 /** Which of the two shows. */
 export type NotesPane = "notes" | "chat";
@@ -28,8 +28,8 @@ export interface NotesViewProps {
   /** The clone the page is about; null when no clone is selected. */
   clone: Clone | null;
   ticket?: CloneTicket;
+  /** Narrow: which tab this is, the clone's notes or its assistant (each a tab of its own). */
   pane: NotesPane;
-  onPaneChange: (pane: NotesPane) => void;
   /** "Ticket" for a clone made from a ticket: its ticket is where its notes would be. */
   notesLabel: string;
   notes: ReactNode;
@@ -46,7 +46,6 @@ export function NotesView({
   clone,
   ticket,
   pane,
-  onPaneChange,
   notesLabel,
   notes,
   chat,
@@ -56,7 +55,7 @@ export function NotesView({
 }: NotesViewProps) {
   if (!clone) {
     return (
-      <Page header={<PageHeader title={only === "chat" ? "Assistant" : only === "notes" ? notesLabel : "Notes and assistant"} />}>
+      <Page header={<PageHeader title={(only ?? pane) === "chat" ? "Assistant" : notesLabel} />}>
         <EmptyLine>No clone is selected. Pick one in Clones.</EmptyLine>
       </Page>
     );
@@ -98,14 +97,6 @@ export function NotesView({
             sub={`${clone.id} · ${statusLabel(clone)}`}
           >
             {onBackToScreen ? <HeaderButton label="Back to screen" onClick={onBackToScreen} /> : null}
-            {only ? null : <Segmented
-              options={[
-                { value: "notes", label: notesLabel },
-                { value: "chat", label: "Assistant" },
-              ]}
-              value={pane}
-              onChange={onPaneChange}
-            />}
           </PageHeader>
         }
       >

@@ -4,14 +4,15 @@ import { type PointerEvent, type ReactNode } from "react";
 import { GAP, TOOL_H } from "./geometry";
 
 /** The control panel the tool row opens, in place of the keyboard. */
-export type NgTab = "usage" | "tickets" | "clones" | "notes" | "settings";
+export type NgTab = "usage" | "tickets" | "clones" | "notes" | "assistant" | "settings";
 
 /** Each tab: its button's label (the settings tab shows a gear) and its page's name. */
 export const TABS: { tab: NgTab; label: string; page: string }[] = [
   { tab: "usage", label: "Usage", page: "Account usage" },
   { tab: "tickets", label: "Tickets", page: "Tickets" },
   { tab: "clones", label: "Clones", page: "Other clones" },
-  { tab: "notes", label: "Notes", page: "Notes and assistant" },
+  { tab: "notes", label: "Notes", page: "Notes" },
+  { tab: "assistant", label: "Assistant", page: "Assistant" },
   { tab: "settings", label: "Settings", page: "Settings" },
 ];
 

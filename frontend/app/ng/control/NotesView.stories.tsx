@@ -16,7 +16,6 @@ const meta = {
   args: {
     clone: cloneWorking,
     pane: "notes",
-    onPaneChange: fn(),
     notesLabel: "Notes",
     notes: (
       <div className="space-y-2 px-4 text-sm text-neutral-700 dark:text-neutral-300">

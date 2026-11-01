@@ -181,7 +181,9 @@ function page(tab: NgTab, server: boolean): ReactNode {
     case "clones":
       return <Panel>{<ClonesView {...clonesArgs} />}</Panel>;
     case "notes":
-      return <Panel>{<NotesView {...notesArgs} />}</Panel>;
+      return <Panel>{<NotesView {...notesArgs} pane="notes" />}</Panel>;
+    case "assistant":
+      return <Panel>{<NotesView {...notesArgs} pane="chat" />}</Panel>;
     case "settings":
       return <Panel>{<SettingsView {...settingsArgs} />}</Panel>;
   }

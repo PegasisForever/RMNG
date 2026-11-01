@@ -99,7 +99,7 @@ const NotesEditorContainer = lazy(() => import("~/components/NotesEditorContaine
 const ChatContainer = lazy(() => import("~/components/ChatContainer"));
 const TicketDescription = lazy(() => import("~/components/TicketDescription"));
 
-const TABS: NgTab[] = ["usage", "tickets", "clones", "notes", "settings"];
+const TABS: NgTab[] = ["usage", "tickets", "clones", "notes", "assistant", "settings"];
 
 function Loading({ label }: { label: string }) {
   return <p className="p-4 text-sm text-black/40 dark:text-white/40">{label}</p>;
@@ -271,7 +271,6 @@ export function ControlPanelContainer({
   /** An archived clone the Notes page shows; null: the one on the screen. */
   const [notesId, setNotesId] = useState<string | null>(null);
   const notesClone = (notesId ? clonesById.get(notesId) : null) ?? (state.selected ? clonesById.get(state.selected) : null) ?? null;
-  const [notesPane, setNotesPane] = useState<NotesPane>("chat");
   const notesTicket = notesClone?.linearTicket ? findTicket(notesClone.linearTicket, linearTickets) : null;
   const openTicketMeta = useTeamMeta(presets, openTicket);
   const notesTicketMeta = useTeamMeta(presets, notesTicket);
@@ -528,18 +527,17 @@ export function ControlPanelContainer({
       node
     );
 
-  /** The Notes page, or (`only`, wide) one of its two parts in a side panel of its own. */
-  const notesView = (only?: NotesPane) => (
+  /** The Notes or the Assistant tab (narrow), or (`card`, wide) its side panel. */
+  const notesView = (pane: NotesPane, card = false) => (
     <NotesView
-      only={only}
+      only={card ? pane : undefined}
       clone={notesClone}
       ticket={notesClone ? liveCloneTickets[notesClone.id] : undefined}
-      pane={notesPane}
-      onPaneChange={setNotesPane}
+      pane={pane}
       notesLabel={notesClone?.linearTicket ? "Ticket" : "Notes"}
       notes={notesSlot()}
       // Wide, the clone's own ticket fills its card (`notesSlot` gives it then)
-      ticketCard={only === "notes" && notesClone?.linearTicket && notesTicket ? notesSlot() : undefined}
+      ticketCard={card && pane === "notes" && notesClone?.linearTicket && notesTicket ? notesSlot() : undefined}
       chat={
         notesClone ? (
           <Suspense fallback={<Loading label="Loading chat…" />}>
@@ -631,7 +629,9 @@ export function ControlPanelContainer({
           />
         );
       case "notes":
-        return notesView();
+        return notesView("notes");
+      case "assistant":
+        return notesView("chat");
       case "settings":
         return <SettingsView {...settings} />;
     }
@@ -676,8 +676,8 @@ export function ControlPanelContainer({
               // are the clone's)
               side={{
                 ticket: openTicket && tab ? ticketPanel(openTicket, openTicketMeta, false) : undefined,
-                notes: notesClone ? notesView("notes") : null,
-                chat: notesView("chat"),
+                notes: notesClone ? notesView("notes", true) : null,
+                chat: notesView("chat", true),
                 widthPct: sideWidth,
               }}
               sideAt={sideAt}
