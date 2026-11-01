@@ -33,6 +33,7 @@ export function ImportAccountModalContainer({
   initialProvider,
   initialGroup,
   replacing,
+  glass = false,
   onClose,
   onImported,
 }: {
@@ -46,6 +47,8 @@ export function ImportAccountModalContainer({
   /** An account this sign-in stands in for. Its provider is the one being signed in, so the
    *  provider tabs go away, and its pools are inherited, so the pool picker does too. */
   replacing?: { provider: "claude" | "codex"; email: string } | null;
+  /** In /ng's glass (`ImportAccountModalView`'s `glass`). */
+  glass?: boolean;
   onClose: () => void;
   onImported: (email: string) => void;
 }) {
@@ -118,6 +121,7 @@ export function ImportAccountModalContainer({
       group={group}
       replacing={replacing?.email ?? null}
       importing={importing}
+      glass={glass}
       progress={landed && check ? { ...landed, ...check, slow } : null}
       error={error}
       onProviderChange={setProvider}

@@ -452,6 +452,7 @@ export function NgPagesContainer({
         return (
           <ImportAccountModalContainer
             accounts={accounts}
+            glass
             groupNames={state.groups.map((g) => g.name)}
             initialProvider={d.provider}
             initialGroup={d.group}
