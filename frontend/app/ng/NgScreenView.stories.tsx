@@ -3,7 +3,9 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { LayoutEditorView } from "~/components/LayoutEditorView";
+import { cloneOperation, deleteOperation } from "~/components/__fixtures__/operations";
 import { DEFAULT_DESKTOP_LAYOUT } from "~/lib/clientLayout";
+import type { Operation } from "~/lib/types";
 
 import {
   DESKTOP,
@@ -42,7 +44,14 @@ const buttons = (over: Partial<NonNullable<NgScreenViewProps["buttons"]>> = {}):
 
 /** The control panel over a display `d` wide (their panel's width: `controlPanelBox`). */
 const controlPanel = (
-  over: { open?: boolean; tab?: NgTab; onTab?: (tab: NgTab) => void; badges?: Partial<Record<NgTab, number>>; onPopOut?: () => void } = {},
+  over: {
+    open?: boolean;
+    tab?: NgTab;
+    onTab?: (tab: NgTab) => void;
+    badges?: Partial<Record<NgTab, number>>;
+    onPopOut?: () => void;
+    operations?: Operation[];
+  } = {},
   d: { width: number; height: number; safe: Insets } = PHONE,
 ): NgScreenViewProps["controlPanel"] => ({
   open: over.open ?? false,
@@ -214,12 +223,13 @@ export const DesktopMonitorsToOpen: Story = {
 };
 
 /** The chord showed the control panel, under the buttons (no keyboard button). A large screen gives
- *  them the dashboard's layout: the usage rail, the board's columns, the notes. */
+ *  them the dashboard's layout: the usage rail (a clone being made and one being deleted at its
+ *  top), the board's columns, the notes. */
 export const DesktopControlPanel: Story = {
   args: {
     ...desktop,
     away: false,
-    controlPanel: controlPanel({ open: true, onPopOut: fn() }, DESKTOP),
+    controlPanel: controlPanel({ open: true, onPopOut: fn(), operations: [cloneOperation, deleteOperation] }, DESKTOP),
     buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
   },
 };

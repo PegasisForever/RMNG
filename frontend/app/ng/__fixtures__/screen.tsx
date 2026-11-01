@@ -5,6 +5,7 @@ import type { Decorator } from "@storybook/react-vite";
 import type { ReactNode } from "react";
 import { fn } from "storybook/test";
 
+import type { Operation } from "~/lib/types";
 import type { CursorShape } from "~/lib/wire/CursorShape";
 
 export { FakeDesktop } from "./desktop";
@@ -215,6 +216,7 @@ export function controlPanelFor({
   onTab = fn(),
   badges,
   onPopOut,
+  operations,
 }: {
   width: number;
   /** Over the clone's screen (wide: each column glass), not in the control panel's own window. */
@@ -223,6 +225,8 @@ export function controlPanelFor({
   onTab?: (tab: NgTab) => void;
   badges?: Partial<Record<NgTab, number>>;
   onPopOut?: () => void;
+  /** The server's jobs, at the top of the wide layout's rail; absent: the Usage story's. */
+  operations?: Operation[];
 }): ReactNode {
   if (width >= WIDE_MIN) {
     return (
@@ -235,7 +239,7 @@ export function controlPanelFor({
           onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
           onPopOut={onPopOut}
           onLayout={glass ? fn() : undefined}
-          rail={<UsageView {...railArgs} rail />}
+          rail={<UsageView {...railArgs} operations={operations ?? railArgs.operations} rail />}
           board={
             <BoardDnd
               lanes={lanes()}
