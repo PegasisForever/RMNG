@@ -19,6 +19,7 @@ import SettingsStories from "../pages/SettingsView.stories";
 import { SettingsView } from "../pages/SettingsView";
 import TicketsStories from "../pages/TicketsView.stories";
 import { TicketsView } from "../pages/TicketsView";
+import { makeUsage } from "~/components/__fixtures__/accounts";
 import UsageStories from "../pages/UsageView.stories";
 import { UsageView } from "../pages/UsageView";
 import { resolveColumns, withDefaults } from "~/lib/board";
@@ -125,6 +126,24 @@ function Panel({ children }: { children: ReactNode }) {
 }
 
 const usageArgs = UsageStories.args as Parameters<typeof UsageView>[0];
+
+/** The rail's accounts: the Usage story's, and a pool of five more, so the rail is longer than
+ *  the display and scrolls. */
+const railArgs: Parameters<typeof UsageView>[0] = (() => {
+  const at = (hours: number) => new Date((usageArgs.now ?? 0) + hours * 3_600_000).toISOString();
+  const more = ["kim", "lee", "max", "noa", "ray"].map((name, i) =>
+    makeUsage({
+      email: `${name}@example.com`,
+      fiveHour: { pct: 15 + i * 17, resetsAt: at(1 + i) },
+      sevenDay: { pct: 30 + i * 12, resetsAt: at(30 + i * 20) },
+    }),
+  );
+  return {
+    ...usageArgs,
+    accounts: [...usageArgs.accounts, ...more],
+    groups: [...usageArgs.groups, { name: "night", accounts: more.map((a) => ({ email: a.email })) }],
+  };
+})();
 const ticketsArgs = TicketsStories.args as Parameters<typeof TicketsView>[0];
 const clonesArgs = ClonesStories.args as Parameters<typeof ClonesView>[0];
 const notesArgs = NotesStories.args as Parameters<typeof NotesView>[0];
@@ -194,7 +213,7 @@ export function pagesFor({
           settingsOpen={tab === "settings"}
           onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
           onPopOut={onPopOut}
-          rail={<UsageView {...usageArgs} rail />}
+          rail={<UsageView {...railArgs} rail />}
           board={
             <BoardDnd
               lanes={lanes()}
