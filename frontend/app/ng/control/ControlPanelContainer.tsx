@@ -11,6 +11,7 @@
 // Wide (`WIDE_MIN`), they are the dashboard's layout (`./WideLayout.tsx`): the usage rail, the
 // board's columns, the side panel; a dialog opens over them, in the middle.
 import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
 import { CloneModalContainer } from "~/components/CloneModalContainer";
@@ -62,7 +63,9 @@ import { useTeamMeta } from "~/lib/linear/useTeamMeta";
 import { useTickets } from "~/lib/linear/useTickets";
 import { useWorkspaces } from "~/lib/linear/useWorkspaces";
 import { workspaceHomeUrl } from "~/lib/linear/workspaces";
+import { hostWindow } from "~/lib/host";
 import { toggleMuted } from "~/lib/mute";
+import { readSelection, sameSelection, type Selection, withSelection } from "~/lib/selection";
 import { BASTION_PORT, buildSshCommand } from "~/lib/ssh";
 import {
   adoptTickets,
@@ -77,6 +80,7 @@ import {
   type TicketState,
 } from "~/lib/tickets";
 import type { ClaudeUsage, Clone, ControlState } from "~/lib/types";
+import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
@@ -127,6 +131,7 @@ export function ControlPanelContainer({
   sound,
   sideAt,
   onLayout,
+  notify = false,
 }: {
   /** The control panel's width, CSS px: narrow (tabs) or wide (the dashboard's layout). */
   width: number;
@@ -152,6 +157,9 @@ export function ControlPanelContainer({
   sideAt?: HTMLElement | null;
   /** Open the Edit layout dialog; absent where there is none (the control panel's own window). */
   onLayout?: () => void;
+  /** This window raises the notifications of clones that stop working (one window of the
+   *  browser does: monitor 0's). */
+  notify?: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => p.then(() => setError(null)).catch((e: Error) => setError(e.message));
@@ -230,7 +238,18 @@ export function ControlPanelContainer({
   });
   const liveCloneTickets = cloneTickets(state.hosts, linearTickets);
 
-  const [openTicketId, setOpenTicketId] = useState<string | null>(null);
+  // What is open, held in the page's address as on the dashboard (`?clone=`, `?ticket=`;
+  // `~/lib/selection`): the browser's Back returns to the one before it, and a link opens it
+  const [params, setParams] = useSearchParams();
+  const selection = readSelection(params);
+  /** Open something, with a history entry for Back; `replace`: in place of the current one, for
+   *  a move the operator did not ask for by name. */
+  const select = (next: Selection, replace = false) => {
+    if (sameSelection(next, selection)) return;
+    setParams((p) => withSelection(p, next), { replace, preventScrollReset: true });
+  };
+  const openTicketId = selection.ticket;
+  const setOpenTicketId = (ticket: string | null, replace = false) => select({ ...selection, ticket }, replace);
   const openTicket = openTicketId ? findTicket(openTicketId, visibleTickets) : null;
 
   /** A Linear write: on screen now, in Linear a round trip later, put back if refused. */
@@ -248,7 +267,7 @@ export function ControlPanelContainer({
   /** The open ticket leaves the list: the page goes to the one after it. */
   const advancePast = (ticket: LinearTicket) => {
     if (openTicket?.id !== ticket.id) return;
-    setOpenTicketId(ticketAfter(visibleTickets, ticket.id)?.id ?? null);
+    setOpenTicketId(ticketAfter(visibleTickets, ticket.id)?.id ?? null, true);
   };
   const editTicket = (t: LinearTicket, patch: { title?: string; description?: string }) =>
     writeTicket(t, { ...t, ...patch }, (keys) => issueUpdate(keys, t, patch));
@@ -269,7 +288,8 @@ export function ControlPanelContainer({
 
   // ---- the clone on the screen, and the one the Notes page is on ----
   /** An archived clone the Notes page shows; null: the one on the screen. */
-  const [notesId, setNotesId] = useState<string | null>(null);
+  const addressed = selection.clone ? (clonesById.get(selection.clone) ?? null) : null;
+  const notesId = addressed?.archived ? addressed.id : null;
   const notesClone = (notesId ? clonesById.get(notesId) : null) ?? (state.selected ? clonesById.get(state.selected) : null) ?? null;
   const notesTicket = notesClone?.linearTicket ? findTicket(notesClone.linearTicket, linearTickets) : null;
   const openTicketMeta = useTeamMeta(presets, openTicket);
@@ -279,15 +299,55 @@ export function ControlPanelContainer({
    *  has no screen, so its notes open instead. Wide, as on the dashboard, an open ticket closes:
    *  the side panels are the clone's again. */
   const selectClone = (clone: Clone) => {
-    if (width >= WIDE_MIN) setOpenTicketId(null);
+    select({ clone: clone.id, ticket: width >= WIDE_MIN ? null : selection.ticket });
     if (clone.archived) {
-      setNotesId(clone.id);
       onTab("notes");
       return;
     }
-    setNotesId(null);
+    applied.current = clone.id;
     if (state.selected !== clone.id) run(activate(clone.id));
   };
+
+  // A live clone the address names (Back, Forward, a reload, a link) goes on the screen, as a
+  // press on it does: once for each value, so it does not fight a choice made elsewhere
+  const applied = useRef<string | null>(null);
+  useEffect(() => {
+    const id = selection.clone;
+    if (applied.current === id) return;
+    if (id === null) {
+      applied.current = null;
+      return;
+    }
+    // Not in the list yet (the first frame has not come) or gone: the next frame tries again
+    const clone = clonesById.get(id);
+    if (!clone) return;
+    applied.current = id;
+    if (!clone.archived && state.selected !== id) run(activate(id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selection.clone, state.hosts]);
+  // A clone chosen elsewhere (another window, the phone, `rmng clone select`) goes into the
+  // address in place of the one there, so a reload (a new server build reloads the page) does
+  // not put that one back on the screen. Archived notes the operator has open stay.
+  useEffect(() => {
+    const id = state.selected;
+    if (!id || notesId || selection.clone === id) return;
+    applied.current = id;
+    select({ ...selection, clone: id }, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.selected]);
+
+  // A clone that stops working raises a notification, as on the dashboard; a press on it shows
+  // that clone
+  useCloneNotifications(
+    state.hosts,
+    mutedClones,
+    (id) => {
+      hostWindow().focus();
+      const clone = clonesById.get(id);
+      if (clone) selectClone(clone);
+    },
+    notify,
+  );
 
   /** Where a parent or sub-issue goes: the ticket in this page, or the clone made for it. */
   const resolveLink = (id: string, inList: boolean) => {
@@ -545,7 +605,7 @@ export function ControlPanelContainer({
           </Suspense>
         ) : null
       }
-      onBackToScreen={notesId && notesId !== state.selected ? () => setNotesId(null) : undefined}
+      onBackToScreen={notesId && notesId !== state.selected ? () => select({ ...selection, clone: state.selected }) : undefined}
     />
   );
 

@@ -24,11 +24,15 @@ import type { Clone } from "./types";
  *  clone is still baselined, so unmuting it does not fire for a stop that happened while it was
  *  silent. The mute covers sub clones too (see `isMuted`), which today changes nothing on its
  *  own — they are already out of scope — and keeps the two rules from disagreeing if that
- *  scope ever widens. */
+ *  scope ever widens.
+ *
+ *  `enabled`: false in all but one of a browser's windows that show the same clones (the /ng
+ *  page has one per monitor), so one stop raises one notification. The others ask nothing. */
 export function useCloneNotifications(
   hosts: Clone[],
   muted: string[] = [],
   onActivate?: (id: string) => void,
+  enabled = true,
 ) {
   const seen = useRef<Map<string, boolean>>(new Map());
   // Latest-ref for the activate callback so a notification's click handler (created in an
@@ -39,10 +43,10 @@ export function useCloneNotifications(
   // Ask once on mount. The browser remembers the grant/deny per origin, so this is a
   // no-op after the first answer.
   useEffect(() => {
-    if (typeof Notification !== "undefined" && Notification.permission === "default") {
+    if (enabled && typeof Notification !== "undefined" && Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});
     }
-  }, []);
+  }, [enabled]);
 
   // Keyed on the serialized ids rather than the array, because `mutedClones` is a fresh array
   // on every SSE frame and the effect would otherwise re-run for every unrelated state change.
@@ -52,7 +56,7 @@ export function useCloneNotifications(
     const prev = seen.current;
     seen.current = new Map(hosts.map((h) => [h.id, !!h.unread]));
 
-    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    if (!enabled || typeof Notification === "undefined" || Notification.permission !== "granted") return;
 
     const silent = mutedSet(JSON.parse(mutedKey) as string[]);
     const byId = cloneIndex(hosts);
@@ -63,7 +67,7 @@ export function useCloneNotifications(
         notifyStopped(h, activateRef.current);
       }
     }
-  }, [hosts, mutedKey]);
+  }, [hosts, mutedKey, enabled]);
 }
 
 function notifyStopped(clone: Clone, onActivate?: (id: string) => void) {

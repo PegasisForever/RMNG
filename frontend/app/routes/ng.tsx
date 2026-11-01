@@ -4,11 +4,15 @@
 // (`public/ng-shell.html`), or sends a browser with no fullscreen here. `?monitor=N` shows
 // monitor N of this browser's layout (a desktop has one window per monitor); `?control-panel` shows
 // only the control panel, in a window of its own (`~/ng/ControlPanelWindow.tsx`). The update rules are in
-// `~/ng/pwa.ts`.
+// `~/ng/pwa.ts`. A server whose first-run setup is not done shows the setup wizard in place of
+// all of it, as the dashboard did.
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
+import { SetupWizardContainer } from "~/components/SetupWizardContainer";
+import { getConfig } from "~/lib/api";
 import { shellWindow } from "~/lib/host";
+import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import { FullDesk } from "~/ng/FullDesk";
 import { ControlPanelWindow } from "~/ng/ControlPanelWindow";
 import { attachPwa } from "~/ng/pwa";
@@ -39,8 +43,6 @@ export default function Ng() {
   const monitor = Number(params.get("monitor") ?? 0) || 0;
   const controlPanelOnly = params.has("control-panel");
   const setMonitor = (next: number) => {
-    // The browser window's address too, so a reload of the shell shows the same monitor
-    shellWindow()?.history.replaceState(null, "", `/ng?monitor=${next}`);
     setParams(
       (p) => {
         p.set("monitor", String(next));
@@ -49,10 +51,25 @@ export default function Ng() {
       { replace: true },
     );
   };
+  // The browser window's address is this frame's (`?monitor=`, the open clone and ticket), so a
+  // reload of the shell, or its address copied, shows the same
+  const search = params.toString();
+  useEffect(() => {
+    shellWindow()?.history.replaceState(null, "", search ? `/ng?${search}` : "/ng");
+  }, [search]);
   const probe = useRef<HTMLDivElement>(null);
   const [page, setPage] = useState<Page | null>(null);
   // Null until the effect has looked: the page has no `window` while it is built
   const [secure, setSecure] = useState<boolean | null>(null);
+  /** The first-run setup: unknown (null) until the config is read, then whether it is done.
+   *  A config that cannot be read counts as done: the app then shows its own errors. */
+  const [setup, setSetup] = useState<{ done: true } | { done: false; config: AppConfigRedacted } | null>(null);
+  const readSetup = () => {
+    getConfig()
+      .then((c) => setSetup(c.setupComplete ? { done: true } : { done: false, config: c }))
+      .catch(() => setSetup({ done: true }));
+  };
+  useEffect(readSetup, []);
 
   useEffect(() => {
     setSecure(window.isSecureContext);
@@ -97,6 +114,15 @@ export default function Ng() {
     };
   }, []);
 
+  if (setup && !setup.done) {
+    // The dashboard's wizard, on its own page: it scrolls, and its text can be selected
+    return (
+      <div className="fixed inset-0 select-text overflow-auto">
+        <SetupWizardContainer initialConfig={setup.config} onDone={readSetup} />
+      </div>
+    );
+  }
+
   const message = secure === false ? "This page is not HTTPS: open it at the server's HTTPS address." : null;
 
   return (
@@ -110,8 +136,8 @@ export default function Ng() {
           </div>
         </div>
       ) : null}
-      {secure && page && controlPanelOnly ? <ControlPanelWindow width={page.size[0]} height={page.size[1]} /> : null}
-      {secure && page && !controlPanelOnly ? (
+      {secure && page && setup && controlPanelOnly ? <ControlPanelWindow width={page.size[0]} height={page.size[1]} /> : null}
+      {secure && page && setup && !controlPanelOnly ? (
         <FullDesk
           width={page.size[0]}
           height={page.size[1]}

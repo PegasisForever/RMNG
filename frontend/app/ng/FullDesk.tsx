@@ -56,6 +56,7 @@ import { hostWindow } from "~/lib/host";
 import { useOpenMonitors, useViewerChannel } from "~/lib/useViewerChannel";
 import { openViewerWindows } from "~/viewer/open";
 import { toggleFullscreen } from "~/viewer/input";
+import { uploadToClone } from "~/viewer/upload";
 
 import { attachEditKeys } from "./editKeys";
 import { firstLayout, startScale } from "./firstLayout";
@@ -99,6 +100,8 @@ const GROUP_MARGIN_PX = 48;
 const SWIPE_EDGE_PX = 24;
 const SWIPE_PX = 40;
 /** The control panel's own window: its name, and its size when it opens. */
+/** How long the note of a finished upload stays (one that failed: twice this). */
+const UPLOAD_NOTE_MS = 5000;
 const CONTROL_PANEL_WINDOW = "rmng-control-panel";
 const CONTROL_PANEL_WINDOW_W = 560;
 const CONTROL_PANEL_WINDOW_H = 900;
@@ -251,6 +254,49 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Files dropped on the clone's screen go to the selected clone's home, one after another, as
+  // in the viewer. A drop on the control panel, the right group or a dialog is theirs.
+  const [upload, setUpload] = useState<string | null>(null);
+  useEffect(() => {
+    let clear: ReturnType<typeof setTimeout> | undefined;
+    const say = (text: string, ms?: number) => {
+      clearTimeout(clear);
+      setUpload(text);
+      if (ms) clear = setTimeout(() => setUpload(null), ms);
+    };
+    const ours = (e: DragEvent) =>
+      !e.defaultPrevented &&
+      (e.dataTransfer?.types.includes("Files") ?? false) &&
+      !(e.target instanceof Element && e.target.closest("[data-ng-right], [data-modal], [role=dialog]")) &&
+      !(e.target instanceof Node && panelRef.current?.contains(e.target));
+    const onOver = (e: DragEvent) => {
+      if (!ours(e)) return;
+      e.preventDefault();
+      e.dataTransfer!.dropEffect = "copy";
+    };
+    const onDrop = async (e: DragEvent) => {
+      if (!ours(e)) return;
+      e.preventDefault();
+      const done: string[] = [];
+      for (const f of [...e.dataTransfer!.files]) {
+        try {
+          done.push(await uploadToClone(f, (p) => say(`Uploading ${f.name} to ~/ … ${Math.round(p * 100)}%`)));
+        } catch (err) {
+          say(`Upload of ${f.name} failed: ${(err as Error).message}`, UPLOAD_NOTE_MS * 2);
+          return;
+        }
+      }
+      say(`Uploaded to ~/: ${done.join(", ")}`, UPLOAD_NOTE_MS);
+    };
+    window.addEventListener("dragover", onOver);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      clearTimeout(clear);
+      window.removeEventListener("dragover", onOver);
+      window.removeEventListener("drop", onDrop);
+    };
   }, []);
 
   /** Where the pointer was last, CSS px. */
@@ -568,7 +614,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       notes={{
         dictation: r.dictation,
         heard: r.heard,
-        note: r.note,
+        note: r.note ?? upload,
       }}
       controlPanel={{
         open: controlPanel,
@@ -588,6 +634,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
             sound={r.soundReport}
             sideAt={wide ? sideAt : undefined}
             onLayout={() => setLayoutOpen(true)}
+            notify={monitor === 0}
           />
         ),
       }}
