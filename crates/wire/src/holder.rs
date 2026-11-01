@@ -49,7 +49,7 @@ use crate::socket::{
 /// gate held forever after one stuck transfer, so every later clipboard read from that clone
 /// hung until the holder restarted.
 ///
-/// Version 5 carries [`ToHolder::Touch`], the touch screen of `/ng`: a running holder ignores
+/// Version 5 carries [`ToHolder::Touch`], the web app's touch screen: a running holder ignores
 /// it (it decodes to `Unknown`), so touch would wait for each clone's next restart.
 pub const PROTO_VERSION: u32 = 5;
 

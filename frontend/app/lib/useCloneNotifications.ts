@@ -26,13 +26,13 @@ import type { Clone } from "./types";
  *  own — they are already out of scope — and keeps the two rules from disagreeing if that
  *  scope ever widens.
  *
- *  `enabled`: false in all but one of a browser's windows that show the same clones (the /ng
- *  page has one per monitor), so one stop raises one notification. The others ask nothing. */
+ *  `enabled`: false in all but one of a browser's windows that show the same clones (there is
+ *  one per monitor), so one stop raises one notification. The others ask nothing. */
 export function useCloneNotifications(
   hosts: Clone[],
-  muted: string[] = [],
-  onActivate?: (id: string) => void,
-  enabled = true,
+  muted: string[],
+  onActivate: (id: string) => void,
+  enabled: boolean,
 ) {
   const seen = useRef<Map<string, boolean>>(new Map());
   // Latest-ref for the activate callback so a notification's click handler (created in an
@@ -70,7 +70,7 @@ export function useCloneNotifications(
   }, [hosts, mutedKey, enabled]);
 }
 
-function notifyStopped(clone: Clone, onActivate?: (id: string) => void) {
+function notifyStopped(clone: Clone, onActivate: (id: string) => void) {
   const name = clone.displayName ?? clone.id;
   const offline = clone.monitorState === "offline";
   try {
@@ -82,7 +82,7 @@ function notifyStopped(clone: Clone, onActivate?: (id: string) => void) {
     // Click → focus this tab and select the clone that stopped.
     n.onclick = () => {
       window.focus();
-      onActivate?.(clone.id);
+      onActivate(clone.id);
       n.close();
     };
   } catch {

@@ -1,6 +1,6 @@
-//! The browser viewer ⇄ control-server protocol: one WebSocket per viewer window, on the web
-//! port at `/api/viewer?monitor=<id>`. The socket carries video for that one monitor and every
-//! control message.
+//! The browser viewer ⇄ control-server protocol: one WebSocket per monitor window of the web
+//! app, on the web port at `/api/viewer?monitor=<id>`. The socket carries video for that one
+//! monitor and every control message.
 //!
 //! - A **binary** message starts with a kind byte. Kind [`KIND_VIDEO`] (server → browser) is
 //!   a [`VideoHeader`] ([`VIDEO_HEADER_LEN`] bytes), then one Annex-B access unit. Kinds
@@ -134,7 +134,7 @@ pub fn decode_clipboard_piece(b: &[u8]) -> Option<(ClipboardData, bool)> {
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum ToBrowser {
     /// The server's build, first on every connection. A window that reconnects after an
-    /// update sees a different one and reloads, as the dashboard does on its `version` event.
+    /// update sees a different one and reloads, as the web app does on the `version` event of `/events`.
     Version { build_id: String },
     /// How to read wheel events: the layout in force's scroll mode and speed (percent).
     /// Sent at connect and when either changes.
@@ -158,7 +158,7 @@ pub enum ToBrowser {
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
 pub enum FromBrowser {
     Input(InputMsg),
-    /// A touch on the selected clone's monitor, from a touch screen (`/ng`).
+    /// A touch on the selected clone's monitor, from a touch screen (the web app on a phone or a tablet).
     Touch(TouchMsg),
     /// The operator's lock keys, for the selected clone's to follow (see [`LockState`]).
     Locks(LockState),
@@ -278,7 +278,7 @@ mod tests {
     use super::*;
     use crate::socket::ClipboardOffer;
 
-    /// The page sends this JSON for a finger on the screen (`frontend/app/ng/Desk.tsx`); it
+    /// The page sends this JSON for a finger on the screen (`frontend/app/desk/FullDesk.tsx`); it
     /// reaches the daemon as its own message, which an older daemon decodes to `Unknown`.
     #[test]
     fn a_touch_crosses_as_its_own_message() {

@@ -1,9 +1,9 @@
-// What the /ng screen (`./FullDesk.tsx`) does under its layout: the connection to the selected
+// What the screen (`./FullDesk.tsx`) does under its layout: the connection to the selected
 // clone (`./session.ts`), the live server state, and the input. In touch mode: the keys'
 // touches, which type or move the pointer (`./keypad.ts`), a trackpad with no keys (the screen),
 // the modifiers, Fn, Caps Lock, the key clicks and dictation. In mouse and keyboard mode
-// (`./inputMode.ts`): the viewer's own input and clipboard (`~/viewer/input.ts`). And the layout
-// claim. The screen only lays things out.
+// (`./inputMode.ts`): the page's mouse, keys and clipboard (`~/viewer/input.ts`,
+// `~/viewer/clipboard.ts`). And the layout claim. The screen only lays things out.
 //
 // A headless clone has a terminal in place of a desktop (`./TerminalScreen.tsx`, in monitor 0's
 // window): the keys type into it (`./termKeys.ts`), Space's drag too (arrows), and dictation's
@@ -12,9 +12,8 @@
 // mouse gets them.
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
-import { formatLxcUsage } from "~/components/BoardRail";
+import { formatLxcUsage } from "~/lib/format";
 import { type ClientKind, attachLayoutClaims, clientId, layoutClaim } from "~/lib/clientLayout";
-import { emptyState } from "~/lib/types";
 import { useLiveState } from "~/lib/useLiveState";
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
 import type { CursorShape } from "~/lib/wire/CursorShape";
@@ -87,7 +86,7 @@ export function useRemote({
   /** The keys show as a trackpad (`./keypad.ts`: after a pointer gesture, for a while). */
   const [padMode, setPadMode] = useState(false);
   // The server's state, kept live: the tool row's numbers and everything the control panel shows
-  const live = useLiveState(useRef(emptyState()).current);
+  const live = useLiveState();
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
   /** How the clone's sound plays here, for the Usage page. */
@@ -148,7 +147,7 @@ export function useRemote({
 
   /** Mouse mode's input and clipboard while they are attached, and what they are told when
    *  they attach: the last view spec, cursor and connection state. */
-  const viewer = useRef<{ input: Input; clip: ReturnType<typeof attachClipboard> } | null>(null);
+  const pageInput = useRef<{ input: Input; clip: ReturnType<typeof attachClipboard> } | null>(null);
   const last = useRef<{ spec: ViewSpec | null; cursor: CursorMeta | null; connected: boolean }>({
     spec: null,
     cursor: null,
@@ -163,11 +162,11 @@ export function useRemote({
       onSpec(s) {
         setSpec(s);
         last.current.spec = s;
-        viewer.current?.input.setLayout(s.content.mode === "desktop" ? s.monitors : []);
+        pageInput.current?.input.setLayout(s.content.mode === "desktop" ? s.monitors : []);
       },
       onCursor(c) {
         last.current.cursor = c;
-        viewer.current?.input.onCursor(c);
+        pageInput.current?.input.onCursor(c);
         if (c.hidden) setHidden(true);
         else if (c.shape) {
           setHidden(false);
@@ -180,14 +179,14 @@ export function useRemote({
       onConnected(c) {
         setConnected(c);
         last.current.connected = c;
-        viewer.current?.clip.setConnected(c);
+        pageInput.current?.clip.setConnected(c);
       },
       onScroll(mode, speed) {
         scroll.current = { mode, speed };
-        viewer.current?.input.setScroll(mode, speed);
+        pageInput.current?.input.setScroll(mode, speed);
       },
-      onClipboard: (msg) => viewer.current?.clip.onMessage(msg),
-      onClipboardData: (d) => viewer.current?.clip.onData(d),
+      onClipboard: (msg) => pageInput.current?.clip.onMessage(msg),
+      onClipboardData: (d) => pageInput.current?.clip.onData(d),
       onTermData: (d) => termSink.current?.(d),
       onSoundReport: setSoundReport,
     });
@@ -199,7 +198,7 @@ export function useRemote({
     };
   }, [box, monitor]);
 
-  // Mouse mode: the page's mouse and keys go to the clone, as in the viewer
+  // Mouse mode: the page's mouse and keys go to the clone
   const chordRef = useRef(onChord);
   chordRef.current = onChord;
   useEffect(() => {
@@ -214,8 +213,6 @@ export function useRemote({
       sendLocks: s.locks,
       onGesture: () => clip.onGesture(),
       pasteByEvent: () => clip.pasteByEvent(),
-      // The screen sizes the picture (`./FullDesk.tsx`)
-      onResize: () => {},
       chord: { is: (e) => isControlPanelChord(e), holds: controlPanelChordHolds(), run: () => chordRef.current() },
     });
     const { spec: sp, cursor: c, connected: on } = last.current;
@@ -223,9 +220,9 @@ export function useRemote({
     if (c) input.onCursor(c);
     input.setScroll(scroll.current.mode, scroll.current.speed);
     clip.setConnected(on);
-    viewer.current = { input, clip };
+    pageInput.current = { input, clip };
     return () => {
-      viewer.current = null;
+      pageInput.current = null;
       input.detach();
       clip.detach();
     };

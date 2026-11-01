@@ -1,4 +1,4 @@
-// An SSE stream that recovers by itself after a network drop or a sleep. The dashboard's state
+// An SSE stream that recovers by itself after a network drop or a sleep. The app's state
 // stream and the chat stream both use it; each of their server routes sends a named `ping`
 // event every 15s for the watchdog here to see.
 

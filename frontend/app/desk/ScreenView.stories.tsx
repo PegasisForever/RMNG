@@ -172,7 +172,6 @@ export const PhoneLayoutDialog: Story = {
         matching={null}
         note={null}
         onClose={fn()}
-        glass
       />
     ),
   },
@@ -223,7 +222,7 @@ export const DesktopMonitorsToOpen: Story = {
 };
 
 /** The chord showed the control panel, under the buttons (no keyboard button). A large screen gives
- *  them the dashboard's layout: the usage rail (a clone being made and one being deleted at its
+ *  it columns: the usage rail (a clone being made and one being deleted at its
  *  top), the board's columns, the notes. */
 export const DesktopControlPanel: Story = {
   args: {
@@ -292,7 +291,6 @@ export const DesktopLayoutDialog: Story = {
         matching={null}
         note={null}
         onClose={fn()}
-        glass
       />
     ),
     identify: 0,

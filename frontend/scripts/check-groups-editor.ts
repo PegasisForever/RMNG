@@ -453,7 +453,7 @@ try {
   });
 
   await page.cdp.send("Page.navigate", {
-    url: `${origin}/iframe.html?id=settings-components-settingspanelview--llm&viewMode=story`,
+    url: `${origin}/iframe.html?id=desk-control-panel-settingsview--llm&viewMode=story`,
   });
   await waitFor("!!document.querySelector('[data-groups-editor]')");
   assert.equal(

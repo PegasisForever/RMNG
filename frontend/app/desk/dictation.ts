@@ -1,4 +1,4 @@
-// Dictation for the /ng keyboard: the browser's speech recognition (Web Speech API; on iOS it
+// Dictation for the on-screen keyboard: the browser's speech recognition (Web Speech API; on iOS it
 // is the phone's own dictation) turns speech into text, and the text goes to the clone as
 // typed characters (X keysyms, which Mutter types with the clone's own keymap).
 //

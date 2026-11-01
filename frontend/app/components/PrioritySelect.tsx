@@ -11,7 +11,7 @@
 import { ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { PRIORITY_LABEL, PriorityIcon } from "~/components/TicketColumn";
+import { PRIORITY_LABEL, PriorityIcon } from "~/components/TicketCard";
 import { AnchoredList } from "~/components/AnchoredList";
 import { useModalEscape } from "~/lib/useModalEscape";
 

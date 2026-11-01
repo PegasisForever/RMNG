@@ -1,4 +1,4 @@
-// The floating buttons of the /ng screen (`./FullDesk.tsx`), on top in the screen's top-right
+// The floating buttons of the screen (`./FullDesk.tsx`), on top in the screen's top-right
 // corner, right to left:
 //
 // - Fit (only where the browser opens no windows of its own: a phone, a tablet): gives the

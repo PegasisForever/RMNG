@@ -13,7 +13,7 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 
 | Name | Default | Override | Listener | Connected by | Transport |
 | --- | --- | --- | --- | --- | --- |
-| web | `9000` | — (`wire::PORT_WEB`) | control-server web | browser (dashboard + viewer) / `rmng` CLI / control-client | HTTP + SSE + WebSocket (`/api/viewer`) |
+| web | `9000` | — (`wire::PORT_WEB`) | control-server web | browser (the web app) / `rmng` CLI / control-client | HTTP + SSE + WebSocket (`/api/viewer`) |
 | bastion | `2222` | — (`wire::PORT_BASTION`) | control-server ssh.rs | operator ssh client (jump) | OpenSSH; pubkey-only; forwards to `clone:22` |
 | daemon MCP | `9004` | `RMNG_DAEMON_MCP_PORT` | clone-daemon | agents in the clone + `rmng desktop` proxy (via web API) | HTTP JSON-RPC |
 | clone socket | `/srv/rmng-sock/clones.sock` | — (`wire::CLONE_SOCKET`, server) / `RMNG_SOCKET` (daemon) | control-server mediaplane | clone-daemon | unix `SOCK_SEQPACKET` + `SCM_RIGHTS` |
@@ -23,7 +23,7 @@ crate's public Rust API. Sources: [crates/wire/src/socket.rs](../crates/wire/src
 
 ## Browser viewer protocol (browser ⇄ control-server)
 
-Each viewer window opens one WebSocket on the web port, same origin as the page:
+Each monitor window of the web app opens one WebSocket on the web port, same origin as the page:
 `ws://<host>:9000/api/viewer?monitor=<id>&tab=<page id>`, or `wss://` when the page is HTTPS.
 The socket carries the video of that one monitor and every control message. `tab` is a random
 id that the page makes once and sends again on each reconnect (`rmng-fps`: one per process);
@@ -62,7 +62,7 @@ back.
 | `5..9` | packet number in its stream, from 0 (u32, wraps). It counts every packet the clone encoded, also the silent ones it did not send, so a jump is that much silence |
 | `9..` | the Opus packet (empty = the quiet marker) |
 
-The window starts its Opus decoder again on a new stream. The viewer page
+The window starts its Opus decoder again on a new stream. The web app
 ([sound.ts](../frontend/app/viewer/sound.ts)) plays the sound only in the monitor 0 window,
 so two windows never play it twice. The worker decodes each packet with WebCodecs
 (`AudioDecoder`, `opus`) and sends the samples on a `MessagePort` straight to an AudioWorklet,
@@ -283,7 +283,7 @@ MCP-driven move) the viewer snaps the drawn remote cursor and **ignores local mo
 > before it ever reaches this socket. Do not change the viewer or the encoder to 1080p.
 
 **Frame-rate test.** `rmng-fps` ([rmng-fps.rs](../crates/control-client/src/bin/rmng-fps.rs))
-connects to `/api/viewer` like a viewer window and prints once a second how many frames,
+connects to `/api/viewer` like a monitor window and prints once a second how many frames,
 keyframes and megabits arrived, and the delay (the median `echo` time). It does not decode,
 so it sends `ack` for a frame when the frame arrives; the server's log then has the video's
 own delay (the `echo` answer goes ahead of the video, so its time is not the video's delay).
@@ -374,7 +374,7 @@ the viewer's 0.5 s local-motion suppression.
 {serial, mime_type}` asks for one. `ClipboardData {serial, mime_type, bytes /* b64 */}`
 transfers. `ClipboardMsg` (serde tag `k`: `offer`/`request`/`data`) is the viewer-side
 envelope. The control-server is the **broker**: it tracks the owner, fans each offer to
-every viewer window + every other clone, routes a paste's request to the owner, and routes
+every monitor window + every other clone, routes a paste's request to the owner, and routes
 bytes back to the requester. The clone-daemon bridges via Mutter `RemoteDesktop` selection
 (`SelectionRead`/`SelectionWrite`); the browser viewer via the async clipboard API, which
 Chrome allows only while the window has focus. Safari reads the clipboard only in the paste
@@ -508,7 +508,7 @@ Ports, the data directory, the clone socket and the Docker socket are constants 
   ignored on load.
 - **First-run setup wizard**: a fresh deploy ships `config.json` with `"setupComplete":
   false`, so the web UI shows the wizard (environment checklist → server settings + monitors
-  → finish) instead of the dashboard; finishing latches
+  → finish) instead of the app; finishing latches
   `setupComplete: true` (a one-way latch) and materializes the lazy `rmng` network. There is
   **no grandfather rule**: an old `config.json` re-runs the wizard (new machine, no network /
   template pulled yet). A legacy `proxmox` block is scrubbed on load, carrying `hostnamePrefix` into

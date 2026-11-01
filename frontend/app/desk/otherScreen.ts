@@ -1,4 +1,4 @@
-// Where a window that /ng opens goes so that it leaves this page's fullscreen alone. Chrome takes
+// Where a window that the app opens goes so that it leaves this page's fullscreen alone. Chrome takes
 // a page out of its fullscreen when the page opens a window on the same screen (a page must not
 // put a window of its own over its fullscreen); a window on another screen leaves it as it is.
 // To place a window on another screen the page needs the Window Management API and its

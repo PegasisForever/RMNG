@@ -39,7 +39,7 @@ function Ticket({ ticket, own }: { ticket: LinearTicket; own: boolean }) {
   );
 }
 
-/** The wide /ng side panels (`SidePanels`), at the right of a desktop's display, as the mouse
+/** The wide side panels (`SidePanels`), at the right of a desktop's display, as the mouse
  *  at its right edge brings them over the clone's screen (`onControlPanel`: on the control panel's backdrop).
  *  A click or a focus in a card gives it three quarters of the height; the band on their left
  *  edge sets their width. The look is the toolbar's Theme. */
@@ -86,7 +86,6 @@ function Side({
           onCancelScheduled={fn()}
           now={chatNow}
           locale={chatLocale}
-          glass
         />
       }
       onBackToScreen={archived ? fn() : undefined}

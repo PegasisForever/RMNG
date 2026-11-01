@@ -3,7 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "RMNG dashboard and browser viewer: a React Router 7 single-page app that the control-server serves.",
+  "description": "The RMNG web app: a React Router 7 single-page app that the control-server serves.",
   "scripts": {
     "dev": "react-router dev",
     "build": "react-router build && bun scripts/compress.ts",

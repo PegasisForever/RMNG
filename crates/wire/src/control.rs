@@ -26,7 +26,7 @@ pub struct MonitorSpec {
 
 /// The monitor layout in force: the one of the client the operator used last.
 ///
-/// Each client (a desktop browser, the `/ng` phone page) keeps its own layout in its own
+/// Each client (a desktop browser, a phone) keeps its own layout in its own
 /// browser storage, and sends it on each real action of the operator in it while its window
 /// is in the foreground (`POST /api/layout/claim`). The server keeps only the last one it got,
 /// and gives the clones its monitors. Never set: the built-in default ([`default_monitors`]).
@@ -83,7 +83,7 @@ pub enum Provider {
     Codex,
 }
 
-/// One column of the dashboard board, holding clone ids top to bottom.
+/// One column of the board (the web app's Clones tab), holding clone ids top to bottom.
 ///
 /// A clone the operator has not filed anywhere is not stored: the board draws it in the
 /// first column, which is how a newly created clone shows up without anyone writing it here

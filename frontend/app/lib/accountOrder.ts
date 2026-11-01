@@ -82,7 +82,7 @@ export function ordered<T>(
 /** Apply the per-bucket saved order to a list that MIXES buckets, permuting each bucket's
  *  items only among the slots that bucket already occupies.
  *
- *  The sidebar renders one flat list carrying both providers, but a drag can only ever
+ *  The usage list renders one flat list carrying both providers, but a drag can only ever
  *  reorder within a provider (Settings shows the two pools separately), so there is no
  *  saved answer for "does this Claude row belong above that Codex row". Sorting the mixed
  *  list by a per-bucket position would be a non-transitive comparator — items from different

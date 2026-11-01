@@ -280,7 +280,7 @@ const keyboard = () =>
   (hostWindow().navigator as Navigator & { keyboard?: { lock(keys?: string[]): Promise<void>; unlock(): void } })
     .keyboard;
 
-/** The document whose fullscreen this page uses: the /ng shell's around it, or its own. */
+/** The document whose fullscreen this page uses: the shell's around it, or its own. */
 const fullscreenDoc = () => hostWindow().document;
 
 /** Fullscreen on or off, on the screen the window is on. The page's own fullscreen hides
@@ -288,7 +288,7 @@ const fullscreenDoc = () => hostWindow().document;
  *  without Keyboard Lock is asked for `keyboardLock: "browser"` (Safari 26.4, Firefox 156): for
  *  as long as the fullscreen lasts, Esc and the browser's own shortcuts go to the clone, and a
  *  held Esc leaves, as with Chrome's Keyboard Lock. A browser that does not know the option
- *  ignores it. In the /ng shell's frame, the shell's page goes fullscreen, so a reload of the
+ *  ignores it. In the shell's frame, the shell's page goes fullscreen, so a reload of the
  *  frame keeps it. */
 export function toggleFullscreen() {
   const document = fullscreenDoc();
@@ -296,7 +296,7 @@ export function toggleFullscreen() {
   else {
     const options = keyboard() ? undefined : { keyboardLock: "browser" };
     // Locked here too, not only when an input sees the change: a page that takes no keys
-    // now (`/ng` with its control panel open) still gets them once it does
+    // now (the app with its control panel open) still gets them once it does
     void document.documentElement
       .requestFullscreen(options as FullscreenOptions | undefined)
       .then(() => keyboard()?.lock())
@@ -325,13 +325,11 @@ interface InputOptions {
    *  (Safari, Firefox: `./clipboard.ts`). Then the chord's key keeps its default action, which
    *  fires that event, and goes to the clone after it, behind the offer the event makes. */
   pasteByEvent(): boolean;
-  /** The canvas's size in device pixels changed: the worker draws at this size. */
-  onResize(width: number, height: number): void;
   /** A chord of the page's own (`~/desk/shortcut.ts`), which does not go to the clone. The press
    *  of its modifier (`holds`: Super, or Alt on a Mac) is held back until the next key or click:
    *  a Super or an Alt pressed and let go alone does something in the clone (GNOME's overview,
    *  an app's menu bar), so the chord's must never reach it. */
-  chord?: { is(e: KeyboardEvent): boolean; holds: readonly string[]; run(): void };
+  chord: { is(e: KeyboardEvent): boolean; holds: readonly string[]; run(): void };
 }
 
 export interface Input {
@@ -527,7 +525,7 @@ export function attachInput(o: InputOptions): Input {
   function onKeyDown(e: KeyboardEvent) {
     if (forPage(e)) return;
     syncMods(e);
-    if (o.chord?.is(e)) {
+    if (o.chord.is(e)) {
       e.preventDefault();
       if (e.repeat) return;
       // Its keys never reach the clone; what else is held is let go there
@@ -567,7 +565,7 @@ export function attachInput(o: InputOptions): Input {
     if (!paste) e.preventDefault();
     // The clone runs its own key repeat, so the browser's repeats are not sent.
     if (e.repeat) return;
-    if (o.chord?.holds.includes(e.code) && !keys.has(k)) {
+    if (o.chord.holds.includes(e.code) && !keys.has(k)) {
       heldMod = k;
       return;
     }
@@ -758,7 +756,6 @@ export function attachInput(o: InputOptions): Input {
           h: Math.round(c.blockSize * devicePixelRatio),
         };
     built = null;
-    o.onResize(box.w, box.h);
   });
   /** Without the device-pixel box, a new device pixel ratio (the window moved to a screen of
    *  another density) changes no CSS size: observe again then, which reports the size again. */

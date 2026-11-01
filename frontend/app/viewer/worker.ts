@@ -1,4 +1,4 @@
-// The browser viewer's worker: it owns the WebSocket, the H.264 decoder and the canvas, so a
+// The viewer's worker: it owns the WebSocket, the H.264 decoder and the canvas, so a
 // busy page thread never delays a frame. With sound on, it also decodes the sound packets
 // (Opus: WebCodecs, or libopus in WebAssembly, `./opus.ts`) and sends the samples straight to
 // the page's sound worklet on a port of their own, so a busy page thread never delays the sound
@@ -8,11 +8,8 @@
 // this worker (`transferControlToOffscreen`). That is one GPU copy per frame, and every part of
 // it is plain, long-shipped Chrome API. A track generator into a <video> would save the copy,
 // but the track would have to cross from this worker to the page, or the frames would have to
-// go to the page thread first; both are less certain in Chrome than a canvas, so in Chrome the
-// copy stays until a measurement shows it matters. Safari draws a VideoFrame on a worker canvas
-// slowly (Selkies measured 5 to 25 ms a frame, at times over 100), so where the page asks for
-// it and the worker has the standard `VideoTrackGenerator` (Safari 18 and later), the frames go
-// into a generator's track instead, which the page shows in a <video> (`./track.ts`).
+// go to the page thread first; both are less certain in Chrome than a canvas, so the copy stays
+// until a measurement shows it matters.
 //
 // H.264: the server sends Annex B. Safari's decoder takes only avcC framing (a `description`
 // with the SPS and PPS, and length-prefixed NAL units; Selkies found this), which every browser
@@ -44,12 +41,6 @@ import {
   parseVideoHeader,
   sameBytes,
 } from "./protocol";
-
-/** The standard track generator, a DedicatedWorker global (Safari 18 and later); not in
- *  TypeScript's DOM types. */
-declare const VideoTrackGenerator:
-  | (new () => { track: MediaStreamTrack; writable: WritableStream<VideoFrame> })
-  | undefined;
 
 const scope = self as unknown as Worker;
 const post = (m: WorkerOut, transfer: Transferable[] = []) => scope.postMessage(m, transfer);
@@ -91,8 +82,6 @@ let ws: WebSocket | null = null;
 let reconnectMs = 0;
 /** The last frame drawn, kept to draw again when the canvas changes size. */
 let last: VideoFrame | null = null;
-/** Where frames go instead of the canvas, when the page shows the video through a track. */
-let track: WritableStreamDefaultWriter<VideoFrame> | null = null;
 
 let decoder: VideoDecoder | null = null;
 /** The codec the decoder is configured for, and its avcC description; "" and null until a
@@ -313,7 +302,6 @@ function onFrame(frame: VideoFrame) {
   lastOut = performance.now();
   const seq = seqOf(frame.timestamp);
   if (seq !== undefined) done(seq);
-  if (track) return toTrack(frame);
   // A new monitor size leaves parts of the old picture in the bars.
   if (last?.displayWidth !== frame.displayWidth || last.displayHeight !== frame.displayHeight) {
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -321,33 +309,6 @@ function onFrame(frame: VideoFrame) {
   last?.close();
   last = frame;
   draw();
-}
-
-/** Hand a frame to the page's <video>. The track keeps only a few: over that, the frame is
- *  dropped, as the newest frame replaces the last one on the canvas. A track that fails goes
- *  back to the canvas. */
-function toTrack(frame: VideoFrame) {
-  const w = track!;
-  if (w.desiredSize !== null && w.desiredSize <= 0) return frame.close();
-  // The write closes the frame, unless it fails.
-  w.write(frame).catch(() => {
-    frame.close();
-    if (track !== w) return;
-    track = null;
-    post({ type: "track", track: null });
-  });
-}
-
-/** Write frames to a track that the page shows, if the worker can make one. */
-function startTrack() {
-  if (typeof VideoTrackGenerator === "undefined") return;
-  try {
-    const gen = new VideoTrackGenerator();
-    post({ type: "track", track: gen.track }, [gen.track]);
-    track = gen.writable.getWriter();
-  } catch (e) {
-    console.warn("video track did not start, the canvas shows the video:", e);
-  }
 }
 
 /** Draw the last frame scaled to fit, at the canvas's device pixels: when the canvas has the
@@ -543,7 +504,6 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   // window with the new one at once, which may still be open on a network that is gone.
   url = `${m.url}&tab=${crypto.randomUUID()}`;
   ctx = m.canvas.getContext("2d")!;
-  if (m.track) startTrack();
   resetDecoder();
   connect();
   setInterval(() => {

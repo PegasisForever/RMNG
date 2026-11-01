@@ -87,7 +87,7 @@ export const Lg: Story = {
   },
 };
 
-/** The two-pane fixed-height overlay: the clone dialog and Settings. */
+/** The two-pane fixed-height overlay: the clone dialog. */
 export const Panel: Story = {
   args: {
     size: "panel",

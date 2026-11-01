@@ -1,4 +1,4 @@
-// The /ng keys are also a touchpad. Each touch on a key is a key or a pointer gesture, decided
+// The on-screen keys are also a touchpad. Each touch on a key is a key or a pointer gesture, decided
 // by what the finger does:
 //
 // - It lifts without moving: a tap of that key.

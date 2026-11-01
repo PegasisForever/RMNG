@@ -1,10 +1,10 @@
-// VIEWER_CHANNEL (`./clientLayout.ts`). A monitor window's side: the viewer windows and the
-// `/ng` windows answer the Edit layout dialog with their size, follow their monitor when the
-// monitors are renumbered, and show their monitor's number while the dialog is open. The
-// asking side: the windows' sizes, and which monitors have a window open.
+// MONITOR_CHANNEL (`./clientLayout.ts`). A monitor window's side: the monitor windows answer
+// the Edit layout dialog with their size, follow their monitor when the monitors are
+// renumbered, and show their monitor's number while the dialog is open. The asking side: the
+// windows' sizes, and which monitors have a window open.
 import { useEffect, useRef, useState } from "react";
 
-import { IDENTIFY_EVERY_MS, VIEWER_CHANNEL, type ViewerChannelMsg } from "./clientLayout";
+import { IDENTIFY_EVERY_MS, MONITOR_CHANNEL, type MonitorChannelMsg } from "./clientLayout";
 
 /** How long the monitor windows get to say their sizes. */
 const ANSWER_MS = 400;
@@ -15,11 +15,11 @@ const LOOK_EVERY_MS = 2000;
 export function askWindowSizes(): Promise<Map<number, { width: number; height: number }>> {
   return new Promise((resolve) => {
     const sizes = new Map<number, { width: number; height: number }>();
-    const ch = new BroadcastChannel(VIEWER_CHANNEL);
-    ch.onmessage = (e: MessageEvent<ViewerChannelMsg>) => {
+    const ch = new BroadcastChannel(MONITOR_CHANNEL);
+    ch.onmessage = (e: MessageEvent<MonitorChannelMsg>) => {
       if (e.data.t === "size") sizes.set(e.data.monitor, { width: e.data.width, height: e.data.height });
     };
-    const ask: ViewerChannelMsg = { t: "ask-size" };
+    const ask: MonitorChannelMsg = { t: "ask-size" };
     ch.postMessage(ask);
     setTimeout(() => {
       ch.close();
@@ -58,7 +58,7 @@ export function useOpenMonitors(on: boolean): { open: ReadonlySet<number> | null
 }
 
 /** Whether the window should show its monitor's number now (the dialog is open). */
-export function useViewerChannel(
+export function useMonitorChannel(
   monitor: number,
   /** The window's room for the picture, in screen (device) pixels. */
   size: () => { width: number; height: number },
@@ -72,9 +72,9 @@ export function useViewerChannel(
   renumberRef.current = onRenumber;
 
   useEffect(() => {
-    const ch = new BroadcastChannel(VIEWER_CHANNEL);
+    const ch = new BroadcastChannel(MONITOR_CHANNEL);
     let identifyTimer: ReturnType<typeof setTimeout> | undefined;
-    ch.onmessage = (e: MessageEvent<ViewerChannelMsg>) => {
+    ch.onmessage = (e: MessageEvent<MonitorChannelMsg>) => {
       switch (e.data.t) {
         case "renumber": {
           const next = e.data.map[monitor];
@@ -92,7 +92,7 @@ export function useViewerChannel(
           setIdentify(false);
           break;
         case "ask-size": {
-          const reply: ViewerChannelMsg = { t: "size", monitor, ...sizeRef.current() };
+          const reply: MonitorChannelMsg = { t: "size", monitor, ...sizeRef.current() };
           ch.postMessage(reply);
           break;
         }

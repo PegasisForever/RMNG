@@ -33,7 +33,7 @@ use crate::app::App;
 use crate::mediaplane::{Viewers, broadcast, configured_monitors, send_to_monitor};
 use wire::browser::{TermData, ToBrowser, ViewContent, ViewSpec};
 
-/// The monitor whose window shows the terminal (`routes/viewer.tsx`); terminal output goes
+/// The monitor whose window shows the terminal (`frontend/app/desk/FullDesk.tsx`); terminal output goes
 /// only to its windows.
 const TERMINAL_MONITOR: u32 = 0;
 /// The clone user every session PTY runs as (uid 1000).
@@ -95,7 +95,7 @@ pub struct TermPlane {
     rt: tokio::runtime::Handle,
     active: Mutex<Option<Active>>,
     /// The viewer's last-reported terminal grid, remembered across (de)activations. The terminal
-    /// window is a stable viewer window whose size carries over between headless clones and across
+    /// is in monitor 0's window, which stays open and whose size carries over between headless clones and across
     /// reconnects, but the viewer only emits a `TermResize` when that widget is (re)allocated — not
     /// on a headless→headless switch. So on activation we attach PTYs immediately at this size
     /// instead of waiting for a resize that won't come; `None` (first-ever select) falls back to

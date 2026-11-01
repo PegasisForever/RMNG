@@ -1,11 +1,16 @@
-// One component per settings category: the sections the rail files under Board, Agents,
-// Presets, Claude, Codex, Clones and Server. Each is a pure composition of sections that
-// already have their own stories, so a pane has no state and no variants of its own beyond
-// what the panel hands it, and `SettingsPanelView`'s per-category stories are what show them.
+// The settings form's categories, and one component per category: the sections the rail files
+// under Board, Presets, LLM and Server. Each is a pure composition of sections that already
+// have their own stories, so a pane has no state and no variants of its own beyond what the
+// panel hands it.
 //
-// Each pane declares only the fields it renders. `SettingsPanelView` assembles each pane's
-// props from the panel's, so adding a field used by one pane touches that pane's interface
-// and one assembly branch — not all five panes.
+// Each pane declares only the fields it renders. `SettingsPane` assembles each pane's props
+// from the panel's, so adding a field used by one pane touches that pane's interface and one
+// assembly branch — not all four panes.
+//
+// The categories are data rather than markup, so the rail, the panes and the stories all read
+// one list.
+import { Bot, Boxes, LayoutGrid, Server } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
 import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
@@ -18,38 +23,56 @@ import { SettingsSshSection } from "~/components/SettingsSshSection";
 import { SettingsStuckSection } from "~/components/SettingsStuckSection";
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import type { SettingsDraft } from "~/lib/settingsDraft";
+import { type AcctOrder, orderedAccounts } from "~/lib/accountOrder";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
+export type SettingsCategory = "board" | "presets" | "llm" | "server";
+
+interface SettingsCategoryInfo {
+  id: SettingsCategory;
+  label: string;
+  icon: LucideIcon;
+}
+
+/** Every category, in rail order. Roughly outside-in: what the operator arranges daily first,
+ *  what the server was installed with last. */
+export const SETTINGS_CATEGORIES: SettingsCategoryInfo[] = [
+  { id: "board", label: "Board", icon: LayoutGrid },
+  { id: "presets", label: "Presets", icon: Boxes },
+  { id: "llm", label: "LLM", icon: Bot },
+  { id: "server", label: "Server", icon: Server },
+];
+
 /** Write one field of the settings form back. Same shape as the panel's writer; kept here so each pane seam declares its own use. */
-export type OnDraftChange = <K extends keyof SettingsDraft>(
+type OnDraftChange = <K extends keyof SettingsDraft>(
   key: K,
   value: SettingsDraft[K],
 ) => void;
 
 /** The form slice every pane needs: the loaded draft plus its single writer. A pane only renders once the config is in, so the draft is non-null here. */
-export interface PaneDraftProps {
+interface PaneDraftProps {
   draft: SettingsDraft;
   onDraftChange: OnDraftChange;
 }
 
-/** Board: the dashboard's swim lanes, plus their handlers. */
-export interface BoardPaneProps extends PaneDraftProps {
-  boardColumns?: BoardColumn[];
-  boardColumnCounts?: Record<string, number>;
-  onAddBoardColumn?: (title: string) => void;
-  onRenameBoardColumn?: (columnId: string, title: string) => void;
-  onSetBoardColumnArchive?: (columnId: string, archive: boolean) => void;
-  onDeleteBoardColumn?: (columnId: string) => void;
-  onReorderBoardColumns?: (columnIds: string[]) => void;
+/** Board: the board's swim lanes, plus their handlers. */
+interface BoardPaneProps extends PaneDraftProps {
+  boardColumns: BoardColumn[];
+  boardColumnCounts: Record<string, number>;
+  onAddBoardColumn: (title: string) => void;
+  onRenameBoardColumn: (columnId: string, title: string) => void;
+  onSetBoardColumnArchive: (columnId: string, archive: boolean) => void;
+  onDeleteBoardColumn: (columnId: string) => void;
+  onReorderBoardColumns: (columnIds: string[]) => void;
 }
 
 /** Presets: only the form, plus the forkable clones the default-source picker offers. */
-export interface PresetsPaneProps extends PaneDraftProps {
+interface PresetsPaneProps extends PaneDraftProps {
   forkSources: string[];
 }
 
 /** LLM: the form, the ordered account rows, the import entry point, and the judge test. */
-export interface LlmPaneProps extends PaneDraftProps {
+interface LlmPaneProps extends PaneDraftProps {
   rows: { claude: ClaudeUsage[]; codex: ClaudeUsage[] };
   onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
   onTestJudge: () => void;
@@ -57,7 +80,7 @@ export interface LlmPaneProps extends PaneDraftProps {
 }
 
 /** Server: the form, the control-server's own version and update state. */
-export interface ServerPaneProps extends PaneDraftProps {
+interface ServerPaneProps extends PaneDraftProps {
   serverStatus: UpdateStatus | null;
   serverMessage: string | null;
   updateOperation: Operation | null;
@@ -67,8 +90,8 @@ export interface ServerPaneProps extends PaneDraftProps {
   onRestartServer: () => void;
 }
 
-/** Board: the dashboard's swim lanes. Applies the moment it is saved. */
-export function BoardPane({
+/** Board: the board's swim lanes. Applies the moment it is saved. */
+function BoardPane({
   draft,
   onDraftChange,
   boardColumns,
@@ -80,34 +103,28 @@ export function BoardPane({
   onReorderBoardColumns,
 }: BoardPaneProps) {
   return (
-    <>
-      {/* Board columns. Clones move between them by drag on the board itself; the columns
-          are made and ordered here. */}
-      {boardColumns ? (
-        <Section
-          title="Board columns"
-          hint="The dashboard board's columns, left to right. Drag to reorder. Tick archive to make a column stop and keep the clones dropped into it, and start them again when they are dragged out. A clone in no column shows up in the first one."
-        >
-          <BoardColumnsEditor
-            columns={boardColumns}
-            counts={boardColumnCounts}
-            onAddColumn={(title) => onAddBoardColumn?.(title)}
-            onRenameColumn={(id, title) => onRenameBoardColumn?.(id, title)}
-            onSetArchive={(id, archive) =>
-              onSetBoardColumnArchive?.(id, archive)
-            }
-            onDeleteColumn={(id) => onDeleteBoardColumn?.(id)}
-            onReorderColumns={(ids) => onReorderBoardColumns?.(ids)}
-          />
-        </Section>
-      ) : null}
-    </>
+    // Board columns. Clones move between them by drag on the board itself; the columns are
+    // made and ordered here.
+    <Section
+      title="Board columns"
+      hint="The board's columns, left to right. Drag to reorder. Tick archive to make a column stop and keep the clones dropped into it, and start them again when they are dragged out. A clone in no column shows up in the first one."
+    >
+      <BoardColumnsEditor
+        columns={boardColumns}
+        counts={boardColumnCounts}
+        onAddColumn={onAddBoardColumn}
+        onRenameColumn={onRenameBoardColumn}
+        onSetArchive={onSetBoardColumnArchive}
+        onDeleteColumn={onDeleteBoardColumn}
+        onReorderColumns={onReorderBoardColumns}
+      />
+    </Section>
   );
 }
 
 /** Presets: the assistant, the two prompt layers, then Linear identity (key +
  *  the ticket-id prefixes that auto-select it) plus the env vars a clone is created with. */
-export function PresetsPane({
+function PresetsPane({
   draft,
   onDraftChange,
   forkSources,
@@ -193,8 +210,8 @@ export function PresetsPane({
  *  There are no per-provider account sections anymore: importing happens per-pool in the
  *  group tree (every import lands in a pool directly), deleting happens by dropping the
  *  last membership and saving (the server sweeps unclaimed accounts), and token health
- *  ("sign in again") lives in the dashboard Usage column. */
-export function LlmPane({
+ *  ("sign in again") lives in the Usage tab. */
+function LlmPane({
   draft,
   onDraftChange,
   rows,
@@ -252,7 +269,7 @@ export function LlmPane({
 
 /** Server: the control-server itself. Its own version, the Docker settings for new clones,
  *  and the keys it installs on every clone. */
-export function ServerPane({
+function ServerPane({
   draft,
   onDraftChange,
   serverStatus,
@@ -307,4 +324,117 @@ export function ServerPane({
       </Section>
     </>
   );
+}
+
+/** The settings form and everything it can do, as `useSettingsPanel` hands it over. */
+export interface SettingsPanelProps {
+  /** The whole form, as one editable model. Null while the config is still in flight, which
+   *  is what draws the loading state. */
+  draft: SettingsDraft | null;
+  /** Write one field back. The container holds the draft; this is how a keystroke reaches it. */
+  onDraftChange: OnDraftChange;
+
+  /** Which category the rail is on. Controlled, so every pane is reachable as a story. */
+  category: SettingsCategory;
+  onCategoryChange: (category: SettingsCategory) => void;
+
+  /** Live per-account usage (from `ControlState.claudeAccounts`). Despite the field name it
+   *  carries BOTH providers' rows tagged by `provider`; the Claude and Codex panes split it
+   *  by that tag. The preset pickers take the list unordered, the way a dropdown of options
+   *  rather than a list of rows wants it. */
+  accounts: ClaudeUsage[];
+  /** The operator's own cosmetic ordering of those rows, per provider. It orders the
+   *  group tree's account source. */
+  accountOrder: AcctOrder;
+  /** Open the import modal, optionally on one provider tab with a group preselected
+   *  (the settings group tree's per-group import buttons). Accounts are never OAuth'd
+   *  in the browser — the control-server harvests the tokens off a clone that's
+   *  already signed in. */
+  onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
+  /** Forkable clone ids, newest first, for the preset default-source picker. */
+  forkSources: string[];
+
+  /** The last failed load or save, in the panel's own banner. */
+  error: string | null;
+  saving: boolean;
+  /** The post-save confirmation, which the container clears after a beat. */
+  saved: boolean;
+  onSave: () => void;
+
+  /** The control-server's own version and update-available answer. */
+  serverStatus: UpdateStatus | null;
+  /** The last thing the panel has to say about a check, an update or a restart. */
+  serverMessage: string | null;
+  /** The self-update operation, once it shows up in the live op list. */
+  updateOperation: Operation | null;
+  /** The Update button is dead: nothing to update to, or an update is already running. */
+  updateDisabled: boolean;
+  onCheckUpdate: () => void;
+  onUpdateServer: () => void;
+  onRestartServer: () => void;
+
+  /** A second slot rather than one shared string: the two tests live in different
+   *  categories, and one verdict overwriting the other reads as the wrong answer. */
+  judgeTestMessage: string | null;
+  onTestJudge: () => void;
+
+  /** The board's columns, left to right. */
+  boardColumns: BoardColumn[];
+  /** Clones per column id, so a delete can say what it displaces. */
+  boardColumnCounts: Record<string, number>;
+  onAddBoardColumn: (title: string) => void;
+  onRenameBoardColumn: (columnId: string, title: string) => void;
+  onSetBoardColumnArchive: (columnId: string, archive: boolean) => void;
+  onDeleteBoardColumn: (columnId: string) => void;
+  onReorderBoardColumns: (columnIds: string[]) => void;
+}
+
+/** One category's pane of sections. Each pane declares only the fields it renders; this
+ *  switch assembles each pane's props from the panel's. Adding a category is a branch here
+ *  and a line in `SETTINGS_CATEGORIES`. */
+export function SettingsPane(props: Omit<SettingsPanelProps, "draft"> & { draft: SettingsDraft }) {
+  const { draft, onDraftChange } = props;
+  switch (props.category) {
+    case "board":
+      return (
+        <BoardPane
+          draft={draft}
+          onDraftChange={onDraftChange}
+          boardColumns={props.boardColumns}
+          boardColumnCounts={props.boardColumnCounts}
+          onAddBoardColumn={props.onAddBoardColumn}
+          onRenameBoardColumn={props.onRenameBoardColumn}
+          onSetBoardColumnArchive={props.onSetBoardColumnArchive}
+          onDeleteBoardColumn={props.onDeleteBoardColumn}
+          onReorderBoardColumns={props.onReorderBoardColumns}
+        />
+      );
+    case "presets":
+      return <PresetsPane draft={draft} onDraftChange={onDraftChange} forkSources={props.forkSources} />;
+    case "llm":
+      return (
+        <LlmPane
+          draft={draft}
+          onDraftChange={onDraftChange}
+          rows={orderedAccounts(props.accounts, props.accountOrder)}
+          onImportAccount={props.onImportAccount}
+          onTestJudge={props.onTestJudge}
+          judgeTestMessage={props.judgeTestMessage}
+        />
+      );
+    case "server":
+      return (
+        <ServerPane
+          draft={draft}
+          onDraftChange={onDraftChange}
+          serverStatus={props.serverStatus}
+          serverMessage={props.serverMessage}
+          updateOperation={props.updateOperation}
+          updateDisabled={props.updateDisabled}
+          onCheckUpdate={props.onCheckUpdate}
+          onUpdateServer={props.onUpdateServer}
+          onRestartServer={props.onRestartServer}
+        />
+      );
+  }
 }

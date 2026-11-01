@@ -1,77 +1,57 @@
 # frontend
 
-The web app — the **management UI** (port 9000). It is the existing React Router 7 dashboard
-(`../../control-server/app`) kept and extended with a Settings page, built to a static
-bundle and **served by the Rust control-server**.
+The web app (port 9000): a React Router 7 single-page app, built to a static bundle and
+**served by the Rust control-server**. It shows the selected clone's screen and, over it, the
+control panel: account usage, tickets, clones, notes and settings. The same app runs on a
+desktop (mouse and keyboard, one browser window per monitor) and on a phone or a tablet
+(touch, an on-screen keyboard, Add to Home Screen).
 
-It does host selection, clone orchestration, Claude accounts, chat, notes, and settings.
-It also holds the **viewer**: `/viewer?monitor=<id>` (`app/routes/viewer.tsx`,
-`app/viewer/*`) opens one browser window per monitor of the selected clone. Each window gets
-its monitor's H.264 over a WebSocket (`/api/viewer`) and decodes it with WebCodecs. The
-monitor 0 window also plays the selected clone's sound (Opus, decoded with WebCodecs in the
-worker, played by an AudioWorklet: `app/viewer/sound*.ts`). The protocol is in
-`../docs/PROTOCOL.md`.
+## Pages and addresses
 
-## What's reused (≈99% of the current UI)
+- `/`: the shell (`public/shell.html`, sent by the server). It holds the app in a frame and
+  keeps the fullscreen and the key lock, so a new build reloads only the frame. A browser with
+  no fullscreen (an iPhone) goes straight to the app.
+- `/app`: the app (`app/routes/app.tsx`). A server whose first-run setup is not done shows the
+  setup wizard here.
+- `/screen-area`: a test page of the screen's areas, opened from Settings.
 
-- Clone board: a card per clone in operator-made columns, drag to move (`Board`, dnd-kit).
-- `CloneModal` (existing/new/plain ticket + Claude account picker).
-- `ClaudeAccountsPanel` (5h/7d usage bars).
-- `ChatContainer` + `ChatView` (per-host agent chat over `/api/chat/:id/events`).
-- `NotesEditorContainer` + `NotesEditorView` (notes/BlockNote + uploads).
-- `OperationProgress` (clone/delete progress).
-- SSE subscription to `/events` → `ControlState`.
+The address holds what is open, so Back works and a copied address shows the same:
+`?clone=<id>` (the open clone), `?ticket=<id>` (the open ticket, `app/lib/selection.ts`),
+`?monitor=<N>` (this window's monitor of the browser's layout, 0 when absent) and
+`?control-panel` (only the control panel, in a window of its own). The shell's address is the
+app's: `/?clone=…`, `/?monitor=1`.
 
-The page is the board across 70% of the width and the selected clone's notes over its
-agent chat across the other 30% (`AppShellV2`). Below the `lg` breakpoint the three cannot
-share the screen, so a segmented control picks one (`pane: "board" | "notes" | "chat"`). The
-planned "monitor" pane is dropped.
+## Where things are
 
-## What's new
-
-- **`Settings.tsx`** — per-section forms for **all** configuration (the Docker backend —
-  daemon socket / `rmng`-network subnet / hostname prefix / per-clone limits, presets —
-  Linear key + auto-select ticket-id prefixes + env vars, Claude polling/groups, monitor
-  defaults), replacing hand-edited `config.json`. Secret fields are
-  masked/write-only with **Test connection** buttons (`POST /api/config/test`); saves go to
-  `PUT /api/config` and apply live. Claude accounts are imported from a signed-in clone
-  (`ClaudeAccountsPanel`), not entered here. Reads the redacted `GET /api/config`, which
-  hands over each preset's Linear key verbatim: the ticket column queries Linear itself.
-- **Claude account controls** (extending `ClaudeAccountsPanel` + the per-host card): show the
-  assigned account, **hot-swap** a running clone's token to another account (`POST
-  /api/claude/swap`). Usage bars drive the recommendation; "auto" clones rotate across
-  all imported accounts as they exhaust.
+- `app/desk/`: the screen (`FullDesk.tsx`, `ScreenView.tsx`), its floating buttons, the
+  on-screen keyboard and trackpad, the terminal of a headless clone, and the connection to the
+  selected clone (`remote.ts`, `session.ts`). The glass look is in `app/desk/GLASS.md`.
+- `app/desk/control/`: the control panel's tabs (Usage, Tickets, Clones, Notes, Settings).
+- `app/viewer/`: the media client. A worker opens the WebSocket (`/api/viewer`), decodes the
+  monitor's H.264 with WebCodecs and draws it. Monitor 0's window also plays the selected
+  clone's sound (Opus, decoded in the worker, played by an AudioWorklet: `sound*.ts`). Also the
+  input, the clipboard, and file upload. The protocol is in `../docs/PROTOCOL.md`.
+- `app/components/`: dialogs (New clone, tickets, accounts, layout, port forward), the Settings
+  panes, chat and notes.
+- `app/lib/`: the live state over SSE (`useLiveState.ts`: `/events` → `ControlState`), the
+  API calls (`api.ts`), the monitor layouts (`clientLayout.ts`), and the generated wire types.
+- `public/`: the shell, the web app manifest and the service worker.
 
 ## Types
 
-TypeScript types are **generated from the `wire` crate via ts-rs** (replacing the
-hand-maintained `app/lib/types.ts`), so `ControlState`/`Host`/`Operation`/etc. cannot drift
+TypeScript types are **generated from the `wire` crate via ts-rs** into `app/lib/wire/`
+(`cargo test -p wire` writes them), so `ControlState`, `Operation` and the rest cannot drift
 from the Rust backend.
 
 ## Build & serve
 
-- Build with Vite/Bun to a static bundle (`frontend/build` or similar).
-- The Rust control-server serves the bundle + `/uploads` on port 9000; no Bun runtime in
-  production.
+- `bun run build` builds the static bundle to `frontend/build/client`.
+- The Rust control-server serves the bundle and `/uploads` on port 9000; there is no Bun
+  runtime in production.
 - Dev: `bun run dev` starts the Vite dev server on port 9000 with no proxy, so the API and
-  the viewer do not work there. To test them, run `bun run build`, then
+  the clone's screen do not work there. To test them, run `bun run build`, then
   `cargo run -p control-server`, which serves `frontend/build/client`.
+- The app needs HTTPS (or `localhost`) for WebCodecs, the async clipboard and Keyboard Lock.
+- `bun test` runs the unit tests; `bun run storybook` shows the stories.
 
-## Backend contract (preserved by the Rust port)
-
-- `GET /events` → full `ControlState` JSON, `data: …\n\n` frames, `: ping` heartbeats.
-- `POST /api/{activate,reorder,clone,delete}`, `/api/claude/{import,refresh,recommended}`,
-  `/api/notes/:id`, `/api/upload`, `/api/chat/:id` (+ `/events`, `/abort`).
-- **New**: `/api/config` (GET/PUT), `/api/config/test`, `/api/setup/env`, `/api/images/*`,
-  `/api/claude/swap` (hot-swap a clone's token); `/api/clone` and `/api/fork` take a `CloneRequest`.
-
-## Tests
-
-- Type-check against generated `wire` types.
-- Selection + clone/chat/claude flows work against the Rust backend (parity with Bun).
-- Settings: redacted read, write-only secrets, live-apply, "Test connection".
-
-## Open questions
-
-- Whether to keep React Router 7 + Bun build or simplify to a plain Vite SPA (the backend
-  serves it either way).
+The API is in `../docs/API.md`.

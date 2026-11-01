@@ -1,4 +1,4 @@
-// The /ng on-screen keyboard: a full Linux (US) keyboard in six rows of ROW_UNITS each. The
+// The on-screen keyboard: a full Linux (US) keyboard in six rows of ROW_UNITS each. The
 // symbols that sit beside the letters on a real keyboard have a row of their own (with Esc
 // first), so the letters get the width. Every
 // key sends its evdev code (`~/viewer/keycodes.ts`), so the clone's own keyboard layout

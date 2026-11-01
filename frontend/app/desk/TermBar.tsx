@@ -1,4 +1,4 @@
-// The tab bar over a headless clone's terminal in /ng (`./TerminalScreen.tsx`): one tab per tmux
+// The tab bar over a headless clone's terminal (`./TerminalScreen.tsx`): one tab per tmux
 // session and a "+" that makes a new one. It is as tall as the floating buttons' row, and keeps
 // its right end free for them: they float over it, not over the terminal's lines. The terminal
 // is dark in both looks, so the bar is too: flat content (`./GLASS.md`) on a solid panel.

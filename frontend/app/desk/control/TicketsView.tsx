@@ -1,18 +1,17 @@
-// The /ng Tickets page: the dashboard's ticket column, as a list, and one ticket at a time in
-// the same page. The open Linear tickets no clone was made for, in the operator's order.
+// The Tickets page: the ticket column, as a list, and one ticket at a time in the same page.
+// The open Linear tickets no clone was made for, in the operator's order.
 //
-// What the desktop does with the pointer is a tap here: a tap on a row opens the ticket, the
-// ⋯ on a row opens a sheet of everything the card's menu does, and the drag that orders the
-// column is Move up / Move down / Move to top in that sheet. A drag onto a clone column
-// (which makes a clone) is "Create a clone" in the sheet.
+// A tap on a row opens the ticket, the ⋯ on a row opens a sheet of everything the card's menu
+// does, and Move up / Move down / Move to top in that sheet order the column, as a drag does.
+// "Create a clone" in the sheet does what a drag onto a clone column does.
 //
-// Wide (`column`), the list is the board's first column, with the dashboard's own card per
-// ticket (`TicketCardBody`) on the control panel's glass, and the open ticket shows beside the board
+// Wide (`column`), the list is the board's first column, with a card per ticket
+// (`TicketCardBody`) on the control panel's glass, and the open ticket shows beside the board
 // (the container puts `detail` there).
 //
-// As on the dashboard: a ticket drags within the list, or (wide) onto a clone column, which
-// makes a clone for it (`./BoardDnd.tsx`: a mouse at once, a finger after a long press); a
-// mouse's click on ⋯ opens the dashboard's menu, a finger's the sheet.
+// A ticket drags within the list, or (wide) onto a clone column, which makes a clone for it
+// (`./BoardDnd.tsx`: a mouse at once, a finger after a long press); a mouse's click on ⋯ opens
+// a menu (`DesktopMenu`), a finger's the sheet.
 //
 // Pure: the open ticket's panel comes in as a slot (`detail`), because the real one loads its
 // description editor lazily, in the browser only.
@@ -31,7 +30,7 @@ import {
 import { type MouseEvent, type ReactNode, useState } from "react";
 
 import type { Box } from "~/components/OverflowMenu";
-import { LabelPill, PriorityIcon, StateIcon, TicketCardBody } from "~/components/TicketColumn";
+import { LabelPill, PriorityIcon, StateIcon, TicketCardBody } from "~/components/TicketCard";
 import type { LinearWorkspace } from "~/lib/linear/types";
 import { branchNameOf, type LinearTicket, TICKET_COLUMN_ID, ticketDragId } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
@@ -43,7 +42,6 @@ import {
   boxOf,
   CARD,
   CARD_BOX,
-  CARD_FILL_ON_GLASS,
   CARD_LIST,
   DesktopMenu,
   DIVIDE,
@@ -102,7 +100,7 @@ export function TicketsView(p: TicketsViewProps) {
   const frame = useColumnFrame();
   const dnd = useBoardDnd();
   const [sheet, setSheet] = useState<LinearTicket | "workspaces" | null>(null);
-  /** The dashboard's menu, opened by a mouse, and where. */
+  /** The menu a mouse opens, and where. */
   const [menu, setMenu] = useState<{ of: LinearTicket | "workspaces"; at: Box } | null>(null);
   const openMenu = (of: LinearTicket | "workspaces", e: MouseEvent) =>
     isMouseClick(e) ? setMenu({ of, at: boxOf(e) }) : setSheet(of);
@@ -156,7 +154,7 @@ export function TicketsView(p: TicketsViewProps) {
     </>
   );
 
-  /** The dashboard's card for a ticket (wide); the click opens it beside the board. */
+  /** A ticket's card (wide); the click opens it beside the board. */
   const card = (t: LinearTicket, drag?: Record<string, unknown>) => (
     <div
       {...drag}
@@ -167,7 +165,6 @@ export function TicketsView(p: TicketsViewProps) {
       <TicketCardBody
         ticket={t}
         selected={p.open?.id === t.id}
-        fill={CARD_FILL_ON_GLASS}
         onCreateClone={() => p.onCreateClone(t)}
         onOpenInLinear={p.onOpenInLinear}
         onCopyBranchName={(b) => void p.onCopy(b)}

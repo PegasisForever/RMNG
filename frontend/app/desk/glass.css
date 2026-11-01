@@ -1,6 +1,6 @@
-/* /ng's glass: the material of the surfaces that float over the clone's screen (a button, a
+/* Glass: the material of the surfaces that float over the clone's screen (a button, a
    tooltip, a dialog's panel). Only the surface: what is on it is flat. The rules are in
-   `./GLASS.md`; the samples are the `ng/Design/Glass` story.
+   `./GLASS.md`; the samples are the `Desk/Design/Glass` story.
 
    One light, high above the top of the display. So, on every piece:
    - the rim (a 1 px edge, `::before`) is brightest at the top and fades down the sides, with a
@@ -186,8 +186,8 @@
   }
 }
 
-/* The dashboard's parts on the glass, flat (`./GLASS.md`): Settings in the control panel reuses
-   the dashboard's panes, drawn in slate on white (light) and on slate-800 / -900 (dark). Under
+/* The parts from `~/components` on the glass, flat (`./GLASS.md`): Settings' panes, the cards and
+   the ticket panel are drawn in slate on white (light) and on slate-800 / -900 (dark). Under
    `.on-glass` each slate shade takes the role it has in that look: in light, the light shades
    (fills, lines) are black at a low opacity and the dark ones (text) are solid greys dark enough
    to read; in dark, the light shades (text) are white at a high opacity and the dark ones (fills,

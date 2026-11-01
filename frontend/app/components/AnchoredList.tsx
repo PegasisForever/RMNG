@@ -2,8 +2,8 @@
 // is more room there), and kept there while the page scrolls or resizes.
 //
 // On the body because a list inside the field's own box is drawn in that box's layers: under
-// what is over the box, cut by a scrolling column, and, inside /ng's glass (a dialog, Settings),
-// a blurred layer in another, whose blur Safari (and Chrome on some machines) does not draw. A
+// what is over the box, cut by a scrolling column, and, inside glass (a dialog, Settings), a
+// blurred layer in another, whose blur Safari (and Chrome on some machines) does not draw. A
 // list from inside the glass keeps its look (`.on-glass`, `~/desk/glass.css`).
 import { type ReactNode, useLayoutEffect, useState } from "react";
 import { createPortal } from "react-dom";
@@ -14,7 +14,7 @@ const GAP = 4;
 
 type Place = { left: number; width: number; top?: number; bottom?: number };
 
-/** An unsafe edge of /ng's display (the clock bar, the home bar), CSS px; 0 elsewhere. */
+/** An unsafe edge of the display (the clock bar, the home bar), CSS px; 0 where none is set. */
 function inset(side: "top" | "bottom"): number {
   return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(`--safe-${side}`)) || 0;
 }

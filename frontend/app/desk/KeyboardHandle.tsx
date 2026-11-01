@@ -1,4 +1,4 @@
-// The bar along the top of the /ng keyboard (`./FullDesk.tsx`): a long press on it, then a drag
+// The bar along the top of the on-screen keyboard (`./FullDesk.tsx`): a long press on it, then a drag
 // up or down, makes the keyboard taller or shorter. A drag with no long press first does
 // nothing, so a finger that only brushes it changes nothing.
 import { type PointerEvent, useRef, useState } from "react";

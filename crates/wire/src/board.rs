@@ -1,4 +1,4 @@
-//! Where a clone sits on the dashboard board, as a Rust mirror of the browser's
+//! Where a clone sits on the board (the web app's Clones tab), as a Rust mirror of the browser's
 //! `frontend/app/lib/board.ts`.
 //!
 //! The server stores [`crate::BoardColumn`]s and applies no rules to them: `PUT /api/board`

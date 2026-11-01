@@ -100,7 +100,7 @@ $SSH root@10.0.0.100 'pct exec 101 -- bash -lc "docker exec rmng zfs create \
   && docker exec rmng zfs destroy rpool/rmng-homes/probe"'
 ```
 
-Restarting resets in-memory state and drops every dashboard connection. Within about a
+Restarting resets in-memory state and drops every web app connection. Within about a
 minute the reconciler pushes fresh clone binaries into every running clone and restarts
 the clone daemon, with no clone recreate needed. On a clone that still has the retired
 `agent-wrapper`, the same pass stops it, masks its unit, and deletes its files.
@@ -125,16 +125,16 @@ Two traps here.
    `serverUrl` (this server as the assistant reaches it, here `http://10.0.0.178:9000`).
    Without them `POST /api/chat/:id` answers `409` and says which address is missing.
 
-## Watch a clone in the viewer
+## Watch a clone in the web app
 
-To test the viewer on CT 101, open the dashboard over HTTPS (`tailscale serve`), or start
+To watch a clone on CT 101, open the web app over HTTPS (`tailscale serve`), or start
 Chrome with `--unsafely-treat-insecure-origin-as-secure=http://10.0.0.178:9000`. On plain
-HTTP the viewer shows a warning instead of video.
+HTTP the app shows a warning instead of the clone's screen.
 
 ## Drive a real turn
 
 The chat panel talks to an outside assistant, not to anything inside the clone. Send
-through the dashboard API. It exercises the whole path: the first message creates the
+through the web API. It exercises the whole path: the first message creates the
 clone's chat on the assistant, and the control-server follows that chat's event stream.
 
 ```sh

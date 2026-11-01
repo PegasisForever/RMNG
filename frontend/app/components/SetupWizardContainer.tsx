@@ -1,7 +1,7 @@
 // First-run setup wizard, impure half. Everything the card is not allowed to do lives here:
 // the per-step config PUT. The markup is SetupWizardView.
 //
-// The route renders this INSTEAD of the dashboard while `!setupComplete`. Each step persists
+// The route renders this INSTEAD of the app while `!setupComplete`. Each step persists
 // via `putConfig` on Next; a failed PUT blocks the advance and surfaces the standard red
 // banner. The Finish step's `putConfig({ setupComplete: true })` latches setup and also
 // ensures the `rmng` bridge network.
@@ -26,7 +26,7 @@ export function SetupWizardContainer({
   /** The config as the server sent it at mount. Seeds the form.
    *  Read it nowhere else, because the route fetches it once and never refetches. */
   initialConfig: AppConfigRedacted;
-  /** Called after setup latches; the parent refetches config and swaps to the dashboard. */
+  /** Called after setup latches; the parent refetches config and swaps to the app. */
   onDone: () => void;
 }) {
   const [step, setStep] = useState(0);

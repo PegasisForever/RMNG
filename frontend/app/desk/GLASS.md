@@ -1,13 +1,13 @@
-# /ng's glass
+# Glass
 
-The surfaces that float over the clone's screen in `/ng` are made of one material: glass. The
+The surfaces that float over the clone's screen are made of one material: glass. The
 clone's screen stays the subject; the glass lets its colors show through, blurred, so the
 operator keeps a sense of what is under a button or a dialog. What is on the glass is flat.
 
-Glass is light or dark as the OS says (`/ng` sets no theme of its own; Storybook: the Theme in
+Glass is light or dark as the OS says (the app sets no theme of its own; Storybook: the Theme in
 the toolbar). Light glass is white with dark text; dark glass is grey with light text.
 
-The classes are in `./glass.css`. The samples are the Storybook story `ng/Design/Glass`.
+The classes are in `./glass.css`. The samples are the Storybook story `Desk/Design/Glass`.
 
 ## The light
 
@@ -33,7 +33,8 @@ operator's own are green glass (`glass glass-green`: the send button's green, se
 white text); its field and buttons are the
 flat ones below, translucent, not solid. The side panels, the notes, the chat and an open
 ticket scroll with no bar showing (`NO_SCROLLBARS`, `./control/ui.tsx`).
-Settings in the control panel is the dashboard's own panes, drawn in slate. Under `.on-glass`
+The parts from `~/components` (Settings' panes, a clone's card, a ticket's card, the ticket
+panel) are drawn in slate. Under `.on-glass`
 (`./glass.css`) their slate shades become this flat content: in light, the light shades (fills,
 lines) are black at a low opacity and the text shades are greys dark enough to read, and a white
 fill is see-through white; in dark, the text shades are white at a high opacity and the fills and
@@ -104,7 +105,7 @@ Each color has its light value and its `dark:` value.
 
 ## Color
 
-- Neutral grey only: no blue in the greys (`/ng` is black and grey).
+- Neutral grey only: no blue in the greys (the app is black and grey).
 - One accent, green (Tailwind emerald): the primary monitor, Done, "here". Never on a glass
   surface itself: no green rim, no green glow.
 - A count is a small solid dot: green for "to do", red (`rose-500`) for "went wrong". It has its

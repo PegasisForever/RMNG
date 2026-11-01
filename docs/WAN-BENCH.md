@@ -9,7 +9,7 @@ It is row S1 of [WEB-VIEWER-WAN-SCOPE.md](WEB-VIEWER-WAN-SCOPE.md).
 |---|---|---|
 | [`scripts/wan-shape.sh`](../scripts/wan-shape.sh) | CT 101, as root | Starts a TCP proxy on port 9001 in front of port 9000, as `tailscale serve` is in production. Makes one port (9001 by default, or 9000) look like a slow link with `tc`. Other traffic is not shaped. |
 | [`scripts/wan-motion.sh`](../scripts/wan-motion.sh) | the clone, as the clone user | Makes the screen still, or scrolls text in a window, or scrolls text on the full screen, or pans a detailed picture on the full screen. |
-| `rmng-fps` ([PROTOCOL.md](PROTOCOL.md#browser-viewer-protocol-browser--control-server)) | the bench client | Joins as one viewer window and acknowledges frames as a window does. Prints each second, then for the run: frames, Mbit/s, keyframes, delay, reconnects. |
+| `rmng-fps` ([PROTOCOL.md](PROTOCOL.md#browser-viewer-protocol-browser--control-server)) | the bench client | Joins as one monitor window of the web app and acknowledges frames as a window does. Prints each second, then for the run: frames, Mbit/s, keyframes, delay, reconnects. |
 
 **The proxy path is the main path.** Off the LAN, operators open the viewer through
 `tailscale serve`: the browser's TCP connection ends in `tailscaled`, which opens a second

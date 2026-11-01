@@ -1,5 +1,5 @@
 // The browser viewer's binary messages (`wire::browser`: video, clipboard pieces, sound), the
-// H.264 reframing the decoder needs for a video message (Annex B to avcC), and the messages between the viewer page,
+// H.264 reframing the decoder needs for a video message (Annex B to avcC), and the messages between the page,
 // its worker and its sound worklet.
 //
 // The worker imports this file, so it uses relative imports only: Vite builds the worker
@@ -193,14 +193,13 @@ export function sameBytes(a: Uint8Array | null, b: Uint8Array | null): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
-/** Page → worker: first the canvas to draw on, the socket to read and whether to show the
- *  video through a track instead of the canvas where the worker can (`init`, once), then a
+/** Page → worker: first the canvas to draw on and the socket to read (`init`, once), then a
  *  message to send on the socket (`send`: input waits while the socket is down, the rest is
  *  dropped), a clipboard reply to send in pieces (`clipboard`, its bytes transferred), the
  *  canvas's new size in device pixels (`resize`), or sound on or off (`sound`; with `on`, the
  *  port to the sound worklet the first time). */
 export type WorkerIn =
-  | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number; track: boolean }
+  | { type: "init"; canvas: OffscreenCanvas; url: string; monitor: number }
   | { type: "send"; msg: FromBrowser }
   | { type: "clipboard"; data: ClipboardBytes }
   | { type: "resize"; width: number; height: number }
@@ -234,7 +233,4 @@ export type WorkerOut =
   | { type: "message"; msg: ToBrowser }
   /** A clipboard reply, put together from its pieces, its bytes transferred. */
   | { type: "clipboard"; data: ClipboardBytes }
-  | { type: "connected"; connected: boolean }
-  /** The video track to show in a <video> (`./track.ts`), transferred; null when the worker
-   *  stopped writing to it and draws on the canvas again. */
-  | { type: "track"; track: MediaStreamTrack | null };
+  | { type: "connected"; connected: boolean };

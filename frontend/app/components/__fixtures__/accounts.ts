@@ -32,7 +32,7 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 
 /** The instant every account fixture is anchored to, and the one a story hands
- *  `ClaudeAccountsPanel` as its `now`.
+ *  the usage view as its `now`.
  *
  *  The two have to be the same number. A reset instant only means something against the
  *  clock the bars are drawn with: pin the fixture and let the panel read the wall clock, and

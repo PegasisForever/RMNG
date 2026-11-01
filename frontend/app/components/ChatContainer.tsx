@@ -44,12 +44,9 @@ async function errorText(res: Response, fallback: string): Promise<string> {
 export default function ChatContainer({
   cloneId,
   archived = false,
-  glass = false,
 }: {
   cloneId: string;
   archived?: boolean;
-  /** In /ng's glass (`ChatView`'s `glass`). */
-  glass?: boolean;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -206,7 +203,6 @@ export default function ChatContainer({
       // locale instead.
       now={Date.now()}
       locale={browserLocale()}
-      glass={glass}
     />
   );
 }

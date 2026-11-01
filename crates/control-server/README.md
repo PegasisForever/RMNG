@@ -1,8 +1,8 @@
 # control-server
 
 The backend binary — one tokio service that is the **control plane**, the **media plane**,
-and the **fleet-automation plane**. It exposes the web port 9000 (API, dashboard and browser
-viewer) and the SSH bastion on 2222, plus the clone-home and shared-folder SMB shares on 445,
+and the **fleet-automation plane**. It exposes the web port 9000 (API and the web app, with its
+video WebSocket) and the SSH bastion on 2222, plus the clone-home and shared-folder SMB shares on 445,
 and ships as a Docker image; the frontend
 and the `clone-daemon`/`rmng-cli` binaries are plain on-disk payloads under
 `/usr/local/share/rmng/` (read at runtime, injected into clones at create time) — nothing is
@@ -50,15 +50,15 @@ payloads + the served frontend).
 
 ## Media plane and browser viewer (`mediaplane`, `webviewer` → [media](../media/README.md))
 
-Streams the **selected** clone's monitors, one H.264 encoder per monitor. Each browser viewer
-window opens one WebSocket (`/api/viewer?monitor=<id>`) and gets the video of its monitor
+Streams the **selected** clone's monitors, one H.264 encoder per monitor. Each of the web app's
+monitor windows opens one WebSocket (`/api/viewer?monitor=<id>`) and gets the video of its monitor
 plus the control messages (see
 [PROTOCOL.md](../../docs/PROTOCOL.md#browser-viewer-protocol-browser--control-server)). Each
 broadcast builds the WebSocket message once and queues it to every window. A window whose
 128-message queue is full is closed; the browser reconnects and gets a keyframe. On
 `state.selected` change it sends the new view spec and forces an IDR. Viewer input is relayed
 to the selected clone. control-server is also the **clipboard broker**: it tracks the current
-owner and fans each `ClipboardOffer` to every viewer window **and every other clone** (remote↔local + remote↔remote), routing requests to
+owner and fans each `ClipboardOffer` to every monitor window **and every other clone** (remote↔local + remote↔remote), routing requests to
 the owner and bytes back to the requester, re-binding as `selected` changes. Endpoints asking
 for the same `(serial, mime_type)` share one fetch: the first request goes to the owner, the
 rest join its reply, because a clone can only run one selection read at a time.

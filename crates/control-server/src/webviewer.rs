@@ -41,7 +41,7 @@ const PING_EVERY: Duration = Duration::from_secs(5);
 /// acknowledging what was sent ([`Outbox::stalled`]).
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Serve one browser viewer window showing `monitor`. `tab` is the page's id, the same on each
+/// Serve one monitor window of the web app, showing `monitor`. `tab` is the page's id, the same on each
 /// reconnect: a new socket of it replaces the old one ([`mediaplane::join_viewer`]).
 pub(crate) fn serve(app: App, monitor: u32, tab: Option<String>, ws: WebSocket) {
     let Some(plane) = app.media.plane.get().cloned() else {
@@ -90,8 +90,8 @@ pub(crate) fn serve(app: App, monitor: u32, tab: Option<String>, ws: WebSocket) 
         mediaplane::join_viewer(&app, &plane, id, outbox.clone(), monitor, tab);
         tracing::info!("browser viewer {id} connected (monitor {monitor})");
         // Input follows the selection: what this socket holds in the old clone is released at
-        // its next input message (a dashboard switch blurs the window, which releases all) and
-        // at close.
+        // its next input message (a switch made in another window blurs this one, which releases
+        // all) and at close.
         let mut held = Held::default();
         let mut upload = Upload::default();
         let mut pieces_in = 0u32;
@@ -291,7 +291,7 @@ pub(crate) struct UploadQuery {
     name: String,
 }
 
-/// `POST /api/viewer/upload?name=<file name>`: a file dropped on a viewer window. It is written
+/// `POST /api/viewer/upload?name=<file name>`: a file dropped on a clone's screen in the web app. It is written
 /// into the selected clone's home (`~/`), owned by the clone user. The body is the raw file,
 /// streamed to disk, so its size has no cap. A name that exists already gets ` (1)`, ` (2)`…
 /// before its extension; the reply says the name used.

@@ -1,4 +1,4 @@
-// The key chord that shows and hides the /ng control panel in mouse and keyboard mode
+// The key chord that shows and hides the control panel in mouse and keyboard mode
 // (`./inputMode.ts`): Option+Space on macOS, Super+Space elsewhere. The system may keep it for
 // itself (GNOME and Windows give Super+Space to the input source) and hand it to the page only
 // in the page's own fullscreen, where the keys are locked (`~/viewer/input.ts`; not the

@@ -5,7 +5,7 @@ is itself a container; it drives sibling clone containers through the Docker soc
 unix socket only — no SSH, no Proxmox). Deployment is: run the control-server container →
 open the browser → the first-run **setup wizard** pulls the clone template and finishes setup.
 Everything after that (images, clones, monitor layouts) is driven from the running server's
-dashboard/API/`rmng` CLI — clone binaries are injected at clone-create time by the running
+web app/API/`rmng` CLI — clone binaries are injected at clone-create time by the running
 server, with no manual redeploy step (see [Upgrades](#upgrades)).
 
 > **The clone template's base OS is `ubuntu:26.04`.** 24.04's older mesa negotiates a different
@@ -20,17 +20,16 @@ server, with no manual redeploy step (see [Upgrades](#upgrades)).
 - A **GPU render node** `/dev/dri/renderD128` on the host (AMD radeonsi/Mesa VA-API). The
   control-server VA-API-**encodes** every clone's frames and each clone **captures** its own
   desktop — both need the render node. Validated on the AMD Radeon Pro **W6800**.
-- Ports **9000** (web/API and the browser viewer), **445** (SMB, the clone-home share), and
+- Ports **9000** (the web app and the API), **445** (SMB, the clone-home share), and
   **2222** (SSH bastion, jump into clones) free.
-- **Chrome** on the machine you view clones from. The viewer (`/viewer` on port 9000) needs
+- **Chrome** on the machine you view clones from. The web app (`/` on port 9000) needs
   HTTPS, because WebCodecs and the async clipboard work only on HTTPS pages (or `localhost`).
-  Open the dashboard itself over HTTPS, because the viewer windows use the dashboard's
-  address. With Tailscale: on the machine that publishes port 9000, run
+  With Tailscale: on the machine that publishes port 9000, run
   `tailscale serve --bg 9000` (the tailnet must have HTTPS certificates enabled), then open
   `https://<machine>.<tailnet>.ts.net/`. If Tailscale runs on a different machine, run
   `tailscale serve --bg http://<ip>:9000` there. Use the `ts.net` name, not an IP: the
-  certificate is for the name, so `https://<ip>/` fails. Without HTTPS the dashboard works
-  and the viewer shows a warning instead of video.
+  certificate is for the name, so `https://<ip>/` fails. Without HTTPS the app shows a
+  warning in place of the clone's screen (the first-run setup wizard still works).
 
 ## 1. Get the image
 
@@ -76,9 +75,9 @@ What each piece is for:
 | `-v rmng-data:/data` | `config.json` + `data/` (WORKDIR is `/data`) — persists setup + state across restarts |
 | `-v rmng-sock:/srv/rmng-sock` | the shared clone **media socket** dir. Load-bearing: this exact **named** volume is mounted into every clone at `/srv/rmng-sock` so clone-daemons reach the media plane. Must be a named volume (not a bind) so clones can share it |
 | `-v /srv/rmng-homes:/srv/rmng-homes:shared` | the clone-home datasets (gen-2). Load-bearing: datasets are created from inside this container, and only a **shared** bind propagates their mounts into dockerd's namespace (plus server-side home reads/writes). Omit it and the first create fails with `bind source path does not exist` |
-| `-p 9000:9000` | the web API, the dashboard and the browser viewer (video over a WebSocket on the same port) |
+| `-p 9000:9000` | the web API and the web app (video over a WebSocket on the same port) |
 | `-p 445:445` | the two SMB shares: `clones` browses every running clone's `/home/rmng`, and `shared` is the one pool every clone sees at `~/shared` |
-| `-p 2222:2222` | the SSH bastion — jump host for `ssh`/`scp`/`rsync`/VSCode Remote-SSH into any clone's own `sshd` (see [SSH into clones](#ssh-into-clones)). Port forwarding goes through it too: the dashboard's "Port forward…" dialog gives an `ssh -J rmng@<host>:2222 -N -L <local>:localhost:<clone-port> rmng@<clone>` command |
+| `-p 2222:2222` | the SSH bastion — jump host for `ssh`/`scp`/`rsync`/VSCode Remote-SSH into any clone's own `sshd` (see [SSH into clones](#ssh-into-clones)). Port forwarding goes through it too: the web app's "Port forward" dialog gives an `ssh -J rmng@<host>:2222 -N -L <local>:localhost:<clone-port> rmng@<clone>` command |
 
 **There are zero `-e` configuration flags, by design.** `config.json` (edited via the
 wizard / Settings, `PUT /api/config`) is the single source of truth — subnet, hostname
@@ -93,7 +92,7 @@ broken `docker.sock` is surfaced as a failing row in the wizard's environment ch
 ## 3. First-run setup wizard
 
 Open `http://<host>:9000`. A fresh deploy ships `config.json` with `"setupComplete": false`,
-so the web UI opens the **first-run setup wizard** instead of the dashboard. There is no
+so the web app opens the **first-run setup wizard** in place of the clone's screen. There is no
 grandfather rule: an old `config.json` re-runs the wizard (new machine, no `rmng` network yet); a stale `proxmox` block is scrubbed on load and its `hostnamePrefix` is
 carried into `docker.hostnamePrefix`.
 
@@ -152,7 +151,7 @@ Consequences worth knowing before you deploy:
   features. The keys likewise still live in their original `data/` file for the same reason:
   pointing at a fresh path would mint new keys and invalidate every clone's identity at once.
 
-Accounts are added by **signing in to the provider from the dashboard** (Settings → the account
+Accounts are added by **signing in to the provider from the web app** (Settings → the account
 panels). The server owns the OAuth pair from that moment and hands each clone a short-lived
 access token with an empty refresh token, so no clone can rotate what the server holds. An
 account can join a pool as it is added. Named **pools** (the single `groups` list in
@@ -548,16 +547,16 @@ The whole workspace compiles on any Linux dev box with the media dev libs (the
 [Prerequisites](DEVELOPMENT.md#prerequisites): GStreamer + PipeWire + libva + libdrm +
 `clang`); a bare box without them builds only `wire`. What needs a **GPU** is *running* the
 pipeline — the control-server's VA-API **encode** and each clone's **capture** — so exercising
-real clones requires the W6800 host with Docker. The viewer is part of the frontend: it runs in
+real clones requires the W6800 host with Docker. The clone's screen is part of the web app: it runs in
 Chrome and decodes with WebCodecs, so any machine with Chrome can show it.
 
 ### Local (on your laptop)
 
 | You changed | Build & run locally | See the result |
 | --- | --- | --- |
-| **viewer** (`frontend/app/viewer/*`, `routes/viewer.tsx`) | `cd frontend && bun test && bun run build`, then serve the build from a control-server (`cargo run -p control-server` reads `frontend/build/client`) | open `/viewer?monitor=0` in Chrome over HTTPS (or `localhost`); `rmng-fps` shows the frame rate |
+| **the clone's screen** (`frontend/app/viewer/*`, `frontend/app/desk/*`) | `cd frontend && bun test && bun run build`, then serve the build from a control-server (`cargo run -p control-server` reads `frontend/build/client`) | open `/` (or `/?monitor=1` for monitor 1) in Chrome over HTTPS (or `localhost`); `rmng-fps` shows the frame rate |
 | frame rate, no browser | `cargo run -p control-client --bin rmng-fps -- <host>[:port] [monitor]` | frames, keyframes and megabits per second for one monitor of the *selected clone*, read from the `/api/viewer` WebSocket without decoding |
-| **frontend** | `cd frontend && bun run dev` | Vite dev server + HMR for the pages only. It has no proxy, so the API and the viewer do not work there; to test them, `bun run build` and `cargo run -p control-server` |
+| **frontend** | `cd frontend && bun run dev` | Vite dev server + HMR for the pages only. It has no proxy, so the API and the clone's screen do not work there; to test them, `bun run build` and `cargo run -p control-server` |
 | **`wire`** types / DTOs | `cargo test -p wire` | compiles + regenerates the frontend's ts-rs types |
 | pure logic in **any** crate | `cargo build -p <crate>` · `cargo test -p <crate>` | the whole workspace compiles locally, so the compiler + unit tests are a local loop |
 
@@ -577,8 +576,8 @@ Two options for exercising the full clone/capture/encode path against a local Do
   CWD-relative. The expected hashes are pinned once at server start (see the dev caveat in
   [Upgrades](#upgrades)) — restart the dev server after restaging `embedded-bin/`.
 
-Then, from the dashboard: create a clone (`POST /api/clone` — its preset image builds on
-demand), select the clone, and open the viewer from the dashboard. After a
+Then, from the web app's control panel: create a clone (`POST /api/clone` — its preset image
+builds on demand) and select the clone; its screen shows. After a
 `clone-daemon` / `rmng` CLI change, restage `embedded-bin/` and restart the dev server —
 the hot-swap engine picks up every existing clone on its next sweep/`Hello`, no manual step.
 
@@ -656,7 +655,7 @@ inherits it (there's no per-install control-server payload any more; see
 [Publishing the template](#publishing-the-template)). Details + verification:
 [template/gnome-patch/README.md](../template/gnome-patch/README.md).
 
-## Day-2 operations (from the dashboard / API / `rmng` CLI)
+## Day-2 operations (from the web app / API / `rmng` CLI)
 
 - **Clone**: `POST /api/clone` — a preset's image onto a fresh home (`/api/fork` copies a
   live clone's home instead). The
@@ -665,12 +664,12 @@ inherits it (there's no per-install control-server payload any more; see
   corrects the template's baked-in `RMNG_MONITORS` boot value before anyone opens the clone.
   Existing clones are not touched: each keeps the layout it was last viewed with until the
   operator switches to it.
-- **`/ng` is a shell** (`frontend/public/ng-shell.html`): a small page that holds the app
-  (`/ng/app`) in a frame and owns the fullscreen and the key lock. A server update reloads only
+- **`/` is a shell** (`frontend/public/shell.html`): a small page that holds the app
+  (`/app`) in a frame and owns the fullscreen and the key lock. A server update reloads only
   the frame, so a fullscreen window stays fullscreen. The shell has no build step and changes
-  rarely; a browser with no fullscreen (an iPhone) goes straight to `/ng/app`.
-- **Layouts** are each client's own (the Edit layout dialog, in the dashboard or on a long
-  press of the `/ng` page's Fit; Fit itself gives a monitor its window's size). The client used last has its layout in force (`POST /api/layout/claim`): the selected
+  rarely; a browser with no fullscreen (an iPhone) goes straight to `/app`.
+- **Layouts** are each client's own (the Edit layout dialog, on a long press of the
+  Fullscreen or the Fit button; Fit itself gives a monitor its window's size). The client used last has its layout in force (`POST /api/layout/claim`): the selected
   clone's daemon gets `ServerMsg::SetMonitors` and live-swaps to a fresh Mutter session with
   the new monitors (make-before-break, no GNOME restart, no app loss). Every other clone keeps
   its current monitors until the operator switches to it, so a layout change costs one session

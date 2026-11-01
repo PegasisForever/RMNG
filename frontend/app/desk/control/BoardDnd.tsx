@@ -1,5 +1,4 @@
-// Drag and drop on the /ng control panel, as the dashboard's board has it (`~/components/Board.tsx`,
-// whose arrangement it uses): a clone moves within its column or to another one, and a ticket
+// Drag and drop on the control panel (the arrangement is `~/lib/boardDrag.ts`'s): a clone moves within its column or to another one, and a ticket
 // moves within the tickets' column or, dropped on a clone column, asks for a clone. Narrow, the
 // Clones page's sections are the columns, and the Tickets page is the tickets' column.
 //
@@ -36,7 +35,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import { arrange, type Lane, laneOf, REARRANGE_MIN_TRAVEL, settle } from "~/components/Board";
+import { arrange, type Lane, laneOf, REARRANGE_MIN_TRAVEL, settle } from "~/lib/boardDrag";
 import { TICKET_COLUMN_ID, ticketIdFromDrag } from "~/lib/tickets";
 
 /** The card a view draws for a dragged clone or ticket. */
@@ -57,9 +56,9 @@ const DndCtx = createContext<Dnd | null>(null);
 /** The drag in progress, when the view is in a `BoardDnd`. */
 export const useBoardDnd = () => useContext(DndCtx);
 
-/** What the card is being dropped on: the dashboard's rule (`~/components/Board.tsx`), with a
- *  column's cards taken as those inside it both ways, so it holds for the narrow page's
- *  sections, which are stacked, as for the wide columns, which are side by side. */
+/** What the card is being dropped on: what is under the pointer; in a column but between its
+ *  cards, the nearest card. A column's cards are those inside it both ways, so it holds for the
+ *  narrow page's sections, which are stacked, as for the wide columns, which are side by side. */
 const collisionDetection: CollisionDetection = (args) => {
   const pointer = pointerWithin(args);
   const at = args.pointerCoordinates;
@@ -252,7 +251,7 @@ function Droppable({ id, as: Tag, className, children }: { id: string; as: "ul" 
 }
 
 /** A card that drags: the whole card is the handle (`children` takes its listeners, to spread
- *  where the dashboard's card wants them). Without a `BoardDnd`, a plain item. */
+ *  where the card wants them). Without a `BoardDnd`, a plain item. */
 export function DragItem({
   id,
   disabled = false,

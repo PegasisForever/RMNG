@@ -10,8 +10,8 @@ The control-server exposes web/API (with the browser viewer), SSH, and SMB surfa
 
 | Port | Default | Transport | Purpose |
 | --- | --- | --- | --- |
-| **web API** | `9000` | HTTP + SSE + WebSocket (+ embedded frontend) | the React management UI: clone selection, clone/Linear/Claude/chat orchestration, settings; the browser viewer (`/viewer`, WebSocket `/api/viewer`: the selected clone's monitors as H.264, with input + clipboard + cursor back); also the `rmng desktop`/`rmng exec` proxy endpoints |
-| SSH bastion | `2222` | SSH (sshd) | jump host into clones (`ssh -J`); also carries port forwarding (`ssh -L`), which the dashboard's "Port forward…" dialog writes out as a command |
+| **web API** | `9000` | HTTP + SSE + WebSocket (+ embedded frontend) | the React web app at `/`: the selected clone's screen (WebSocket `/api/viewer`: the selected clone's monitors as H.264, with input + clipboard + cursor back) and the control panel (clone selection, clone/Linear/Claude/chat orchestration, settings); also the `rmng desktop`/`rmng exec` proxy endpoints |
+| SSH bastion | `2222` | SSH (sshd) | jump host into clones (`ssh -J`); also carries port forwarding (`ssh -L`), which the web app's "Port forward" dialog writes out as a command |
 | **SMB** | `445` | SMB (smbd) | two shares, fixed cred `rmng`/`rmng`: `clones` browses every running clone's `/home/rmng`, and `shared` is the one pool mounted into every clone at `~/shared` |
 | daemon MCP | `9004` | HTTP JSON-RPC (in each clone) | the full desktop-automation surface; the agent calls it on localhost, the `rmng desktop` CLI proxies to it (operator/fleet desktop control) |
 | clone socket | `/srv/rmng-sock/clones.sock` | unix `SOCK_SEQPACKET` | clone-daemon ⇄ control-server: dmabuf frames (`SCM_RIGHTS`) out, input/clipboard in |
@@ -52,7 +52,7 @@ running server's payloads; there's no manual redeploy step.
 | [crates/clone-daemon](../crates/clone-daemon/README.md) | bin | the thin in-clone pipe: RecordVirtual capture, RemoteDesktop input injection, clipboard bridge, and desktop MCP (:9004) |
 | [crates/control-client](../crates/control-client/README.md) | lib | typed reqwest+SSE client for the web API (port 9000) (`/api/state`, `/events`, clone/delete/image/account wrappers); used by the `rmng` CLI and integration tests; also builds `rmng-fps`, the viewer frame-rate test tool |
 | [crates/cli](../crates/cli/README.md) | bin | the `rmng` fleet CLI: clones/images/accounts/operations over the web API (port 9000); injected into every clone as `/usr/local/bin/rmng` |
-| [frontend](../frontend/README.md) | web app | React Router 7 management UI and the browser viewer (`/viewer`), ts-rs types from `wire`, served by the control-server |
+| [frontend](../frontend/README.md) | web app | React Router 7 web app (the clone's screen and the control panel), ts-rs types from `wire`, served by the control-server |
 | [template/gnome-patch](../template/gnome-patch/README.md) | tooling | builds the patched gnome-shell `.deb` (hide screen-share indicator + enable `Eval` for window-mgmt); built + installed by `template/Dockerfile`'s `gnome-build` stage into the published clone template — not a control-server payload |
 
 The web UI's per-clone chat panel talks to an outside **assistant** (a pi-web server, set in

@@ -1,9 +1,8 @@
-// A headless clone's terminal in /ng, in monitor 0's window in place of the clone's screen: the
+// A headless clone's terminal, in monitor 0's window in place of the clone's screen: the
 // tab bar (`./TermBar.tsx`) and one xterm.js terminal per tmux session (`~/viewer/terminal.tsx`).
 //
-// - Mouse and keyboard mode: the terminal has the page's keys, mouse and selection, as in the
-//   viewer. The control panel's chord is the page's.
-// - Touch mode: the /ng keyboard types into it (`./remote.ts`, `./termKeys.ts`); the terminal never
+// - Mouse and keyboard mode: the terminal has the page's keys, mouse and selection. The control panel's chord is the page's.
+// - Touch mode: the on-screen keyboard types into it (`./remote.ts`, `./termKeys.ts`); the terminal never
 //   brings up the system keyboard. Its area is a trackpad, as the keys are: they move a pointer
 //   drawn here (`cursor`), and its clicks, drags and scrolls go to the terminal as a mouse's.
 //

@@ -1,4 +1,4 @@
-// The /ng Usage page: every account's usage, in the pools the dashboard's rail shows, and the
+// The Usage page: every account's usage, in its pools (`groupAccounts`), and the
 // jobs the server is running. A touch screen has no hover, so the reset time of a window is on
 // its bar, as "in 2h 15m"; in the rail (a mouse), it is a tooltip on the bar.
 //
@@ -6,7 +6,7 @@
 // sign-in go out as callbacks. The server's CPU, memory and disk are in the tool row above, or,
 // where it has no room for them, at the top of this page (`server`).
 //
-// Wide (`rail`), it is the dashboard's rail: one column of accounts at the left of the board,
+// Wide (`rail`), it is the rail: one column of accounts at the left of the board,
 // which scrolls with no bar showing.
 import { Folder, RefreshCw } from "lucide-react";
 import { useState } from "react";
@@ -20,7 +20,7 @@ import {
   pacePct,
   SEVEN_D_MS,
   spendLine,
-} from "~/components/ClaudeAccountsPanel";
+} from "~/lib/accountUsage";
 import { OperationProgress } from "~/components/OperationProgress";
 import { type AcctOrder, orderedWithinBuckets } from "~/lib/accountOrder";
 import { until } from "~/lib/format";
@@ -34,7 +34,7 @@ import { BOX, CARD_BOX, EmptyLine, HeaderButton, LINE, Page, PageHeader, R_PIECE
 export interface UsageViewProps {
   /** Both providers' accounts (`ControlState.claudeAccounts`). */
   accounts: ClaudeUsage[];
-  /** The operator's order of them, from desktop Settings. */
+  /** The operator's order of them, from Settings. */
   accountOrder: AcctOrder;
   /** The pools; with none the list is one flat group. */
   groups: CloneGroup[];
@@ -258,7 +258,7 @@ function SoundLine({ r }: { r: SoundReport }) {
   );
 }
 
-/** The server's CPU, memory and disk, as the dashboard's rail shows them. */
+/** The server's CPU, memory and disk, at the top of the rail. */
 export function ServerStats({ usage }: { usage: ServerUsage | null }) {
   const stats: [string, string | undefined][] = [
     ["CPU", usage?.cpu],

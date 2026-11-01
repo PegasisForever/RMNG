@@ -93,7 +93,7 @@ export function makeCloneUnmanaged(overrides: Partial<Clone> = {}): Clone {
 }
 
 /** A managed clone holding BOTH providers: a pinned Claude account and a pooled Codex one.
- *  Exercises the two-line sidebar layout (one binding line per provider, CPU on the first /
+ *  Exercises the card's two-line layout (one binding line per provider, CPU on the first /
  *  MEM on the second). */
 export function makeCloneDualProvider(overrides: Partial<Clone> = {}): Clone {
   return makeClone({
@@ -121,8 +121,8 @@ export const cloneNoToken: Clone = makeCloneNoToken();
 export const cloneUnmanaged: Clone = makeCloneUnmanaged();
 export const cloneDualProvider: Clone = makeCloneDualProvider();
 
-/** A sub clone: a managed clone spawned by `cloneWorking`, shown indented under it in the
- *  sidebar (collapsed by default). Cosmetic one-level nesting via `parent`. */
+/** A sub clone: a managed clone spawned by `cloneWorking`, shown indented under it in its
+ *  card (collapsed by default). Cosmetic one-level nesting via `parent`. */
 export function makeCloneSubClone(overrides: Partial<Clone> = {}): Clone {
   return makeClone({
     id: "pega-we-142-helper",
@@ -150,5 +150,3 @@ export const hosts: Clone[] = [
   cloneUnmanaged,
   cloneDualProvider,
 ];
-
-export const cloneIds: string[] = hosts.map((h) => h.id);

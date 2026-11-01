@@ -69,7 +69,7 @@ fn clone_status(archived: bool, monitor_state: Option<MonitorState>) -> String {
 pub async fn clone_ls(client: &Client, json: bool) -> Result<u8> {
     let (st, stats) = tokio::try_join!(client.state(), client.stats())?;
     // Resolved, not stored: a clone nobody filed is drawn in a column all the same, and
-    // reporting it as having none would disagree with the dashboard next to it.
+    // reporting it as having none would disagree with the web app next to it.
     let board =
         wire::board::resolve_columns(&wire::board::with_defaults(&st.board_columns), &st.hosts);
     let column_of = |id: &str| {
@@ -684,7 +684,7 @@ async fn settled_clone(client: &Client, id: &str) -> Option<Value> {
 
 // --- the board -------------------------------------------------------------------------
 
-/// `rmng board <verb>` — the dashboard's columns, and which clone is in which.
+/// `rmng board <verb>` — the board's columns, and which clone is in which.
 pub async fn board(client: &Client, cmd: &BoardCmd, json: bool) -> Result<u8> {
     match cmd {
         BoardCmd::Ls => board_ls(client, json).await,
@@ -696,7 +696,7 @@ pub async fn board(client: &Client, cmd: &BoardCmd, json: bool) -> Result<u8> {
     }
 }
 
-/// The columns as the dashboard draws them, left to right.
+/// The columns as the web app draws them, left to right.
 ///
 /// Resolved rather than stored, so a clone nobody has filed appears in the column the board
 /// would put it in rather than nowhere at all. That is the same view `clone ls` reports, and
@@ -734,7 +734,7 @@ async fn board_ls(client: &Client, json: bool) -> Result<u8> {
 
 /// `rmng board move <clone> <column>` — put a clone at the TOP of a column.
 ///
-/// Dropping a card into an archive column on the dashboard archives the clone, and dragging
+/// Dropping a card into an archive column in the web app archives the clone, and dragging
 /// one out again starts it, so this does the same: the column is the gesture, and a CLI that
 /// only rearranged ids would leave the board saying one thing and the fleet doing another.
 async fn board_move(
@@ -769,7 +769,7 @@ async fn board_move(
         .clone();
 
     // The clone's own flag says whether the server has caught up; the column says what it
-    // should be. Same order as the dashboard: change the lifecycle, then file the card.
+    // should be. Same order as the web app: change the lifecycle, then file the card.
     let was_archived = host.archived;
     if target.archive && !was_archived {
         if !json {
@@ -1039,8 +1039,8 @@ pub async fn clone_ssh(client: &Client, clone: &str, json: bool) -> Result<u8> {
         )
     } else {
         // No configured public host anymore (`ssh.publicHost` is retired): the server
-        // this CLI talks to is the bastion host, mirroring the dashboard's
-        // `sshPublicHost || window.location.hostname`.
+        // this CLI talks to is the bastion host, mirroring the web app's
+        // `window.location.hostname`.
         let public_host = host_from_base(client.base()).to_string();
         (
             build_ssh_command(&public_host, wire::PORT_BASTION, clone),

@@ -1,4 +1,4 @@
-// The /ng screen as it is drawn, from props alone (`./FullDesk.tsx` is its container: the
+// The screen as it is drawn, from props alone (`./FullDesk.tsx` is its container: the
 // connection, the input, the layout, the windows). In order, bottom to top:
 //
 // - The clone's screen, at `screen` (the container moves it to keep the cursor in sight). The
@@ -10,8 +10,8 @@
 // - The notes over the screen: what dictation hears at the bottom, and why
 //   there is no screen to use in the middle.
 // - The keyboard at the bottom (touch mode), with the bar that sets its height.
-// - The control panel (`controlPanel.content`: the tool row and the open page, or the dashboard's layout), on a
-//   glass panel at the right under the buttons, on a backdrop that blurs and darkens the screen.
+// - The control panel (`controlPanel.content`: the tool row and the open page, or, wide, the
+//   columns), on a glass panel at the right under the buttons, on a backdrop that blurs and darkens the screen.
 //   They come in and go out as a dialog does.
 // - The right group: the floating buttons in the top-right corner, and under them, wide, the
 //   side panels (the clone's notes and its assistant): with the control panel, and without it
@@ -47,8 +47,8 @@ type Box = { left: number; top: number; width: number; height: number };
 const SIDE_SHADOW = 48;
 
 /** Where the control panel goes on a display `width`×`height` with `safe` its safe area: under the
- *  buttons, FLOAT_GAP in from the safe area's sides. Wide enough for the dashboard's layout
- *  (`./control/WideLayout.tsx`), they take the safe area's whole width instead: their columns
+ *  buttons, FLOAT_GAP in from the safe area's sides. Wide enough for the columns
+ *  (`./control/WideLayout.tsx`), it takes the safe area's whole width instead: their columns
  *  scroll out to its edges, and keep the gap inside the row. */
 export function controlPanelBox(width: number, height: number, safe: Insets): Box {
   const room = width - safe.left - safe.right;

@@ -1,4 +1,4 @@
-//! `rmng clone create <kind>`: the four tabs of the dashboard's "New clone" dialog.
+//! `rmng clone create <kind>`: the four tabs of the web app's "New clone" dialog.
 //!
 //! `template` builds from a preset image (`POST /api/clone`); the other three fork a clone
 //! (`POST /api/fork`). The two ticket kinds first do in Linear what the dialog does in the

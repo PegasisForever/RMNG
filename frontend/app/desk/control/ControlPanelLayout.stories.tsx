@@ -8,8 +8,8 @@ import type { PanelTab } from "../ToolRow";
 import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_DIM, CONTROL_PANEL_GLASS } from "./ui";
 import { WIDE_MIN } from "./WideLayout";
 
-/** The /ng control panel, in each of its layouts, as its container lays it out: narrow, the tool row over a
- *  tab's page; wide (`WIDE_MIN`), the dashboard's layout. On glass over the clone's screen, or
+/** The control panel, in each of its layouts, as its container lays it out: narrow, the tool row
+ *  over a tab's page; wide (`WIDE_MIN`), the columns. On glass over the clone's screen, or
  *  on the solid ground of their own window. The look is the toolbar's Theme. */
 function ControlPanel({ width, height, surface, tab: first }: { width: number; height: number; surface: "glass" | "window"; tab: PanelTab }) {
   const [tab, setTab] = useState(first);
@@ -52,10 +52,10 @@ export const PhoneUsage: Story = { args: { tab: "usage" } };
 /** A phone on its side: the tabs, with the server's numbers in the tool row. */
 export const PhoneSideways: Story = { args: { width: 935, height: 340, tab: "tickets" } };
 
-/** A desktop's large screen: the dashboard's layout, on glass. */
+/** A desktop's large screen: the columns, on glass. */
 export const Wide: Story = { args: { width: 1424, height: 820 } };
 
-/** The control panel's own window, wide: the dashboard's layout on a solid ground. */
+/** The control panel's own window, wide: the columns on a solid ground. */
 export const WideWindow: Story = { args: { width: 1440, height: 900, surface: "window" } };
 
 /** Wide, with Settings open in the board's place. */

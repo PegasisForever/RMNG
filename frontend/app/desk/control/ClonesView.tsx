@@ -1,20 +1,19 @@
-// The /ng Clones page: the dashboard's board, as one list with a section per column. A tap on
-// a clone puts it on the screen above (the server streams the selected clone); an archived
-// clone has no screen, so a tap on one opens its notes instead. The control panel stays open; a double
-// click (a double tap) also closes them, so the clone's screen shows.
+// The Clones page: the board, as one list with a section per column. A tap on a clone puts it
+// on the screen above (the server streams the selected clone); an archived clone has no screen,
+// so a tap on one opens its notes instead. The control panel stays open; a double click (a
+// double tap) also closes it, so the clone's screen shows.
 //
-// The card menu, the drags and the column buttons of the desktop are here as: the ⋯ on a row
-// opens a sheet with all the card's actions, "Move to" a column (into an archive column
-// archives, out of one restores, as the drop does), and Move up / Move down in its column; the
-// "+" on a section makes a clone in that column. Columns are renamed, added and ordered in
-// Settings, Board, as on the desktop.
+// The ⋯ on a row opens a sheet with all the card's actions, "Move to" a column (into an archive
+// column archives, out of one restores, as the drop does), and Move up / Move down in its
+// column; the "+" on a section makes a clone in that column. Columns are renamed, added and
+// ordered in Settings, Board.
 //
-// Wide (`columnsLayout`), the sections are the board's columns side by side, with the
-// dashboard's own card per clone (`SidebarClone`), on the control panel's glass.
+// Wide (`columnsLayout`), the sections are the board's columns side by side, with a card per
+// clone (`CloneCard`), on the control panel's glass.
 //
-// As on the dashboard: a clone drags within its column or into another one (`./BoardDnd.tsx`:
-// a mouse at once, a finger after a long press), a double-click on a column's title renames it,
-// and a mouse's click on ⋯ opens the dashboard's menu; a finger's opens the sheet.
+// A clone drags within its column or into another one (`./BoardDnd.tsx`: a mouse at once, a
+// finger after a long press), a double-click on a column's title renames it, and a mouse's
+// click on ⋯ opens a menu (`DesktopMenu`); a finger's opens the sheet.
 //
 // Pure: everything comes in as props, every action goes out as a callback.
 import {
@@ -41,12 +40,12 @@ import {
 import { type MouseEvent, useState } from "react";
 
 import type { Box } from "~/components/OverflowMenu";
-import { SidebarClone } from "~/components/SidebarClone";
+import { CloneCard } from "~/components/CloneCard";
 
 import chatgptLogo from "~/assets/chatgpt.svg";
 import claudeLogo from "~/assets/claude.svg";
-import { CloneStatusDot, statusLabel } from "~/components/mobile/CloneStatus";
-import { formatCloneUsage, RenameField } from "~/components/SidebarClone";
+import { CloneStatusDot, statusLabel } from "~/components/CloneStatus";
+import { formatCloneUsage, RenameField } from "~/components/CloneCard";
 import { cloneTitle } from "~/lib/cloneTitle";
 import { type BoardColumn, resolveColumns, subCloneTree, withDefaults } from "~/lib/board";
 import { formatTokenCount } from "~/lib/format";
@@ -65,7 +64,6 @@ import {
   boxOf,
   CARD,
   CARD_BOX,
-  CARD_FILL_ON_GLASS,
   CARD_LIST,
   DesktopMenu,
   DIVIDE,
@@ -137,7 +135,7 @@ export function ClonesView(p: ClonesViewProps) {
   const frame = useColumnFrame();
   const dnd = useBoardDnd();
   const [sheet, setSheet] = useState<Clone | null>(null);
-  /** The dashboard's menu, opened by a mouse, and where. */
+  /** The menu a mouse opens, and where. */
   const [menu, setMenu] = useState<{ clone: Clone; at: Box } | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
   /** The clone whose title is a field for a new name (Rename… in its menu). */
@@ -197,7 +195,7 @@ export function ClonesView(p: ClonesViewProps) {
     );
   };
 
-  /** The dashboard's card for a clone (wide), with its sub clones in the same frame. */
+  /** A clone's card (wide), with its sub clones in the same frame. */
   const card = (clone: Clone, drag?: Record<string, unknown>) => {
     const kids = childrenByParent.get(clone.id) ?? [];
     const props = (c: Clone, child: boolean) => ({
@@ -225,24 +223,21 @@ export function ClonesView(p: ClonesViewProps) {
       onRenamingChange: (on: boolean) => setRenamingClone(on ? c.id : null),
       sshPublicHost: "",
       isChild: child,
-      fill: CARD_FILL_ON_GLASS,
-      renameField: `mt-1.5 w-full px-1.5 py-0.5 text-sm font-medium ${FIELD}`,
-      touchScroll: true,
       onMenuTouch: () => setSheet(c),
     });
     return (
       <div {...NO_WORD_SELECT} className={`overflow-hidden ${CARD_BOX} ${p.notesId === clone.id ? BOX : ""}`}>
-        <SidebarClone
+        <CloneCard
           {...props(clone, false)}
           childCount={kids.length}
           expanded={expanded.has(clone.id)}
           onToggleExpand={() => toggle(clone.id)}
-          dragListeners={drag as Parameters<typeof SidebarClone>[0]["dragListeners"]}
+          dragListeners={drag as Parameters<typeof CloneCard>[0]["dragListeners"]}
         />
         {expanded.has(clone.id)
           ? kids.map((k) => (
               <div key={k.id} className="border-t border-black/10 dark:border-white/10">
-                <SidebarClone {...props(k, true)} />
+                <CloneCard {...props(k, true)} />
               </div>
             ))
           : null}

@@ -1,13 +1,10 @@
-import { DndContext } from "@dnd-kit/core";
-import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
-import { SidebarClone } from "./SidebarClone";
+import { CloneCard } from "./CloneCard";
 import {
   cloneDualProvider,
   cloneIdle,
-  cloneIds,
   cloneNoToken,
   cloneOffline,
   cloneUnmanaged,
@@ -19,21 +16,14 @@ import { deleteOperation } from "./__fixtures__/operations";
 import { cloneTokens, stats } from "./__fixtures__/stats";
 
 const meta = {
-  title: "Sidebar/Components/SidebarClone",
-  component: SidebarClone,
+  title: "Clone/Components/CloneCard",
+  component: CloneCard,
   parameters: { layout: "padded" },
-  // SidebarClone calls dnd-kit's useSortable, which reads from a DndContext +
-  // SortableContext. Provide them (with every fixture id registered) so the grip
-  // works and the row renders exactly as it does in the live list.
   decorators: [
     (Story) => (
-      <DndContext>
-        <SortableContext items={cloneIds} strategy={verticalListSortingStrategy}>
-          <div className="w-96 rounded-lg bg-slate-50 p-3 dark:bg-slate-900">
-            <Story />
-          </div>
-        </SortableContext>
-      </DndContext>
+      <div className="w-96 rounded-lg bg-slate-50 p-3 dark:bg-slate-900">
+        <Story />
+      </div>
     ),
   ],
   args: {
@@ -60,8 +50,12 @@ const meta = {
     muted: false,
     mutedByParent: false,
     onToggleMute: fn(),
+    // The rename field is the caller's to open, so the story logs the request and leaves the
+    // title as it is.
+    renaming: false,
+    onRenamingChange: fn(),
   },
-} satisfies Meta<typeof SidebarClone>;
+} satisfies Meta<typeof CloneCard>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;

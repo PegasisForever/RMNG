@@ -1,4 +1,4 @@
-// What the /ng screen stories (`../ScreenView.stories.tsx`) draw from: a picture of a clone's
+// What the screen stories (`../ScreenView.stories.tsx`) draw from: a picture of a clone's
 // desktop in place of the video, its cursor, the control panel with its tabs' own stories' data, and the
 // displays the screen is shown on.
 import type { Decorator } from "@storybook/react-vite";
@@ -39,7 +39,7 @@ export const DESKTOP = { width: 1440, height: 900, safe: NO_INSETS };
 /** The width of a display's safe area. */
 export const safeWidth = (d: { width: number; safe: Insets }) => d.width - d.safe.left - d.safe.right;
 
-/** The display's frame, its size from the story's `width` and `height`, in /ng's greys, light or
+/** The display's frame, its size from the story's `width` and `height`, in the app's greys, light or
  *  dark by the Theme in the toolbar (the app: by the OS). It holds what is fixed (a dialog) as
  *  the display would (a transform makes it their box). */
 export const inDisplay: Decorator = (Story, ctx) => (
@@ -114,7 +114,7 @@ export function FakeTerminal({ touch = true, cursor = null }: { touch?: boolean;
         {"   Compiling wire v0.1.0\n    Finished test [unoptimized] in 4.2s\n     Running 58 tests\n"}
         {"test result: "}<span className={g}>ok</span>{". 58 passed; 0 failed\n"}
         <span className={g}>rmng@pega-we-151</span>:<span className={b}>~/RMNG</span>$ git status --short{"\n"}
-        {" M frontend/app/ng/TerminalScreen.tsx\n"}
+        {" M frontend/app/desk/TerminalScreen.tsx\n"}
         <span className={g}>rmng@pega-we-151</span>:<span className={b}>~/RMNG</span>$ <span className="bg-white text-transparent">_</span>
       </pre>
     </TerminalScreenView>
@@ -208,7 +208,7 @@ export function sideFor(): ReactNode {
 }
 
 /** The control panel as the container lays it out `width` CSS px wide: the tool row over a tab's page,
- *  or (wide) the dashboard's layout. */
+ *  or (wide) the columns. */
 export function controlPanelFor({
   width,
   glass = true,

@@ -1,5 +1,5 @@
 // Step 2 of the first-run wizard: the fleet's server-side defaults. Clone naming and the
-// per-clone resource limits. (Monitors are each browser's own: the dashboard's Edit layout.)
+// per-clone resource limits. (Monitors are each browser's own: the app's Edit layout.)
 //
 // It takes the wizard's whole model plus one updater, the same pair `SetupWizardView` holds
 // and `SetupReviewStep` reads, rather than a value/setter couple per field.

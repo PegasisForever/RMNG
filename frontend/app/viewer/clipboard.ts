@@ -1,10 +1,10 @@
-// The browser viewer's clipboard: each viewer window is one endpoint of the server's clipboard
+// The page's clipboard: each monitor window is one endpoint of the server's clipboard
 // broker (docs/PROTOCOL.md "Clipboard (rich + lazy)").
 //
 // Chrome lets a page use the clipboard only while the page has focus, and it has no "clipboard
 // changed" event. So:
 // - Local → clone: when the window gets focus, read the local clipboard. If it changed since a
-//   viewer window last saw it, offer it to the server, keep the bytes, and answer the server's
+//   monitor window last saw it, offer it to the server, keep the bytes, and answer the server's
 //   requests from them.
 // - Clone → local: an offer becomes the shared "pending" offer. The focused window asks at once
 //   for the best type of each kind (image, HTML, text), and writes
@@ -21,7 +21,7 @@
 //   content comes later: the clone's text, once the offer of its copy and the text arrive.
 //   Everything else (HTML, an image, an agent's copy) waits for the next key press or click.
 //
-// All viewer windows share two values in localStorage: a hash of the last local content seen
+// All monitor windows share two values in localStorage: a hash of the last local content seen
 // (so focusing another window does not offer the same content again), and the pending offer.
 // A window's own offer is stored there marked `own`, so its siblings, which get it from the
 // server too, do not fetch it back.
@@ -42,11 +42,11 @@ const COPY_WAIT_MS = 2000;
  *  the server's hop to the clone. A larger copy is answered with no bytes (the paste fails). */
 const MAX_BYTES = 23 * 1024 * 1024;
 
-const SEEN_KEY = "rmng-viewer-clipboard-seen";
-const PENDING_KEY = "rmng-viewer-clipboard-pending";
+const SEEN_KEY = "rmng.clipboard.seen";
+const PENDING_KEY = "rmng.clipboard.pending";
 
 /** The shared pending offer: one from another endpoint that no window has written yet, or
- *  (`own`) the one a viewer window made. */
+ *  (`own`) the one a monitor window made. */
 type Pending = ClipboardOffer & { own?: boolean };
 
 /** The clone's names for plain text. */

@@ -1,29 +1,15 @@
-// The numbers on a clone row, from the two sources that feed them: the volatile `stats` /
-// `lxcStats` SSE buses, and the persisted per-clone token totals in `ControlState`.
+// The numbers on a clone card, from the two sources that feed them: the volatile `stats` SSE
+// bus, and the persisted per-clone token totals in `ControlState`.
 
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
-import type { LxcStats } from "~/lib/wire/LxcStats";
 
 import { cloneDualProvider, cloneIdle, cloneNoToken, cloneWorking } from "./clones";
 
 const GiB = 1024 ** 3;
 
-/** Live usage for the whole LXC that hosts RMNG, as the control rail draws it. */
-export function makeLxcStats(overrides: Partial<LxcStats> = {}): LxcStats {
-  return {
-    cpuPct: 23,
-    memUsed: BigInt(Math.round(18.7 * GiB)),
-    memLimit: BigInt(264 * GiB),
-    diskUsed: BigInt(Math.round(312.1 * GiB)),
-    ...overrides,
-  };
-}
-
-export const lxcStats: LxcStats = makeLxcStats();
-
 /** One clone's live container usage. The limit is the per-clone allowance, which is what the
- *  sidebar normalizes CPU against. */
+ *  card normalizes CPU against. */
 export function makeContainerStats(overrides: Partial<ContainerStats> = {}): ContainerStats {
   return {
     cpuPct: 12,

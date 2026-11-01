@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useId, useState } from "react";
 
-import { CardFrame } from "~/components/BoardCard";
+import { CardFrame } from "~/components/CardFrame";
 import type { Operation } from "~/lib/types";
 
 const STATUS_COLOR: Record<Operation["status"], string> = {
@@ -45,8 +45,8 @@ export function OperationProgress({
   box,
 }: {
   op: Operation;
-  /** The card's frame and fill in place of the board's card (`CardFrame`): the /ng control
-   *  panel's card, as its accounts and clones wear it. */
+  /** The card's frame and fill in place of `CardFrame` (a dialog's): the control panel's card,
+   *  as its accounts and clones wear it. */
   box?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -114,7 +114,7 @@ export function OperationProgress({
         aria-valuemax={100}
         aria-valuenow={pct}
         aria-valuetext={`${STATUS_LABEL[op.status]}: ${op.message} (${Math.round(pct)}%)`}
-        // On the /ng card, the track of its usage bars
+        // On the control panel's card, the track of its usage bars
         className={`h-1 w-full overflow-hidden rounded-sm ${box ? "bg-black/10 dark:bg-white/15" : "bg-slate-100 dark:bg-slate-800"}`}
       >
         <div

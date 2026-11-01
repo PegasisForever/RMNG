@@ -176,7 +176,7 @@ export function renumber<T>(values: T[], map: (number | null)[]): T[] {
   return out;
 }
 
-/** The size monitor `m` gets when its pixel scale goes from `from` to `to`: its viewer window
+/** The size monitor `m` gets when its pixel scale goes from `from` to `to`: its window
  *  keeps its size in screen pixels, so the clone pixels in it change. */
 export function rescale(m: { width: number; height: number }, from: number, to: number) {
   return { width: (m.width * from) / to, height: (m.height * from) / to };

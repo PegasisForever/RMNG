@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 
 import { FakeDesktop } from "./__fixtures__/screen";
 
-/** `/ng`'s glass (`./GLASS.md`, `./glass.css`): every piece, in the light or the dark look, over
+/** The glass (`./GLASS.md`, `./glass.css`): every piece, in the light or the dark look, over
  *  a clone's desktop or over black. */
 function Glass({ look, ground }: { look: "light" | "dark"; ground: "desktop" | "black" }) {
   return (

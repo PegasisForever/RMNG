@@ -1,9 +1,9 @@
 // The terminal of a clone with no desktop: monitor 0's window shows it in place of the video.
-// One xterm.js terminal per tmux session, as tabs, with a "+" that makes a new session. The server (`control-server/src/termplane.rs`)
-// sends each session's tmux output (`term_data`) and resizes every session to the one grid this
-// view reports (`term_resize`). xterm.js does the keys, the mouse modes, selection and
-// scrollback; Ctrl+Shift+C copies and Ctrl+Shift+V pastes. `useTermTabs` is the terminals
-// without the tab bar, for /ng (`~/desk/TerminalScreen.tsx`), which draws its own.
+// One xterm.js terminal per tmux session, as tabs; the page draws the tab bar
+// (`~/desk/TerminalScreen.tsx`). The server (`control-server/src/termplane.rs`) sends each
+// session's tmux output (`term_data`) and resizes every session to the one grid this view
+// reports (`term_resize`). xterm.js does the keys, the mouse modes, selection and scrollback;
+// Ctrl+Shift+C copies and Ctrl+Shift+V pastes.
 import "@xterm/xterm/css/xterm.css";
 
 import { FitAddon } from "@xterm/addon-fit";
@@ -53,7 +53,7 @@ interface Tab {
   el: HTMLDivElement;
 }
 
-/** The shown tab's terminal, for a page that types into it with keys of its own (the /ng
+/** The shown tab's terminal, for a page that types into it with keys of its own (the on-screen
  *  keyboard) and scrolls it with fingers. */
 export interface TermApi {
   /** Type `data` (the bytes the keys make) into the shown session. */
@@ -94,17 +94,17 @@ export interface TermTabsOptions {
   /** The page puts each `term_data` it gets into this. */
   sink: { current: ((d: TermData) => void) | null };
   /** A key the page keeps for itself: true, and xterm.js does nothing with it. */
-  ownKey?: (e: KeyboardEvent) => boolean;
+  ownKey: (e: KeyboardEvent) => boolean;
   /** The shown tab takes the page's keys (xterm.js's textarea has the focus). False on a touch
-   *  screen, where the focus would bring up the system keyboard. Default true. */
-  focus?: boolean;
+   *  screen, where the focus would bring up the system keyboard. */
+  focus: boolean;
   /** Set to the shown tab's terminal while there is one. */
-  api?: { current: TermApi | null };
+  api: { current: TermApi | null };
 }
 
 /** One xterm.js terminal per session, in the box (`box`) the page puts where it wants them,
  *  and which one is shown. */
-export function useTermTabs({ sessions, send, sink, ownKey, focus = true, api }: TermTabsOptions) {
+export function useTermTabs({ sessions, send, sink, ownKey, focus, api }: TermTabsOptions) {
   const box = useRef<HTMLDivElement>(null);
   const tabs = useRef(new Map<string, Tab>());
   const [active, setActive] = useState<string | null>(null);
@@ -173,7 +173,7 @@ export function useTermTabs({ sessions, send, sink, ownKey, focus = true, api }:
       // Old-style mouse reports are bytes, not text.
       term.onBinary((data) => send({ t: "term_input", session: name, data: btoa(data) }));
       term.attachCustomKeyEventHandler((e) => {
-        if (ownKeyRef.current?.(e)) return false;
+        if (ownKeyRef.current(e)) return false;
         if (!(e.ctrlKey && e.shiftKey && (e.code === "KeyC" || e.code === "KeyV"))) return true;
         if (e.type === "keydown" && e.code === "KeyC") {
           e.preventDefault(); // Chrome's element inspector
@@ -200,7 +200,7 @@ export function useTermTabs({ sessions, send, sink, ownKey, focus = true, api }:
     fit();
     const shown = active ? tabs.current.get(active) : undefined;
     if (shown && focus) shown.term.focus();
-    if (api) api.current = shown ? termApi(shown.term) : null;
+    api.current = shown ? termApi(shown.term) : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
 
@@ -229,53 +229,10 @@ export function useTermTabs({ sessions, send, sink, ownKey, focus = true, api }:
       ro.disconnect();
       for (const t of all.values()) t.term.dispose();
       all.clear();
-      if (api) api.current = null;
+      api.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return { box, active, setActive };
-}
-
-export function TermView({
-  sessions,
-  send,
-  sink,
-}: {
-  sessions: string[];
-  send(msg: FromBrowser): void;
-  /** The page puts each `term_data` it gets into this. */
-  sink: { current: ((d: TermData) => void) | null };
-}) {
-  const { box, active, setActive } = useTermTabs({ sessions, send, sink });
-  return (
-    <div className="flex h-full w-full flex-col bg-[#1c1c1f]">
-      <div className="flex shrink-0 gap-0.5 bg-black px-1 pt-1 text-xs text-slate-300">
-        {sessions.map((s) => (
-          <button
-            key={s}
-            type="button"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => setActive(s)}
-            className={`rounded-t px-2 py-0.5 ${s === active ? "bg-[#1c1c1f] text-white" : "hover:bg-white/10"}`}
-          >
-            {s}
-          </button>
-        ))}
-        <button
-          type="button"
-          title="New tmux session"
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => send({ t: "term_new_session" })}
-          className="rounded-t px-2 py-0.5 hover:bg-white/10"
-        >
-          +
-        </button>
-      </div>
-      {/* A half-cell inset. */}
-      <div className="relative min-h-0 flex-1 pl-1.5 pt-1">
-        <div ref={box} className="relative h-full w-full" />
-      </div>
-    </div>
-  );
 }

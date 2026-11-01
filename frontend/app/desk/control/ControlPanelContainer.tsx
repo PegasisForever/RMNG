@@ -1,14 +1,14 @@
-// The /ng control panel's container: it holds what its five tabs draw (the live server state, the
-// Linear tickets), does what they ask (every write the dashboard can make), and opens the
-// dialogs. It is the phone app's counterpart of `DashboardContainer`, with the same writes in
-// the same shape: show the change now, send it, put the old value back if it is refused.
+// The control panel's container: it holds what its tabs draw (the live server state, the
+// Linear tickets), does what they ask (every write to the server and to Linear), and opens the
+// dialogs. Each write has the same shape: show the change now, send it, put the old value back
+// if it is refused.
 //
 // Narrow, the control panel is tabs under the tool row (`../ToolRow.tsx`). Each page, once opened,
 // stays mounted while another one shows, so a half-typed setting, a scrolled list or an open
 // ticket is still there when the operator comes back. A dialog opens in the page that opened
 // it, in that page's space (`ModalPlacementProvider`), so the clone's screen stays in view.
 //
-// Wide (`WIDE_MIN`), they are the dashboard's layout (`./WideLayout.tsx`): the usage rail, the
+// Wide (`WIDE_MIN`), they are columns (`./WideLayout.tsx`): the usage rail, the
 // board's columns, the side panel; a dialog opens over them, in the middle.
 import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
@@ -19,7 +19,7 @@ import { ImportAccountModalContainer } from "~/components/ImportAccountModalCont
 import { ModalPlacementProvider } from "~/components/ModalShell";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { RebaseModalContainer } from "~/components/RebaseModalContainer";
-import { useSettingsPanel } from "~/components/SettingsPanelContainer";
+import { useSettingsPanel } from "~/components/useSettingsPanel";
 import { TicketModalContainer } from "~/components/TicketModalContainer";
 import { TicketPanel } from "~/components/TicketPanel";
 import { useAccountOrder } from "~/lib/accountOrder";
@@ -133,7 +133,7 @@ export function ControlPanelContainer({
   onLayout,
   notify = false,
 }: {
-  /** The control panel's width, CSS px: narrow (tabs) or wide (the dashboard's layout). */
+  /** The control panel's width, CSS px: narrow (tabs) or wide (columns). */
   width: number;
   /** Over the clone's screen: wide, each column is glass of its own (narrow, the screen's view
    *  puts the whole control panel on one glass panel). Not in the control panel's own window. */
@@ -175,7 +175,7 @@ export function ControlPanelContainer({
       .catch((e: Error) => setError(e.message));
   }, []);
 
-  // Wide: the side panels' width, the dashboard's (one stored width for both), read after mount
+  // Wide: the side panels' width (one stored width for both), read after mount
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT);
   useEffect(() => {
     const stored = storedSideWidth();
@@ -231,14 +231,14 @@ export function ControlPanelContainer({
   );
   const workspaces = useWorkspaces(presets);
   const visibleTickets = orderTickets(openTickets(linearTickets, state.hosts), ticketOrder);
-  // Each ticket keeps the place it was first drawn in (as on the desktop)
+  // Each ticket keeps the place it was first drawn in
   useEffect(() => {
     const adopted = adoptTickets(visibleTickets, ticketOrder);
     if (adopted) applyTicketOrder(adopted);
   });
   const liveCloneTickets = cloneTickets(state.hosts, linearTickets);
 
-  // What is open, held in the page's address as on the dashboard (`?clone=`, `?ticket=`;
+  // What is open, held in the page's address (`?clone=`, `?ticket=`;
   // `~/lib/selection`): the browser's Back returns to the one before it, and a link opens it
   const [params, setParams] = useSearchParams();
   const selection = readSelection(params);
@@ -296,7 +296,7 @@ export function ControlPanelContainer({
   const notesTicketMeta = useTeamMeta(presets, notesTicket);
 
   /** Put a clone on the screen; the control panel stays open (the operator closes it). An archived one
-   *  has no screen, so its notes open instead. Wide, as on the dashboard, an open ticket closes:
+   *  has no screen, so its notes open instead. Wide, an open ticket closes:
    *  the side panels are the clone's again. */
   const selectClone = (clone: Clone) => {
     select({ clone: clone.id, ticket: width >= WIDE_MIN ? null : selection.ticket });
@@ -336,8 +336,7 @@ export function ControlPanelContainer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.selected]);
 
-  // A clone that stops working raises a notification, as on the dashboard; a press on it shows
-  // that clone
+  // A clone that stops working raises a notification; a press on it shows that clone
   useCloneNotifications(
     state.hosts,
     mutedClones,
@@ -476,7 +475,6 @@ export function ControlPanelContainer({
       case "clone":
         return (
           <CloneModalContainer
-            glass
             clones={state.hosts}
             operations={state.operations}
             accounts={accounts}
@@ -499,7 +497,6 @@ export function ControlPanelContainer({
       case "ticket":
         return (
           <TicketModalContainer
-            glass
             presets={presets}
             onClose={closeDialog}
             onCreated={(created) => {
@@ -513,7 +510,6 @@ export function ControlPanelContainer({
         return (
           <ImportAccountModalContainer
             accounts={accounts}
-            glass
             groupNames={state.groups.map((g) => g.name)}
             initialProvider={d.provider}
             initialGroup={d.group}
@@ -601,7 +597,7 @@ export function ControlPanelContainer({
       chat={
         notesClone ? (
           <Suspense fallback={<Loading label="Loading chat…" />}>
-            <ChatContainer key={notesClone.id} cloneId={notesClone.id} archived={notesClone.archived === true} glass />
+            <ChatContainer key={notesClone.id} cloneId={notesClone.id} archived={notesClone.archived === true} />
           </Suspense>
         ) : null
       }
@@ -609,7 +605,7 @@ export function ControlPanelContainer({
     />
   );
 
-  /** A page, as the tabs show it, or (`wide`) as its part of the dashboard's layout. */
+  /** A page, as the tabs show it, or (`wide`) as its column. */
   const page = (t: PanelTab, wide = false): ReactNode => {
     switch (t) {
       case "usage":
@@ -693,7 +689,7 @@ export function ControlPanelContainer({
       case "assistant":
         return notesView("chat");
       case "settings":
-        // The test page in the browser's own window: /ng's frame has no safe area of its own
+        // The test page in the browser's own window: the app's frame has no safe area of its own
         return <SettingsView {...settings} onScreenArea={() => hostWindow().location.assign("/screen-area")} />;
     }
   };
@@ -732,7 +728,7 @@ export function ControlPanelContainer({
                   {page("clones", true)}
                 </BoardDnd>
               }
-              // An open ticket takes the side panel, as on the dashboard; the clone's notes come
+              // An open ticket takes the side panel; the clone's notes come
               // back when it closes, and when the control panel closes (the side panels without the control panel
               // are the clone's)
               side={{

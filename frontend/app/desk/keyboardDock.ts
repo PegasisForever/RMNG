@@ -1,4 +1,4 @@
-// The /ng keyboard's settings (`./FullDesk.tsx`), this phone's own, kept in its browser storage,
+// The on-screen keyboard's settings (`./FullDesk.tsx`), this phone's own, kept in its browser storage,
 // not on the server: whether it is docked (always shown under the clone's screen, which is then
 // a touch screen; a long press on the keyboard button changes it), and its height (the bar on
 // top of it, `./KeyboardHandle.tsx`).

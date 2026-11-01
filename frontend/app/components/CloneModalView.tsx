@@ -7,23 +7,25 @@
 // image onto a fresh empty home dataset (headed unless asked, preset defaults underneath
 // the account overrides).
 //
-// In /ng (`glass`) it is a glass dialog laid out as /ng's Settings (`~/desk/control/SettingsView.tsx`):
-// the modes a rail of buttons on the left with Create at its foot (where Settings has Save),
-// the form scrolling beside it. Its fields are the same as here, drawn flat on the glass
-// (`.on-glass`, `~/desk/glass.css`). Its corners: the dialog's 26 px, and 10 px for what sits
-// 16 px in from them (`~/desk/GLASS.md`, Shape).
+// It is a glass dialog laid out as Settings (`~/desk/control/SettingsView.tsx`): the modes a
+// rail of buttons on the left with Create at its foot (where Settings has Save), the form
+// scrolling beside it. Its fields are drawn flat on the glass (`.on-glass`, `~/desk/glass.css`).
+// Its corners: the dialog's 26 px, and 10 px for what sits 16 px in from them
+// (`~/desk/GLASS.md`, Shape).
 //
 // The form is one editable model (`CloneDraft`) plus a single `onDraftChange`, rather than
 // thirty value/onChange pairs. What is NOT in the draft is everything the server decides:
 // the presets, the team keys, the preset a ticket prefix resolved to, whether the request
 // would be rejected for a missing Linear key, and whether the button may fire at all.
+import { Boxes, FilePlus, MessageSquare, Ticket } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+
 import { OperationProgress } from "~/components/OperationProgress";
 import { CloneAccountFields } from "~/components/CloneAccountFields";
 import {
   CloneExistingTicketFields,
   type ParsedTicket,
 } from "~/components/CloneExistingTicketFields";
-import { CLONE_MODE_TABS, CloneModeTabs } from "~/components/CloneModeTabs";
 import { CloneNewTicketFields } from "~/components/CloneNewTicketFields";
 import { CloneOptionsRow } from "~/components/CloneOptionsRow";
 import { ClonePlainFields } from "~/components/ClonePlainFields";
@@ -37,7 +39,7 @@ import {
   cloneRowTop,
   cloneSectionCaption,
 } from "~/components/cloneFieldStyles";
-import type { CloneDraft, TeamKey } from "~/lib/cloneDraft";
+import type { CloneDraft, CloneMode, TeamKey } from "~/lib/cloneDraft";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
@@ -90,11 +92,19 @@ export interface CloneModalViewProps {
   open?: boolean;
   /** The dialog is finished: unmount it. The exit frames have already played. */
   onClose: () => void;
-  /** In /ng's glass, laid out as its Settings. */
-  glass?: boolean;
 }
 
-/** /ng's flat content on the glass (`~/desk/control/ui.tsx`), for the glass rail. */
+/** The rail: which kind of clone this is going to be. The four entries are four different
+ *  requests, not four views of one — the fields beside them change, and so does the server
+ *  route the Create button ends up hitting. */
+const MODES: { mode: CloneMode; label: string; icon: LucideIcon }[] = [
+  { mode: "existing", label: "Existing ticket", icon: Ticket },
+  { mode: "create", label: "New ticket", icon: FilePlus },
+  { mode: "plain", label: "No ticket", icon: MessageSquare },
+  { mode: "template", label: "From template", icon: Boxes },
+];
+
+/** The flat content on the glass (`~/desk/control/ui.tsx`), for the rail. */
 const G = {
   title: "text-neutral-900 dark:text-white",
   text2: "text-black/60 dark:text-white/60",
@@ -122,7 +132,6 @@ export function CloneModalView({
   onSubmit,
   open = true,
   onClose,
-  glass = false,
 }: CloneModalViewProps) {
   /** The form beside the rail: one mode's fields. */
   const form = (
@@ -398,119 +407,60 @@ export function CloneModalView({
     </>
   );
 
-  if (glass) {
-    return (
-      <ModalShell size="panel" dismissible={!busy} open={open} onExited={onClose} glass>
-        {(close) => (
-          // Settings' layout: the rail (16 px in from the dialog's 26 px corners, its buttons 10 px)
-          <div className="on-glass flex min-h-0 flex-1">
-            <nav aria-label="Clone modes" className={`flex w-52 shrink-0 flex-col gap-1 border-r p-4 ${G.line}`}>
-              <h3 className={`px-2 pb-2 text-[15px] font-semibold tracking-tight ${G.title}`}>New clone</h3>
-              {CLONE_MODE_TABS.map(({ mode, label, icon: Icon }) => (
-                <button
-                  key={mode}
-                  type="button"
-                  disabled={busy}
-                  onClick={() => onDraftChange("mode", mode)}
-                  aria-current={mode === draft.mode ? "page" : undefined}
-                  className={`flex h-9 items-center gap-2 rounded-[10px] px-2 text-left text-sm disabled:opacity-50 ${
-                    mode === draft.mode ? `${G.lit} font-medium` : `${G.text2} ${G.press}`
-                  }`}
-                >
-                  <Icon aria-hidden className="size-4 shrink-0" />
-                  <span className="truncate">{label}</span>
-                </button>
-              ))}
-              <span className="flex-1" />
-              <button
-                type="button"
-                onClick={() => close()}
-                disabled={busy}
-                className={`flex h-9 items-center justify-center rounded-[10px] text-sm disabled:opacity-40 ${G.text2} ${G.press}`}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={onSubmit}
-                disabled={!valid || busy}
-                className="flex h-9 items-center justify-center rounded-[10px] bg-emerald-600 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
-              >
-                {busy ? "Creating…" : "Create"}
-              </button>
-            </nav>
-            <div className="flex min-w-0 flex-1 flex-col">
-              <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-y-contain p-4 [&>section:first-child]:border-t-0 [&>section:first-child]:pt-0">
-                {form}
-              </div>
-              {error || operation ? (
-                <div className={`shrink-0 space-y-2 border-t p-4 ${G.line}`}>
-                  {error ? <p className="text-[11px] text-rose-700 dark:text-rose-300">{error}</p> : null}
-                  {operation ? <OperationProgress op={operation} /> : null}
-                </div>
-              ) : null}
-            </div>
-          </div>
-        )}
-      </ModalShell>
-    );
-  }
-
   return (
-    // Two panes like Settings, hence `panel`: the mode rail on the left, the form on the
-    // right, the button bar pinned to the bottom. Neither Cancel nor Escape may close over a
-    // running clone operation, so both are held by the same `busy`.
-    <ModalShell size="panel" dismissible={!busy} open={open} onExited={onClose}>
+    // Neither Cancel nor Escape may close over a running clone operation, so both are held by
+    // the same `busy`.
+    <ModalShell size="panel" dismissible={!busy} open={open} onExited={onClose} glass>
       {(close) => (
-        <>
-          <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
-            <div className="shrink-0 border-b border-slate-100 dark:border-slate-800 sm:w-44 sm:border-b-0 sm:border-r">
-              <h3 className="px-4 pt-4 pb-1 text-base font-semibold text-slate-900 dark:text-slate-100">
-                New clone
-              </h3>
-              <CloneModeTabs
-                mode={draft.mode}
+        // Settings' layout: the rail (16 px in from the dialog's 26 px corners, its buttons 10 px)
+        <div className="on-glass flex min-h-0 flex-1">
+          <nav aria-label="Clone modes" className={`flex w-52 shrink-0 flex-col gap-1 border-r p-4 ${G.line}`}>
+            <h3 className={`px-2 pb-2 text-[15px] font-semibold tracking-tight ${G.title}`}>New clone</h3>
+            {MODES.map(({ mode, label, icon: Icon }) => (
+              <button
+                key={mode}
+                type="button"
                 disabled={busy}
-                onModeChange={(mode) => onDraftChange("mode", mode)}
-              />
-            </div>
-
-            <div className="min-w-0 flex-1 space-y-5 overflow-y-auto p-5">
+                onClick={() => onDraftChange("mode", mode)}
+                aria-current={mode === draft.mode ? "page" : undefined}
+                className={`flex h-9 items-center gap-2 rounded-[10px] px-2 text-left text-sm disabled:opacity-50 ${
+                  mode === draft.mode ? `${G.lit} font-medium` : `${G.text2} ${G.press}`
+                }`}
+              >
+                <Icon aria-hidden className="size-4 shrink-0" />
+                <span className="truncate">{label}</span>
+              </button>
+            ))}
+            <span className="flex-1" />
+            <button
+              type="button"
+              onClick={() => close()}
+              disabled={busy}
+              className={`flex h-9 items-center justify-center rounded-[10px] text-sm disabled:opacity-40 ${G.text2} ${G.press}`}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={onSubmit}
+              disabled={!valid || busy}
+              className="flex h-9 items-center justify-center rounded-[10px] bg-emerald-600 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+            >
+              {busy ? "Creating…" : "Create"}
+            </button>
+          </nav>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-y-contain p-4 [&>section:first-child]:border-t-0 [&>section:first-child]:pt-0">
               {form}
             </div>
-          </div>
-
-          <div className="shrink-0 border-t border-slate-100 px-5 py-3 dark:border-slate-800">
             {error || operation ? (
-              <div className="mb-3 space-y-2">
-                {error ? (
-                  <p className="text-[11px] text-red-600 dark:text-red-400">
-                    {error}
-                  </p>
-                ) : null}
+              <div className={`shrink-0 space-y-2 border-t p-4 ${G.line}`}>
+                {error ? <p className="text-[11px] text-rose-700 dark:text-rose-300">{error}</p> : null}
                 {operation ? <OperationProgress op={operation} /> : null}
               </div>
             ) : null}
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => close()}
-                disabled={busy}
-                className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={onSubmit}
-                disabled={!valid || busy}
-                className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
-              >
-                {busy ? "Creating…" : "Create"}
-              </button>
-            </div>
           </div>
-        </>
+        </div>
       )}
     </ModalShell>
   );

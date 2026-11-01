@@ -113,7 +113,7 @@ export function findTicket(ticketId: string, tickets: LinearTicket[]): LinearTic
 /** Whether a ticket in `state` is work the column shows. It shows what is queued or underway
  *  and nothing else, so a ticket set to any other state leaves the column.
  *
- *  `openTickets` filters on this, and the dashboard asks it before a state write, to know
+ *  `openTickets` filters on this, and the control panel asks it before a state write, to know
  *  whether the card it is about to change is one that will still be there afterwards. */
 export function queued(state: TicketState): boolean {
   return state === "todo" || state === "in_progress";

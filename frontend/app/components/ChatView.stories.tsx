@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { fn } from "storybook/test";
 
 import { ChatView, epochMsToLocalInput, localInputToEpochMs } from "./ChatView";
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
 import {
   chatActivity,
   chatDraft,
@@ -17,12 +18,15 @@ import {
   scheduledMessages,
 } from "./__fixtures__/chat";
 
-/** The pane fills the chat card in the shell's side column, so the story gives it one of the
- *  same shape rather than letting it size to its contents. The thread scrolls inside it. */
+/** The pane fills a glass panel over the clone's screen, so the story gives it one of the same
+ *  shape rather than letting it size to its contents. The thread scrolls inside it. */
 function Frame({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-[38rem] w-[26rem] flex-col overflow-hidden rounded-2xl border border-slate-900/10 bg-white shadow-xl dark:border-white/10 dark:bg-slate-900">
-      {children}
+    <div className="relative grid h-screen w-screen place-items-center overflow-hidden bg-black">
+      <FakeDesktop />
+      <div className="glass glass-thick relative flex h-[38rem] w-[26rem] flex-col overflow-hidden rounded-[26px]">
+        {children}
+      </div>
     </div>
   );
 }
@@ -30,7 +34,7 @@ function Frame({ children }: { children: ReactNode }) {
 const meta = {
   title: "Clone/Components/ChatView",
   component: ChatView,
-  parameters: { layout: "centered" },
+  parameters: { layout: "fullscreen" },
   args: {
     messages: chatMessages,
     loading: false,

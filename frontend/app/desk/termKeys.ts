@@ -1,4 +1,4 @@
-// The /ng keyboard typing into a headless clone's terminal (`./TerminalScreen.tsx`): its keys send
+// The on-screen keyboard typing into a headless clone's terminal (`./TerminalScreen.tsx`): its keys send
 // evdev codes (`./keyboard.ts`), as to a desktop, and this turns them into the bytes a terminal's
 // keys make (xterm's: a US keyboard, Ctrl and Alt as a terminal reads them). It keeps which
 // modifiers are down and Caps Lock, from the same presses; a click takes the modifiers too.

@@ -1,9 +1,9 @@
 // The ⋮ menu every card carries: a trigger, and a panel portalled to the body.
 //
-// The portal is the whole point. A card frame clips its overflow and a board column scrolls
-// its own, so a menu positioned inside either one is cut off at the card's edge. Rendering
-// into the body at fixed coordinates measured off the trigger is what lets it draw over the
-// board instead.
+// The portal is the whole point. A card frame clips its overflow and a column scrolls its
+// own, so a menu positioned inside either one is cut off at the card's edge. Rendering into
+// the body at fixed coordinates measured off the trigger is what lets it draw over them
+// instead.
 //
 // Every trigger and item stops pointer propagation, so opening one neither selects the card
 // underneath nor starts dragging it.
@@ -138,7 +138,7 @@ export interface Box {
 /** Where a panel of this size goes: hanging off `trigger`, wholly inside `viewport`.
  *
  *  A fixed panel is clipped by nothing, so nothing stops it drawing off the bottom of the
- *  window — which is what a ⋮ on a card near the foot of the board used to do, leaving half
+ *  window — which is what a ⋮ on a card near the foot of a column used to do, leaving half
  *  its items unreachable. This flips the panel above its trigger when the room below will not
  *  hold it, and caps its height to whichever side it lands on so a menu taller than the whole
  *  window scrolls instead of overflowing. The horizontal clamp does the same for a trigger
@@ -178,20 +178,17 @@ const PLAIN_TRIGGER = "flex cursor-pointer items-center rounded disabled:opacity
 
 /** A menu's panel, portalled to the body at fixed coordinates off `at` (its trigger's box):
  *  placed to stay inside the window (`placeMenu`), closed by a click outside it, Escape, a
- *  scroll that would strand it, or an item (`useMenuClose`). `className`: its surface, the
- *  dashboard's glass when absent. */
+ *  scroll that would strand it, or an item (`useMenuClose`). Its surface is the dense glass. */
 export function MenuPanel({
   at,
   align = "right",
   onClose,
-  className,
   ignore,
   children,
 }: {
   at: Box;
   align?: "left" | "right";
   onClose: () => void;
-  className?: string;
   /** Its trigger: a press on it is the trigger's to handle, not a click outside. */
   ignore?: { current: HTMLElement | null };
   children: ReactNode;
@@ -242,7 +239,7 @@ export function MenuPanel({
       if (e.key === "Escape") close();
     };
     // A fixed panel cannot follow its trigger, so scrolling the column out from under it
-    // closes it rather than leaving it stranded mid-board.
+    // closes it rather than leaving it stranded mid-column.
     //
     // Its own scrolling is exempt. This listens in the capture phase, which is what catches a
     // scrolling ancestor at all, and that also catches a menu long enough to scroll inside —
@@ -275,9 +272,7 @@ export function MenuPanel({
           maxHeight: place?.maxHeight,
           visibility: place ? undefined : "hidden",
         }}
-        className={`fixed z-50 w-56 overflow-y-auto py-1 ${
-          className ?? `rounded-md ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`
-        }`}
+        className={`fixed z-50 w-56 overflow-y-auto rounded-md py-1 ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`}
         onClick={(e) => e.stopPropagation()}
       >
         {children}
@@ -302,10 +297,10 @@ export function OverflowMenu({
    *  show that its own menu is up. The button and everything wired to it stay the same. */
   trigger?: (open: boolean) => ReactNode;
   /** Which edge the panel lines up with. A card's ⋮ sits at its right corner and the panel
-   *  hangs left off it; a menu under a column title hangs the other way. */
+   *  hangs left off it; a menu off a mark at the left of a row hangs the other way. */
   align?: "left" | "right";
-  /** A tap with a finger (or a pen) calls this in place of opening the panel: the /ng control panel
-   *  open their own sheet of large tiles on a touch screen. Absent ⇒ the panel opens. */
+  /** A tap with a finger (or a pen) calls this in place of opening the panel: the control
+   *  panel opens its own sheet of large tiles on a touch screen. Absent ⇒ the panel opens. */
   onTouch?: () => void;
   children: ReactNode;
 }) {

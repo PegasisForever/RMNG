@@ -1,5 +1,5 @@
-// The phone's own keyboard, for the text boxes on the /ng control panel's tabs. While it is up, the whole
-// /ng screen moves up (`useLift`) so the open page is all above it, not only the text box:
+// The phone's own keyboard, for the text boxes on the control panel's tabs. While it is up, the
+// whole screen moves up (`useLift`) so the open page is all above it, not only the text box:
 // the top of the clone's screen goes out of view for that time. iOS tells how much of the page
 // the keyboard leaves in view through `visualViewport`.
 import { useEffect, useState } from "react";

@@ -48,10 +48,8 @@ export function CloneModalContainer({
   operations,
   accounts,
   initialTicket = "",
-  initialSource = null,
   onClose,
   onStart,
-  glass = false,
 }: {
   /** Clones to fork from: live first, archived last; the dialog offers every managed row. */
   clones: Clone[];
@@ -62,17 +60,13 @@ export function CloneModalContainer({
   /** Seeds the existing-ticket field, e.g. from a ticket dragged onto a board column. A
    *  Linear URL is enough: the same parser reads an id out of a link or a bare `WE-142`. */
   initialTicket?: string;
-  /** Pre-selects a source clone, e.g. from the clone's own menu. Null = pick by hand. */
-  initialSource?: string | null;
   onClose: () => void;
   /** Starts the clone and resolves with the driving Operation: a fork of the picked source
    *  clone, or (the template tab) a clone built from the preset's image. */
   onStart: (fork: boolean, req: CloneRequest) => Promise<Operation>;
-  /** In /ng's glass, laid out as its Settings (`CloneModalView`'s `glass`). */
-  glass?: boolean;
 }) {
   const [state, dispatch] = useReducer(cloneDialogReducer, null, () =>
-    emptyCloneDialog(initialTicket, initialSource),
+    emptyCloneDialog(initialTicket),
   );
   const onDraftChange = useCallback(
     <K extends keyof CloneDraft>(key: K, value: CloneDraft[K]) =>
@@ -154,7 +148,6 @@ export function CloneModalContainer({
 
   return (
     <CloneModalView
-      glass={glass}
       draft={state.draft}
       onDraftChange={onDraftChange}
       clones={sources}

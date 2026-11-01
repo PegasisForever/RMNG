@@ -1,6 +1,6 @@
 //! The Linear calls `rmng clone create ticket` and `create new-ticket` make for themselves.
 //!
-//! The control-server has no Linear route: the dashboard's browser holds the preset keys
+//! The control-server has no Linear route: the web app holds the preset keys
 //! (`GET /api/config` hands them out) and talks to `api.linear.app` directly, then posts the
 //! answer with the fork request. The CLI does the same, so both clients follow one set of
 //! rules, which are the browser's (`frontend/app/lib/linear/{issues,mutations,people}.ts`):

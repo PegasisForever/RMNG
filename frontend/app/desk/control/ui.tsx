@@ -1,4 +1,4 @@
-// The parts every /ng page is made of. A page has a small space (a phone's, beside the clone's
+// The parts every page of the control panel is made of. A page has a small space (a phone's, beside the clone's
 // screen), so each one is a 36 px header over a body that scrolls, and every control is a
 // finger's size: nothing here waits for a hover, and a menu is a sheet of large tiles over the
 // page (`ActionSheet`), not a small list at a pointer.
@@ -69,14 +69,14 @@ export const NO_WORD_SELECT = {
 };
 
 /** A card's row on glass, idle and selected (the clone on the screen, the ticket beside the
- *  board): the dashboard cards' `fill`, one for clones and tickets alike. */
+ *  board), one for clones and tickets alike (`CloneCard`, `TicketCard`). */
 export const CARD_FILL_ON_GLASS = {
   idle: "bg-transparent hover:bg-black/[0.03] dark:hover:bg-white/5",
   selected: "bg-emerald-500/10 dark:bg-emerald-400/10",
 };
 
-/** Where the dashboard's own parts (a clone's card, a ticket's card, the ticket panel) sit on
- *  the glass: their slate greys become readable ones on it (`../glass.css`, `.on-glass`). */
+/** Where the parts from `~/components` (a clone's card, a ticket's card, the ticket panel) sit
+ *  on the glass: their slate greys become readable ones on it (`../glass.css`, `.on-glass`). */
 export const ON_GLASS = "on-glass";
 /** A column's list of cards: its inset and the gap between them, for all three columns. */
 export const CARD_LIST = "space-y-1.5 px-1.5 pb-1.5";
@@ -94,10 +94,10 @@ export const PRESS = "hover:bg-black/5 active:bg-black/10 dark:hover:bg-white/5 
 export const BOX = "bg-white/60 dark:bg-white/[0.06]";
 /** A button: a small box of its own. */
 export const BUTTON = `bg-white/60 border border-black/10 dark:bg-white/10 dark:border-white/10 ${TEXT} active:bg-black/10 dark:active:bg-white/20`;
-/** The one thing on: the other look (as lit glass). */
 /** A field (a text box) on the panel, as `../GLASS.md`'s flat content has it. */
 export const FIELD =
   "rounded-[10px] border border-black/10 bg-white/60 text-neutral-900 outline-none focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30";
+/** The one thing on: the other look (as lit glass). */
 export const LIT = "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
 /** The page's own row, lit: the clone on the screen. */
 export const HERE = "bg-emerald-500/10 shadow-[inset_3px_0_0_var(--color-emerald-500)] dark:bg-emerald-400/10 dark:shadow-[inset_3px_0_0_var(--color-emerald-400)]";
@@ -349,8 +349,8 @@ export function ActionSheet({
   );
 }
 
-/** A click from a mouse (or the keyboard), not a finger or a pen: it opens a menu as the
- *  dashboard's ⋮ does (`DesktopMenu`), not a sheet of large tiles. */
+/** A click from a mouse (or the keyboard), not a finger or a pen: it opens a small menu
+ *  (`DesktopMenu`), not a sheet of large tiles. */
 export function isMouseClick(e: ReactMouseEvent) {
   const kind = (e.nativeEvent as PointerEvent).pointerType;
   return kind !== "touch" && kind !== "pen";
@@ -362,7 +362,7 @@ export function boxOf(e: ReactMouseEvent): Box {
   return { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
 }
 
-/** The same groups as an `ActionSheet`, as the dashboard's ⋮ menu draws them, off `at`. */
+/** The same groups as an `ActionSheet`, as a small menu (`MenuPanel`), off `at`. */
 export function DesktopMenu({ at, groups, onClose }: { at: Box; groups: SheetGroup[]; onClose: () => void }) {
   const shown = groups.filter((g) => g.actions.length > 0);
   return (

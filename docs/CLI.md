@@ -23,7 +23,7 @@ What is not here: the in-clone agent's own desktop automation is the daemon MCP'
 ## Headed vs headless clones
 
 Every clone is one of two kinds, fixed at creation. A **headed** clone (the default) has a
-full GUI desktop: `rmng desktop` drives it and the viewer streams it. A **headless** clone
+full GUI desktop: `rmng desktop` drives it and the web app streams it. A **headless** clone
 (`--headless` at create) has no desktop, only a terminal — lighter and faster to boot, and
 `rmng desktop` does not work on it. Pick headless for pure coding or CLI work, headed only
 when the task needs a browser or a GUI.
@@ -47,7 +47,7 @@ $RMNG_CONTROL_URL` hint.
 | Command (with `--json`) | Emits |
 | --- | --- |
 | `clone ls` | `{ selected, clones: [Clone + {stats, accounts, column}], operations }` (CLI shape — includes the metrics the table shows) |
-| `board ls` | `BoardColumn[]`, resolved the way the dashboard draws them |
+| `board ls` | `BoardColumn[]`, resolved the way the web app draws them |
 | `board move` | the resolved `BoardColumn[]` after the move |
 | `clone select`, `account swap`, `account rm` | small status object (`{selected}` / the `{ok, account, group, selection}` / `{ok, moved}` reply) |
 | `clone ssh` | `{ command, mode: "direct"\|"bastion" }` |
@@ -106,7 +106,7 @@ the Codex twins); `accounts` is a convenience view over them, not extra data.
 
 ### Creating clones: `rmng clone create <kind>` and `rmng clone fork`
 
-`rmng clone create` has one kind for each tab of the dashboard's "New clone" dialog. It sends
+`rmng clone create` has one kind for each tab of the web app's "New clone" dialog. It sends
 the same request the dialog sends, so a clone made either way is the same.
 
 | Kind | Dialog tab | What it does |
@@ -142,9 +142,9 @@ takes from the preset, as it does for the dialog.
 **Flags for the three forking kinds** (`ticket`, `new-ticket`, `no-ticket`):
 
 - `--source <CLONE>`: the clone whose home is copied (live or archived). Omitted: the clone
-  the dashboard's dialog picks: the preset's default fork clone where that clone still
+  the web app's dialog picks: the preset's default fork clone where that clone still
   exists, else the newest live clone. `--dry-run` shows the pick.
-- `--parent <CLONE>`: draw the new clone under this clone's card on the dashboard.
+- `--parent <CLONE>`: draw the new clone under this clone's card on the board (the control panel's Clones tab).
 
 **The two ticket kinds.**
 
@@ -163,7 +163,7 @@ takes from the preset, as it does for the dialog.
 - If the clone cannot start after `new-ticket` opened its ticket, the error names the ticket.
   Run `rmng clone create ticket <ID>` to try again without a second ticket.
 - The Linear calls go from the CLI straight to `api.linear.app`, with the presets' keys from
-  `GET /api/config`, the same way the dashboard does. The machine needs internet access.
+  `GET /api/config`, the same way the web app does. The machine needs internet access.
 
 **The two kinds without a ticket.** `--title` names the clone: `--title 'Fix login'` gives
 `<prefix>fix-login`. A second clone with the same title gets the next letter. `--message <M>`
@@ -230,10 +230,10 @@ passes through the command's exit code. `--json` emits one object with the captu
 
 ### `rmng board ls`
 
-The dashboard's columns, left to right: `COLUMN ID ARCHIVES CLONES CONTENTS`. The view is
+The board's columns (the control panel's Clones tab), left to right: `COLUMN ID ARCHIVES CLONES CONTENTS`. The view is
 **resolved**, not the raw stored list, so a clone nobody has filed appears in the column the
 board draws it in rather than nowhere. A board nobody has arranged yet reports the two columns
-the dashboard draws by default, `Clones` and `Archived`.
+the web app draws by default, `Clones` and `Archived`.
 
 `--json` emits `BoardColumn[]` in the same resolved form.
 
@@ -243,7 +243,7 @@ Move a clone to the **top** of a column. `COLUMN` is what a person reads off the
 `"In Progress"` works; the stored id (`in-progress`) works too, and both ignore case and
 surrounding space. An unknown name lists the columns that do exist and changes nothing.
 
-**An archive column archives.** Dropping a card into one on the dashboard archives the clone
+**An archive column archives.** Dropping a card into one in the web app archives the clone
 and dragging it out again restores it, so this does the same: moving into `Archived` stops the
 clone, moving it back out starts it. `--wait` blocks on that lifecycle operation. Without it
 the move is filed immediately and the archive runs in the background.
@@ -268,7 +268,7 @@ exits 1.
 
 ### `rmng clone select <CLONE>` / `rmng clone select --none`
 
-Point the operator's viewer at a clone (`POST /api/activate`); `--none` clears it. **Operator-only
+Put a clone on the operator's screen in the web app (`POST /api/activate`); `--none` clears it. **Operator-only
 — it does not change which clone your other commands target.** Unknown id errors (exit 1).
 
 ### `rmng account ls [--provider claude|codex]`

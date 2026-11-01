@@ -31,10 +31,10 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Headless off: the viewer shows a video stream. */
+/** Headless off: the screen shows a video stream. */
 export const Headed: Story = {};
 
-/** Headless on: no desktop, so the viewer shows a tmux tab view instead of a stream. */
+/** Headless on: no desktop, so the screen shows a tmux tab view instead of a stream. */
 export const Headless: Story = {
   args: { headless: true },
 };

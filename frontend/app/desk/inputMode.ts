@@ -1,9 +1,9 @@
-// The /ng page's two modes, chosen by the input used last, so a laptop with a touch screen
+// The page's two modes, chosen by the input used last, so a laptop with a touch screen
 // changes as its operator does (`./FullDesk.tsx`):
 //
 // - touch: the floating buttons, the on-screen keyboard, and the screen as a trackpad (or, with
 //   the keyboard docked, as a touch screen).
-// - mouse: the mouse and the keyboard go to the clone as in the viewer (`~/viewer/input.ts`); no
+// - mouse: the mouse and the keyboard go to the clone (`~/viewer/input.ts`); no
 //   floating buttons; a shortcut opens the control panel (`./shortcut.ts`).
 import { useEffect, useState } from "react";
 

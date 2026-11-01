@@ -20,19 +20,19 @@ function Description({ text }: { text?: string }) {
   return <TicketDescription markdown={text ?? ""} onSave={fn()} />;
 }
 
-/** Three referenced issues, three answers. WE-302 has a clone on this board, WE-303 and
- *  WE-280 are in the ticket column, and WE-304 is in neither, so only its row keeps the
- *  arrow and opens Linear. The route resolves the same three ways against the real lists. */
-const onBoard: Record<string, string> = {
+/** Three referenced issues, three answers. WE-302 has a clone, WE-303 and WE-280 are in the
+ *  tickets' list, and WE-304 is in neither, so only its row keeps the arrow and opens Linear.
+ *  The control panel resolves the same three ways against the real lists. */
+const known: Record<string, string> = {
   "WE-302": "Show the clone for WE-302: mercury",
   "WE-303": "Show WE-303 in this panel",
   "WE-280": "Show WE-280 in this panel",
 };
 const resolveLink = (id: string) =>
-  onBoard[id] ? { title: onBoard[id], open: fn() } : null;
+  known[id] ? { title: known[id], open: fn() } : null;
 
 const meta = {
-  title: "Board/Components/TicketPanel",
+  title: "Tickets/Components/TicketPanel",
   component: TicketPanel,
   parameters: { layout: "centered" },
   args: {
@@ -52,8 +52,8 @@ const meta = {
     onRemoveLabel: fn(),
     resolveLink,
   },
-  /** The panel fills a card in the shell's side column, so the story gives it one of the
-   *  same size rather than letting it size to its contents. */
+  /** The panel fills a side panel, so the story gives it one of a like size rather than
+   *  letting it size to its contents. */
   render: (args) => (
     <div className="h-[42rem] w-[26rem] overflow-hidden rounded-2xl border border-slate-900/10 bg-white shadow-xl dark:border-white/10 dark:bg-slate-900">
       <TicketPanel {...args} />
@@ -113,7 +113,7 @@ export const EveryLabelOn: Story = {
 
 /** No clone action, no title editing, and no writes: the title falls back to a plain heading,
  *  the state mark to a glyph, and the pills lose their X. Without a resolver every referenced
- *  issue opens Linear, which is what a panel with no board behind it wants. */
+ *  issue opens Linear. */
 export const ReadOnly: Story = {
   args: {
     onCreateClone: undefined,

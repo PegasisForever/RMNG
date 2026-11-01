@@ -18,6 +18,15 @@ const meta = {
   title: "Settings/Components/ImportAccountModalView",
   component: ImportAccountModalView,
   parameters: { layout: "fullscreen" },
+  // Over a clone's screen, as the dialog opens
+  decorators: [
+    (Story) => (
+      <div className="relative h-screen w-screen overflow-hidden bg-black">
+        <FakeDesktop />
+        <Story />
+      </div>
+    ),
+  ],
   args: {
     provider: "claude" as const,
     loginUrl: CLAUDE_URL,
@@ -122,29 +131,4 @@ export const Slow: Story = {
       problem: "usage poll failed: 429 Too Many Requests",
     },
   },
-};
-
-/** In /ng's glass, over the clone's screen (as the Edit layout dialog there). */
-export const GlassReplacing: Story = {
-  args: { replacing: "talktomedi.claude.dev.0@gmail.com", glass: true },
-  decorators: [
-    (Story) => (
-      <div className="relative h-screen w-screen overflow-hidden bg-black">
-        <FakeDesktop />
-        <Story />
-      </div>
-    ),
-  ],
-};
-
-/** A new account in /ng's glass: the provider and the pool too. */
-export const GlassAdd: Story = {
-  args: { glass: true },
-  decorators: GlassReplacing.decorators,
-};
-
-/** The steps in /ng's glass. */
-export const GlassReplaced: Story = {
-  args: { ...Replaced.args, glass: true },
-  decorators: GlassReplacing.decorators,
 };

@@ -1,6 +1,5 @@
-// Moving one thing in a list the operator orders by hand. The dashboard does it with a drag;
-// /ng does it with Move up, Move down and Move to top in a sheet, as a drag in a page this
-// small fights the scroll.
+// Moving one thing in a list the operator orders by hand: Move up, Move down and Move to top
+// in a sheet, for a page so small that a drag fights the scroll.
 
 /** Where a move sends the item. */
 export type Move = "top" | "up" | "down";

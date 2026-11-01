@@ -4,8 +4,8 @@
 // knows about any of them. The markup is NotesEditorView, which takes the document and the
 // callbacks as props and is the half Storybook renders.
 //
-// Client-only (BlockNote/ProseMirror touch the DOM), so it is lazy-imported behind a mount
-// gate in _index.tsx and MobileDashboardContainer.tsx, and never runs during SSR.
+// Client-only (BlockNote/ProseMirror touch the DOM), so it is lazy-imported
+// (`~/desk/control/ControlPanelContainer.tsx`) and never runs during SSR.
 import type { PartialBlock } from "@blocknote/core";
 import { useEffect, useRef, useState } from "react";
 

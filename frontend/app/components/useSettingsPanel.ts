@@ -1,18 +1,14 @@
-// Settings panel, impure half. Everything the overlay is not allowed to do lives here: the
+// The settings panel, impure half. Everything the panel is not allowed to do lives here: the
 // config read that seeds the form, the save that sends it back, the stuck-judge probe, the
 // control-server's version check and its two self-directed actions, the shared account-order
 // store, and the confirms that guard destructive clicks.
 //
-// The server calls themselves arrive as props rather than being imported, which is how the
-// setup wizard can reuse this panel against a different pair of endpoints. The markup is
-// SettingsPanelView.
+// The server calls themselves arrive as arguments rather than being imported, so the panel
+// renders in isolation (Storybook) with mocked data. The markup is the Settings tab
+// (`~/desk/control/SettingsView.tsx`).
 import { useEffect, useState } from "react";
 
-import type { SettingsCategory } from "~/components/SettingsNav";
-import {
-  SettingsPanelView,
-  type SettingsPanelViewProps,
-} from "~/components/SettingsPanelView";
+import type { SettingsCategory, SettingsPanelProps } from "~/components/SettingsPanes";
 import { useAccountOrder } from "~/lib/accountOrder";
 import type { BoardColumn } from "~/lib/board";
 import {
@@ -26,14 +22,12 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
-export interface SettingsPanelContainerProps {
+interface SettingsPanelOptions {
   /** Live per-account usage (from `ControlState.claudeAccounts`). Despite the field name
    *  it carries BOTH providers' rows tagged by `provider`; the two account/group sections
    *  below split it by that tag. Used here only for the emails. */
   accounts: ClaudeUsage[];
-  onClose: () => void;
-  // --- injected server calls (no API logic lives in this component, so it's
-  //     renderable in isolation — e.g. Storybook — with mocked data) ---
+  // --- injected server calls ---
   /** Read the current redacted config (each preset's Linear key comes back verbatim). */
   getConfig: () => Promise<AppConfigRedacted>;
   /** Persist a partial config patch; returns the merged config. */
@@ -63,28 +57,18 @@ export interface SettingsPanelContainerProps {
   /** Forkable clone ids, newest first, for the preset default-source picker. */
   forkSources: string[];
   // --- board columns ---
-  /** The dashboard board's columns, left to right. Omit to hide the section entirely,
-   *  which is what a page without a board does. */
-  boardColumns?: BoardColumn[];
+  /** The board's columns, left to right. */
+  boardColumns: BoardColumn[];
   /** Clones per column id, so a delete can say what it displaces. */
-  boardColumnCounts?: Record<string, number>;
-  onAddBoardColumn?: (title: string) => void;
-  onRenameBoardColumn?: (columnId: string, title: string) => void;
-  onSetBoardColumnArchive?: (columnId: string, archive: boolean) => void;
-  onDeleteBoardColumn?: (columnId: string) => void;
-  onReorderBoardColumns?: (columnIds: string[]) => void;
+  boardColumnCounts: Record<string, number>;
+  onAddBoardColumn: (title: string) => void;
+  onRenameBoardColumn: (columnId: string, title: string) => void;
+  onSetBoardColumnArchive: (columnId: string, archive: boolean) => void;
+  onDeleteBoardColumn: (columnId: string) => void;
+  onReorderBoardColumns: (columnIds: string[]) => void;
 }
 
-export function SettingsPanelContainer({
-  onClose,
-  ...props
-}: SettingsPanelContainerProps) {
-  return <SettingsPanelView {...useSettingsPanel(props)} onClose={onClose} />;
-}
-
-/** Everything the settings form needs but cannot do itself, for any view of it: the panel
- *  here, and the phone app's Settings page (`~/desk/control`), which lays the same panes out its
- *  own way. */
+/** Everything the settings form needs but cannot do itself. */
 export function useSettingsPanel({
   accounts,
   getConfig,
@@ -103,9 +87,8 @@ export function useSettingsPanel({
   onSetBoardColumnArchive,
   onDeleteBoardColumn,
   onReorderBoardColumns,
-}: Omit<SettingsPanelContainerProps, "onClose">): Omit<SettingsPanelViewProps, "onClose"> {
-  // Which category the rail is on. Resets to the top every time the panel opens, which is the
-  // right default: the panel is closed by the operator, and the next open is a new errand.
+}: SettingsPanelOptions): SettingsPanelProps {
+  // Which category the rail is on. Starts at the top.
   const [category, setCategory] = useState<SettingsCategory>("board");
   const [draft, setDraft] = useState<SettingsDraft | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -117,7 +100,7 @@ export function useSettingsPanel({
   const [serverStatus, setServerStatus] = useState<UpdateStatus | null>(null);
   const [serverMsg, setServerMsg] = useState<string | null>(null);
   // The in-flight self-update op, followed through the SSE frames so its progress renders
-  // inline here rather than only in the sidebar. Same rules as the two dialogs that follow
+  // inline here rather than only in the jobs list. Same rules as the two dialogs that follow
   // an op — `~/lib/useOperation` — and the panel had none of them before: it held a bare op
   // id, so a FAILED update read exactly like a running one and left the Update button dead
   // for the life of the panel.
@@ -139,8 +122,8 @@ export function useSettingsPanel({
     setDraft(settingsDraftFrom(c));
   }
 
-  // Seed the form from the server ONCE, when the panel opens. This must NOT depend on
-  // `onClose` (a fresh inline arrow on every parent render): the dashboard re-renders
+  // Seed the form from the server ONCE, when the panel mounts. This must NOT depend on the
+  // callbacks (fresh inline arrows on every parent render): the control panel re-renders
   // every few seconds on each `stats` SSE frame, and re-running this would re-seed the
   // form from the server and wipe the user's in-progress edits.
   useEffect(() => {

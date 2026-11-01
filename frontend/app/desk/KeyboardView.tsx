@@ -38,7 +38,7 @@ export type KeyboardViewProps = {
   dictation: DictationState;
 };
 
-/** The /ng keyboard: a full keyboard of square keys (`./FullDesk.tsx` puts it over the clone's
+/** The on-screen keyboard: a full keyboard of square keys (`./FullDesk.tsx` puts it over the clone's
  *  screen or under it). The keys are a touchpad too: a finger that moves on them moves the
  *  cursor, two scroll. */
 export const KeyboardView = memo(function KeyboardView(p: KeyboardViewProps) {

@@ -1,4 +1,5 @@
 // Small display formatters, plus the one session value they read from.
+import type { LxcStats } from "~/lib/wire/LxcStats";
 
 /** The operator's locale, for the formatters that take one.
  *
@@ -24,6 +25,24 @@ export function formatBytes(bytes: bigint | number): string {
     i++;
   }
   return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
+}
+
+/** The whole-container totals as one line: CPU percentage, memory used, physical disk used.
+ *  A metric the host could not sample reads as an em-dash rather than a zero, so an
+ *  unavailable figure never passes for an idle one. Null in, null out. */
+export function formatLxcUsage(
+  stats: LxcStats | null,
+): { cpu: string; mem: string; disk: string } | null {
+  if (!stats) return null;
+
+  const GiB = 1024 ** 3;
+  const cpu =
+    stats.cpuPct === null
+      ? "—"
+      : `${stats.cpuPct < 1 ? stats.cpuPct.toFixed(1) : Math.round(stats.cpuPct)}%`;
+  const mem = `${(Number(stats.memUsed) / GiB).toFixed(1)}GB`;
+  const disk = stats.diskUsed === null ? "—" : `${(Number(stats.diskUsed) / GiB).toFixed(1)}GB`;
+  return { cpu, mem, disk };
 }
 
 /** Compact integer count, e.g. `12.4k` or `3.1M`. Wire `u64` values are typed as bigint

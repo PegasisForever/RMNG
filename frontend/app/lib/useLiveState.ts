@@ -1,8 +1,8 @@
-// The live server state every page draws from: the dashboard, the phone list, and `/ng`.
+// The live server state the app draws from.
 import { useEffect, useState } from "react";
 
 import { openLiveEvents } from "~/lib/liveEvents";
-import type { ControlState } from "~/lib/types";
+import { emptyState } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 
@@ -10,12 +10,12 @@ import type { LxcStats } from "~/lib/wire/LxcStats";
 // editor's 600ms autosave debounce to fire, short enough that nobody reads a stale page.
 const RELOAD_DELAY_MS = 1_500;
 
-/** Initial state from the SSR loader, kept live by the SSE stream (`openLiveEvents`, which
- *  also rebuilds it after a network drop or a sleep). The same connection carries persisted
- *  `ControlState` plus volatile clone (`stats`) and CT-wide (`lxcStats`) resource events;
- *  neither metric stream touches `state.json`. */
-export function useLiveState(initial: ControlState) {
-  const [state, setState] = useState(initial);
+/** The server's state, empty until the first frame, kept live by the SSE stream
+ *  (`openLiveEvents`, which also rebuilds it after a network drop or a sleep). The same
+ *  connection carries persisted `ControlState` plus volatile clone (`stats`) and CT-wide
+ *  (`lxcStats`) resource events; neither metric stream touches `state.json`. */
+export function useLiveState() {
+  const [state, setState] = useState(emptyState);
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
   const [lxcStats, setLxcStats] = useState<LxcStats | null>(null);
   useEffect(() => {

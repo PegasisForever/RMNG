@@ -1,42 +1,10 @@
-// The board's leftmost work column: Linear tickets in Todo or In Progress that no clone has
-// been created for. Drag one into a clone column to start it.
-//
-// It is a column, not a rail section, because that is what makes the gesture obvious: the
-// tickets sit in the same well the cards do, so dragging one right into a column reads as
-// the same move as dragging a card, and the board already knows how to receive it.
-//
-// The order is the operator's, not Linear's: cards sort within the column, and the well
-// takes drops so one dragged back lands where it was let go.
-//
-// The list refreshes itself. This browser holds the Linear keys and polls with them
-// (`~/lib/linear/useTickets`), so a ticket somebody moves in Linear appears or disappears
-// here on its own, and there is no refresh button to press: a button that has to be pressed
-// is a promise that the list is stale until you do.
-import { useDroppable } from "@dnd-kit/core";
-import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import {
-  ChevronDown,
-  CircleDashed,
-  CircleX,
-  ExternalLink,
-  GitBranch,
-  Link2,
-  Plus,
-  X,
-} from "lucide-react";
-import type { CSSProperties } from "react";
+// A Linear ticket as a card: its state, priority and labels in Linear's own marks, its id and
+// title, and its ⋮ menu. The marks are shared with the ticket panel and the new-ticket dialog.
+import { CircleDashed, CircleX, ExternalLink, GitBranch, Link2, Plus, X } from "lucide-react";
 
-import { CardFrame } from "~/components/BoardCard";
 import { MenuDivider, MenuItem, OverflowMenu } from "~/components/OverflowMenu";
-import {
-  ColumnHeader,
-  ColumnShell,
-  ColumnWell,
-  COLUMN_TITLE_TEXT,
-} from "~/components/BoardColumnPanel";
-import type { LinearWorkspace } from "~/lib/linear/types";
-import { branchNameOf, ticketDragId, TICKET_COLUMN_ID, type LinearTicket } from "~/lib/tickets";
+import { CARD_FILL_ON_GLASS } from "~/desk/control/ui";
+import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
 
 /** What each kind of state is called when the workspace's own name for it is not to hand.
@@ -246,13 +214,12 @@ function teamOf(ticket: LinearTicket): string {
   return ticket.team ?? ticket.id.split("-")[0];
 }
 
-
 /** The ticket's ⋮ menu, on the same shell the clone cards use.
  *
  *  Three kinds of item, in that order: one that starts work here, shortcuts out to Linear,
- *  and two that write a new state back to it. The writes are the only things on this board
- *  that change a ticket, and both mean the same thing to this column — a ticket that is
- *  neither Todo nor In progress is not waiting to be started, so it leaves the list.
+ *  and two that write a new state back to it. Both writes mean the same thing to the tickets'
+ *  column — a ticket that is neither Todo nor In progress is not waiting to be started, so it
+ *  leaves the list.
  *
  *  Leaving for Linear and writing to the clipboard both happen to the browser rather than to
  *  the ticket, so the menu asks for them and the container does them. Each item is offered
@@ -317,7 +284,7 @@ function TicketMenu({
  *  the `WE-301` badge inline with the title, so a wrapped title flows back to the card's
  *  left edge instead of indenting under the badge. The badge takes its colour from the same
  *  `workspaceBadge` the clone cards use, so a ticket and the clone made from it are the
- *  same colour on the same board.
+ *  same colour side by side.
  *
  *  No lifecycle dot and no state word. Linear's own ring says it in one glyph, and a clone
  *  card's solid dot is reserved for something that changes while you watch it rather than a
@@ -332,15 +299,13 @@ export function TicketCardBody({
   onCancel,
   onMoveToBacklog,
   onMenuTouch,
-  fill,
 }: {
   ticket: LinearTicket;
   /** Selected: the panel on the right is showing this ticket. The tint alone says so. No
    *  left accent bar — a card is one object, and a bar down its edge reads as a second one
    *  next to it. */
   selected?: boolean;
-  /** Opens the clone dialog for this ticket. Absent ⇒ the item is not offered, which is
-   *  what the drag overlay and a board with no columns get. */
+  /** Opens the clone dialog for this ticket. Absent ⇒ the item is not offered. */
   onCreateClone?: () => void;
   /** Show the ticket in Linear, which leaves the app. Absent ⇒ the item is not offered. */
   onOpenInLinear?: (url: string) => void;
@@ -352,19 +317,13 @@ export function TicketCardBody({
   onMoveToBacklog?: () => void;
   /** A tap with a finger on the ⋮ calls this in place of the dropdown (`OverflowMenu`). */
   onMenuTouch?: () => void;
-  /** The fills of a card on glass (/ng), idle and selected, as a clone's card has them
-   *  (`SidebarClone`'s `fill`), so the two read as one kind of selection: the tint alone.
-   *  Absent: the dashboard's tint. */
-  fill?: { idle: string; selected: string };
 }) {
   const labels = ticket.labels ?? [];
   return (
+    // The fills a clone's card has (`CloneCard`), so the two read as one kind of selection:
+    // the tint alone.
     <article
-      className={
-        fill
-          ? `px-2.5 py-2 ${selected ? fill.selected : fill.idle}`
-          : `px-2.5 py-2 ${selected ? "bg-emerald-50 dark:bg-emerald-950" : ""}`
-      }
+      className={`px-2.5 py-2 ${selected ? CARD_FILL_ON_GLASS.selected : CARD_FILL_ON_GLASS.idle}`}
     >
       {/* State, priority, then labels: the row Linear itself draws, in its own marks. No
           owner on it: every ticket here belongs to one of the operator's own API keys, so
@@ -407,218 +366,5 @@ export function TicketCardBody({
         {ticket.title}
       </p>
     </article>
-  );
-}
-
-function TicketCard({
-  ticket,
-  selected = false,
-  onSelect,
-  onCreateClone,
-  onOpenInLinear,
-  onCopyBranchName,
-  onCopyTicketLink,
-  onCancel,
-  onMoveToBacklog,
-}: {
-  ticket: LinearTicket;
-  selected?: boolean;
-  onSelect?: () => void;
-  onCreateClone?: () => void;
-  onOpenInLinear?: (url: string) => void;
-  onCopyBranchName?: (branch: string) => void;
-  onCopyTicketLink?: (url: string) => void;
-  onCancel?: () => void;
-  onMoveToBacklog?: () => void;
-}) {
-  const { listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: ticketDragId(ticket.id),
-  });
-  // Pointer drag only, the same rule the clone cards follow (see `BoardCard`). The whole card
-  // is the drag activator, so dnd-kit's keyboard activator lifts it on any Space or Enter that
-  // reaches it. Its `attributes` go with the handler, since they are what advertise the
-  // keyboard drag: `tabIndex`, `role`, and an `aria-describedby` pointing at "press the space
-  // bar to pick up".
-  const { onKeyDown: _liftOnSpace, ...dragListeners } = listeners ?? {};
-  const style: CSSProperties = {
-    transform: CSS.Translate.toString(transform),
-    transition,
-    // The original keeps its slot as a hole while the overlay follows the pointer, so the
-    // cards below it do not jump twice.
-    opacity: isDragging ? 0 : 1,
-  };
-  return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      {...dragListeners}
-      onClick={onSelect}
-      className="cursor-grab touch-none"
-    >
-      <CardFrame>
-        <TicketCardBody
-          ticket={ticket}
-          selected={selected}
-          onCreateClone={onCreateClone}
-          onOpenInLinear={onOpenInLinear}
-          onCopyBranchName={onCopyBranchName}
-          onCopyTicketLink={onCopyTicketLink}
-          onCancel={onCancel}
-          onMoveToBacklog={onMoveToBacklog}
-        />
-      </CardFrame>
-    </div>
-  );
-}
-
-export interface TicketColumnProps {
-  /** Already filtered to open, unclaimed tickets — see `openTickets`. The server keeps
-   *  this current, so the column draws it and nothing else. */
-  tickets: LinearTicket[];
-  /** The ticket whose panel is open, if any. */
-  selectedId?: string | null;
-  /** A card was clicked. The container opens it in the side panel. */
-  onSelectTicket?: (ticket: LinearTicket) => void;
-  /** No answer from Linear yet, which is only true before the first one arrives. */
-  loading?: boolean;
-  /** The server's last poll of Linear failed. The column keeps whatever it had and says so,
-   *  because a stale list beats an empty one while the fleet is mid-flight. */
-  error?: string | null;
-  /** The card menu's "Create a clone…". Absent ⇒ the item is not offered. Where the clone
-   *  is filed is the caller's call: this action names no column, unlike a drag, which
-   *  names the one it landed on. */
-  onCreateClone?: (ticket: LinearTicket) => void;
-  /** The card menu's "Open in Linear". Leaving the app is the container's call, so the menu
-   *  hands over the ticket's URL and the container opens it. Absent ⇒ the item is not
-   *  offered. */
-  onOpenInLinear?: (url: string) => void;
-  /** The card menu's "Copy branch name", handed the branch the menu derived. Writing to the
-   *  clipboard is a browser API, so the container owns it. Absent ⇒ the item is not offered.
-   *
-   *  Nothing on the card reports whether the write landed, so the answer is not read here.
-   *  The two places that do say "Copied!" take a callback that reports it. */
-  onCopyBranchName?: (branch: string) => void;
-  /** The card menu's "Copy link", handed the ticket's URL. Absent ⇒ the item is not offered. */
-  onCopyTicketLink?: (url: string) => void;
-  /** Set the ticket Cancelled in Linear. The caller drops it from `tickets` on its own:
-   *  waiting for the next fetch would leave a card sitting there that has already been
-   *  cancelled. */
-  onCancel?: (ticket: LinearTicket) => void;
-  /** Set the ticket Backlog in Linear. Same deal — the caller drops it. */
-  onMoveToBacklog?: (ticket: LinearTicket) => void;
-  /** Open the new-ticket dialog. Absent ⇒ no button, which is what a board with no Linear
-   *  key configured gets. */
-  onNewTicket?: () => void;
-  /** The workspaces the configured Linear keys belong to, for the title's menu. Empty while
-   *  the lookup is in flight, and forever on a board with no key. */
-  workspaces?: LinearWorkspace[];
-  /** The title menu's rows. Leaving the app is the container's call, the same as the card
-   *  menu's "Open in Linear", so this hands over the workspace and the container opens it.
-   *  Absent ⇒ no menu. */
-  onOpenWorkspace?: (workspace: LinearWorkspace) => void;
-}
-
-export function TicketColumn({
-  tickets,
-  loading = false,
-  error = null,
-  selectedId = null,
-  onSelectTicket,
-  onCreateClone,
-  onOpenInLinear,
-  onCopyBranchName,
-  onCopyTicketLink,
-  onCancel,
-  onMoveToBacklog,
-  onNewTicket,
-  workspaces = [],
-  onOpenWorkspace,
-}: TicketColumnProps) {
-  // The well takes drops so a ticket dragged back into the column lands, including on the
-  // empty space below the last card.
-  const { setNodeRef } = useDroppable({ id: TICKET_COLUMN_ID });
-  const dragIds = tickets.map((t) => ticketDragId(t.id));
-  // A first fetch still running is not an empty queue, so it says nothing rather than
-  // claiming everything is claimed.
-  const emptyLine =
-    tickets.length > 0 || loading
-      ? null
-      : error
-        ? "Nothing to show."
-        : "Every open ticket has a clone.";
-
-  return (
-    <ColumnShell>
-      <ColumnHeader>
-        <div className="flex min-w-0 flex-1 items-center gap-1">
-          <h2 className={COLUMN_TITLE_TEXT}>Tickets</h2>
-          {/* The way out to Linear itself. The column draws one merged queue across every
-              configured key, so which workspace a ticket came from is deliberately not on the
-              cards, and this is where that question gets answered instead. The chevron sits
-              beside the heading rather than replacing it, so the heading stays a heading. */}
-          {workspaces.length > 0 && onOpenWorkspace ? (
-            <OverflowMenu
-              label="Open a Linear workspace"
-              align="left"
-              trigger={(open) => (
-                <ChevronDown
-                  className={`size-4 rounded p-0.5 ${
-                    open
-                      ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300"
-                      : "text-slate-400 hover:bg-slate-200 hover:text-slate-600 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300"
-                  }`}
-                />
-              )}
-            >
-              {workspaces.map((workspace) => (
-                <MenuItem
-                  key={workspace.id}
-                  icon={ExternalLink}
-                  label={workspace.name}
-                  onClick={() => onOpenWorkspace(workspace)}
-                />
-              ))}
-            </OverflowMenu>
-          ) : null}
-        </div>
-        {/* The same button the clone columns carry, in the same place, for the same reason:
-            the thing a column is for is the thing you make more of at the top of it. */}
-        {onNewTicket ? (
-          <button
-            type="button"
-            onClick={onNewTicket}
-            title="Open a new Linear ticket"
-            className="flex shrink-0 cursor-pointer items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium text-slate-500 hover:bg-slate-200 dark:text-slate-400 dark:hover:bg-slate-700"
-          >
-            <Plus className="size-3.5" />
-            New ticket
-          </button>
-        ) : null}
-      </ColumnHeader>
-
-      <ColumnWell innerRef={setNodeRef} empty={emptyLine}>
-        {error ? (
-          <p className="rounded-lg bg-rose-50 px-2 py-1.5 text-xs text-rose-700 dark:bg-rose-950 dark:text-rose-300">
-            {error}
-          </p>
-        ) : null}
-        <SortableContext items={dragIds} strategy={verticalListSortingStrategy}>
-          {tickets.map((ticket) => (
-            <TicketCard
-              key={ticket.id}
-              ticket={ticket}
-              selected={ticket.id === selectedId}
-              onSelect={onSelectTicket ? () => onSelectTicket(ticket) : undefined}
-              onCreateClone={onCreateClone ? () => onCreateClone(ticket) : undefined}
-              onOpenInLinear={onOpenInLinear}
-              onCopyBranchName={onCopyBranchName}
-              onCopyTicketLink={onCopyTicketLink}
-              onCancel={onCancel ? () => onCancel(ticket) : undefined}
-              onMoveToBacklog={onMoveToBacklog ? () => onMoveToBacklog(ticket) : undefined}
-            />
-          ))}
-        </SortableContext>
-      </ColumnWell>
-    </ColumnShell>
   );
 }

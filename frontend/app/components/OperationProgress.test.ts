@@ -12,9 +12,8 @@ function render(overrides: Parameters<typeof makeOperation>[0] = {}) {
   );
 }
 
-test("job cards use the board-card frame and separate target from source details", () => {
+test("job cards use the card frame and separate target from source details", () => {
   const html = render({ source: "registry.example.com/team/template:latest" });
-  expect(html).toContain("group/card");
   expect(html).toContain(GLASS_OUTLINE);
   expect(html).toContain("rounded-lg");
   expect(html).toMatch(/<h3[^>]*>pega-per-9<\/h3>/);

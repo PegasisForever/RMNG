@@ -1,8 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { arrange } from "./Board";
-
-type Lane = { id: string; cloneIds: string[] };
+import { arrange, type Lane } from "./boardDrag";
 
 const lanes = (): Lane[] => [
   { id: "todo", cloneIds: ["a", "b"] },

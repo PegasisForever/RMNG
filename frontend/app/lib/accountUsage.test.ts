@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { groupAccounts } from "./ClaudeAccountsPanel";
+import { groupAccounts } from "./accountUsage";
 import type { ClaudeUsage } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 

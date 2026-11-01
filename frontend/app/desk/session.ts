@@ -1,11 +1,10 @@
-// The /ng page's connection to the selected clone: the browser viewer's socket for one monitor
-// of this browser's layout (`~/lib/clientLayout.ts`), run by the viewer's own worker
-// (`~/viewer/worker.ts`: socket, decode, drawing, and, for monitor 0, the clone's sound, which
-// `~/viewer/sound.ts` plays from the first touch). The page sizes the box it is shown in
-// (`./geometry.ts`). In touch mode the input does not come from the page's events, as it does in
-// the viewer: the on-screen keyboard and the trackpad send it (`send`). In mouse and keyboard
-// mode the viewer's own input takes the page's events on `canvas` (`~/viewer/input.ts`), and the
-// clipboard is shared (`~/viewer/clipboard.ts`).
+// The page's connection to the selected clone: the media socket (`/api/viewer`) for one monitor
+// of this browser's layout (`~/lib/clientLayout.ts`), run by a worker (`~/viewer/worker.ts`:
+// socket, decode, drawing, and, for monitor 0, the clone's sound, which `~/viewer/sound.ts`
+// plays from the first touch). The page sizes the box it is shown in (`./geometry.ts`). In
+// touch mode the input does not come from the page's events: the on-screen keyboard and the
+// trackpad send it (`send`). In mouse and keyboard mode `~/viewer/input.ts` takes the page's
+// events on `canvas`, and the clipboard is shared (`~/viewer/clipboard.ts`).
 import type { ClipboardMsg } from "~/lib/wire/ClipboardMsg";
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
 import type { FromBrowser } from "~/lib/wire/FromBrowser";
@@ -59,8 +58,8 @@ const PHONE_SOUND_MAX = 15;
 const SOUND_MONITOR = 0;
 
 /** Show `monitor` of the selected clone in `box`, which the canvas fills, scaled to fit its
- *  device pixels (`resize`). Always on the canvas: on an iPhone it ran better than the video
- *  track the viewer uses in Safari. */
+ *  device pixels (`resize`). Always on the canvas: on an iPhone it ran better than a video
+ *  track in Safari. */
 export function openSession(box: HTMLElement, monitor: number, events: SessionEvents): Session {
   const canvas = document.createElement("canvas");
   canvas.className = "absolute inset-0 block h-full w-full";
@@ -74,7 +73,7 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
   const onServerMessage = (msg: ToBrowser) => {
     switch (msg.t) {
       case "version":
-        // The server came back on a different build: reload onto it, as the viewer does
+        // The server came back on a different build: reload onto it
         if (buildId !== null && msg.build_id !== buildId) location.reload();
         buildId = msg.build_id;
         break;
@@ -108,7 +107,6 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
       canvas: offscreen,
       url: `${scheme}//${location.host}/api/viewer?monitor=${monitor}`,
       monitor,
-      track: false,
     },
     [offscreen],
   );

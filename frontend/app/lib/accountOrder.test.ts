@@ -1,4 +1,4 @@
-// The account order is per-provider, but the sidebar renders one list mixing both. These
+// The account order is per-provider, but the usage list renders one list mixing both. These
 // cases pin the two properties that make that work — new accounts don't get shuffled to the
 // front, and permuting one provider never disturbs where the other provider's rows sit.
 import { expect, test } from "bun:test";
@@ -36,7 +36,7 @@ test("an account missing from the saved order lands after the ordered ones, not 
 });
 
 test("reordering one provider leaves the other provider's rows in place", () => {
-  // Interleaved, as the sidebar receives them: claude, codex, claude, codex.
+  // Interleaved, as the usage list receives them: claude, codex, claude, codex.
   const rows = [
     acct("c1", "claude"),
     acct("x1", "codex"),

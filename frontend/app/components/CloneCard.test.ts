@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { formatCloneUsage } from "./SidebarClone";
+import { formatCloneUsage } from "./CloneCard";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 
 const GiB = 1024 ** 3;

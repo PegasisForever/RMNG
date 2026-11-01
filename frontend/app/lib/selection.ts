@@ -1,8 +1,8 @@
-// Which item the dashboard has open, kept in the page's address rather than in React state,
+// Which item the control panel has open, kept in the page's address rather than in React state,
 // so the browser's own Back button is what returns to the one before it.
 //
 // Two things can be open at once, so there are two parameters. Opening a ticket does not stop
-// the viewer following the clone underneath it, and picking a clone is how a ticket closes,
+// the screen following the clone underneath it, and picking a clone is how a ticket closes,
 // so neither can stand in for the other.
 //
 // Ids are written lowercase and compared lowercase. A clone id is a DNS label and already is

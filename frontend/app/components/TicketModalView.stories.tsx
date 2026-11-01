@@ -1,4 +1,4 @@
-import type { Decorator, Meta, StoryObj } from "@storybook/react-vite";
+import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import { useArgs } from "storybook/preview-api";
 import { fn } from "storybook/test";
@@ -47,13 +47,14 @@ const meta = {
     onClose: fn(),
     onCreate: slowCreate,
   },
-  /** The dialog positions itself over the page, so the story gives it a board-coloured one
-   *  to sit on rather than a white void. Both dropdowns are live in every story, and the
+  /** The dialog positions itself over the page, so the story gives it a clone's screen to
+   *  sit on rather than a white void. Both dropdowns are live in every story, and the
    *  Controls panel follows along, so a story is a starting point rather than a still. */
   render: function Render(args) {
     const [{ team, assigneeId }, updateArgs] = useArgs<TicketModalViewProps>();
     return (
-      <div className="h-screen bg-slate-50 dark:bg-slate-950">
+      <div className="relative h-screen w-screen overflow-hidden bg-black">
+        <FakeDesktop />
         <TicketModalView
           {...args}
           team={team}
@@ -134,7 +135,8 @@ export const Interactive: Story = {
     const forTeam = makeTeamPeople(team);
     const [assigneeId, setAssigneeId] = useState(defaultAssignee(forTeam));
     return (
-      <div className="h-screen bg-slate-50 dark:bg-slate-950">
+      <div className="relative h-screen w-screen overflow-hidden bg-black">
+        <FakeDesktop />
         <TicketModalView
           {...args}
           team={team}
@@ -154,16 +156,3 @@ export const Interactive: Story = {
     );
   },
 };
-
-/** Over /ng's clone screen, in its glass. */
-const overScreen: Decorator[] = [
-  (Story) => (
-    <div className="relative h-screen w-screen overflow-hidden bg-black">
-      <FakeDesktop />
-      <Story />
-    </div>
-  ),
-];
-
-/** In /ng's glass: flat fields on the glass, 10 px corners 16 px in from its 26 px ones. */
-export const Glass: Story = { args: { glass: true }, decorators: overScreen };

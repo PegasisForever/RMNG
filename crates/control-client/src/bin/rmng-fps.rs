@@ -1,5 +1,5 @@
 //! `rmng-fps`: frame-rate test tool for the browser viewer's WebSocket. It joins
-//! `ws://<host>/api/viewer?monitor=<n>&tab=<id>` like one browser viewer window, reads each
+//! `ws://<host>/api/viewer?monitor=<n>&tab=<id>` like one monitor window of the web app, reads each
 //! video message's header (`wire::browser::VideoHeader`) without decoding, and prints once a
 //! second how many frames, keyframes and megabits arrived, and the delay.
 //!
@@ -7,7 +7,7 @@
 //! cargo run -p control-client --bin rmng-fps -- <host>[:port] [monitor] [seconds]
 //! ```
 //!
-//! The port defaults to 9000 and the monitor to 0. It shows the selected clone, as a viewer
+//! The port defaults to 9000 and the monitor to 0. It shows the selected clone, as a monitor
 //! window does. With `seconds` it stops after that time and prints a summary line; without,
 //! stop it with Ctrl+C. When the server closes the socket, it connects again after 1 s, and
 //! counts it. Its `tab` id is random per process, the same on each reconnect, as a window's.
@@ -17,7 +17,7 @@
 //! kernel send buffer and in any proxy on the way. The video's own delay is in the server's
 //! log: `rmng-fps` acknowledges frames (`ack`), and the server logs the round trip and how far
 //! behind the window is. It does not decode, so it acknowledges a frame when it arrives; a
-//! viewer window acknowledges a frame when its decoder has output it.
+//! monitor window acknowledges a frame when its decoder has output it.
 
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,7 @@ const ECHO_EVERY: Duration = Duration::from_millis(200);
 /// did not (`ACK_MS` and `ACK_HEARTBEAT_MS` in `viewer/worker.ts`).
 const ACK_EVERY: Duration = Duration::from_millis(50);
 const ACK_HEARTBEAT: Duration = Duration::from_secs(1);
-/// The wait before it connects again. (A viewer window tries at once, then after 400 ms
+/// The wait before it connects again. (A monitor window tries at once, then after 400 ms
 /// doubling up to 1 s; the bench needs no reconnect to be fast.)
 const RECONNECT: Duration = Duration::from_secs(1);
 

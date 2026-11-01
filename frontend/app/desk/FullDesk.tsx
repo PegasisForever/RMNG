@@ -1,6 +1,6 @@
-// The /ng page, on any screen and in any orientation: one monitor of this browser's layout
+// The app's page, on any screen and in any orientation: one monitor of this browser's layout
 // (`~/lib/clientLayout.ts`; `?monitor=`, 0 when absent) fills the window. On a desktop each
-// monitor has an /ng window of its own; a phone has one monitor, this page.
+// monitor has a window of its own; a phone has one monitor, this page.
 //
 // It has two modes, chosen by the input used last (`./inputMode.ts`):
 //
@@ -21,7 +21,7 @@
 //   buttons' row, it moves just enough to keep the cursor in sight. With the keyboard docked,
 //   it is always shown at the bottom, the clone's screen fits in the area above it, and that
 //   area is a touch screen: each finger goes to the clone as a touch.
-// - Mouse and keyboard: the mouse, the keys and the clipboard go to the clone as in the viewer
+// - Mouse and keyboard: the mouse, the keys and the clipboard go to the clone
 //   (`~/viewer/input.ts`). The same buttons, less the keyboard's, and on a large screen (the
 //   control panel's wide layout) the side panels under them (the clone's notes and its
 //   assistant), are one group at the right: it shows when the mode starts, then slides out of
@@ -30,12 +30,12 @@
 //   chord (`./shortcut.ts`) shows the control panel, with the buttons above it, and hides it again;
 //   so does a click beside them, and Escape when no dialog or menu is open.
 //
-// Where the browser can open windows, the control panel can move to a window of its own (`?control panel`);
+// Where the browser can open windows, the control panel can move to a window of its own (`?control-panel`);
 // while the page is fullscreen, on another screen where there is one (`./otherScreen.ts`), as
 // one on this screen takes the page out of its fullscreen. A button opens the windows of the
 // layout's other monitors while any is not open.
 //
-// It runs in the frame of the /ng shell (`public/shell.html`) where the browser has
+// It runs in the frame of the shell (`public/shell.html`) where the browser has
 // fullscreen: the fullscreen, the key lock, the window's name and address are the shell's
 // (`~/lib/host.ts`), so a reload onto a new build keeps them.
 //
@@ -53,8 +53,8 @@ import { LayoutEditorContainer } from "~/components/LayoutEditorContainer";
 import { type BrowserLayout, clientKind, ensureLayout, readLayout, saveLayout } from "~/lib/clientLayout";
 import { resize } from "~/lib/monitorLayout";
 import { hostWindow } from "~/lib/host";
-import { useOpenMonitors, useViewerChannel } from "~/lib/useViewerChannel";
-import { openViewerWindows } from "~/viewer/open";
+import { useMonitorChannel, useOpenMonitors } from "~/lib/useMonitorChannel";
+import { monitorWindowName, openMonitorWindows } from "~/viewer/open";
 import { toggleFullscreen } from "~/viewer/input";
 import { uploadToClone } from "~/viewer/upload";
 
@@ -99,9 +99,9 @@ const GROUP_MARGIN_PX = 48;
  *  this far left brings the side panels in. */
 const SWIPE_EDGE_PX = 24;
 const SWIPE_PX = 40;
-/** The control panel's own window: its name, and its size when it opens. */
 /** How long the note of a finished upload stays (one that failed: twice this). */
 const UPLOAD_NOTE_MS = 5000;
+/** The control panel's own window: its name, and its size when it opens. */
 const CONTROL_PANEL_WINDOW = "rmng-control-panel";
 const CONTROL_PANEL_WINDOW_W = 560;
 const CONTROL_PANEL_WINDOW_H = 900;
@@ -208,7 +208,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   const mouseInput = mouse && !controlPanel && !layoutOpen && !(peek && overGroup);
   const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, onChord: toggleControlPanel });
 
-  // The chord while the clone does not get the keys (the viewer's input takes it otherwise)
+  // The chord while the clone does not get the keys (`~/viewer/input.ts` takes it otherwise)
   const chordRef = useRef(toggleControlPanel);
   chordRef.current = toggleControlPanel;
   const mouseInputRef = useRef(mouseInput);
@@ -256,8 +256,8 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Files dropped on the clone's screen go to the selected clone's home, one after another, as
-  // in the viewer. A drop on the control panel, the right group or a dialog is theirs.
+  // Files dropped on the clone's screen go to the selected clone's home, one after another
+  // (`~/viewer/upload.ts`). A drop on the control panel, the right group or a dialog is theirs.
   const [upload, setUpload] = useState<string | null>(null);
   useEffect(() => {
     let clear: ReturnType<typeof setTimeout> | undefined;
@@ -381,7 +381,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
 
   // The Edit layout dialog finds this window by its name and its number
   useEffect(() => {
-    if (windows) hostWindow().name = `rmng-viewer-${monitor}`;
+    if (windows) hostWindow().name = monitorWindowName(monitor);
     // Several windows: each says its monitor in its title
     hostWindow().document.title = windows && monitor > 0 ? `RMNG monitor ${monitor}` : "RMNG";
   }, [windows, monitor]);
@@ -395,13 +395,12 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
       : [];
   const openMissing = () => {
     // One window a click where the browser blocks the rest: the button stays for them
-    void openViewerWindows(
+    void openMonitorWindows(
       missing.map((id) => ({ id })),
-      "/",
       false,
     ).then(() => setTimeout(openMonitors.look, 1500));
   };
-  const identify = useViewerChannel(
+  const identify = useMonitorChannel(
     monitor,
     // The size Fit would give, at the pixel scale, so a match gives just that
     () => ({ width: target.width * scale, height: target.height * scale }),
@@ -666,10 +665,8 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
       dialog={
         layoutOpen ? (
           <LayoutEditorContainer
-            page="/"
             windows={windows}
             here={monitor}
-            glass
             onApplied={(l) => {
               setLayout(l);
               r.claim();

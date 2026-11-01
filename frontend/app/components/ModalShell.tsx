@@ -26,7 +26,7 @@ import { useModalExit } from "~/lib/useModalExit";
  *  - `sm` a short form (the account and sign-in dialogs)
  *  - `md` a wider short form (port forwards)
  *  - `lg` a form tall enough to need a scrolling middle, which it pins itself
- *  - `panel` the two-pane fixed-height overlay (the clone dialog, Settings) */
+ *  - `panel` the two-pane fixed-height overlay (the clone dialog) */
 export type ModalSize = "sm" | "md" | "lg" | "panel";
 
 /** Which z rung the dialog sits on. `over` is for a dialog opened from another one — the
@@ -72,9 +72,9 @@ const PANEL: Record<ModalSize, string> = {
 const PANEL_CHROME =
   "rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800";
 
-/** The same in `/ng`'s glass (`~/desk/GLASS.md`), and its backdrop: darker, with no blur (the
- *  panel blurs what is under it). Its corners are 26 px and its padding 16 px, so a button in a
- *  corner (10 px, `/ng`'s piece radius) is concentric with it (GLASS.md, Shape). */
+/** The same in glass (`~/desk/GLASS.md`), and its backdrop: darker, with no blur (the panel
+ *  blurs what is under it). Its corners are 26 px and its padding 16 px, so a button in a corner
+ *  (10 px, the piece radius) is concentric with it (GLASS.md, Shape). */
 const GLASS_CHROME = "glass glass-thick rounded-[26px]";
 
 /** `PANEL` with the glass padding (16 px in place of 20). */
@@ -86,9 +86,9 @@ const GLASS_PANEL: Record<ModalSize, string> = {
 };
 
 /** Where a dialog goes. `window`: over the whole page, on a dimmed backdrop. `inline`: it
- *  fills the nearest positioned box instead, with no backdrop and no frame. The phone app
- *  (`/ng`) shows its control panel in the space of its keyboard, and a dialog opened from one of its tabs
- *  takes that same space, so the clone's screen above stays in view. */
+ *  fills the nearest positioned box instead, with no backdrop and no frame. The narrow control
+ *  panel shows in the space of the keyboard, and a dialog opened from one of its tabs takes that
+ *  same space, so the clone's screen above stays in view. */
 export type ModalPlacement = "window" | "inline";
 
 const PlacementContext = createContext<ModalPlacement>("window");
@@ -104,7 +104,7 @@ const INLINE_PANEL: Record<ModalSize, string> = {
 };
 
 /** The inline frame: the box's whole space, on a solid ground of the page's look (it hides the
- *  page under it; on the /ng control panel's glass, glass would show the page through). */
+ *  page under it; on the control panel's glass, glass would show the page through). */
 export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boolean) {
   return {
     backdrop: `absolute inset-0 ${LAYER[layer]} flex flex-col rounded-[10px] bg-neutral-100 dark:bg-neutral-900 ${
@@ -114,9 +114,8 @@ export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boole
   };
 }
 
-/** The window dialog's space round it: 1rem, plus /ng's unsafe edges (`--safe-*`, set by
- *  `routes/ng.tsx`; none elsewhere), so a dialog there keeps clear of the clock bar, the home bar
- *  and a cut-out. */
+/** The window dialog's space round it: 1rem, plus the unsafe edges (`--safe-*`, set by
+ *  `routes/app.tsx`), so a dialog keeps clear of the clock bar, the home bar and a cut-out. */
 const AROUND =
   "pt-[calc(1rem+var(--safe-top,0px))] pr-[calc(1rem+var(--safe-right,0px))] " +
   "pb-[calc(1rem+var(--safe-bottom,0px))] pl-[calc(1rem+var(--safe-left,0px))]";
@@ -153,7 +152,7 @@ export interface ModalShellProps {
   dismissible?: boolean;
   size?: ModalSize;
   layer?: ModalLayer;
-  /** In `/ng`'s glass (`~/desk/GLASS.md`), over the clone's screen; else the dashboard's panel. */
+  /** In glass (`~/desk/GLASS.md`), over the clone's screen; else a plain white panel. */
   glass?: boolean;
   /** The dialog's own markup, given the shell's door out. */
   children: (close: ModalClose) => ReactNode;
@@ -213,7 +212,7 @@ export function ModalShell({
     </div>
   );
   // Over the whole page, on the body: opened from inside a box that is a layer of its own (the
-  // /ng control panel, which also moves), it would be drawn in that layer, under whatever is
-  // over the box (/ng's side panels), and its `fixed` would be the box's
+  // control panel, which also moves), it would be drawn in that layer, under whatever is over
+  // the box (the side panels), and its `fixed` would be the box's
   return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
 }

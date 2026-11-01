@@ -1,4 +1,4 @@
-// Sizes on the /ng screen: the keyboard (at the bottom, over the clone's screen or under it) and
+// Sizes on the screen: the keyboard (at the bottom, over the clone's screen or under it) and
 // the clone's screen, letterboxed when its area is not the monitor's shape.
 import { ROWS, ROW_UNITS } from "./keyboard";
 

@@ -1,7 +1,7 @@
 import type { Preview } from "@storybook/react-vite";
 
 // The app's global stylesheet — pulls in Tailwind + the base font/colors so stories
-// render with the same look as the real dashboard.
+// render with the same look as the real app.
 import "../app/app.css";
 
 const preview: Preview = {

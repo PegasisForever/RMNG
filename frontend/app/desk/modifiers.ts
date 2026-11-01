@@ -1,4 +1,4 @@
-// The /ng modifier keys (Shift, Ctrl, Alt, Win), on the page's side:
+// The on-screen keyboard's modifier keys (Shift, Ctrl, Alt, Win), on the page's side:
 //
 // - Tapped, a modifier goes down for the next key: Ctrl, then C, is Ctrl+C, and Ctrl goes up
 //   after the C (also after a mouse click). Tapped again before that, it goes up.

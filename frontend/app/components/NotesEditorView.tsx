@@ -3,8 +3,8 @@
 // the injected `uploadFile`. NotesEditorContainer supplies the /api/notes and /api/upload
 // implementations; a story supplies fixtures and a no-op.
 //
-// BlockNote/ProseMirror touch the DOM, so this module is browser-only. Import it lazily
-// behind a mount gate (see _index.tsx) and never during SSR.
+// BlockNote/ProseMirror touch the DOM, so this module is browser-only. Import it lazily and
+// never during SSR.
 import "@blocknote/core/fonts/inter.css";
 import "@blocknote/mantine/style.css";
 

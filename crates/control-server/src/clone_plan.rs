@@ -216,7 +216,7 @@ fn preset_pool(p: &Preset) -> Option<String> {
 /// The clone a fork copies: the one asked for, else the preset's default fork clone where a
 /// managed clone still carries that id (live or archived — an archived home is quiescent,
 /// which makes it the most stable template), else the newest live clone (clones are
-/// prepended as they are made, so the first live row is the newest). The dashboard and the
+/// prepended as they are made, so the first live row is the newest). The web app and the
 /// CLI make the same pick themselves and send it as `source`.
 fn fork_source(
     st: &ControlState,

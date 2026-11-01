@@ -25,7 +25,7 @@ export function MonitorNumber({ monitor }: { monitor: number | null }) {
       className={`glass glass-thick pointer-events-none fixed z-[80] flex size-36 flex-col items-center justify-center rounded-2xl ${
         monitor !== null ? MODAL_ANIMATION.panel.enter : MODAL_ANIMATION.panel.exit
       }`}
-      // /ng's insets where it set them (in its frame `env()` is 0), else the page's own
+      // The app's insets where it set them (in a frame `env()` is 0), else the page's own
       style={{
         top: "calc(var(--safe-top, env(safe-area-inset-top)) + 8px)",
         left: "calc(var(--safe-left, env(safe-area-inset-left)) + 8px)",

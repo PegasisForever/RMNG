@@ -14,11 +14,11 @@ You need to **see and steer** each agent. A coding agent designing a web app or 
 
 You need to **pack** a lot of agents onto one machine. RMNG's custom GPU accelerated remote desktop stack with a patched GNOME encodes only the clone you are watching, and lets you fit far more of them on the same hardware.
 
-You need to **efficiently multi-task** with the fleet. RMNG watchs every desktop for you, and flags the exact clone that needs you your attention. An `rmng` CLI and a web dashboard drive the whole fleet, and automated Claude/Codex account rotation keeps agents working instead of stalling on limits.
+You need to **efficiently multi-task** with the fleet. RMNG watchs every desktop for you, and flags the exact clone that needs you your attention. An `rmng` CLI and a web app drive the whole fleet, and automated Claude/Codex account rotation keeps agents working instead of stalling on limits.
 
 ## How does it solve it?
 
-A remote-desktop stack written from scratch is the core of RMNG. It collects frames from every clone, encodes the selected clone's frames, and sends them to a browser viewer with multi-monitor support. The pipeline is zero-copy, GPU-accelerated H.264, and hits 60fps on LAN. See the [Features](#features) section for the full list.
+A remote-desktop stack written from scratch is the core of RMNG. It collects frames from every clone, encodes the selected clone's frames, and sends them to a web app in the browser with multi-monitor support. The pipeline is zero-copy, GPU-accelerated H.264, and hits 60fps on LAN. See the [Features](#features) section for the full list.
 
 ## How does it compare?
 
@@ -43,22 +43,23 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 **Remote Desktop**
 
 - Zero-copy hardware H.264 pipeline (VA-API encode on the server)
-- Browser viewer in Chrome or Safari: H.264 over a WebSocket, decoded with WebCodecs
-- One browser window per monitor. You move and size each window yourself. Each window has a Fullscreen button at the top left; it is hidden in fullscreen. Its fullscreen hides the browser's address bar (macOS fullscreen does not). Keys in a viewer window: F11 fullscreen, Ctrl+Alt+G lock the pointer, Ctrl+Alt+P release it. On a Mac, Cmd acts as Ctrl in the clone and Ctrl acts as Super, as in the old native viewer.
+- Web app in Chrome or Safari: H.264 over a WebSocket, decoded with WebCodecs
+- One browser window per monitor (`/?monitor=N`). You move and size each window yourself. Each window has a Fullscreen button at the top right (with a mouse, move to the window's right edge to show the buttons). Its fullscreen hides the browser's address bar (macOS fullscreen does not). Keys in a monitor's window: F11 fullscreen, Ctrl+Alt+G lock the pointer, Ctrl+Alt+P release it, Super+Space (Option+Space on a Mac) show or hide the control panel. On a Mac, Cmd acts as Ctrl in the clone and Ctrl acts as Super.
+- Phones and tablets: the same app, with an on-screen keyboard and a trackpad (Add to Home Screen installs it)
 - 60fps on local network
 - Multi-monitor
 - Sound of the selected clone, in the monitor 0 window (Opus, about 70–110 ms behind the clone on the LAN), from the first click or key in that window
 - Instant swap between clones
 - Absolute and relative pointer
 - Rich clipboard bridge, remote↔remote and local↔remote
-- Drop a file on a viewer window to upload it to the clone's home folder
+- Drop a file on a clone's screen to upload it to the clone's home folder
 - Terminal view for clones with no desktop
-- Port forwarding: the dashboard gives an `ssh` command that forwards a local port to a clone port through the bastion
+- Port forwarding: the control panel gives an `ssh` command that forwards a local port to a clone port through the bastion
 
 **Fleet Management**
 
 - One control-server Docker container is the web/API/media entrypoint
-- Web dashboard with per-clone notes
+- Web app with a control panel (clones, tickets, account usage, notes, settings) and per-clone notes
 - Docker + lxcfs clone isolation
 - Full GNOME in each clone
 - Central SMB share for clone file systems
@@ -118,8 +119,8 @@ docker run -d --name rmng --privileged --init --pid host --restart unless-stoppe
   -p 9000:9000 -p 445:445 -p 2222:2222 pegasis0/rmng
 ```
 
-Ports: `9000` web UI/API and the browser viewer · `445` SMB, serving both the clone-home share and the shared folder (host `445` must be free) · `2222` SSH bastion (jump into clones). The clone-local desktop MCP remains on internal port `9004`.
+Ports: `9000` web app/API and its video WebSocket · `445` SMB, serving both the clone-home share and the shared folder (host `445` must be free) · `2222` SSH bastion (jump into clones). The clone-local desktop MCP remains on internal port `9004`.
 
 Open `http://<host>:9000`. The **first-run setup wizard** walks through the environment checklist, server settings, and setup completion. There is no template download step: a clone's system image is built from its preset's Dockerfile, lazily, the first time a create needs it. Full flow, image build, template publishing, upgrades, and the dev loop: [docs/DEPLOY.md](docs/DEPLOY.md). Running the Docker host on a Proxmox LXC CT: [docs/PROXMOX-LXC.md](docs/PROXMOX-LXC.md).
 
-**The viewer needs HTTPS.** Browsers allow WebCodecs, the async clipboard and Keyboard Lock only on a secure page (HTTPS or `localhost`). `http://<tailscale-ip>:9000` is not enough. Open the dashboard itself over HTTPS, because the viewer windows use the dashboard's address. With Tailscale: on the machine that publishes port 9000, run `tailscale serve --bg 9000` (the tailnet must have HTTPS certificates enabled), then open `https://<machine>.<tailnet>.ts.net/`. If Tailscale runs on a different machine, run `tailscale serve --bg http://<ip>:9000` there. Use the `ts.net` name, not an IP: the certificate is for the name, so `https://<ip>/` fails. Without HTTPS the dashboard works, and the viewer window shows a warning instead of video.
+**The web app needs HTTPS.** Browsers allow WebCodecs, the async clipboard and Keyboard Lock only on a secure page (HTTPS or `localhost`). `http://<tailscale-ip>:9000` is not enough. Open the app itself over HTTPS. With Tailscale: on the machine that publishes port 9000, run `tailscale serve --bg 9000` (the tailnet must have HTTPS certificates enabled), then open `https://<machine>.<tailnet>.ts.net/`. If Tailscale runs on a different machine, run `tailscale serve --bg http://<ip>:9000` there. Use the `ts.net` name, not an IP: the certificate is for the name, so `https://<ip>/` fails. Without HTTPS the app shows a warning in place of the clone's screen (the first-run setup wizard still works).

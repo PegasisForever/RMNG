@@ -1,12 +1,12 @@
-// The selected clone's sound in the viewer window: the AudioContext and its worklet
+// The selected clone's sound in the page: the AudioContext and its worklet
 // (`./sound-worklet.ts`). The worker decodes the packets and sends the samples to the worklet
 // on a port of their own; this page thread only starts the sound.
 //
-// Chrome starts an AudioContext only after a click or a key in the page. A viewer window opens
+// Chrome starts an AudioContext only after a click or a key in the page. A monitor window opens
 // with none, so the sound starts at the first click or key. The window asks the server for the
 // sound only while the context runs, so a window nobody clicked yet gets no packets.
 //
-// iOS (the /ng phone app) is stricter, as selkies found: there a touch counts only as it ends,
+// iOS (the phone) is stricter, as selkies found: there a touch counts only as it ends,
 // so the lift and the click resume the context too, and iOS stops a running context
 // ("interrupted") when the app goes to the background, so every gesture tries again. The
 // page's audio session is "playback", as a video app's: the ring/silent switch does not mute
@@ -24,19 +24,19 @@ const GESTURES = ["pointerdown", "pointerup", "touchend", "click", "keydown"] as
 type WithAudioSession = Navigator & { audioSession?: { type: string } };
 
 export interface SoundOptions {
-  /** The AudioContext's latency hint: "interactive" (the default) keeps the delay short;
-   *  "playback" gives the phone's audio thread a longer output buffer, so it misses fewer
-   *  deadlines while the same phone decodes the video. */
-  latencyHint?: AudioContextLatencyCategory;
+  /** The AudioContext's latency hint: "interactive" keeps the delay short; "playback" gives the
+   *  phone's audio thread a longer output buffer, so it misses fewer deadlines while the same
+   *  phone decodes the video. */
+  latencyHint: AudioContextLatencyCategory;
   /** The jitter buffer's range (`./sound-buffer.ts`). */
-  limits?: BufferLimits;
+  limits: BufferLimits;
   /** The worklet's report, once a second. */
-  onReport?: (r: SoundReport) => void;
+  onReport: (r: SoundReport) => void;
 }
 
 export function attachSound(
   post: (m: WorkerIn, transfer?: Transferable[]) => void,
-  opts: SoundOptions = {},
+  opts: SoundOptions,
 ): {
   detach(): void;
 } {
@@ -46,7 +46,7 @@ export function attachSound(
   } catch {
     // the browser refused the type
   }
-  const ctx = new AudioContext({ sampleRate: 48000, latencyHint: opts.latencyHint ?? "interactive" });
+  const ctx = new AudioContext({ sampleRate: 48000, latencyHint: opts.latencyHint });
   /** The worker has its port to the worklet. */
   let ready = false;
   /** What the worker was last told: whether packets flow. */
@@ -77,7 +77,7 @@ export function attachSound(
     // For a look from the console or a test: `rmngSound` is the buffer's last report.
     node.port.onmessage = (e: MessageEvent<SoundStats>) => {
       (globalThis as { rmngSound?: SoundStats }).rmngSound = e.data;
-      opts.onReport?.({
+      opts.onReport({
         ...e.data,
         sampleRate: ctx.sampleRate,
         baseLatency: ctx.baseLatency ?? 0,

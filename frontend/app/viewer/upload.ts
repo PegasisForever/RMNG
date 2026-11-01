@@ -1,4 +1,4 @@
-// A file dropped on a clone's screen (the viewer, `/ng`) goes to the selected clone's home.
+// A file dropped on a clone's screen goes to the selected clone's home.
 
 /** Upload one dropped file into the selected clone's home; resolves to the name it got there. */
 export function uploadToClone(file: File, onProgress: (fraction: number) => void): Promise<string> {

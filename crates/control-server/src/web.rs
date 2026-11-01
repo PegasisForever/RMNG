@@ -56,9 +56,9 @@ pub fn router(app: App) -> Router {
         .route("/api/state", get(state_get))
         .route("/api/stats", get(stats_get))
         .route("/api/activate", post(activate))
-        // The browser viewer: one WebSocket per viewer window (see `crate::webviewer`).
+        // The browser viewer: one WebSocket per monitor window of the web app (see `crate::webviewer`).
         .route("/api/viewer", get(viewer_ws))
-        // A file dropped on a viewer window, into the selected clone's home. Streamed, so the
+        // A file dropped on a clone's screen in the web app, into the selected clone's home. Streamed, so the
         // 64MB cap below does not apply.
         .route(
             "/api/viewer/upload",
@@ -372,7 +372,7 @@ async fn stats_get(State(app): State<App>) -> Response {
 #[derive(Deserialize)]
 struct ViewerQuery {
     monitor: u32,
-    /// The viewer page's random id, the same on each reconnect of that window.
+    /// The window's random id, the same on each reconnect of that window.
     tab: Option<String>,
 }
 
@@ -401,7 +401,7 @@ async fn activate(State(app): State<App>, Json(req): Json<ActivateReq>) -> Json<
     // stream to show and nothing to deliver its input to, and the selection would leave the
     // viewer holding a still frame that looks live.
     //
-    // The dashboard can still open an archived clone's chat and notes: that focus is the
+    // The web app can still open an archived clone's chat and notes: that focus is the
     // browser's own, alongside an open ticket, and it never reaches this endpoint. So the
     // request keeps the selection where it was rather than failing, because the click that
     // produced it is a navigation, not a command.

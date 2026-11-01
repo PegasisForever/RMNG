@@ -1,8 +1,8 @@
-// The /ng control panel where it is wide (the control panel over a large screen, or its own window): the
-// dashboard's layout in place of the tabs. A row of columns that scrolls sideways: the rail (the
-// server's numbers, Settings, the accounts' usage), the tickets', then the clones'. On the right,
-// floating over the row, the side panels: the selected clone's notes over its assistant (the one
-// touched last is the taller, as on the dashboard), or the open ticket in one panel. The row
+// The control panel where it is wide (over a large screen, or in its own window): columns in
+// place of the tabs. A row of columns that scrolls sideways: the rail (the server's numbers,
+// Settings, the accounts' usage), the tickets', then the clones'. On the right, floating over
+// the row, the side panels: the selected clone's notes over its assistant (the one touched last
+// is the taller), or the open ticket in one panel. The row
 // scrolls under them, and its end has room to bring the last column out from under them.
 // Settings takes the place of the row and the side panels, beside the rail.
 //
@@ -36,11 +36,11 @@ import { ServerStats } from "./UsageView";
 /** At least this wide (CSS px), the control panel takes this layout. */
 export const WIDE_MIN = 1000;
 
-/** A side panel: glass over the columns, with the usual thick tint (not the columns' denser one),
- *  so the columns under it show through. */
 /** A button in the rail's header. */
 const RAIL_BUTTON = `border-black/10 bg-white/50 hover:bg-white/80 dark:border-white/10 dark:bg-white/[0.06] dark:hover:bg-white/10 ${TEXT_2}`;
 
+/** A side panel: glass over the columns, with the usual thick tint (not the columns' denser one),
+ *  so the columns under it show through. */
 const PANEL = `glass glass-thick rounded-2xl pointer-events-auto flex min-h-0 flex-col overflow-hidden`;
 
 export function WideLayout({
@@ -194,19 +194,17 @@ export function WideLayout({
 type SideProps = {
   /** An open ticket: it takes the whole side. */
   ticket?: ReactNode;
-  /** The clone's notes card; null when no clone is selected (then no side panels, as on the
-   *  dashboard). */
+  /** The clone's notes card; null when no clone is selected (then no side panels). */
   notes: ReactNode | null;
   chat: ReactNode;
-  /** The side's width, a part (%) of the layout's, as the dashboard's (`~/lib/sidePanelWidth`). */
+  /** The side's width, a part (%) of the layout's (`~/lib/sidePanelWidth`). */
   widthPct: number;
 };
 
 /** The side panels' width, CSS px: `pct` of the layout's `width`, no less than 20rem. */
 export const sideWidthPx = (width: number, pct: number) => Math.round(Math.max((width * pct) / 100, 320));
 
-/** The side panels, the full height of their box, as the dashboard's (`~/components/AppShellV2.tsx`):
- *  the open ticket, or the clone's notes over its assistant. The one touched or focused last
+/** The side panels, the full height of their box: the open ticket, or the clone's notes over its assistant. The one touched or focused last
  *  takes three quarters of the height, with an ease that goes past and comes back. A band on
  *  their left edge sets their width: a drag, the arrow keys, a double click back to the start.
  *  Each panel is glass of its own, with its blur and its shadow. */

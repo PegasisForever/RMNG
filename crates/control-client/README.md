@@ -31,7 +31,7 @@ the binary lives in [`crates/cli`](../cli/README.md).
 ## `rmng-fps`
 
 `src/bin/rmng-fps.rs` is the frame-rate test tool for the browser viewer. It joins
-`ws://<host>/api/viewer?monitor=<n>` like one viewer window, reads each video message's header
+`ws://<host>/api/viewer?monitor=<n>` like one monitor window of the web app, reads each video message's header
 without decoding, and prints frames, keyframes and megabits per second. It shows the selected
 clone. It uses `tokio-tungstenite`.
 

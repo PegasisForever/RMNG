@@ -53,7 +53,7 @@ export interface CloneDraft {
  plainPreset: string;
  /** Template tab: the hand-picked preset whose Dockerfile builds the image. */
  templatePreset: string;
- /** Headless clone: no desktop, so the viewer shows a tmux tab view. */
+ /** Headless clone: no desktop, so the screen shows its tmux sessions as terminal tabs. */
  headless: boolean;
  /** Force a fresh image build with a fresh base pull. Off unless checked. */
  rebuild: boolean;

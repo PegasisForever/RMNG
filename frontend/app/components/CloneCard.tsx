@@ -22,6 +22,7 @@ import {
   OverflowMenu,
   useMenuClose,
 } from "~/components/OverflowMenu";
+import { CARD_FILL_ON_GLASS, FIELD } from "~/desk/control/ui";
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
@@ -204,7 +205,7 @@ function AccountTag({
   );
 }
 
-export interface SidebarCloneProps {
+export interface CloneCardProps {
   clone: Clone;
   /** This clone's Linear ticket as Linear has it now. Absent ⇒ the card draws the title and
    *  link the clone stored when it was made, which is what a ticket Linear will not answer for
@@ -223,8 +224,8 @@ export interface SidebarCloneProps {
    *  post-add `wait-swap` step), if any. */
   op?: Operation;
   onSelect: () => void;
-  /** A double click on the card (not on a button in it): select it and go to it (/ng: close
-   *  the control panel). Absent: a double click is two selects. */
+  /** A double click on the card (not on a button in it): select it and go to it (close the
+   *  control panel). Absent: a double click is two selects. */
   onOpen?: () => void;
   onDelete: () => void;
   /** Change this clone's account-group binding. */
@@ -256,12 +257,10 @@ export interface SidebarCloneProps {
   /** Give the clone a display name of the operator's own (its hostname stays); empty takes it
    *  away. Absent ⇒ no Rename item. */
   onRename?: (name: string) => void;
-  /** The title is a field for a new name, held by the caller (a Rename from elsewhere, as the
-   *  phone's sheet); absent ⇒ the card holds it, and only its menu opens it. */
-  renaming?: boolean;
-  onRenamingChange?: (renaming: boolean) => void;
-  /** The rename field's classes, where the card is not on the dashboard's white (/ng's glass). */
-  renameField?: string;
+  /** The title is a field for a new name. The caller holds it, so a Rename from elsewhere (a
+   *  finger's sheet) opens it as the card's own menu does. */
+  renaming: boolean;
+  onRenamingChange: (renaming: boolean) => void;
   /** The `-J` jump target for the copied command, already resolved: this page's own
    *  address (no override exists anymore). The container reads the page's address, so a
    *  card never has to. */
@@ -276,17 +275,10 @@ export interface SidebarCloneProps {
   expanded?: boolean;
   /** Toggle this clone's sub-clone expansion. */
   onToggleExpand?: () => void;
-  /** dnd-kit pointer activator from the enclosing board card. Present only on a draggable
-   *  top-level row; spread onto the card so grabbing it drags the whole group (parent + its
-   *  expanded sub clones). Absent ⇒ the row is static (children, archived rows, Storybook).
-   *  Carries no keyboard activator: a card drags with the pointer only (see `BoardCard`). */
+  /** dnd-kit pointer activator from the enclosing card. Present only on a draggable top-level
+   *  row; spread onto the card so grabbing it drags the whole group (parent + its expanded sub
+   *  clones). Absent ⇒ the row is static (children, archived rows, Storybook). */
   dragListeners?: DraggableSyntheticListeners;
-  /** The row's own fill, at rest (with its hover) and selected, in place of the dashboard's
-   *  solid white and green: the /ng control panel draws the card on glass. */
-  fill?: { idle: string; selected: string };
-  /** A finger can scroll the column over the card (the drag waits for a long press), so the
-   *  card does not take every touch for itself (`touch-none`). */
-  touchScroll?: boolean;
   /** A tap with a finger on the ⋮ calls this in place of the dropdown (`OverflowMenu`). */
   onMenuTouch?: () => void;
 }
@@ -491,7 +483,7 @@ function CloneMenu({
   );
 }
 
-export function SidebarClone({
+export function CloneCard({
   clone,
   ticket,
   stats,
@@ -512,30 +504,23 @@ export function SidebarClone({
   mutedByParent = false,
   onToggleMute,
   onRename,
-  renaming: renamingProp,
+  renaming,
   onRenamingChange,
-  renameField,
   sshPublicHost,
   isChild = false,
   childCount = 0,
   expanded = false,
   onToggleExpand,
   dragListeners,
-  fill,
-  touchScroll = false,
   onMenuTouch,
-}: SidebarCloneProps) {
+}: CloneCardProps) {
   const busy = op?.status === "running";
   // Linear's own title and link when the browser resolved the ticket, and what the clone
   // stored at creation when it did not. Both are read in two places each, so they are named
   // once here rather than repeating the fallback down the card.
   const title = cloneTitle(clone, ticket);
-  /** The title is a field for a new name (the menu's Rename…). */
-  const [renamingOwn, setRenamingOwn] = useState(false);
-  const renaming = renamingProp ?? renamingOwn;
-  const setRenaming = (on: boolean) => (onRenamingChange ? onRenamingChange(on) : setRenamingOwn(on));
   const rename = (name: string | null) => {
-    setRenaming(false);
+    onRenamingChange(false);
     if (name === null || !onRename) return;
     const next = name.trim();
     // Unchanged, it stays as it is: not made the operator's own name by an Enter
@@ -593,14 +578,15 @@ export function SidebarClone({
   };
   // Managed clones always show the binding line: an unassigned account is itself worth seeing.
   const showBindingLine = managed || !!cpuMetric;
-  // Drag is owned by the enclosing `BoardCard`. A row is draggable only when it received drag
+  // Drag is owned by the enclosing card. A row is draggable only when it received drag
   // listeners (top-level active rows). Children/archived rows get none and stay static.
   const draggable = !!dragListeners;
 
   return (
-    // The whole card is both the drag source (no handle) and the select target — a
-    // plain click selects (the sensor's 5px activation distance keeps clicks and drags
-    // apart); a drag reorders. The ⋯ menu and the expand control stop propagation.
+    // The whole card is both the drag source (no handle) and the select target — a plain
+    // click selects (the mouse sensor's 5px activation distance keeps clicks and drags apart,
+    // and a finger drags only after a long press, so a swipe still scrolls the column); a drag
+    // reorders. The ⋯ menu and the expand control stop propagation.
     <div
       {...dragListeners}
       aria-pressed={selected}
@@ -609,25 +595,16 @@ export function SidebarClone({
         if (!(e.target as Element).closest("button, input")) onOpen?.();
       }}
       title={clone.id}
-      className={`group flex ${touchScroll ? "" : "touch-none"} items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
+      className={`group flex items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
         // Sub clone rows are indented under their parent; top-level rows keep the normal gutter.
         isChild ? "pl-6" : "pl-1.5"
       } ${draggable ? "cursor-grab active:cursor-grabbing" : "cursor-pointer"} ${
         // The only border is the left accent for the selected row. A row carries no bottom
         // divider: one card holds one row, so a divider there would just double the card's
         // own outline and read as a heavier bottom edge.
-        //
-        // The default fill is solid white rather than transparent, so a card dragged over
-        // this row hides it completely, and white is what leaves the selected tint and the
-        // hover as the only colour in a column.
         selected
-          ? `border-l-emerald-400 ${fill?.selected ?? "bg-emerald-50 dark:bg-emerald-950"}`
-          : (fill?.idle ?? "bg-white hover:bg-slate-50 dark:bg-slate-900 dark:hover:bg-slate-800")
-      } ${
-        // In the air, the frame's glass is the card's surface, so the row gives up its own
-        // fill, including the selected tint, which is opaque and would seal the card shut.
-        // Hover goes with it: a card following the pointer is under it the whole time.
-        "group-data-[lifted]/card:bg-transparent group-data-[lifted]/card:hover:bg-transparent"
+          ? `border-l-emerald-400 ${CARD_FILL_ON_GLASS.selected}`
+          : CARD_FILL_ON_GLASS.idle
       }`}
     >
       <div className="min-w-0 flex-1">
@@ -651,7 +628,7 @@ export function SidebarClone({
             </div>
           ) : showBindingLine ? (
             // Both rows always render for a managed clone, placeholder text included, so card
-            // height is identical across the list and the sidebar doesn't jump as clones change
+            // height is identical across the list and the column doesn't jump as clones change
             // state. `min-w-0` on the column is what lets the tags inside actually truncate.
             <div className="flex min-w-0 flex-1 flex-col gap-0.5 text-[10px]">
               {/* Each row: account … tokens … CPU-or-MEM. The token figures are a whole-clone
@@ -709,7 +686,7 @@ export function SidebarClone({
             muted={muted}
             mutedByParent={mutedByParent}
             onToggleMute={onToggleMute}
-            onRename={onRename ? () => setRenaming(true) : undefined}
+            onRename={onRename ? () => onRenamingChange(true) : undefined}
             onTouch={onMenuTouch}
           />
         </div>
@@ -724,10 +701,7 @@ export function SidebarClone({
           <RenameField
             initial={title}
             onDone={rename}
-            className={
-              renameField ??
-              "mt-1.5 w-full rounded border border-slate-300 bg-white px-1.5 py-0.5 text-sm font-medium text-slate-800 outline-none focus:border-emerald-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
-            }
+            className={`mt-1.5 w-full px-1.5 py-0.5 text-sm font-medium ${FIELD}`}
           />
         ) : !busy ? (
           <p className="mt-1.5 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">

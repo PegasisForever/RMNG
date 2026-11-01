@@ -1,4 +1,4 @@
-// A headless clone's terminal in /ng, as it is drawn (`./TerminalScreen.tsx` is its container): the
+// A headless clone's terminal, as it is drawn (`./TerminalScreen.tsx` is its container): the
 // tab bar (`./TermBar.tsx`) and, under it, the terminal (`children`: the box xterm.js draws in,
 // or a story's picture). In touch mode its area is a trackpad, with the pointer drawn on it.
 import type { PointerEvent, ReactNode } from "react";

@@ -16,7 +16,7 @@ export const TABS: { tab: PanelTab; label: string; page: string }[] = [
   { tab: "settings", label: "Settings", page: "Settings" },
 ];
 
-/** The server's CPU, memory and disk, as the dashboard shows them (`formatLxcUsage`). */
+/** The server's CPU, memory and disk, as text (`formatLxcUsage`). */
 export type ServerUsage = { cpu: string; mem: string; disk: string };
 
 /** Narrower than this (CSS px), the row has no room for the server's numbers: the Usage page
@@ -45,7 +45,7 @@ const IDLE = `${CHIP} text-neutral-900 hover:bg-white/80 dark:text-white dark:ho
 /** The open tab: the other look, as lit glass. */
 const ON = "rounded-[10px] border border-transparent bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
 
-/** The /ng tool row, over the control panel: the server's CPU, memory and disk (where there is room),
+/** The tool row, over the control panel: the server's CPU, memory and disk (where there is room),
  *  then tabs that act as tabs do. One is open at most. */
 export function ToolRow({ width, usage, tab, onTab, badges, onPopOut }: Props) {
   return (

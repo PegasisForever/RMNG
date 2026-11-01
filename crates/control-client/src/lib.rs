@@ -140,7 +140,7 @@ impl Client {
     }
 
     /// POST an op-starting endpoint. Clone/fork/rebase/prebuild answer
-    /// `{"ok": true, "op": {...}}` (the dashboard reads `.op` off the same
+    /// `{"ok": true, "op": {...}}` (the web app reads `.op` off the same
     /// envelope), so unwrap it here rather than in every caller.
     async fn post_op(&self, path: &str, body: &Value) -> Result<Operation> {
         let resp = self

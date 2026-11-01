@@ -16,8 +16,8 @@
 // The container closes the dialog when the last one is done, so the list behind it is already
 // the new one.
 //
-// `glass` draws it in /ng's glass (`~/desk/GLASS.md`), as the Edit layout dialog there: a glass
-// panel, flat content on it.
+// It is drawn in glass (`~/desk/GLASS.md`), as the Edit layout dialog: a glass panel, flat
+// content on it.
 //
 // It renders from props alone. Every server call lives in ImportAccountModalContainer, and
 // every state the operator can reach here is a prop, so all of them are stories.
@@ -42,45 +42,24 @@ export type SignInProgress = {
   problem: string | null;
 };
 
-/** The dialog's classes, in the dashboard's look and in /ng's (on glass, flat), as the Edit
- *  layout dialog's (`./LayoutEditorView.tsx`). */
-const LOOKS = {
-  plain: {
-    title: "text-sm font-semibold text-slate-900 dark:text-slate-100",
-    text: "text-slate-500 dark:text-slate-400",
-    strong: "font-medium text-slate-700 dark:text-slate-200",
-    input:
-      "w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500",
-    open: "border border-slate-300 bg-white text-slate-800 hover:bg-slate-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700",
-    tab: "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
-    tabOn: "bg-slate-800 text-white dark:bg-slate-600",
-    cancel: "rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800",
-    done: "rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40",
-    error: "rounded-md bg-rose-50 text-rose-600 dark:bg-rose-950/40 dark:text-rose-400",
-    late: "rounded-md bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
-    ok: "text-emerald-600 dark:text-emerald-400",
-    lateIcon: "text-amber-600 dark:text-amber-400",
-    radius: "rounded-lg",
-  },
-  glass: {
-    title: "text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-white",
-    text: "text-black/60 dark:text-white/60",
-    strong: "font-medium text-neutral-900 dark:text-white",
-    input:
-      "w-full rounded-[10px] border border-black/10 bg-white/60 px-2.5 py-2 text-sm text-neutral-900 placeholder:text-black/40 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-white/40 dark:focus:border-white/30",
-    open: "border border-black/15 bg-white/50 text-neutral-900 hover:bg-white/80 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10",
-    tab: "bg-black/5 text-black/60 dark:bg-white/10 dark:text-white/60",
-    tabOn: "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900",
-    cancel: "rounded-[10px] px-3 py-1.5 text-sm text-black/60 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10",
-    done: "rounded-[10px] bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-40",
-    error: "rounded-[10px] bg-rose-500/15 text-rose-700 dark:text-rose-300",
-    late: "rounded-[10px] bg-amber-500/15 text-amber-800 dark:text-amber-300",
-    ok: "text-emerald-700 dark:text-emerald-300",
-    lateIcon: "text-amber-700 dark:text-amber-300",
-    radius: "rounded-[10px]",
-  },
+/** The dialog's classes: on glass, flat, as the Edit layout dialog's (`./LayoutEditorView.tsx`). */
+const LOOK = {
+  title: "text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-white",
+  text: "text-black/60 dark:text-white/60",
+  strong: "font-medium text-neutral-900 dark:text-white",
+  input:
+    "w-full rounded-[10px] border border-black/10 bg-white/60 px-2.5 py-2 text-sm text-neutral-900 placeholder:text-black/40 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-white/40 dark:focus:border-white/30",
+  open: "border border-black/15 bg-white/50 text-neutral-900 hover:bg-white/80 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10",
+  tab: "bg-black/5 text-black/60 dark:bg-white/10 dark:text-white/60",
+  tabOn: "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900",
+  cancel: "rounded-[10px] px-3 py-1.5 text-sm text-black/60 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10",
+  done: "rounded-[10px] bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-40",
+  error: "rounded-[10px] bg-rose-500/15 text-rose-700 dark:text-rose-300",
+  late: "rounded-[10px] bg-amber-500/15 text-amber-800 dark:text-amber-300",
+  ok: "text-emerald-700 dark:text-emerald-300",
+  lateIcon: "text-amber-700 dark:text-amber-300",
+  radius: "rounded-[10px]",
 };
-type Look = (typeof LOOKS)["plain"];
 
 export function ImportAccountModalView({
   provider,
@@ -96,7 +75,6 @@ export function ImportAccountModalView({
   onPastedChange,
   onGroupChange,
   open = true,
-  glass = false,
   onClose,
   onImport,
 }: {
@@ -124,14 +102,11 @@ export function ImportAccountModalView({
   /** The dialog is on screen. The container flips it false when the sign-in lands, and the
    *  dialog plays its exit before the unmount rather than blinking out. */
   open?: boolean;
-  /** In /ng's glass, over the clone's screen. */
-  glass?: boolean;
   /** The dialog is finished: unmount it, or hand the account it landed to the page. The exit
    *  frames have already played. */
   onClose: () => void;
   onImport: () => void;
 }) {
-  const look = glass ? LOOKS.glass : LOOKS.plain;
   const canImport = !importing && pasted.trim().length > 0;
   const site = provider === "codex" ? "ChatGPT" : "Claude";
 
@@ -139,15 +114,15 @@ export function ImportAccountModalView({
     // The `over` rung, because this dialog can be opened FROM the settings panel, which is
     // itself Escape-closable. The Escape stack is LIFO, so whichever dialog mounted last owns
     // the key — this one — and the z order has to match what the stack already decides.
-    <ModalShell size="sm" layer="over" open={open} onExited={onClose} glass={glass}>
+    <ModalShell size="sm" layer="over" open={open} onExited={onClose} glass>
       {(close) => (
         <>
           {/* The account it is for in the title, so the line under it stays one line */}
-          <h3 className={`truncate ${look.title}`} title={replacing ?? undefined}>
+          <h3 className={`truncate ${LOOK.title}`} title={replacing ?? undefined}>
             {replacing ? `Sign in again: ${replacing}` : provider === "codex" ? "Add Codex account" : "Add Claude account"}
           </h3>
           {progress ? (
-            <Progress p={progress} look={look} onClose={() => close()} />
+            <Progress p={progress} onClose={() => close()} />
           ) : (
             <form
               onSubmit={(e) => {
@@ -155,7 +130,7 @@ export function ImportAccountModalView({
                 if (canImport) onImport();
               }}
             >
-              <p className={`mt-1 text-xs ${look.text}`}>Sign in, then paste the address of the page that fails to load.</p>
+              <p className={`mt-1 text-xs ${LOOK.text}`}>Sign in, then paste the address of the page that fails to load.</p>
 
               {/* Replacing fixes the provider: it is the dead account's, and a sign-in to the
                   other one could not stand in for it. */}
@@ -167,7 +142,7 @@ export function ImportAccountModalView({
                       type="button"
                       onClick={() => onProviderChange(p)}
                       aria-pressed={provider === p}
-                      className={`rounded-md px-3 py-1 text-sm ${provider === p ? look.tabOn : look.tab}`}
+                      className={`rounded-md px-3 py-1 text-sm ${provider === p ? LOOK.tabOn : LOOK.tab}`}
                     >
                       {p === "claude" ? "Claude" : "Codex"}
                     </button>
@@ -180,7 +155,7 @@ export function ImportAccountModalView({
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-disabled={!loginUrl}
-                className={`mt-3 flex w-full items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium ${look.radius} ${look.open} ${
+                className={`mt-3 flex w-full items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium ${LOOK.radius} ${LOOK.open} ${
                   loginUrl ? "" : "pointer-events-none opacity-50"
                 }`}
               >
@@ -195,31 +170,31 @@ export function ImportAccountModalView({
                   provider === "codex" ? "http://localhost:1455/auth/callback?code=…" : "http://localhost:54545/callback?code=…"
                 }
                 spellCheck={false}
-                className={`mt-2 ${look.input}`}
+                className={`mt-2 ${LOOK.input}`}
               />
 
               {/* Replacing inherits the pools of the account being replaced, so there is
                   nothing to pick here and picking would only fight that. */}
               {replacing || groups.length === 0 ? null : (
-                <label className={`mt-3 flex items-center gap-2 text-xs ${look.text}`}>
+                <label className={`mt-3 flex items-center gap-2 text-xs ${LOOK.text}`}>
                   Pool
                   <DropdownSelect
                     rows={[{ value: "", label: "No pool" }, ...groups.map((g) => ({ value: g, label: g }))]}
                     value={group}
                     onChange={onGroupChange}
                     label="Pool"
-                    className={`flex-1 ${look.input}`}
+                    className={`flex-1 ${LOOK.input}`}
                   />
                 </label>
               )}
 
-              {error ? <p className={`mt-3 px-3 py-2 text-xs break-words ${look.error}`}>{error}</p> : null}
+              {error ? <p className={`mt-3 px-3 py-2 text-xs break-words ${LOOK.error}`}>{error}</p> : null}
 
               <div className="mt-4 flex justify-end gap-2">
-                <button type="button" onClick={() => close()} className={look.cancel}>
+                <button type="button" onClick={() => close()} className={LOOK.cancel}>
                   Cancel
                 </button>
-                <button type="submit" disabled={!canImport} className={look.done}>
+                <button type="submit" disabled={!canImport} className={LOOK.done}>
                   {importing ? "Signing in…" : replacing ? "Sign in again" : "Add account"}
                 </button>
               </div>
@@ -232,8 +207,8 @@ export function ImportAccountModalView({
 }
 
 /** The steps after the exchange, each done, in progress, or (slow) late. */
-function Progress({ p, look, onClose }: { p: SignInProgress; look: Look; onClose: () => void }) {
-  const strong = (s: string) => <span className={look.strong}>{s}</span>;
+function Progress({ p, onClose }: { p: SignInProgress; onClose: () => void }) {
+  const strong = (s: string) => <span className={LOOK.strong}>{s}</span>;
   const steps: { done: boolean; label: ReactNode; doing: ReactNode }[] = [
     { done: true, label: <>Signed in as {strong(p.email)}</>, doing: null },
     ...(p.replaced
@@ -249,11 +224,11 @@ function Progress({ p, look, onClose }: { p: SignInProgress; look: Look; onClose
     <div className="mt-3">
       <ul aria-label="Sign-in steps" className="space-y-2">
         {steps.map((s, i) => (
-          <li key={i} className={`flex items-start gap-2 text-xs ${look.text}`}>
+          <li key={i} className={`flex items-start gap-2 text-xs ${LOOK.text}`}>
             {s.done ? (
-              <Check aria-label="done" className={`mt-px size-3.5 shrink-0 ${look.ok}`} />
+              <Check aria-label="done" className={`mt-px size-3.5 shrink-0 ${LOOK.ok}`} />
             ) : p.slow ? (
-              <AlertTriangle aria-label="late" className={`mt-px size-3.5 shrink-0 ${look.lateIcon}`} />
+              <AlertTriangle aria-label="late" className={`mt-px size-3.5 shrink-0 ${LOOK.lateIcon}`} />
             ) : (
               <Loader2 aria-label="in progress" className="mt-px size-3.5 shrink-0 animate-spin opacity-60" />
             )}
@@ -262,14 +237,14 @@ function Progress({ p, look, onClose }: { p: SignInProgress; look: Look; onClose
         ))}
       </ul>
       {p.slow && !all ? (
-        <p className={`mt-3 px-3 py-2 text-xs ${look.late}`}>
+        <p className={`mt-3 px-3 py-2 text-xs ${LOOK.late}`}>
           This takes longer than it should. The dialog closes by itself when it is done; you can also close it
           now.
           {p.problem ? <span className="mt-1 block break-words">The server says: {p.problem}</span> : null}
         </p>
       ) : null}
       <div className="mt-4 flex justify-end">
-        <button type="button" onClick={onClose} className={look.cancel}>
+        <button type="button" onClick={onClose} className={LOOK.cancel}>
           {all ? "Done" : "Close"}
         </button>
       </div>

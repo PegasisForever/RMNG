@@ -1,4 +1,4 @@
-// The /ng pointer rules: how far the cursor moves for a finger on the trackpad, and how far
+// The pointer rules: how far the cursor moves for a finger on the trackpad, and how far
 // two fingers scroll.
 
 /** The cursor moves this many screen px per px of finger motion when the finger is slow, and

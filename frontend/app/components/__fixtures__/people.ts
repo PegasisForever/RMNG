@@ -1,7 +1,7 @@
 // Who a ticket can be assigned to, as the container's Linear lookup answers.
 //
 // The emails match the account fixtures, so the operator a story assigns a ticket to is the
-// same person whose Claude usage the rail draws. Alex is the key's own owner in every team,
+// same person whose Claude usage the control panel draws. Alex is the key's own owner in every team,
 // because the key is the operator's and a fleet's keys are all their own accounts.
 
 import type { TicketPerson } from "~/lib/linear/people";

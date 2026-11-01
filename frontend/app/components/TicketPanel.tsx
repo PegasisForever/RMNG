@@ -18,13 +18,13 @@
 // Linear rather than to anything of ours, and the card in the column deliberately gets neither:
 // a queue is for scanning, and a click that changes a ticket belongs where it is the subject.
 //
-// Pure, like AppShellV2: the description arrives as a slot, because rendering markdown means
+// Pure: the description arrives as a slot, because rendering markdown means
 // BlockNote, which is browser-only and lazily loaded.
 import { Check, ExternalLink, GitBranch, Link2, type LucideIcon, Plus } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 
 import { MenuChoice, MenuNote, OverflowMenu } from "~/components/OverflowMenu";
-import { LabelPill, PriorityIcon, StateIcon, STATE_LABEL } from "~/components/TicketColumn";
+import { LabelPill, PriorityIcon, StateIcon, STATE_LABEL } from "~/components/TicketCard";
 import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import type { TicketLabel, TicketLink, TicketWorkflowState } from "~/lib/linear/types";
 import { workspaceBadge } from "~/lib/workspace";
@@ -193,7 +193,7 @@ function AddLabelMenu({
   );
 }
 
-/** What a referenced issue turns into on this board. */
+/** What a referenced issue turns into in the control panel. */
 export interface TicketLinkTarget {
   /** The row's tooltip. It names where the click lands, since the two kinds of row look
    *  alike and only one of them leaves the app. */
@@ -204,7 +204,7 @@ export interface TicketLinkTarget {
 
 /** A parent or sub-issue: its state mark, its identifier, and its title.
  *
- *  Where the row goes depends on whether the referenced issue is on this board. One that is
+ *  Where the row goes depends on whether the referenced issue is in the control panel. One that is
  *  becomes a button that selects it here, because sending the operator to Linear for a thing
  *  sitting one column over is a worse answer to the same click. One that is not stays a link
  *  out, and the arrow at its end is what says so before the click rather than after. */
@@ -296,8 +296,8 @@ export interface TicketPanelProps {
    *  browser with no id is left alone either way: a write has nothing to name. */
   onRemoveLabel?: (label: TicketLabel) => void;
   /** Where the parent and sub-issue rows go. Called per row with the referenced identifier.
-   *  Return null when that issue is not on this board and the row should open Linear.
-   *  Absent ⇒ every row opens Linear, which is what a panel with no board behind it wants. */
+   *  Return null when that issue is not in the control panel and the row should open Linear.
+   *  Absent ⇒ every row opens Linear. */
   resolveLink?: (ticketId: string) => TicketLinkTarget | null;
 }
 

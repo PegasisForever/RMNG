@@ -5,7 +5,7 @@ import type { ScrollMode } from "./ScrollMode";
 /**
  * The monitor layout in force: the one of the client the operator used last.
  *
- * Each client (a desktop browser, the `/ng` phone page) keeps its own layout in its own
+ * Each client (a desktop browser, a phone) keeps its own layout in its own
  * browser storage, and sends it on each real action of the operator in it while its window
  * is in the foreground (`POST /api/layout/claim`). The server keeps only the last one it got,
  * and gives the clones its monitors. Never set: the built-in default ([`default_monitors`]).

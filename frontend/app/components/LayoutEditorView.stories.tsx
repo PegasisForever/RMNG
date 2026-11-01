@@ -8,7 +8,7 @@ import { FakeDesktop } from "~/desk/__fixtures__/screen";
 
 /** The dialog on its own draft: drags, size edits, add and remove really change it. `windows`:
  *  a desktop browser's form (it opens a window per monitor), else a phone's. */
-function Frame(args: { layout: BrowserLayout; note: string | null; matching: number | null; glass?: boolean; windows: boolean }) {
+function Frame(args: { layout: BrowserLayout; note: string | null; matching: number | null; windows: boolean }) {
   const [layout, setLayout] = useState(args.layout);
   return (
     <LayoutEditorView
@@ -19,14 +19,23 @@ function Frame(args: { layout: BrowserLayout; note: string | null; matching: num
       onMatchWindow={fn()}
       onOpenWindow={args.windows ? fn() : undefined}
       onClose={fn()}
-      glass={args.glass}
     />
   );
 }
 
 const meta = {
-  title: "Dashboard/LayoutEditorView",
+  title: "Modals/Components/LayoutEditorView",
   component: Frame,
+  parameters: { layout: "fullscreen" },
+  // Over a clone's desktop, as the dialog opens: light or dark by the Theme in the toolbar
+  decorators: [
+    (Story) => (
+      <div className="relative h-screen">
+        <FakeDesktop />
+        <Story />
+      </div>
+    ),
+  ],
   args: { layout: DEFAULT_DESKTOP_LAYOUT, note: null, matching: null, windows: true },
 } satisfies Meta<typeof Frame>;
 
@@ -61,20 +70,7 @@ export const Phone: Story = {
   },
 };
 
-/** A match for a monitor whose viewer window is not open. */
+/** A match for a monitor whose window is not open. */
 export const NoWindow: Story = {
-  args: { note: "No viewer window is open for monitor 1. Open it, size it, then try again." },
-};
-
-/** In `/ng`'s glass, over a clone's desktop: light or dark by the Theme in the toolbar. */
-export const Glass: Story = {
-  args: { glass: true },
-  decorators: [
-    (Story) => (
-      <div className="relative h-screen">
-        <FakeDesktop />
-        <Story />
-      </div>
-    ),
-  ],
+  args: { note: "No window is open for monitor 1. Open it, size it, then try again." },
 };

@@ -1,7 +1,6 @@
-// The status vocabulary the phone shares with the desktop sidebar, so a clone reads the
-// same on both: blue = recent token activity, gray = running but inactive, purple = stopped
-// or gone. An unread working→not-working transition replaces the dot with a red badge,
-// which on a phone row is the one thing worth a second colour.
+// A clone's status as a small dot and a word, in the clone card's vocabulary (`CloneCard`):
+// blue = recent token activity, gray = running but inactive, purple = stopped or gone. An
+// unread working→not-working transition replaces the dot with a red badge.
 import type { Clone } from "~/lib/types";
 
 const STATUS: Record<NonNullable<Clone["monitorState"]>, { dot: string; label: string }> = {

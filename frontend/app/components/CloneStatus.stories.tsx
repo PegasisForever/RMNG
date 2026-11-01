@@ -2,10 +2,9 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 
 import { CloneStatusDot, statusLabel } from "./CloneStatus";
 import type { Clone } from "~/lib/types";
-import { makeClone } from "../__fixtures__/clones";
+import { makeClone } from "./__fixtures__/clones";
 
-/** The dot is 10px, so the story sets it beside the word it stands for — which is also how
- *  the clone screen's header draws it. */
+/** The dot is 10px, so the story sets it beside the word it stands for. */
 function Frame({ clone }: { clone: Clone }) {
   return (
     <p className="flex w-64 items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
@@ -16,7 +15,7 @@ function Frame({ clone }: { clone: Clone }) {
 }
 
 const meta = {
-  title: "Mobile/Components/CloneStatusDot",
+  title: "Clone/Components/CloneStatusDot",
   component: CloneStatusDot,
   parameters: { layout: "centered" },
   args: { clone: makeClone({ monitorState: "working" }) },

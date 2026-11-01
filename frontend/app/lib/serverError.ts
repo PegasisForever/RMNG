@@ -12,9 +12,9 @@
 // reached the server at all. Deciding what of it a banner can carry happens here too, so the
 // containers stay lists of fetches.
 
-/** Longest banner text, in characters. Both banners that show this are plain blocks in a
- *  fixed-height column with nothing else bounding their height: the chat pane's sits between
- *  the thread and the composer, and the shell's sits above the board. */
+/** Longest banner text, in characters. The chat pane's banner is a plain block in a
+ *  fixed-height column, between the thread and the composer, with nothing else bounding its
+ *  height. */
 export const SERVER_ERROR_MAX_CHARS = 300;
 
 /** The banner text for a failed request: the server's own words when it sent any, `fallback`

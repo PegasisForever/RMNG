@@ -1,10 +1,10 @@
 // This browser's own monitor layout, and its claims to the server.
 //
 // Each browser keeps one layout of its own, in its storage (`rmng.layout`), which all its
-// windows share: the dashboard, the viewer windows and the `/ng` windows. A browser that can
-// open windows of its own (a desktop: `canOpenWindows`) has up to MAX_MONITORS monitors, one
-// window each; a phone or a tablet has one, the `/ng` page. The server keeps no list: it has
-// only the layout of the client used last (`POST /api/layout/claim`, `ControlState.layout`).
+// windows share. A browser that can open windows of its own (a desktop: `canOpenWindows`) has
+// up to MAX_MONITORS monitors, one window each; a phone or a tablet has one, its only page.
+// The server keeps no list: it has only the layout of the client used last
+// (`POST /api/layout/claim`, `ControlState.layout`).
 //
 // A client claims on each real action of the operator in it: a touch, a click, a key, a wheel,
 // the mouse moving, and the window being opened or coming to the front. Only while the window
@@ -20,8 +20,8 @@ import { MAX_MONITORS, normalize } from "./monitorLayout";
 
 export type ClientKind = "desktop" | "phone";
 
-/** Whether this browser can open windows of its own, one per monitor (and the control panel, out of
- *  `/ng`). A phone or a tablet opens a tab in their place, or nothing. */
+/** Whether this browser can open windows of its own, one per monitor (and the control panel's
+ *  own). A phone or a tablet opens a tab in their place, or nothing. */
 export function canOpenWindows(nav: Pick<Navigator, "userAgent" | "platform" | "maxTouchPoints"> = navigator): boolean {
   const data = (nav as { userAgentData?: { mobile?: boolean } }).userAgentData;
   if (data?.mobile) return false;
@@ -114,14 +114,11 @@ export function saveLayout(layout: BrowserLayout) {
   write(DESKTOP_KEY, JSON.stringify({ ...layout, monitors: normalize(layout.monitors) }));
 }
 
-/** This browser's layout, made the first time from `seed` (the default: DEFAULT_DESKTOP_LAYOUT).
+/** This browser's layout, made the first time from `seed`.
  *  A desktop starts from the layout in force instead when that is a desktop's (a browser that
  *  comes later starts where the last one left the clones; a server of an older build hands its
  *  active layout preset over that way). A phone keeps one monitor. */
-export async function ensureLayout(
-  kind: ClientKind = "desktop",
-  seed: () => BrowserLayout = () => DEFAULT_DESKTOP_LAYOUT,
-): Promise<BrowserLayout> {
+export async function ensureLayout(kind: ClientKind, seed: () => BrowserLayout): Promise<BrowserLayout> {
   const have = readLayout();
   if (have) {
     if (kind === "desktop" || have.monitors.length === 1) return have;
@@ -153,18 +150,17 @@ export function layoutClaim(): LayoutBody | null {
   return l && { monitors: l.monitors, scrollMode: l.scrollMode, scrollSpeed: l.scrollSpeed };
 }
 
-/** The channel the Edit layout dialog talks to the monitor windows of this browser on (the
- *  viewer windows and the `/ng` windows). */
-export const VIEWER_CHANNEL = "rmng-viewer";
-/** How often the open Edit layout dialog says so on VIEWER_CHANNEL, ms. */
+/** The channel the Edit layout dialog talks to the monitor windows of this browser on. */
+export const MONITOR_CHANNEL = "rmng-monitors";
+/** How often the open Edit layout dialog says so on MONITOR_CHANNEL, ms. */
 export const IDENTIFY_EVERY_MS = 1000;
 
-/** On VIEWER_CHANNEL: the dashboard asks, and each viewer window answers with its monitor and
+/** On MONITOR_CHANNEL: a window asks, and each monitor window answers with its monitor and
  *  its content's size in screen (device) pixels; the monitors were renumbered (`map[old]` is
  *  the new number; null: removed), so each window follows its monitor, or closes; and the Edit
  *  layout dialog is open (`identify`, said every IDENTIFY_EVERY_MS while it is), so each window
  *  shows its monitor's number, until `identify-off` or until the word stops coming. */
-export type ViewerChannelMsg =
+export type MonitorChannelMsg =
   | { t: "ask-size" }
   | { t: "identify" }
   | { t: "identify-off" }

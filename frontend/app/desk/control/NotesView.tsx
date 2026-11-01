@@ -1,10 +1,8 @@
-// The /ng Notes and Assistant tabs: the clone's notes (or the ticket it was made from), and its
-// assistant chat. The desktop stacks the two in its side panel; a narrow page is too short for
-// two, so each is a tab of its own (`pane`).
+// The Notes and Assistant tabs: the clone's notes (or the ticket it was made from), and its
+// assistant chat. A narrow page is too short for two, so each is a tab of its own (`pane`).
 //
-// Wide (`only`), it is one of the dashboard's two side cards, as the dashboard draws them
-// (`~/components/AppShellV2.tsx`): the clone's name over its notes, or its ticket filling the
-// card; the assistant under a small label.
+// Wide (`only`), it is one of the two side panels (`./WideLayout.tsx`): the clone's name over
+// its notes, or its ticket filling the panel; the assistant under a small label.
 //
 // It is about the clone on the screen above. An archived clone has no screen, so a tap on one
 // in the Clones page opens its notes here, and the header then says so and offers the way
@@ -14,7 +12,7 @@
 // browser only).
 import type { ReactNode } from "react";
 
-import { CloneStatusDot, statusLabel } from "~/components/mobile/CloneStatus";
+import { CloneStatusDot, statusLabel } from "~/components/CloneStatus";
 import { cloneTitle } from "~/lib/cloneTitle";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
@@ -101,7 +99,7 @@ export function NotesView({
         }
       >
         {/* The notes are one long scroll; the chat is a column with its composer at the bottom */}
-        {only === "notes" || pane === "notes" ? (
+        {pane === "notes" ? (
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain py-2">{notes}</div>
         ) : (
           chat

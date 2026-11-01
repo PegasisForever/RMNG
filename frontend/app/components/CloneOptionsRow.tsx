@@ -9,7 +9,7 @@ export function CloneOptionsRow({
   rebuild,
   onRebuildChange,
 }: {
-  /** No desktop: the viewer shows a tmux tab view instead of a video stream. */
+  /** No desktop: the screen shows a tmux tab view instead of a video stream. */
   headless: boolean;
   onHeadlessChange: (headless: boolean) => void;
   /** Run the preset's startup script as the clone user. On unless unchecked. */

@@ -1,7 +1,7 @@
 // Shared types for the control plane.
 //
 // In-progress clones are kept OUT of `hosts` until they are fully provisioned, so the
-// viewer never tries to show a half-built container.
+// screen never tries to show a half-built container.
 
 import type { BoardColumn } from "~/lib/wire/BoardColumn";
 import type { ClientLayout } from "~/lib/wire/ClientLayout";
@@ -60,7 +60,7 @@ export interface Clone {
  linearLabel?: string;
  /**
   * Server-owned lifecycle state: Docker supplies liveness and passive proxy token activity
-  * distinguishes working from idle. The sidebar uses this only for its compact indicator.
+  * distinguishes working from idle.
   */
  monitorState?: "working" | "idle" | "offline";
  /** Set when the activity judge could not be reached and the files could not settle this
@@ -71,10 +71,10 @@ export interface Clone {
  /** Set when an unselected clone transitions from working to idle/offline. */
  unread?: boolean;
  /** Headless clone: no desktop (display + capture units disabled at create). Selecting it
-  *  shows the viewer's tmux tab view instead of a video stream. Same template as a regular clone. */
+  *  shows its tmux sessions as terminal tabs instead of a video stream. Same template as a regular clone. */
  headless?: boolean;
  /** Parent clone id when this is a sub clone (one level deep only). Undefined/null = top-level.
-  *  Cosmetic sidebar/`ps` grouping; a sub clone is otherwise an ordinary managed clone. */
+  *  Cosmetic grouping in the clone list and `ps`; a sub clone is otherwise an ordinary managed clone. */
  parent?: string | null;
  /** Preset binding recorded at create/fork (server `preset_name`). Preselects the rebase
   *  dialog's target — rebase itself never changes this binding. */
@@ -177,7 +177,7 @@ export interface ControlState {
   *  until one did. */
  layout?: ClientLayout | null;
  /** The single configured account-pool list, mirrored from config over the live
-  *  state — the sidebar usage list groups by this, so pool edits regroup the live
+  *  state — the usage list groups by this, so pool edits regroup the live
   *  accounts on the next frame with no page reload. */
  groups: CloneGroup[];
  /** All-time per-clone token totals, keyed by clone id. Persisted server-side (the agent

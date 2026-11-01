@@ -1,7 +1,7 @@
 # HTTP API reference — web port (default `:9000`)
 
-The control-server's web port serves the React management UI (a static SPA served from
-disk), the JSON control API, two SSE streams, and the browser viewer's WebSocket. It binds `0.0.0.0:9000`.
+The control-server's web port serves the React web app (a static SPA served from
+disk; `/` is its shell, `/app` the app), the JSON control API, two SSE streams, and the browser viewer's WebSocket. It binds `0.0.0.0:9000`.
 
 - **No auth.** All endpoints are open; the server is meant to sit behind a tailnet /
   firewall. Path params that hit the filesystem (`notes`, `uploads`) are validated as
@@ -33,7 +33,7 @@ disk), the JSON control API, two SSE streams, and the browser viewer's WebSocket
 | GET | `/api/stats` | One-shot volatile per-clone `ContainerStats` map (same shape as SSE `stats`) | 200 `{hostId: ContainerStats}` |
 | POST | `/api/activate` | Select the clone shown in the viewer | 200 `ControlState` |
 | GET | `/api/viewer?monitor=<id>` | The browser viewer's WebSocket for one monitor (protocol in [PROTOCOL.md](PROTOCOL.md)) | 101 WebSocket |
-| POST | `/api/viewer/upload?name=<file>` | Write a file dropped on a viewer window into the selected clone's home (`~/`); raw body | 200 `{name}` |
+| POST | `/api/viewer/upload?name=<file>` | Write a file dropped on a clone's screen in the web app into the selected clone's home (`~/`); raw body | 200 `{name}` |
 | PUT | `/api/board` | Replace the board's columns | 200 `ControlState` |
 | PUT | `/api/tickets/order` | Replace the ticket column's arrangement | 200 `ControlState` |
 | PUT | `/api/clones/muted` | Replace the set of clones whose notifications are silenced | 200 `ControlState` |
@@ -82,7 +82,7 @@ are a plain string or `{error}`.
 
 Subscribe to all control-state changes. Emits a full `ControlState` JSON snapshot
 immediately, then a fresh snapshot on every `store.mutate()`; a `ping` comment every 20 s
-keeps the connection alive. This is what the dashboard subscribes to.
+keeps the connection alive. This is what the web app subscribes to.
 
 One named `version` event rides every connection, once, right after the snapshot:
 
@@ -96,7 +96,7 @@ data: {"buildId":"2ae7f50"}
 label (a dev run, or an image built without `GIT_SHA`) reports a per-boot id instead, so the
 value is always present and always changes across a restart onto a different build.
 
-The dashboard remembers the first one it sees and reloads the page when a later connection
+The web app remembers the first one it sees and reloads the page when a later connection
 reports a different one. An upgrade drops every SSE connection, so one frame per connection
 is enough; there is nothing to poll. This is what keeps a long-open tab from talking to a
 server its bundle was not built against.
@@ -531,7 +531,7 @@ which is why the comparison above is stated as a gap against an age rather than 
 ### `POST /api/activate` — body `{ "id": string | null }`
 
 Set `selected` (or clear with `null`). Returns the updated `ControlState`. The media plane
-sends every open viewer window the newly selected clone (a fresh `ViewSpec` and keyframe).
+sends every open monitor window the newly selected clone (a fresh `ViewSpec` and keyframe).
 
 A clone coming on screen also gets a `ServerMsg::SetMonitors` carrying the layout in force,
 which is where a layout claimed while the operator was elsewhere reaches it. The clone's
@@ -590,7 +590,7 @@ even for a ticket a fork inherited.
 
 The server makes no Linear calls here. A client that starts a clone for a ticket looks the
 ticket up (or opens it) and moves it to In Progress itself, with the preset keys from
-`GET /api/config`, then sends Linear's answer as `linear`. The dashboard's "New clone" dialog
+`GET /api/config`, then sends Linear's answer as `linear`. The web app's "New clone" dialog
 and `rmng clone create ticket|new-ticket` ([linear.rs](../crates/cli/src/linear.rs)) both
 do this.
 
@@ -702,12 +702,12 @@ which is what the loops were for.
 `{ "client": string, "label": string, "monitors": MonitorSpec[], "scrollMode": "auto" | "trackpad" | "mouse", "scrollSpeed": number }`
 
 The server keeps no list of layouts. Each client keeps its own layout in its browser storage
-(a desktop browser: up to 8 monitors, one window each; a phone or a tablet: one monitor, the
-`/ng` page; edited in the Edit layout dialog, which the dashboard opens and `/ng` opens on a long
-press of its Fit button) and sends it on each real action of the operator in it (a touch, a
+(a desktop browser: up to 8 monitors, one window each; a phone or a tablet: one monitor, its
+screen; edited in the Edit layout dialog, which opens on a long press of the Fullscreen or the
+Fit button) and sends it on each real action of the operator in it (a touch, a
 click, a key, a wheel, the mouse moving, the window opening or coming to the front), only while
 its window is in the foreground. The last layout sent is in force: it is stored as
-`ControlState.layout` and its scroll settings go to every viewer window (`scroll`). `client` is
+`ControlState.layout` and its scroll settings go to every monitor window (`scroll`). `client` is
 a random id the client keeps; `label` says what it is (`desktop`, `phone`).
 
 The layout is made sane first: 1 to 8 monitors, each side even and in 320–8192, monitor 0 the

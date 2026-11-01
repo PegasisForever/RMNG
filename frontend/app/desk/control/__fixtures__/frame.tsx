@@ -1,4 +1,4 @@
-// The space of a /ng page for the page stories: a phone's control panel panel (377 × 640 CSS px), on
+// The space of a control panel page for the page stories: a phone's control panel panel (377 × 640 CSS px), on
 // glass over a desktop picture darkened by the control panel's backdrop, as over the clone's
 // screen. `parameters.surface: "window"` puts
 // it on the solid ground of the control panel's own window instead; `parameters.frameWidth` makes it

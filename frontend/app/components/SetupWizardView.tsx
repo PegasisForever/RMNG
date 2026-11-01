@@ -2,9 +2,9 @@
 // the body, and a Back/Next footer. It renders from props alone — no config PUT — so every
 // state it can be in is a story. SetupWizardContainer owns the PUT and hands the result down.
 //
-// NOT a dismissable modal: there is no Escape, no overlay click and no ✕, because the
-// dashboard does not exist behind it. The route renders this INSTEAD of the dashboard while
-// `setupComplete` is false.
+// NOT a dismissable modal: there is no Escape, no overlay click and no ✕, because the app
+// does not exist behind it. The route renders this INSTEAD of the app while `setupComplete`
+// is false.
 //
 // The form is one editable model (`SetupDraft`) plus a single `onDraftChange`, rather than a
 // value/onChange pair per field. What is NOT in the draft is everything the server decides:
@@ -40,7 +40,7 @@ export interface SetupWizardViewProps {
   nextDisabled: boolean;
   onNext: () => void;
   onBack: () => void;
-  /** Latch setup and hand the route back to the dashboard. */
+  /** Latch setup and hand the route back to the app. */
   onFinish: () => void;
 }
 

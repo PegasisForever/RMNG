@@ -51,7 +51,7 @@ pub enum Cmd {
     /// Search the distilled transcripts of every clone, retired clones included
     #[command(subcommand)]
     Ledger(LedgerCmd),
-    /// The dashboard board: which column each clone sits in
+    /// The board (the web app's Clones tab): which column each clone sits in
     #[command(subcommand)]
     Board(BoardCmd),
     /// Drive a clone's desktop via its daemon MCP (screenshot-on-every-action)
@@ -65,7 +65,7 @@ pub enum Cmd {
     Guide,
 }
 
-/// Flags every clone-creating verb takes: the lower half of the dashboard's "New clone"
+/// Flags every clone-creating verb takes: the lower half of the web app's "New clone"
 /// dialog. The server names the clone and fills in what is left out from the preset.
 #[derive(Args, Debug)]
 pub struct CreateArgs {
@@ -105,11 +105,11 @@ pub struct CreateArgs {
 /// The clone a fork copies, for the three verbs that fork one.
 #[derive(Args, Debug, Default)]
 pub struct SourceArgs {
-    /// Clone whose home is copied. Omitted: the one the dashboard picks: the preset's default
+    /// Clone whose home is copied. Omitted: the one the web app picks: the preset's default
     /// fork clone, else the newest live clone
     #[arg(long, value_name = "CLONE")]
     pub source: Option<String>,
-    /// Record this clone as the new clone's parent (cosmetic: the dashboard draws the new
+    /// Record this clone as the new clone's parent (cosmetic: the web app draws the new
     /// clone under the parent's card)
     #[arg(long, value_name = "CLONE")]
     pub parent: Option<String>,
@@ -162,7 +162,7 @@ impl Priority {
     }
 }
 
-/// `rmng clone create <kind>`: the four tabs of the dashboard's "New clone" dialog.
+/// `rmng clone create <kind>`: the four tabs of the web app's "New clone" dialog.
 #[derive(Subcommand, Debug)]
 pub enum CreateCmd {
     /// Existing ticket: fork a clone for a Linear ticket, move the ticket to In Progress, and
@@ -217,7 +217,7 @@ pub enum CreateCmd {
         /// Clone title. The clone id is made from it (`'Fix login'` → `<prefix>fix-login`)
         #[arg(long)]
         title: String,
-        /// Preset. Omitted: the first preset, as in the dashboard's No ticket tab
+        /// Preset. Omitted: the first preset, as in the web app's No ticket tab
         #[arg(long)]
         preset: Option<String>,
         #[command(flatten)]
@@ -233,7 +233,7 @@ pub enum CreateCmd {
         #[arg(long)]
         title: String,
         /// Preset whose Dockerfile builds the image. Omitted: the first preset, as in the
-        /// dashboard's From template tab
+        /// web app's From template tab
         #[arg(long)]
         preset: Option<String>,
         #[command(flatten)]
@@ -260,7 +260,7 @@ pub fn read_text(inline: Option<&String>, file: Option<&PathBuf>) -> std::io::Re
 pub enum CloneCmd {
     /// List clones with live CPU, RAM, activity, and each provider's bound account
     Ls,
-    /// Create a clone, the four ways the dashboard's "New clone" dialog does:
+    /// Create a clone, the four ways the web app's "New clone" dialog does:
     /// `ticket`, `new-ticket`, `no-ticket`, `template`
     #[command(subcommand)]
     Create(CreateCmd),
@@ -293,9 +293,9 @@ pub enum CloneCmd {
     /// `create no-ticket --source <clone>`
     Fork {
         /// Clone to copy. Omitted: the --preset's default fork clone, else the newest live
-        /// clone, as the dashboard picks it
+        /// clone, as the web app picks it
         source: Option<String>,
-        /// Record this clone as the copy's parent (cosmetic: the dashboard draws the copy
+        /// Record this clone as the copy's parent (cosmetic: the web app draws the copy
         /// under the parent's card)
         #[arg(long, value_name = "CLONE")]
         parent: Option<String>,
@@ -355,17 +355,17 @@ pub enum CloneCmd {
     /// Print the calling clone's own record (fails outside a clone)
     #[command(name = "self")]
     Myself,
-    /// Point the operator's viewer at a clone (operator-only; no effect on command targeting)
+    /// Put a clone on the operator's screen in the web app (operator-only; no effect on command targeting)
     Select {
         /// Clone id (omit and pass --none to clear the selection)
         clone: Option<String>,
-        /// Clear the viewer selection
+        /// Clear the selection
         #[arg(long, conflicts_with = "clone")]
         none: bool,
     },
 }
 
-/// `rmng board <verb>` — the dashboard's columns, and which clone is in which.
+/// `rmng board <verb>` — the board's columns, and which clone is in which.
 #[derive(Subcommand, Debug)]
 pub enum BoardCmd {
     /// List the board's columns, left to right, with the clones in each

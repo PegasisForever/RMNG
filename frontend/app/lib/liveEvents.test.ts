@@ -1,4 +1,4 @@
-// The watchdog in `openLiveEvents` is what brings the dashboard back after a sleep. These
+// The watchdog in `openLiveEvents` is what brings the app back after a sleep. These
 // cases drive it with a fake `EventSource`, a fake clock and the watchdog's own tick.
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 
