@@ -11,7 +11,8 @@ import type { LucideIcon } from "lucide-react";
 
 import type { CloneMode } from "~/lib/cloneDraft";
 
-const TABS: { mode: CloneMode; label: string; icon: LucideIcon }[] = [
+/** The four modes, in the rail's order (also /ng's glass rail, `./CloneModalView.tsx`). */
+export const CLONE_MODE_TABS: { mode: CloneMode; label: string; icon: LucideIcon }[] = [
   { mode: "existing", label: "Existing ticket", icon: Ticket },
   { mode: "create", label: "New ticket", icon: FilePlus },
   { mode: "plain", label: "No ticket", icon: MessageSquare },
@@ -34,7 +35,7 @@ export function CloneModeTabs({
       aria-label="Clone modes"
       className="flex shrink-0 gap-1 overflow-x-auto border-b border-slate-100 p-2 dark:border-slate-800 sm:w-44 sm:flex-col sm:overflow-x-visible sm:overflow-y-auto sm:border-b-0 sm:border-r"
     >
-      {TABS.map(({ mode: m, label, icon: Icon }) => {
+      {CLONE_MODE_TABS.map(({ mode: m, label, icon: Icon }) => {
         const current = m === mode;
         return (
           <button

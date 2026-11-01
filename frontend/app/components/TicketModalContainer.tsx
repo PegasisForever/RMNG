@@ -29,6 +29,7 @@ export function TicketModalContainer({
         presets,
         onClose,
         onCreated,
+        glass = false,
 }: {
         /** Configured presets (`config.presets`). Their labels are the dialog's team keys, and a
          *  non-empty `linearKey` says which of them can actually open a ticket. */
@@ -36,6 +37,8 @@ export function TicketModalContainer({
         onClose: () => void;
         /** The issue Linear answered with, once it exists. The dialog closes either way. */
         onCreated: (ticket: LinearTicket) => void;
+        /** In /ng's glass (`TicketModalView`'s `glass`). */
+        glass?: boolean;
 }) {
         const teams = useMemo(() => teamKeysOf(presets), [presets]);
         // Read once on mount: storage is a session fact, and re-reading it would fight the dropdown.
@@ -56,6 +59,7 @@ export function TicketModalContainer({
 
         return (
                 <TicketModalView
+                        glass={glass}
                         teams={teams}
                         team={team}
                         onTeamChange={setTeam}

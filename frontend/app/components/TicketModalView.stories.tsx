@@ -1,9 +1,10 @@
-import type { Meta, StoryObj } from "@storybook/react-vite";
+import type { Decorator, Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import { useArgs } from "storybook/preview-api";
 import { fn } from "storybook/test";
 
 import { MarkdownEditorView } from "./MarkdownEditorView";
+import { FakeDesktop } from "~/ng/__fixtures__/desktop";
 import { TicketModalView, type TicketModalViewProps } from "./TicketModalView";
 import { makeClonePresets } from "./__fixtures__/presets";
 import { makeTeamPeople } from "./__fixtures__/people";
@@ -153,3 +154,16 @@ export const Interactive: Story = {
     );
   },
 };
+
+/** Over /ng's clone screen, in its glass. */
+const overScreen: Decorator[] = [
+  (Story) => (
+    <div className="ng-theme relative h-screen w-screen overflow-hidden bg-black">
+      <FakeDesktop />
+      <Story />
+    </div>
+  ),
+];
+
+/** In /ng's glass: flat fields on the glass, 10 px corners 16 px in from its 26 px ones. */
+export const Glass: Story = { args: { glass: true }, decorators: overScreen };

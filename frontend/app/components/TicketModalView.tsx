@@ -18,6 +18,10 @@
 // people for whichever team is chosen and remembers that team for next time. The description
 // editor arrives as a slot for the same reason — it is browser-only and carries the upload
 // call, so TicketModalContainer decides when and how it mounts.
+//
+// In /ng (`glass`) it is a glass dialog as the others there: its fields drawn flat on the glass
+// (`.ng-on-glass`, `~/ng/glass.css`), and its fields and buttons 10 px, 16 px in from the
+// dialog's 26 px corners (`~/ng/GLASS.md`, Shape).
 import { useState, type ReactNode } from "react";
 
 import { DropdownSelect } from "~/components/DropdownSelect";
@@ -60,6 +64,8 @@ export interface TicketModalViewProps {
   onClose: () => void;
   /** Open it. Rejecting leaves the dialog up with the message; resolving closes it. */
   onCreate: (ticket: NewTicket) => Promise<unknown>;
+  /** In /ng's glass. */
+  glass?: boolean;
 }
 
 export function TicketModalView({
@@ -74,6 +80,7 @@ export function TicketModalView({
   descriptionEditor,
   onClose,
   onCreate,
+  glass = false,
 }: TicketModalViewProps) {
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
@@ -111,17 +118,25 @@ export function TicketModalView({
   // dropdowns and inputs inherit `text-sm`'s 20px and land on 38px — now that every
   // control here is either an input or a custom dropdown, the pin is what keeps the row
   // one height.
+  const radius = glass ? "rounded-[10px]" : "rounded-md";
   const field =
-    "mt-1 h-9 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500";
+    `mt-1 h-9 w-full ${radius} border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500`;
   const label = "block text-xs font-medium text-slate-500 dark:text-slate-400";
+  const button = glass ? "rounded-[10px] px-3 py-1.5 text-sm" : "rounded-lg px-3 py-1.5 text-xs";
 
   return (
     // Neither Cancel nor Escape closes this while a create is in flight, so both are held by
     // the same `busy`: the button below, and `dismissible` for the key.
-    <ModalShell size="lg" dismissible={!busy} onExited={onClose}>
+    <ModalShell size="lg" dismissible={!busy} onExited={onClose} glass={glass}>
       {(close) => (
-        <>
-          <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
+        <div className={glass ? "ng-on-glass flex min-h-0 flex-1 flex-col" : "contents"}>
+          <h3
+            className={`shrink-0 ${
+              glass
+                ? "text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-white"
+                : "text-sm font-semibold text-slate-900 dark:text-slate-100"
+            }`}
+          >
             New ticket
           </h3>
 
@@ -224,7 +239,7 @@ export function TicketModalView({
               {/* `px-3` matches the inputs above, so the body starts where the title does. The
                 editor brings no side padding of its own (see `ticket-description` in app.css),
                 which is what leaves this box free to set its own. */}
-              <div className="mt-1 min-h-[10rem] rounded-md border border-slate-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
+              <div className={`mt-1 min-h-[10rem] ${radius} border border-slate-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600`}>
                 {descriptionEditor}
               </div>
             </div>
@@ -256,7 +271,7 @@ export function TicketModalView({
               type="button"
               onClick={() => close()}
               disabled={busy}
-              className="cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-400 dark:hover:bg-slate-700"
+              className={`cursor-pointer ${button} font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-400 dark:hover:bg-slate-700`}
             >
               Cancel
             </button>
@@ -264,12 +279,12 @@ export function TicketModalView({
               type="button"
               onClick={() => submit(close)}
               disabled={!canSubmit}
-              className="cursor-pointer rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+              className={`cursor-pointer ${button} bg-emerald-600 font-medium text-white hover:bg-emerald-700 disabled:opacity-50`}
             >
               {busy ? "Creating…" : "Create ticket"}
             </button>
           </div>
-        </>
+        </div>
       )}
     </ModalShell>
   );

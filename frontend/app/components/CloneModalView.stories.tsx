@@ -1,6 +1,8 @@
-import type { Meta, StoryObj } from "@storybook/react-vite";
+import type { Decorator, Meta, StoryObj } from "@storybook/react-vite";
 import { useCallback, useState } from "react";
 import { fn } from "storybook/test";
+
+import { FakeDesktop } from "~/ng/__fixtures__/desktop";
 
 import { CloneModalView } from "./CloneModalView";
 import { MarkdownEditorView } from "./MarkdownEditorView";
@@ -237,3 +239,25 @@ export const Interactive: Story = {
     );
   },
 };
+
+/** Over /ng's clone screen: the glass dialog, laid out as /ng's Settings. */
+const overScreen: Decorator[] = [
+  (Story) => (
+    <div className="ng-theme relative h-screen w-screen overflow-hidden bg-black">
+      <FakeDesktop />
+      <Story />
+    </div>
+  ),
+];
+
+/** In /ng's glass: the modes a rail on the left with Create at its foot, as Settings has Save. */
+export const Glass: Story = { args: { ...sources(), glass: true }, decorators: overScreen };
+
+/** In /ng's glass, the New ticket mode. */
+export const GlassNewTicket: Story = { args: { ...NewTicket.args, glass: true }, decorators: overScreen };
+
+/** In /ng's glass, starting: the operation's progress under the form. */
+export const GlassForking: Story = { args: { ...Forking.args, glass: true }, decorators: overScreen };
+
+/** In /ng's glass, every field live. */
+export const GlassInteractive: Story = { ...Interactive, args: { ...Interactive.args, glass: true }, decorators: overScreen };

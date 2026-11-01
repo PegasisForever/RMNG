@@ -51,6 +51,7 @@ export function CloneModalContainer({
   initialSource = null,
   onClose,
   onStart,
+  glass = false,
 }: {
   /** Clones to fork from: live first, archived last; the dialog offers every managed row. */
   clones: Clone[];
@@ -67,6 +68,8 @@ export function CloneModalContainer({
   /** Starts the clone and resolves with the driving Operation: a fork of the picked source
    *  clone, or (the template tab) a clone built from the preset's image. */
   onStart: (fork: boolean, req: CloneRequest) => Promise<Operation>;
+  /** In /ng's glass, laid out as its Settings (`CloneModalView`'s `glass`). */
+  glass?: boolean;
 }) {
   const [state, dispatch] = useReducer(cloneDialogReducer, null, () =>
     emptyCloneDialog(initialTicket, initialSource),
@@ -151,6 +154,7 @@ export function CloneModalContainer({
 
   return (
     <CloneModalView
+      glass={glass}
       draft={state.draft}
       onDraftChange={onDraftChange}
       clones={sources}

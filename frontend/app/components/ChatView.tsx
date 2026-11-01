@@ -8,7 +8,7 @@
 // so a story renders identically on every load and on every machine.
 //
 // `glass` draws it in /ng's glass (`~/ng/GLASS.md`), on a glass panel over the clone's screen:
-// the bubbles are glass of their own (the operator's in the other look, as a lit control), and
+// the assistant's bubbles are glass of their own (the operator's green, as the send button), and
 // the field and the boxes are translucent rather than solid.
 import { CalendarClock, Clock, LoaderCircle, SendHorizontal, Square } from "lucide-react";
 import { useEffect, useRef } from "react";
@@ -109,7 +109,8 @@ const SOLID = {
 
 /** `~/ng/GLASS.md`: glass bubbles, and its flat content (a field, a button, a box) on the panel. */
 const GLASS: Look = {
-  user: "ng-glass ng-glass-lit",
+  // The operator's own: green, as the send button
+  user: "bg-emerald-600 text-white",
   assistant: "ng-glass text-neutral-900 dark:text-white",
   working: "ng-glass",
   faint: "text-black/40 dark:text-white/40",

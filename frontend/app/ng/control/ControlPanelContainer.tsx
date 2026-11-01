@@ -417,6 +417,7 @@ export function ControlPanelContainer({
       case "clone":
         return (
           <CloneModalContainer
+            glass
             clones={state.hosts}
             operations={state.operations}
             accounts={accounts}
@@ -439,6 +440,7 @@ export function ControlPanelContainer({
       case "ticket":
         return (
           <TicketModalContainer
+            glass
             presets={presets}
             onClose={closeDialog}
             onCreated={(created) => {
