@@ -35,14 +35,17 @@ no sheen, no shadow, no glow.
 | `ng-glass` | Every surface: rim, sheen, short shadow. Blur 8 px. | White tint 35 %, dark text, a hairline edge. | Grey tint 30 %, white text. |
 | `ng-glass-thick` | A surface with text to read: a dialog, a tooltip, the monitor's number, a note. Blur 14 px, a long shadow. | White tint 55 %. | Grey tint 50 %. |
 | `ng-glass-control` | A surface that is itself a control (a floating button): more light under the mouse; sinks on a press; an outline on keyboard focus; 45 % when disabled. | Dark outline. | White outline. |
-| `ng-glass-row` | A piece in a row of others at its height (the wide pages' columns): a short shadow that stays under it, out of the 8 px gap, so it does not fall on the next one. | | |
+| `ng-glass-flat` | A piece on a backdrop that already blurs and darkens the screen (the wide pages' columns): no blur and no shadow of its own, only the tint, the rim and the sheen. | | |
 | `ng-glass-lit` | A control whose thing is open (the pages shown, fullscreen on): the other look's glass. | Dark glass, white text. | Frosted white glass, dark text. |
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
 The pages' panel (`./pages/ui.tsx`, `PAGES_GLASS`, narrow) is glass with a denser tint too: light
 grey at 80 %, dark grey at 78 %, as it is full of small text. Wide, the pages have no panel: each
-column, and each side panel over the columns, is the usual thick glass. In the pages' own window there is no clone's
+column is flat glass (`ng-glass-flat`), and each side panel over the columns is the usual thick
+glass. While the pages are open, a backdrop over the whole screen (under the pages and the
+floating buttons) blurs and darkens it (`PAGES_BACKDROP`, `bg-black/25` / `bg-black/40`, blur
+12 px); it fades in and out with the pages (200 ms), and takes no touch or click. In the pages' own window there is no clone's
 screen under them: the same flat content sits on a solid ground (`bg-neutral-100` /
 `bg-neutral-950`), with no glass. A sheet or a dialog over the pages is solid
 (`bg-neutral-100` / `bg-neutral-900`): over a dimmed page, glass would look murky.

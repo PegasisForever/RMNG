@@ -5,7 +5,7 @@ import { fn } from "storybook/test";
 import { FakeDesktop } from "../__fixtures__/desktop";
 import { pagesFor } from "../__fixtures__/screen";
 import type { NgTab } from "../ToolRow";
-import { PAGES_GLASS } from "./ui";
+import { PAGES_BACKDROP, PAGES_GLASS } from "./ui";
 import { WIDE_MIN } from "./WideLayout";
 
 /** The /ng pages, all of them, as their container lays them out: narrow, the tool row over a
@@ -26,6 +26,7 @@ function Pages({ width, height, surface, tab: first }: { width: number; height: 
       style={{ width: width >= WIDE_MIN ? width : width + 16, height: height + 16 }}
     >
       <FakeDesktop />
+      <div className={`absolute inset-0 ${PAGES_BACKDROP}`} />
       {/* Narrow, one glass panel; wide, each column is glass of its own */}
       <div className={`relative h-full ${width >= WIDE_MIN ? "" : `overflow-hidden ${PAGES_GLASS}`}`}>{content}</div>
     </div>

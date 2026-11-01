@@ -24,11 +24,14 @@ import { type Box, MenuDivider, MenuItem, MenuPanel } from "~/components/Overflo
 export const PAGES_GLASS =
   "ng-glass ng-glass-thick rounded-2xl [--glass-tint:rgb(245_245_245/0.8)] dark:[--glass-tint:rgb(23_23_23/0.78)]";
 
-/** A column of the wide pages (`./WideLayout.tsx`) on its own: glass of its own over the clone's
- *  screen (the usual thick glass, as the side panels over it, with a short shadow that stays out
- *  of the gap to the next column: `ng-glass-row`); a flat hollow on the solid ground of the
- *  pages' window. */
-export const COLUMN_GLASS = "ng-glass ng-glass-thick ng-glass-row rounded-2xl overflow-hidden";
+/** A column of the wide pages (`./WideLayout.tsx`) on its own: over the clone's screen, glass
+ *  with no blur or shadow of its own (`ng-glass-flat`: the backdrop under the pages blurs and
+ *  darkens the screen for them all); a flat hollow on the solid ground of the pages' window. */
+export const COLUMN_GLASS = "ng-glass ng-glass-thick ng-glass-flat rounded-2xl overflow-hidden";
+
+/** Over the whole clone's screen while the pages are open, under them and the floating buttons:
+ *  it blurs and darkens the screen. It takes no touch or click. */
+export const PAGES_BACKDROP = "pointer-events-none bg-black/25 backdrop-blur-md dark:bg-black/40";
 export const COLUMN_SOLID =
   "overflow-hidden rounded-xl border border-black/10 bg-black/[0.03] dark:border-white/10 dark:bg-white/[0.03]";
 const ColumnFrame = createContext(COLUMN_SOLID);

@@ -11,7 +11,8 @@
 //   there is no screen to use in the middle.
 // - The keyboard at the bottom (touch mode), with the bar that sets its height.
 // - The pages (`pages.content`: the tool row and the open page, or the dashboard's layout), on a
-//   glass panel at the right under the buttons. They come in and go out as a dialog does.
+//   glass panel at the right under the buttons, on a backdrop that blurs and darkens the screen.
+//   They come in and go out as a dialog does.
 // - The floating buttons, a dialog, and the monitor's number while the Edit layout dialog is
 //   open in another window.
 import { type PointerEvent, type ReactNode, type Ref, useEffect, useState } from "react";
@@ -27,7 +28,7 @@ import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
 import { GAP } from "./geometry";
 import type { InputMode } from "./inputMode";
 import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
-import { PAGES_GLASS } from "./pages/ui";
+import { PAGES_BACKDROP, PAGES_GLASS } from "./pages/ui";
 import { WIDE_MIN } from "./pages/WideLayout";
 import { KeyboardView, type KeyboardViewProps, type TouchKind, keyboardPanel } from "./KeyboardView";
 
@@ -183,6 +184,17 @@ export function NgScreenView({
           <KeyboardHandle height={keysH} onHeight={keyboard.onHeight} onDone={keyboard.onHeightDone} />
           <KeyboardView width={width} height={keysH - HANDLE_H} bottom={bottom} {...keyboard.keys} />
         </div>
+      ) : null}
+
+      {/* Under the pages and the buttons while the pages are open: the screen blurred and
+          darkened, fading in and out with them as a dialog's backdrop does */}
+      {pagesShown ? (
+        <div
+          aria-hidden
+          className={`absolute inset-0 z-30 ${PAGES_BACKDROP} ${
+            pages.open ? MODAL_ANIMATION.backdrop.enter : MODAL_ANIMATION.backdrop.exit
+          }`}
+        />
       ) : null}
 
       {/* The pages: mounted from the start, so their data is there when they open */}
