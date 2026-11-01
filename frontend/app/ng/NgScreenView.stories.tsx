@@ -264,7 +264,7 @@ export const DesktopIdentify: Story = {
   args: { ...desktop, identify: 1 },
 };
 
-/** A right click on Fullscreen: the Edit layout dialog over the control panel, and this window's
+/** The Edit layout dialog, desktop form (a browser that opens windows), over the control panel, and this window's
  *  monitor's number in its corner. */
 export const DesktopLayoutDialog: Story = {
   args: {

@@ -6,8 +6,9 @@ import { LayoutEditorView } from "./LayoutEditorView";
 import { DEFAULT_DESKTOP_LAYOUT, type BrowserLayout } from "~/lib/clientLayout";
 import { FakeDesktop } from "~/ng/__fixtures__/screen";
 
-/** The dialog on its own draft: drags, size edits, add and remove really change it. */
-function Frame(args: { layout: BrowserLayout; note: string | null; matching: number | null; glass?: boolean }) {
+/** The dialog on its own draft: drags, size edits, add and remove really change it. `windows`:
+ *  a desktop browser's form (it opens a window per monitor), else a phone's. */
+function Frame(args: { layout: BrowserLayout; note: string | null; matching: number | null; glass?: boolean; windows: boolean }) {
   const [layout, setLayout] = useState(args.layout);
   return (
     <LayoutEditorView
@@ -16,6 +17,7 @@ function Frame(args: { layout: BrowserLayout; note: string | null; matching: num
       note={args.note}
       matching={args.matching}
       onMatchWindow={fn()}
+      onOpenWindow={args.windows ? fn() : undefined}
       onClose={fn()}
       glass={args.glass}
     />
@@ -25,7 +27,7 @@ function Frame(args: { layout: BrowserLayout; note: string | null; matching: num
 const meta = {
   title: "Dashboard/LayoutEditorView",
   component: Frame,
-  args: { layout: DEFAULT_DESKTOP_LAYOUT, note: null, matching: null },
+  args: { layout: DEFAULT_DESKTOP_LAYOUT, note: null, matching: null, windows: true },
 } satisfies Meta<typeof Frame>;
 
 export default meta;
@@ -48,6 +50,14 @@ export const Three: Story = {
       ],
       scales: [1.5, 1, 1.25],
     },
+  },
+};
+
+/** A phone's form: its one monitor, its own screen; no windows to open, add or remove. */
+export const Phone: Story = {
+  args: {
+    windows: false,
+    layout: { ...DEFAULT_DESKTOP_LAYOUT, monitors: [{ width: 590, height: 1278, x: 0, y: 0, primary: true }], scales: [2] },
   },
 };
 
