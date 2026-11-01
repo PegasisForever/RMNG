@@ -1,9 +1,10 @@
 // What the screen (`./FullDesk.tsx`) does under its layout: the connection to the selected
 // clone (`./session.ts`), the live server state, and the input. In touch mode: the keys'
 // touches, which type or move the pointer (`./keypad.ts`), a trackpad with no keys (the screen),
-// the modifiers, Fn, Caps Lock, the key clicks and dictation. In mouse and keyboard mode
-// (`./inputMode.ts`): the page's mouse, keys and clipboard (`~/viewer/input.ts`,
-// `~/viewer/clipboard.ts`). And the layout claim. The screen only lays things out.
+// the modifiers, Fn, Caps Lock, the key clicks, the clipboard keys and dictation. In mouse and
+// keyboard mode (`./inputMode.ts`): the page's mouse and keys (`~/viewer/input.ts`). In both
+// the clipboard (`~/viewer/clipboard.ts`). And the layout claim. The screen only lays things
+// out.
 //
 // A headless clone has a terminal in place of a desktop (`./TerminalScreen.tsx`, in monitor 0's
 // window): the keys type into it (`./termKeys.ts`), Space's drag too (arrows), and dictation's
@@ -48,6 +49,8 @@ const OWN_MOVES_MS = 400;
 /** Mutter axis flags: a finger scroll, and its end. */
 const AXIS_FINGER = 4;
 const AXIS_FINISH = 1;
+/** How long the note of a clipboard key stays. */
+const CLIP_NOTE_MS = 4000;
 
 type Size = { width: number; height: number };
 
@@ -89,6 +92,9 @@ export function useRemote({
   const live = useLiveState();
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
+  /** What the last clipboard key did, for a while. */
+  const [clipNote, setClipNote] = useState<string | null>(null);
+  const clipNoteTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** How the clone's sound plays here, for the Usage tab. */
   const [soundReport, setSoundReport] = useState<SoundReport | null>(null);
   /** The layout's scroll mode and speed, percent: the server says them when the socket opens. */
@@ -145,9 +151,10 @@ export function useRemote({
   };
   const sendTerm = useCallback((msg: FromBrowser) => session.current?.sendTerm(msg), []);
 
-  /** Mouse mode's input and clipboard while they are attached, and what they are told when
-   *  they attach: the last view spec, cursor and connection state. */
-  const pageInput = useRef<{ input: Input; clip: ReturnType<typeof attachClipboard> } | null>(null);
+  /** The clipboard of the session, and mouse mode's input while it is attached; and what they
+   *  are told when they attach: the last view spec, cursor and connection state. */
+  const clipboard = useRef<ReturnType<typeof attachClipboard> | null>(null);
+  const pageInput = useRef<{ input: Input } | null>(null);
   const last = useRef<{ spec: ViewSpec | null; cursor: CursorMeta | null; connected: boolean }>({
     spec: null,
     cursor: null,
@@ -179,14 +186,14 @@ export function useRemote({
       onConnected(c) {
         setConnected(c);
         last.current.connected = c;
-        pageInput.current?.clip.setConnected(c);
+        clipboard.current?.setConnected(c);
       },
       onScroll(mode, speed) {
         scroll.current = { mode, speed };
         pageInput.current?.input.setScroll(mode, speed);
       },
-      onClipboard: (msg) => pageInput.current?.clip.onMessage(msg),
-      onClipboardData: (d) => pageInput.current?.clip.onData(d),
+      onClipboard: (msg) => clipboard.current?.onMessage(msg),
+      onClipboardData: (d) => clipboard.current?.onData(d),
       onTermData: (d) => termSink.current?.(d),
       onSoundReport: setSoundReport,
     });
@@ -198,13 +205,26 @@ export function useRemote({
     };
   }, [box, monitor]);
 
+  // The clipboard, in both modes: the clipboard keys use it in touch mode
+  useEffect(() => {
+    const s = session.current;
+    if (!s) return;
+    const clip = attachClipboard({ send: s.sendClipboard, sendData: s.sendClipboardData });
+    clip.setConnected(last.current.connected);
+    clipboard.current = clip;
+    return () => {
+      clipboard.current = null;
+      clip.detach();
+    };
+  }, [sessionNo]);
+
   // Mouse mode: the page's mouse and keys go to the clone
   const chordRef = useRef(onChord);
   chordRef.current = onChord;
   useEffect(() => {
     const s = session.current;
-    if (!mouse || !s || !overlay.current) return;
-    const clip = attachClipboard({ send: s.sendClipboard, sendData: s.sendClipboardData });
+    const clip = clipboard.current;
+    if (!mouse || !s || !clip || !overlay.current) return;
     const input = attachInput({
       canvas: s.canvas,
       overlay: overlay.current,
@@ -215,16 +235,14 @@ export function useRemote({
       pasteByEvent: () => clip.pasteByEvent(),
       chord: { is: (e) => isControlPanelChord(e), holds: controlPanelChordHolds(), run: () => chordRef.current() },
     });
-    const { spec: sp, cursor: c, connected: on } = last.current;
+    const { spec: sp, cursor: c } = last.current;
     if (sp) input.setLayout(sp.content.mode === "desktop" ? sp.monitors : []);
     if (c) input.onCursor(c);
     input.setScroll(scroll.current.mode, scroll.current.speed);
-    clip.setConnected(on);
-    pageInput.current = { input, clip };
+    pageInput.current = { input };
     return () => {
       pageInput.current = null;
       input.detach();
-      clip.detach();
     };
   }, [mouse, monitor, sessionNo, overlay]);
 
@@ -318,6 +336,30 @@ export function useRemote({
     for (const keycode of [...keys].reverse()) send({ kind: "key_code", keycode, pressed: false });
   };
 
+  /** Say what a clipboard key did, for CLIP_NOTE_MS. */
+  const sayClip = (text: string) => {
+    clearTimeout(clipNoteTimer.current);
+    setClipNote(text);
+    clipNoteTimer.current = setTimeout(() => setClipNote(null), CLIP_NOTE_MS);
+  };
+  /** A clipboard key's tap. The browser lets the page use the clipboard only in the tap, so the
+   *  read or the write starts here and now. */
+  const clipKey = (way: NonNullable<Key["clip"]>) => {
+    const clip = clipboard.current;
+    if (!clip) return sayClip("Not connected to the clone.");
+    if (way === "toLocal") {
+      clip.toLocal().then(
+        (r) => sayClip(r === "same" ? "This device's clipboard has it already." : "Copied the clone's clipboard here."),
+        (e: Error) => sayClip(`Not copied: ${e.message}.`),
+      );
+    } else {
+      clip.toClone().then(
+        (r) => sayClip(r === "empty" ? "This device's clipboard is empty." : "Copied this clipboard to the clone."),
+        (e: Error) => sayClip(`Not copied: ${e.message}.`),
+      );
+    }
+  };
+
   /** What both keypads do, the keys' and the screen's trackpad. */
   const out = (o: KeypadOut) => {
     switch (o.t) {
@@ -327,6 +369,7 @@ export function useRemote({
       case "tap":
         if (o.key.fn) setFn((f) => !f);
         else if (o.key.dictate) dictate.current!.toggle();
+        else if (o.key.clip) clipKey(o.key.clip);
         else {
           keyCode(o.key.code, true);
           keyCode(o.key.code, false);
@@ -448,7 +491,7 @@ export function useRemote({
           ? `In use on ${live.state.layout.label === kind ? "another" : "the"} ${live.state.layout.label}. ${
               mouse ? "Click" : "Touch"
             } to use it here.`
-          : null;
+          : clipNote;
 
   return {
     session,

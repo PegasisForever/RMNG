@@ -1,4 +1,14 @@
-import { ArrowBigUp, ArrowBigUpDash, ArrowRightToLine, CornerDownLeft, Mic, MicOff } from "lucide-react";
+import {
+  ArrowBigUp,
+  ArrowBigUpDash,
+  ArrowDown,
+  ArrowRightToLine,
+  ArrowUp,
+  Clipboard,
+  CornerDownLeft,
+  Mic,
+  MicOff,
+} from "lucide-react";
 import { type PointerEvent, type ReactNode, memo, useRef, useState } from "react";
 
 import type { DictationState } from "./dictation";
@@ -20,7 +30,8 @@ export type KeyboardViewProps = {
   width: number;
   height: number;
   bottom: number;
-  /** Fn: F1–F12 in place of the number row, Home/PgUp/PgDn/End on the arrows. */
+  /** Fn: F1–F12 in place of the symbol row; Home, PgUp, PgDn, End, the clipboard keys and the
+   *  arrows on the number row (`keyRows`). */
   fn: boolean;
   /** The modifiers that are down (evdev code → held, tapped, or locked). */
   mods: ReadonlyMap<number, ModState>;
@@ -203,7 +214,8 @@ function KeyButton({
   return (
     <div
       role="button"
-      aria-label={k.id}
+      aria-label={k.clip ? k.label : k.id}
+      title={k.clip ? k.label : undefined}
       aria-pressed={
         k.mod || k.fn || k.code === CAPS_LOCK ? state !== undefined : dictation ? dictation === "listening" : undefined
       }
@@ -248,8 +260,21 @@ function KeyIcon({ icon, size, locked }: { icon: NonNullable<Key["icon"]>; size:
     shift: locked ? <ArrowBigUpDash {...p} /> : <ArrowBigUp {...p} />,
     win: <WinLogo size={size * 0.8} />,
     mic: <Mic {...p} />,
+    "clip-down": <ClipIcon size={size} arrow={<ArrowDown {...p} size={size * 0.7} />} />,
+    "clip-up": <ClipIcon size={size} arrow={<ArrowUp {...p} size={size * 0.7} />} />,
   };
   return icons[icon];
+}
+
+/** A clipboard with an arrow beside it: down, the clone's clipboard to this device; up, this
+ *  device's to the clone. */
+function ClipIcon({ size, arrow }: { size: number; arrow: ReactNode }) {
+  return (
+    <span className="flex items-center">
+      <Clipboard size={size * 0.85} strokeWidth={1.75} aria-hidden />
+      {arrow}
+    </span>
+  );
 }
 
 /** The four panes of the Win key. */

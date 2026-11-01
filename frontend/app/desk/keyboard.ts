@@ -24,8 +24,11 @@ export type Key = {
   /** The dictation key: it starts and stops dictation (`./dictation.ts`), and sends nothing
    *  itself (`code` is 0). */
   dictate?: boolean;
+  /** A clipboard key: it copies the clone's clipboard to this device's ("toLocal") or this
+   *  device's to the clone's ("toClone"), and sends nothing itself (`code` is 0). */
+  clip?: "toLocal" | "toClone";
   /** Drawn as this icon in place of its label. */
-  icon?: "tab" | "enter" | "shift" | "win" | "mic";
+  icon?: "tab" | "enter" | "shift" | "win" | "mic" | "clip-down" | "clip-up";
 };
 
 /** The rows are this many units wide: ten letters and a Shift's worth more. The Tab row is
@@ -56,15 +59,22 @@ const NUMBER_ROW = even([BACKQUOTE, ...DIGITS.slice(1), DIGITS[0], key("Backspac
 
 const ARROWS = [key("ArrowLeft", "←"), key("ArrowUp", "↑"), key("ArrowDown", "↓"), key("ArrowRight", "→")];
 
-/** The number row under Fn: Home, PgUp, PgDn and End on 1 to 4, the arrows on 7 to 0. */
+/** The clipboard keys: the clone's clipboard down to this device's (the keyboard is under the
+ *  clone's screen), and this device's up to the clone's. */
+const CLIP_KEYS: Key[] = [
+  { id: "ClipToLocal", code: 0, label: "Copy the clone's clipboard here", units: 1, clip: "toLocal", icon: "clip-down" },
+  { id: "ClipToClone", code: 0, label: "Copy this clipboard to the clone", units: 1, clip: "toClone", icon: "clip-up" },
+];
+
+/** The number row under Fn: Home, PgUp, PgDn and End on 1 to 4, the clipboard keys on 5 and 6,
+ *  the arrows on 7 to 0. */
 const FN_NUMBER_ROW = even([
   BACKQUOTE,
   key("Home", "Home"),
   key("PageUp", "PgUp"),
   key("PageDown", "PgDn"),
   key("End", "End"),
-  DIGITS[5],
-  DIGITS[6],
+  ...CLIP_KEYS,
   ...ARROWS,
   key("Backspace", "⌫"),
 ]);
@@ -129,7 +139,8 @@ const SPACE_ROW: Key[] = [
 ];
 
 /** The six rows, top first: symbols, numbers, three of letters, space. `fn` puts F1–F12 in
- *  place of the symbol row, and Home, PgUp, PgDn, End and the arrows on number keys. */
+ *  place of the symbol row, and Home, PgUp, PgDn, End, the clipboard keys and the arrows on
+ *  number keys. */
 export function keyRows(fn: boolean): Key[][] {
   return [fn ? F_ROW : SYMBOL_ROW, fn ? FN_NUMBER_ROW : NUMBER_ROW, ...letterRows(fn), SPACE_ROW];
 }

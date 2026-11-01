@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { localTypeFor, offerMimes, pickMimes } from "./clipboard";
+import { localTypeFor, offerMimes, pickForWrite, pickMimes } from "./clipboard";
 
 test("a clone's offer: PNG, HTML and the best plain text, as Chrome types", () => {
   // What a Chromium app in the clone offers for a copied web page part with an image.
@@ -25,6 +25,17 @@ test("a clone's offer: PNG, HTML and the best plain text, as Chrome types", () =
   ]);
   // Nothing Chrome can write.
   expect(pickMimes(["image/jpeg", "application/x-gtk-text-buffer-rich-text"])).toEqual([]);
+});
+
+test("the clipboard key writes the types that belong together: text with its HTML, else the image", () => {
+  expect(pickForWrite(["text/html", "UTF8_STRING", "image/png"])).toEqual([
+    { mime: "text/html", type: "text/html" },
+    { mime: "UTF8_STRING", type: "text/plain" },
+  ]);
+  // A copied image, with the HTML of its page part: the image
+  expect(pickForWrite(["text/html", "image/png"])).toEqual([{ mime: "image/png", type: "image/png" }]);
+  expect(pickForWrite(["text/html"])).toEqual([{ mime: "text/html", type: "text/html" }]);
+  expect(pickForWrite(["image/jpeg"])).toEqual([]);
 });
 
 test("local content is offered under the names Linux apps ask for, and served back", () => {

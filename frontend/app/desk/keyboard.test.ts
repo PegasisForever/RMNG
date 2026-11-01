@@ -34,10 +34,15 @@ describe("keyRows", () => {
     }
   });
 
-  test("Fn puts F1 to F12 on the symbol row, and Home PgUp PgDn End and the arrows on number keys", () => {
+  test("Fn puts F1 to F12 on the symbol row, and Home PgUp PgDn End, the clipboard keys and the arrows on number keys", () => {
     const [top, numbers, , , , bottom] = keyRows(true);
     expect(top.map((k) => k.label).join(" ")).toBe("F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12");
-    expect(numbers.map((k) => k.label).join(" ")).toBe("` Home PgUp PgDn End 5 6 ← ↑ ↓ → ⌫");
+    expect(numbers.map((k) => k.id).join(" ")).toBe(
+      "Backquote Home PageUp PageDown End ClipToLocal ClipToClone ArrowLeft ArrowUp ArrowDown ArrowRight Backspace",
+    );
+    // The clipboard keys send nothing to the clone themselves
+    expect(numbers[5]).toMatchObject({ clip: "toLocal", code: 0 });
+    expect(numbers[6]).toMatchObject({ clip: "toClone", code: 0 });
     // The keys stay where they are: the same count in each row as without Fn
     expect(keyRows(true).map((r) => r.length)).toEqual(keyRows(false).map((r) => r.length));
     expect(bottom).toEqual(keyRows(false)[5]);

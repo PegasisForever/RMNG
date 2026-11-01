@@ -21,6 +21,10 @@
 //   content comes later: the clone's text, once the offer of its copy and the text arrive.
 //   Everything else (HTML, an image, an agent's copy) waits for the next key press or click.
 //
+// The on-screen keyboard has two keys for this, which work in every browser: one writes the
+// clone's clipboard to the local one (`toLocal`), the other offers the local clipboard to the
+// clone (`toClone`). Each starts in its tap, the only time Safari lets a page use the clipboard.
+//
 // All monitor windows share two values in localStorage: a hash of the last local content seen
 // (so focusing another window does not offer the same content again), and the pending offer.
 // A window's own offer is stored there marked `own`, so its siblings, which get it from the
@@ -37,6 +41,8 @@ const LOCAL_TYPES: LocalType[] = ["image/png", "text/html", "text/plain"];
 
 /** How long a copy chord's write waits for the clone's text before it gives up. */
 const COPY_WAIT_MS = 2000;
+/** How long `toLocal`'s write waits for the clone's content before it gives up. */
+const TO_LOCAL_WAIT_MS = 10_000;
 
 /** Most bytes sent per type: what still fits the 32 MiB clipboard limit once it is base64 on
  *  the server's hop to the clone. A larger copy is answered with no bytes (the paste fails). */
@@ -66,6 +72,17 @@ export function offerMimes(types: LocalType[]): string[] {
 export function localTypeFor(mime: string): LocalType | null {
   if (isTextMime(mime)) return "text/plain";
   return mime === "text/html" || mime === "image/png" ? mime : null;
+}
+
+/** What `toLocal` writes of a clone's offer: one write fails as a whole when one type does not
+ *  come, so only the types that belong together. Text (with its HTML, for a paste with its
+ *  look), else the PNG image, else the HTML. */
+export function pickForWrite(mimes: string[]): { mime: string; type: LocalType }[] {
+  const all = pickMimes(mimes);
+  const text = all.filter((x) => x.type !== "image/png");
+  if (text.some((x) => x.type === "text/plain")) return text;
+  const image = all.filter((x) => x.type === "image/png");
+  return image.length ? image : text;
 }
 
 /** What to fetch from a clone's offer (limited to what Chrome can write): the PNG image, the HTML and the best plain text, each with the Chrome type it
@@ -123,6 +140,10 @@ function htmlToText(html: string): string {
   return text;
 }
 
+/** A text field of the page: what is pasted or copied there is the page's own. */
+const editable = (t: EventTarget | null) =>
+  t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || (t instanceof HTMLElement && t.isContentEditable);
+
 /** The content of a paste event, in the types Chrome can write (as `readLocal`). */
 function pasted(cd: DataTransfer): Map<LocalType, Blob> {
   const blobs = new Map<LocalType, Blob>();
@@ -160,6 +181,12 @@ interface PageClipboard {
   onGesture(): void;
   /** Whether the local clipboard comes only from a paste chord's paste event. */
   pasteByEvent(): boolean;
+  /** In a tap or a click: write the clone's clipboard to the local one. "same": it is the local
+   *  clipboard's own content. Fails when the clone's clipboard is empty or does not come. */
+  toLocal(): Promise<"written" | "same">;
+  /** In a tap or a click: offer the local clipboard to the clone (Safari first shows its Paste
+   *  button). "empty": there is nothing to offer. Fails when the browser refuses the read. */
+  toClone(): Promise<"sent" | "empty">;
   detach(): void;
 }
 
@@ -175,7 +202,12 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
     want: Map<string, LocalType>;
     got: Map<LocalType, Blob>;
     byChord?: boolean;
+    /** `toLocal`'s write takes the types as they come; nothing else writes them. */
+    waiters?: Map<LocalType, (b: Blob) => void>;
   } | null = null;
+  /** The clone's clipboard: the offer the server sent last, or this window's own. `own`: this
+   *  browser's content (this window's offer, or a sibling's). */
+  let current: (ClipboardOffer & { own: boolean }) | null = null;
   /** Content Chrome refused to write (and the offer it came from), for the next gesture. */
   let unwritten: { serial: number; blobs: Map<LocalType, Blob> } | null = null;
   /** Offers from the server so far; a copy chord's write, waiting for the text of an offer that
@@ -208,6 +240,7 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
   function offerLocal(blobs: Map<LocalType, Blob>) {
     const offer = { serial: Date.now(), mime_types: offerMimes([...blobs.keys()]) };
     owned = blobs;
+    current = { ...offer, own: true };
     // This copy is newer than any offer not written yet, and than the reply on its way.
     setPending({ ...offer, own: true });
     unwritten = null;
@@ -235,7 +268,7 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
    *  the clone. The page's terminal pastes for itself. */
   function onPaste(e: ClipboardEvent) {
     if (focusReads !== false || !connected || !e.clipboardData) return;
-    if (e.target instanceof HTMLTextAreaElement) return;
+    if (editable(e.target)) return;
     e.preventDefault();
     const blobs = pasted(e.clipboardData);
     if (blobs.size) offerLocal(blobs);
@@ -248,7 +281,7 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
   function onCopyKey(e: KeyboardEvent) {
     if (focusReads !== false || !connected || e.repeat || e.altKey) return;
     if (!(isMac ? e.metaKey : e.ctrlKey) || (e.code !== "KeyC" && e.code !== "KeyX")) return;
-    if (e.target instanceof HTMLTextAreaElement) return;
+    if (editable(e.target)) return;
     // This copy is newer than a write refused before: the next gesture must not write that.
     unwritten = null;
     const text = new Promise<Blob>((resolve, reject) => {
@@ -281,6 +314,12 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
       unwritten = { serial, blobs }; // no focus or no user activation: retry on the next gesture
       return;
     }
+    await written(serial);
+  }
+
+  /** After a write of the clone's content: it is no longer pending, and Chrome's copy of it is
+   *  known as seen. */
+  async function written(serial: number) {
     if (pending()?.serial === serial) setPending(null);
     // Without focus reads nothing reads it back, and a read would raise Safari's paste prompt.
     if (!focusReads) return;
@@ -288,6 +327,58 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
     // window does not offer it back to the clone.
     const back = await readLocal();
     if (back?.size) localStorage.setItem(SEEN_KEY, await digest(back));
+  }
+
+  function toLocal(): Promise<"written" | "same"> {
+    const c = current;
+    if (!connected) return Promise.reject(new Error("not connected"));
+    if (!c) return Promise.reject(new Error("the clone's clipboard is empty"));
+    if (c.own) {
+      // The local clipboard's own content: this window still has it, or a sibling's copy is
+      // in the local clipboard already
+      if (!owned) return Promise.resolve("same");
+      return navigator.clipboard.write([new ClipboardItem(Object.fromEntries(owned))]).then(() => "same");
+    }
+    const picks = pickForWrite(c.mime_types);
+    if (!picks.length) return Promise.reject(new Error("the clone's clipboard has nothing this browser can take"));
+    // The fetch of this offer that runs already (a focused window asks at once), or a new one
+    if (fetching?.serial !== c.serial) fetching = { serial: c.serial, want: new Map(), got: new Map() };
+    const f = fetching;
+    const waiters = (f.waiters ??= new Map());
+    unwritten = null;
+    const items = Object.fromEntries(
+      picks.map((x) => {
+        const got = f.got.get(x.type);
+        if (got) return [x.type, got];
+        if (![...f.want.values()].includes(x.type)) {
+          f.want.set(x.mime, x.type);
+          o.send({ k: "request", serial: c.serial, mime_type: x.mime });
+        }
+        return [
+          x.type,
+          new Promise<Blob>((resolve, reject) => {
+            waiters.set(x.type, resolve);
+            setTimeout(() => reject(new Error("the clone's clipboard did not come")), TO_LOCAL_WAIT_MS);
+          }),
+        ];
+      }),
+    );
+    // Called now, in the tap; the content comes later
+    return navigator.clipboard.write([new ClipboardItem(items)]).then(async () => {
+      await written(c.serial);
+      return "written" as const;
+    });
+  }
+
+  async function toClone(): Promise<"sent" | "empty"> {
+    if (!connected) throw new Error("not connected");
+    // The read first, while the tap lets the page read
+    const blobs = await readLocal();
+    if (!blobs) throw new Error("the browser did not let the page read the clipboard");
+    if (!blobs.size) return "empty";
+    localStorage.setItem(SEEN_KEY, await digest(blobs));
+    offerLocal(blobs);
+    return "sent";
   }
 
   async function serve(serial: number, mime: string) {
@@ -311,7 +402,9 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
     onMessage(msg) {
       if (msg.k === "offer") {
         const p = pending();
-        if (p?.own && p.serial === msg.serial) return; // a sibling window's copy
+        const own = !!p?.own && p.serial === msg.serial;
+        current = { serial: msg.serial, mime_types: msg.mime_types, own };
+        if (own) return; // a sibling window's copy
         offers++;
         setPending({ serial: msg.serial, mime_types: msg.mime_types });
         // A new copy, even with the serial of the last one: serials restart per clone and when
@@ -329,6 +422,10 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
       // Write what came so far after each reply: one type that never comes (an image too
       // large, a clone read that hangs) must not hold back the others.
       f.got.set(type, new Blob([d.bytes], { type }));
+      if (f.waiters) {
+        f.waiters.get(type)?.(f.got.get(type)!);
+        return;
+      }
       if (type === "text/plain" && copyWait && offers > copyWait.after) {
         copyWait.resolve(f.got.get(type)!);
         copyWait = null;
@@ -358,6 +455,8 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
       else void write(u.serial, u.blobs);
     },
     pasteByEvent: () => focusReads === false,
+    toLocal,
+    toClone,
     detach() {
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("paste", onPaste);
