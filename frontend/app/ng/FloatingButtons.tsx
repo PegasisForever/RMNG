@@ -16,9 +16,9 @@
 //
 // They are glass (`./GLASS.md`). A button whose thing is open is lit, but not Fullscreen: its
 // icon says which way it goes. A right click is a long press, for a mouse. With a mouse each
-// button says what it does, and what its long press does, in a tooltip under it. In mouse and
-// keyboard mode they slide out of the window to the right when they are not in use (`away`;
-// `./FullDesk.tsx` says when).
+// button says what it does, and what its long press does, in a tooltip under it. They are placed,
+// with the side panels under them, by the screen's right group (`./NgScreenView.tsx`), which in
+// mouse and keyboard mode slides out of the window to the right when not in use.
 import { Expand, Keyboard, LayoutGrid, Maximize, Minimize, Monitor } from "lucide-react";
 import { type ReactNode, useRef } from "react";
 
@@ -40,7 +40,6 @@ export function FloatingButtons({
   fullscreen,
   monitors,
   controlPanelKeys,
-  away = false,
 }: {
   controlPanelOpen: boolean;
   /** The keyboard's button shows (not in mouse and keyboard mode). */
@@ -67,22 +66,10 @@ export function FloatingButtons({
   /** The key chord that shows and hides the control panel (`./shortcut.ts`), for the Control panel button's
    *  tooltip; absent: none said. */
   controlPanelKeys?: string;
-  /** Slid out of the window to the right, and out of reach. */
-  away?: boolean;
 }) {
+  // Placed, and slid out, by the screen's right group (`./NgScreenView.tsx`)
   return (
-    <div
-      data-ng-buttons
-      inert={away}
-      className="absolute z-50 flex transition-transform duration-300 ease-out"
-      style={{
-        gap: FLOAT_GAP,
-        top: `calc(env(safe-area-inset-top) + ${FLOAT_GAP}px)`,
-        right: `calc(env(safe-area-inset-right) + ${FLOAT_GAP}px)`,
-        // Right by their width, the room beside them, and their shadow
-        transform: away ? `translateX(calc(100% + env(safe-area-inset-right) + ${FLOAT_GAP * 3}px))` : undefined,
-      }}
-    >
+    <div data-ng-buttons className="pointer-events-auto flex shrink-0" style={{ gap: FLOAT_GAP }}>
       {monitors?.missing.length ? (
         <Round
           label={`Open the window${monitors.missing.length > 1 ? "s" : ""} of monitor${

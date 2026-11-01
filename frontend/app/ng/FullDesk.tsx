@@ -22,12 +22,11 @@
 //   it is always shown at the bottom, the clone's screen fits in the area above it, and that
 //   area is a touch screen: each finger goes to the clone as a touch.
 // - Mouse and keyboard: the mouse, the keys and the clipboard go to the clone as in the viewer
-//   (`~/viewer/input.ts`). The same buttons, less the keyboard's, show when the mode starts,
-//   then slide out of the window to the right; the mouse at the window's right edge, by their
-//   row, brings them back. On a large screen (the control panel's wide layout), the mouse at the right
-//   edge under their row brings in the side panels, the clone's notes and its assistant, over
-//   the screen, and the buttons with them; the mouse and the keys are theirs then, and a move
-//   away sends both out. A
+//   (`~/viewer/input.ts`). The same buttons, less the keyboard's, and on a large screen (the
+//   control panel's wide layout) the side panels under them (the clone's notes and its
+//   assistant), are one group at the right: it shows when the mode starts, then slides out of
+//   the window to the right; the mouse at the window's right edge brings it back, and a move
+//   away from it sends it out. While the mouse is over it, the mouse and the keys are its. A
 //   chord (`./shortcut.ts`) shows the control panel, with the buttons above it, and hides it again;
 //   so does a click beside them.
 //
@@ -88,14 +87,16 @@ const MIN_KEYS_H = 160;
 const MAX_KEYS_PART = 0.8;
 /** Touch slots a touch screen offers, fingers at once. */
 const TOUCH_SLOTS = 10;
-/** How long the buttons show when mouse and keyboard mode starts, ms. */
+/** How long the right group shows when mouse and keyboard mode starts, ms. */
 const INTRO_MS = 4000;
-/** Mouse mode: the mouse this close to the window's right edge (CSS px), by the buttons' row,
- *  brings the buttons in; this much (CSS px) away from their row, it sends them away again. */
+/** Mouse mode: the mouse this close to the window's right edge (CSS px) brings the right group
+ *  in; this far (CSS px) left of the group, it sends it out again. */
 const RIGHT_EDGE_PX = 2;
-const BUTTONS_MARGIN_PX = 24;
-/** The mouse this far (CSS px) left of the side panels sends them out again. */
-const SIDE_MARGIN_PX = 48;
+const GROUP_MARGIN_PX = 48;
+/** Touch mode, wide: a finger that comes down this close to the right edge (CSS px) and moves
+ *  this far left brings the side panels in. */
+const SWIPE_EDGE_PX = 24;
+const SWIPE_PX = 40;
 /** The control panel's own window: its name, and its size when it opens. */
 const CONTROL_PANEL_WINDOW = "rmng-control-panel";
 const CONTROL_PANEL_WINDOW_W = 560;
@@ -140,12 +141,14 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const [controlPanel, setControlPanel] = useState(false);
   const [tab, setTab] = useState<NgTab>("clones");
   const [layoutOpen, setLayoutOpen] = useState(false);
-  /** Mouse mode: the buttons are in the window (the mode is new, or the mouse is at the top). */
+  /** Mouse mode: the right group (the buttons, and the side panels) is in the window (the mode
+   *  is new, or the mouse is at the right edge), and the mouse is over it. */
   const [peek, setPeek] = useState(false);
+  const [overGroup, setOverGroup] = useState(false);
   /** The control panel's wide layout fits: the side panels can come in without it. */
   const wide = controlPanelBox(width, height, bottom).width >= WIDE_MIN;
-  /** Mouse mode, wide: the side panels are in the window without the control panel; and their box. */
-  const [sidePeek, setSidePeek] = useState(false);
+  /** Touch mode, wide: a swipe from the right edge brought the side panels in. Their box. */
+  const [swiped, setSwiped] = useState(false);
   const [sideAt, setSideAt] = useState<HTMLDivElement | null>(null);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
   const [fullscreen, setFullscreen] = useState<boolean | null>(null);
@@ -198,7 +201,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     else setControlPanel((p) => !p);
   };
   /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. */
-  const mouseInput = mouse && !controlPanel && !layoutOpen && !sidePeek;
+  const mouseInput = mouse && !controlPanel && !layoutOpen && !(peek && overGroup);
   const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, onChord: toggleControlPanel });
 
   // The chord while the clone does not get the keys (the viewer's input takes it otherwise)
@@ -224,35 +227,35 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     window.addEventListener("pointermove", onMove, { capture: true, passive: true });
     return () => window.removeEventListener("pointermove", onMove, { capture: true });
   }, []);
-  /** The buttons' row ends this far down (CSS px): under the clock bar, a gap, the buttons, a gap. */
-  const rowEnd = useRef(0);
-  rowEnd.current = top + FLOAT_GAP * 2 + FLOAT_BUTTON;
-  // Mouse and keyboard mode starts: the buttons show for a while, then they slide out of the
-  // window to the right. The mouse at the window's right edge, as high as their row, brings
-  // them back; away from their row it sends them away again.
+  // Mouse and keyboard mode starts: the right group shows for a while, then it slides out of
+  // the window to the right. The mouse at the window's right edge brings it back; left of it
+  // (by GROUP_MARGIN_PX, and with no button held, as a text selection's drag), out again.
   useEffect(() => {
-    if (!mouse) return;
+    if (!mouse) {
+      setPeek(false);
+      setOverGroup(false);
+      return;
+    }
     setZoom(1);
     setPeek(true);
     let intro = true;
-    /** The mouse is at the buttons' row, or by it. Their row's width is the page's to say. */
-    const isNear = ({ x, y }: { x: number; y: number }) => {
-      const row = document.querySelector<HTMLElement>("[data-ng-buttons]")?.offsetWidth ?? 0;
-      return y <= rowEnd.current + BUTTONS_MARGIN_PX && x >= window.innerWidth - FLOAT_GAP - row - BUTTONS_MARGIN_PX;
-    };
-    /** The start's time ends without sending them away while the mouse is by them. The move
-     *  that started the mode came before this listener: it is in `pointer`. */
-    let near = isNear(pointer.current);
+    /** The group's left edge, less the margin (its width is the page's to say). */
+    const groupLeft = () =>
+      window.innerWidth - (document.querySelector<HTMLElement>("[data-ng-right]")?.offsetWidth ?? 0) - GROUP_MARGIN_PX;
+    /** The start's time ends without sending it out while the mouse is over it. The move that
+     *  started the mode came before this listener: it is in `pointer`. */
+    let over = pointer.current.x >= groupLeft();
+    setOverGroup(over);
     const t = setTimeout(() => {
       intro = false;
-      if (!near) setPeek(false);
+      if (!over) setPeek(false);
     }, INTRO_MS);
     const onMove = (e: globalThis.PointerEvent) => {
       if (e.pointerType !== "mouse") return;
-      const at = { x: e.clientX, y: e.clientY };
-      near = isNear(at);
-      if (at.x >= window.innerWidth - RIGHT_EDGE_PX && at.y <= rowEnd.current) setPeek(true);
-      else if (!near && !intro) setPeek(false);
+      over = e.clientX >= groupLeft();
+      setOverGroup(over);
+      if (e.clientX >= window.innerWidth - RIGHT_EDGE_PX) setPeek(true);
+      else if (!over && !intro && e.buttons === 0) setPeek(false);
     };
     window.addEventListener("pointermove", onMove, { capture: true, passive: true });
     return () => {
@@ -261,22 +264,36 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     };
   }, [mouse]);
 
-  // Wide, in mouse mode: the mouse at the window's right edge, under the buttons' row, brings the
-  // side panels in; away from them (no button held, as a text selection's drag), out again
+  // Touch mode, wide: a finger from the right edge, moving left, brings the side panels in
+  // (`onDownCapture` starts it); a touch beside them sends them out
+  const swipe = useRef<{ id: number; x: number; y: number } | null>(null);
   useEffect(() => {
-    if (!mouse || !wide) return setSidePeek(false);
+    if (mouse || !wide) {
+      setSwiped(false);
+      return;
+    }
     const onMove = (e: globalThis.PointerEvent) => {
-      if (e.pointerType !== "mouse") return;
-      // Only when there are panels to bring: none while no clone is selected
-      const edge = e.clientX >= window.innerWidth - RIGHT_EDGE_PX && e.clientY > rowEnd.current;
-      if (edge && document.querySelector("[data-ng-side] section")) return setSidePeek(true);
-      const w = document.querySelector<HTMLElement>("[data-ng-side]")?.offsetWidth ?? 0;
-      if (e.buttons === 0 && e.clientX < window.innerWidth - FLOAT_GAP - w - SIDE_MARGIN_PX) setSidePeek(false);
+      const s = swipe.current;
+      if (!s || e.pointerId !== s.id) return;
+      const dx = e.clientX - s.x;
+      if (dx < -SWIPE_PX && Math.abs(dx) > Math.abs(e.clientY - s.y)) {
+        swipe.current = null;
+        setSwiped(true);
+      }
+    };
+    const onEnd = (e: globalThis.PointerEvent) => {
+      if (swipe.current?.id === e.pointerId) swipe.current = null;
     };
     window.addEventListener("pointermove", onMove, { capture: true, passive: true });
-    return () => window.removeEventListener("pointermove", onMove, { capture: true });
+    window.addEventListener("pointerup", onEnd, { capture: true });
+    window.addEventListener("pointercancel", onEnd, { capture: true });
+    return () => {
+      window.removeEventListener("pointermove", onMove, { capture: true });
+      window.removeEventListener("pointerup", onEnd, { capture: true });
+      window.removeEventListener("pointercancel", onEnd, { capture: true });
+    };
   }, [mouse, wide]);
-  const sideShown = wide && (controlPanel || sidePeek);
+  const sideShown = wide && (controlPanel || (mouse ? peek : swiped));
   // Out of the window, the side panels keep no focus: the keys go back to the clone
   useEffect(() => {
     const a = document.activeElement;
@@ -358,6 +375,21 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const onDownCapture = (e: PointerEvent<HTMLDivElement>) => {
     r.sounds.unlock();
     const target = e.target as Element;
+    // Touch mode, wide: a finger at the right edge may be a swipe for the side panels (only when
+    // there are panels to bring: none while no clone is selected), and a touch beside them while
+    // they are in sends them out. Neither reaches the clone.
+    if (!mouse && wide && e.pointerType === "touch" && !controlPanel) {
+      if (swiped && !target.closest("[data-ng-side], [data-ng-buttons]")) {
+        setSwiped(false);
+        e.stopPropagation();
+        return;
+      }
+      if (!swiped && e.clientX >= window.innerWidth - SWIPE_EDGE_PX && document.querySelector("[data-ng-side] section")) {
+        swipe.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+        e.stopPropagation();
+        return;
+      }
+    }
     // A touch outside the control panel puts the phone's keyboard away
     if (isTyping() && !target.closest("[role=tabpanel]")) {
       (document.activeElement as HTMLElement).blur();
@@ -525,7 +557,8 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
           />
         ),
       }}
-      side={wide ? { shown: sideShown, ref: setSideAt } : null}
+      // In mouse mode the panels go with the group (`away`), so they do not slide on their own
+      side={wide ? { shown: mouse || sideShown, ref: setSideAt } : null}
       buttons={{
         controlPanelOpen: controlPanel,
         keyboard: !mouse,
@@ -542,10 +575,10 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
         controlPanelKeys: controlPanelChordLabel(),
         monitors: missing.length ? { missing, onOpen: openMissing } : undefined,
-        // In mouse mode, out of the window unless the mouse brought them in (or the side
-        // panels, which bring them too), or the control panel or the dialog are open
-        away: mouse && !peek && !sidePeek && !controlPanel && !layoutOpen,
       }}
+      // The right group (the buttons, the side panels): in mouse mode out of the window unless
+      // the mouse brought it in, or the control panel or the dialog are open
+      away={mouse && !peek && !controlPanel && !layoutOpen}
       dialog={
         layoutOpen ? (
           <LayoutEditorContainer

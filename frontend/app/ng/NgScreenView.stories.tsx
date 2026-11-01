@@ -192,22 +192,24 @@ const desktop = {
   mode: "mouse" as const,
   screen: { x: 0, y: 0, width: DESKTOP.width, height: DESKTOP.height },
   cursor: null,
-  buttons: buttons({ keyboard: false, fit: undefined, away: true }),
+  buttons: buttons({ keyboard: false, fit: undefined }),
+  // Mouse mode, at rest: the right group (the buttons, the side panels) is out of the window
+  away: true,
 };
 
-/** Only the clone's screen: the buttons slid up out of the window. */
+/** Only the clone's screen: the buttons slid out of the window to the right. */
 export const Desktop: Story = { args: { ...desktop } };
 
 /** The mode just started, or the mouse is at the window's right edge by the buttons' row: the
  *  buttons are in (no keyboard button). */
 export const DesktopButtonsIn: Story = {
-  args: { ...desktop, buttons: buttons({ keyboard: false, fit: undefined }) },
+  args: { ...desktop, away: false, buttons: buttons({ keyboard: false, fit: undefined }) },
 };
 
 /** First open of the site with a layout of three monitors: this window shows monitor 0, and
  *  the button at the left opens the other two. */
 export const DesktopMonitorsToOpen: Story = {
-  args: { ...desktop, buttons: buttons({ keyboard: false, fit: undefined, monitors: { missing: [1, 2], onOpen: fn() } }) },
+  args: { ...desktop, away: false, buttons: buttons({ keyboard: false, fit: undefined, monitors: { missing: [1, 2], onOpen: fn() } }) },
 };
 
 /** The chord showed the control panel, under the buttons (no keyboard button). A large screen gives
@@ -215,6 +217,7 @@ export const DesktopMonitorsToOpen: Story = {
 export const DesktopControlPanel: Story = {
   args: {
     ...desktop,
+    away: false,
     controlPanel: controlPanel({ open: true, onPopOut: fn() }, DESKTOP),
     buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
   },
@@ -223,12 +226,12 @@ export const DesktopControlPanel: Story = {
 /** The mouse at the window's right edge, under the buttons' row: the side panels (the clone's
  *  notes and its assistant) over the screen, without the control panel and its backdrop. */
 export const DesktopSidePanels: Story = {
-  args: { ...desktop, side: { shown: true, content: sideFor() } },
+  args: { ...desktop, away: false, side: { shown: true, content: sideFor() } },
 };
 
 /** A headless clone: its terminal, with the page's keys and mouse (xterm.js's own). */
 export const DesktopTerminal: Story = {
-  args: { ...desktop, picture: null, terminal: <FakeTerminal touch={false} />, buttons: buttons({ keyboard: false, fit: undefined }) },
+  args: { ...desktop, away: false, picture: null, terminal: <FakeTerminal touch={false} />, buttons: buttons({ keyboard: false, fit: undefined }) },
 };
 
 /** A headless clone in monitor 1's window: its terminal is in monitor 0's. */
@@ -246,6 +249,7 @@ export const DesktopTerminalOtherMonitor: Story = {
 export const DesktopSmallWindowControlPanel: Story = {
   args: {
     ...desktop,
+    away: false,
     width: 900,
     height: 700,
     screen: { x: 0, y: 0, width: 900, height: 700 },
@@ -264,6 +268,7 @@ export const DesktopIdentify: Story = {
 export const DesktopLayoutDialog: Story = {
   args: {
     ...desktop,
+    away: false,
     controlPanel: controlPanel({ open: true, onPopOut: fn() }, DESKTOP),
     buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
     dialog: (
@@ -323,9 +328,8 @@ export const PhoneInteractive: Story = {
   },
 };
 
-/** The mouse at the display's right edge, as high as the buttons, brings them in; away from
- *  them it sends them away. Lower down, the edge brings in the side panels; 48 px left of them
- *  sends them away.
+/** The mouse at the display's right edge brings the right group in (the buttons, and the side
+ *  panels under them); 48 px left of the group sends it out. The two go the same distance.
  *  The button at the bottom left stands for Super+Space: it shows or hides the control panel. */
 export const DesktopInteractive: Story = {
   args: { ...desktop },
@@ -333,31 +337,29 @@ export const DesktopInteractive: Story = {
     const [open, setOpen] = useState(false);
     const [tab, setTab] = useState<NgTab>("clones");
     const [peek, setPeek] = useState(false);
-    const [side, setSide] = useState(false);
     return (
       <>
         <div
           onPointerMove={(e) => {
             const r = e.currentTarget.getBoundingClientRect();
-            const [x, y] = [e.clientX - r.left, e.clientY - r.top];
-            if (x >= r.width - 2 && y <= 60) setPeek(true);
-            else if (y > 84 || x < r.width - 260) setPeek(false);
-            if (x >= r.width - 2 && y > 60) setSide(true);
-            else if (e.buttons === 0 && x < r.width - 8 - 384 - 48) setSide(false);
+            const x = e.clientX - r.left;
+            const group = (e.currentTarget.querySelector("[data-ng-right]") as HTMLElement | null)?.offsetWidth ?? 0;
+            if (x >= r.width - 2) setPeek(true);
+            else if (e.buttons === 0 && x < r.width - group - 48) setPeek(false);
           }}
         >
           <NgScreenView
             {...args}
             controlPanel={controlPanel({ open, tab, onTab: setTab, onPopOut: fn() }, DESKTOP)}
             // The control panel's own story data has the side panels in it while it is open
-            side={{ shown: side && !open, content: sideFor() }}
+            side={{ shown: !open, content: sideFor() }}
             buttons={buttons({
               controlPanelOpen: open,
               keyboard: false,
               fit: undefined,
               onControlPanel: () => setOpen((o) => !o),
-              away: !open && !peek && !side,
             })}
+            away={!open && !peek}
           />
         </div>
         <button

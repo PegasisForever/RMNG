@@ -13,11 +13,13 @@
 // - The control panel (`controlPanel.content`: the tool row and the open page, or the dashboard's layout), on a
 //   glass panel at the right under the buttons, on a backdrop that blurs and darkens the screen.
 //   They come in and go out as a dialog does.
-// - Wide, the side panels (the clone's notes and its assistant) at the right, under the buttons:
-//   with the control panel, and without it when the mouse brings them in. Each is glass of its own,
-//   with its blur and shadow, and no backdrop; they slide in from the right and out again.
-// - The floating buttons, a dialog, and the monitor's number while the Edit layout dialog is
-//   open in another window.
+// - The right group: the floating buttons in the top-right corner, and under them, wide, the
+//   side panels (the clone's notes and its assistant): with the control panel, and without it
+//   when the mouse or a swipe brings them in. Each panel is glass of its own, with its blur and
+//   shadow, and no backdrop. In mouse mode the group slides out to the right and back as one
+//   (`away`), the buttons and the panels by the same distance; in touch mode the buttons stay,
+//   and the panels slide alone (`side.shown`).
+// - A dialog, and the monitor's number while the Edit layout dialog is open in another window.
 import { type PointerEvent, type ReactNode, type Ref, useEffect, useState } from "react";
 
 import { MODAL_ANIMATION } from "~/components/ModalShell";
@@ -100,8 +102,11 @@ export type NgScreenViewProps = {
   /** Wide: the side panels' box (`ref`, where the control panel puts them; or a story's `content`), and
    *  whether they are in the window (else slid out to the right); null: none. */
   side?: { shown: boolean; ref?: Ref<HTMLDivElement>; content?: ReactNode } | null;
-  /** The floating buttons (`away`: slid up out of the window); null: none. */
+  /** The floating buttons; null: none. */
   buttons: Parameters<typeof FloatingButtons>[0] | null;
+  /** The right group (the buttons and the side panels) slid out of the window to the right,
+   *  and out of reach (mouse mode). */
+  away?: boolean;
   /** A dialog over everything (the Edit layout dialog). */
   dialog?: ReactNode;
   /** The monitor's number, large in the middle; null: not shown. */
@@ -127,6 +132,7 @@ export function NgScreenView({
   controlPanel,
   side,
   buttons,
+  away = false,
   dialog,
   identify,
   onPointerDownCapture,
@@ -225,25 +231,35 @@ export function NgScreenView({
         </div>
       </div>
 
-      {side ? (
-        // Out: past the window's edge by its gap and its shadow; and out of reach of Tab
-        <div
-          ref={side.ref}
-          data-ng-side
-          inert={!side.shown}
-          className="pointer-events-none absolute z-40 transition-transform duration-300 ease-out"
-          style={{
-            top: panel.top,
-            right: FLOAT_GAP,
-            height: panel.height,
-            transform: side.shown ? "none" : `translateX(calc(100% + ${FLOAT_GAP + SIDE_SHADOW}px))`,
-          }}
-        >
-          {side.content}
-        </div>
-      ) : null}
-
-      {buttons ? <FloatingButtons {...buttons} /> : null}
+      {/* The right group: one column at the right edge, the buttons over the side panels. Out,
+          it moves right by its own width, its gap and its shadow: the buttons and the panels go
+          the same distance. Out of reach of Tab while out. */}
+      <div
+        data-ng-right
+        inert={away}
+        className="pointer-events-none absolute inset-y-0 right-0 z-40 flex flex-col items-end transition-transform duration-300 ease-out"
+        style={{
+          gap: FLOAT_GAP,
+          paddingTop: `calc(env(safe-area-inset-top) + ${FLOAT_GAP}px)`,
+          paddingRight: `calc(env(safe-area-inset-right) + ${FLOAT_GAP}px)`,
+          paddingBottom: FLOAT_GAP + bottom,
+          transform: away ? `translateX(calc(100% + ${SIDE_SHADOW}px))` : undefined,
+        }}
+      >
+        {buttons ? <FloatingButtons {...buttons} /> : null}
+        {side ? (
+          // Touch mode slides the panels alone: past the edge by their gap and their shadow
+          <div
+            ref={side.ref}
+            data-ng-side
+            inert={!side.shown}
+            className="pointer-events-none min-h-0 flex-1 transition-transform duration-300 ease-out"
+            style={{ transform: side.shown ? "none" : `translateX(calc(100% + ${FLOAT_GAP + SIDE_SHADOW}px))` }}
+          >
+            {side.content}
+          </div>
+        ) : null}
+      </div>
       {dialog}
       {identify !== null ? <MonitorNumber monitor={identify} /> : null}
     </div>

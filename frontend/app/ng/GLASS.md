@@ -132,6 +132,9 @@ Each color has its light value and its `dark:` value.
 ## Motion
 
 - A control's light and press: 150 ms, ease out.
+- The floating buttons and the side panels are one group at the right. With a mouse it comes in
+  and goes out as one (the right edge brings it), both by the same distance; with a finger the
+  buttons stay and the side panels come in by a swipe from the right edge.
 - A piece that comes in or goes out (the floating buttons, the control panel): 300 ms, ease out, along
   the way it goes (to the right for the buttons).
 - A dialog: in from a blur, 200 ms (`~/components/ModalShell.tsx`).
