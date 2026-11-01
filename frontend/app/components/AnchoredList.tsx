@@ -4,7 +4,7 @@
 // On the body because a list inside the field's own box is drawn in that box's layers: under
 // what is over the box, cut by a scrolling column, and, inside /ng's glass (a dialog, Settings),
 // a blurred layer in another, whose blur Safari (and Chrome on some machines) does not draw. A
-// list from inside the glass keeps its look (`.ng-on-glass`, `~/ng/glass.css`).
+// list from inside the glass keeps its look (`.on-glass`, `~/desk/glass.css`).
 import { type ReactNode, useLayoutEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -16,7 +16,7 @@ type Place = { left: number; width: number; top?: number; bottom?: number };
 
 /** An unsafe edge of /ng's display (the clock bar, the home bar), CSS px; 0 elsewhere. */
 function inset(side: "top" | "bottom"): number {
-  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(`--ng-safe-${side}`)) || 0;
+  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(`--safe-${side}`)) || 0;
 }
 
 function placeFor(field: HTMLElement): Place {
@@ -43,7 +43,7 @@ export function AnchoredList({ anchor, children }: { anchor: HTMLElement | null;
     };
   }, [anchor]);
   if (!anchor || !place || typeof document === "undefined") return null;
-  const glass = anchor.closest(".ng-on-glass") ? "ng-on-glass" : "";
+  const glass = anchor.closest(".on-glass") ? "on-glass" : "";
   return createPortal(
     // Over the dialogs (`ModalShell`: z-50, z-60)
     <div className={`fixed z-[70] ${glass}`} style={place}>

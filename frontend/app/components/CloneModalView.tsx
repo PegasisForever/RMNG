@@ -7,11 +7,11 @@
 // image onto a fresh empty home dataset (headed unless asked, preset defaults underneath
 // the account overrides).
 //
-// In /ng (`glass`) it is a glass dialog laid out as /ng's Settings (`~/ng/control/SettingsView.tsx`):
+// In /ng (`glass`) it is a glass dialog laid out as /ng's Settings (`~/desk/control/SettingsView.tsx`):
 // the modes a rail of buttons on the left with Create at its foot (where Settings has Save),
 // the form scrolling beside it. Its fields are the same as here, drawn flat on the glass
-// (`.ng-on-glass`, `~/ng/glass.css`). Its corners: the dialog's 26 px, and 10 px for what sits
-// 16 px in from them (`~/ng/GLASS.md`, Shape).
+// (`.on-glass`, `~/desk/glass.css`). Its corners: the dialog's 26 px, and 10 px for what sits
+// 16 px in from them (`~/desk/GLASS.md`, Shape).
 //
 // The form is one editable model (`CloneDraft`) plus a single `onDraftChange`, rather than
 // thirty value/onChange pairs. What is NOT in the draft is everything the server decides:
@@ -94,7 +94,7 @@ export interface CloneModalViewProps {
   glass?: boolean;
 }
 
-/** /ng's flat content on the glass (`~/ng/control/ui.tsx`), for the glass rail. */
+/** /ng's flat content on the glass (`~/desk/control/ui.tsx`), for the glass rail. */
 const G = {
   title: "text-neutral-900 dark:text-white",
   text2: "text-black/60 dark:text-white/60",
@@ -403,7 +403,7 @@ export function CloneModalView({
       <ModalShell size="panel" dismissible={!busy} open={open} onExited={onClose} glass>
         {(close) => (
           // Settings' layout: the rail (16 px in from the dialog's 26 px corners, its buttons 10 px)
-          <div className="ng-on-glass flex min-h-0 flex-1">
+          <div className="on-glass flex min-h-0 flex-1">
             <nav aria-label="Clone modes" className={`flex w-52 shrink-0 flex-col gap-1 border-r p-4 ${G.line}`}>
               <h3 className={`px-2 pb-2 text-[15px] font-semibold tracking-tight ${G.title}`}>New clone</h3>
               {CLONE_MODE_TABS.map(({ mode, label, icon: Icon }) => (

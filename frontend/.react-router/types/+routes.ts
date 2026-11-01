@@ -14,13 +14,10 @@ type Pages = {
   "/": {
     params: {};
   };
-  "/viewer": {
+  "/app": {
     params: {};
   };
-  "/ng/app": {
-    params: {};
-  };
-  "/ng/screen-area": {
+  "/screen-area": {
     params: {};
   };
 };
@@ -28,30 +25,20 @@ type Pages = {
 type RouteFiles = {
   "root.tsx": {
     id: "root";
-    page: "/" | "/viewer" | "/ng/app" | "/ng/screen-area";
+    page: "/" | "/app" | "/screen-area";
   };
-  "routes/_index.tsx": {
-    id: "routes/_index";
-    page: "/";
+  "routes/app.tsx": {
+    id: "routes/app";
+    page: "/app";
   };
-  "routes/viewer.tsx": {
-    id: "routes/viewer";
-    page: "/viewer";
-  };
-  "routes/ng.tsx": {
-    id: "routes/ng";
-    page: "/ng/app";
-  };
-  "routes/ngScreenArea.tsx": {
-    id: "routes/ngScreenArea";
-    page: "/ng/screen-area";
+  "routes/screenArea.tsx": {
+    id: "routes/screenArea";
+    page: "/screen-area";
   };
 };
 
 type RouteModules = {
   "root": typeof import("./app/root.tsx");
-  "routes/_index": typeof import("./app/routes/_index.tsx");
-  "routes/viewer": typeof import("./app/routes/viewer.tsx");
-  "routes/ng": typeof import("./app/routes/ng.tsx");
-  "routes/ngScreenArea": typeof import("./app/routes/ngScreenArea.tsx");
+  "routes/app": typeof import("./app/routes/app.tsx");
+  "routes/screenArea": typeof import("./app/routes/screenArea.tsx");
 };

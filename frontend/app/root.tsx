@@ -13,22 +13,22 @@ export function meta() {
   return [{ title: "RMNG" }];
 }
 
-// Safety net for the installed /ng app: no page 8 s after opening means its kept code files do
-// not match. Remove the worker and its copies and load once more from the network (once per
-// open, so it cannot loop). `routes/ng.tsx` sets `__ngReady` when it shows.
+// Safety net for the installed app: no page 8 s after opening means its kept code files do not
+// match. Remove the worker and its copies and load once more from the network (once per open,
+// so it cannot loop). `~/desk/pwa.ts` sets `__appReady` when the app shows.
 const NG_SAFETY_NET = `
-if (location.pathname === "/ng" || location.pathname.indexOf("/ng/") === 0) setTimeout(function () {
-  if (window.__ngReady) return;
+setTimeout(function () {
+  if (window.__appReady) return;
   try {
-    if (sessionStorage.getItem("ng-healed")) return;
-    sessionStorage.setItem("ng-healed", "1");
+    if (sessionStorage.getItem("healed")) return;
+    sessionStorage.setItem("healed", "1");
   } catch (e) {}
   var jobs = [];
   if ("serviceWorker" in navigator)
     jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
       return Promise.all(rs.map(function (r) { return r.unregister(); }));
     }));
-  if (window.caches) jobs.push(caches.delete("ng-code"));
+  if (window.caches) jobs.push(caches.delete("code"));
   Promise.all(jobs).then(function () { location.reload(); }, function () { location.reload(); });
 }, 8000);
 `;
@@ -39,8 +39,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        {/* The installed app (Add to Home Screen) opens `/ng` full screen, whatever page it was
-            added from. The page draws under the iOS clock bar (`routes/ng.tsx`). */}
+        {/* The installed app (Add to Home Screen) opens `/` full screen. The page draws under the
+            iOS clock bar (`~/desk/page.ts`). */}
         <link rel="manifest" href="/manifest.webmanifest" />
         <link rel="apple-touch-icon" href="/icons/icon-180.png" />
         <meta name="apple-mobile-web-app-capable" content="yes" />

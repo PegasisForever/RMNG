@@ -25,6 +25,11 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeader;
 use tower_http::trace::TraceLayer;
 
+/// Old addresses of the app's pages: they go to the home page.
+async fn home() -> axum::response::Redirect {
+    axum::response::Redirect::permanent("/")
+}
+
 /// 404 hint when no frontend dir resolves anywhere (image install missing AND no dev
 /// build) — the API stays up so this only ever surfaces in a broken/dev environment.
 async fn missing_frontend() -> Response {
@@ -128,30 +133,36 @@ pub fn router(app: App) -> Router {
                 .precompressed_br()
                 .precompressed_gzip();
             // Pages are checked with the server on each load, so an open always gets the newest
-            // build (the installed /ng app depends on it, see `frontend/app/ng/pwa.ts`). The
+            // build (the installed app depends on it, see `frontend/app/desk/pwa.ts`). The
             // code files they name change their names with each build, so they keep the
             // browser's usual caching.
             let files = ServeDir::new(&dir)
                 .precompressed_br()
                 .precompressed_gzip()
                 .fallback(index);
-            // `/ng` is a small page that holds the app (`/ng/app`) in a frame and keeps the
-            // fullscreen, so a new build reloads only the frame (`frontend/public/ng-shell.html`)
+            // `/` is a small page that holds the app (`/app`) in a frame and keeps the
+            // fullscreen, so a new build reloads only the frame (`frontend/public/shell.html`)
             let shell = SetResponseHeader::overriding(
-                ServeFile::new(dir.join("ng-shell.html")),
+                ServeFile::new(dir.join("shell.html")),
                 header::CACHE_CONTROL,
                 header::HeaderValue::from_static("no-cache"),
             );
-            routes.route_service("/ng", shell).fallback_service(SetResponseHeader::overriding(
-                files,
-                header::CACHE_CONTROL,
-                |res: &Response<_>| {
-                    res.headers()
-                        .get(header::CONTENT_TYPE)
-                        .is_some_and(|t| t.as_bytes().starts_with(b"text/html"))
-                        .then(|| header::HeaderValue::from_static("no-cache"))
-                },
-            ))
+            routes
+                .route_service("/", shell)
+                .route("/ng", get(home))
+                .route("/ng/", get(home))
+                .route("/ng/*rest", get(home))
+                .route("/viewer", get(home))
+                .fallback_service(SetResponseHeader::overriding(
+                    files,
+                    header::CACHE_CONTROL,
+                    |res: &Response<_>| {
+                        res.headers()
+                            .get(header::CONTENT_TYPE)
+                            .is_some_and(|t| t.as_bytes().starts_with(b"text/html"))
+                            .then(|| header::HeaderValue::from_static("no-cache"))
+                    },
+                ))
         }
         None => {
             tracing::warn!(
@@ -3834,9 +3845,9 @@ PLAIN=plainvalue
         assert!(layout_claim(State(app.clone()), Json(layout(" ", &[(1920, 1080)]))).await.is_err());
     }
 
-    /// Pages go back to the server on each load, so the installed /ng app opens the newest
-    /// build; code files keep normal caching. `/ng` is the shell around the app. Needs a
-    /// frontend build, so it passes without one.
+    /// Pages go back to the server on each load, so the installed app opens the newest build;
+    /// code files keep normal caching. `/` is the shell around the app. Needs a frontend
+    /// build, so it passes without one.
     #[tokio::test]
     async fn pages_are_not_cached_and_code_files_are() {
         let Some(dir) = crate::assets::static_dir() else {
@@ -3853,21 +3864,38 @@ PLAIN=plainvalue
                 .map(|v| v.to_str().unwrap().to_string())
         };
 
-        for page in ["/", "/ng", "/ng?monitor=1", "/ng/app", "/viewer?monitor=0", "/index.html"] {
+        for page in ["/", "/?monitor=1", "/app", "/app?monitor=1", "/screen-area"] {
             assert_eq!(cache(page.into()).await.as_deref(), Some("no-cache"), "{page}");
         }
-        // `/ng` is the shell, `/ng/app` the app in its frame
+        // `/` is the shell, `/app` the app in its frame
         let body = |path: &'static str| async move {
             reqwest::get(format!("http://{addr}{path}")).await.unwrap().text().await.unwrap()
         };
-        assert!(body("/ng").await.contains("rmngShell"));
-        assert!(!body("/ng/app").await.contains("rmngShell"));
+        assert!(body("/").await.contains("rmngShell"));
+        assert!(!body("/app").await.contains("rmngShell"));
         let code = std::fs::read_dir(dir.join("assets"))
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .find(|n| n.ends_with(".js"))
             .unwrap();
         assert_eq!(cache(format!("/assets/{code}")).await, None);
+    }
+
+    /// Old addresses go to the home page. Needs a frontend build, so it passes without one.
+    #[tokio::test]
+    async fn old_addresses_go_to_the_home_page() {
+        if crate::assets::static_dir().is_none() {
+            return;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(test_app())).await.unwrap() });
+        let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        for old in ["/ng", "/ng/", "/ng?clone=a", "/ng/app?control-panel", "/ng/screen-area", "/viewer?monitor=1"] {
+            let resp = client.get(format!("http://{addr}{old}")).send().await.unwrap();
+            assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT, "{old}");
+            assert_eq!(resp.headers()[header::LOCATION], "/", "{old}");
+        }
     }
 
     #[test]

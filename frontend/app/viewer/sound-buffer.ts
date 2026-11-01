@@ -30,7 +30,7 @@ export const TARGET_MAX = 6;
 export const MAX_PACKETS = TARGET_MAX + 2;
 
 /** The range `target` moves in, in packets; the defaults are the ones above. A phone on Wi-Fi
- *  gets a wider one (`~/ng/session.ts`), as its packets come less evenly. */
+ *  gets a wider one (`~/desk/session.ts`), as its packets come less evenly. */
 export interface BufferLimits {
   min: number;
   max: number;

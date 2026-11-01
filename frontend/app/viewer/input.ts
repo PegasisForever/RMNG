@@ -327,7 +327,7 @@ interface InputOptions {
   pasteByEvent(): boolean;
   /** The canvas's size in device pixels changed: the worker draws at this size. */
   onResize(width: number, height: number): void;
-  /** A chord of the page's own (`~/ng/shortcut.ts`), which does not go to the clone. The press
+  /** A chord of the page's own (`~/desk/shortcut.ts`), which does not go to the clone. The press
    *  of its modifier (`holds`: Super, or Alt on a Mac) is held back until the next key or click:
    *  a Super or an Alt pressed and let go alone does something in the clone (GNOME's overview,
    *  an app's menu bar), so the chord's must never reach it. */

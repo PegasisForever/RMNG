@@ -20,8 +20,8 @@
 // call, so TicketModalContainer decides when and how it mounts.
 //
 // In /ng (`glass`) it is a glass dialog as the others there: its fields drawn flat on the glass
-// (`.ng-on-glass`, `~/ng/glass.css`), and its fields and buttons 10 px, 16 px in from the
-// dialog's 26 px corners (`~/ng/GLASS.md`, Shape).
+// (`.on-glass`, `~/desk/glass.css`), and its fields and buttons 10 px, 16 px in from the
+// dialog's 26 px corners (`~/desk/GLASS.md`, Shape).
 import { useState, type ReactNode } from "react";
 
 import { DropdownSelect } from "~/components/DropdownSelect";
@@ -129,7 +129,7 @@ export function TicketModalView({
     // the same `busy`: the button below, and `dismissible` for the key.
     <ModalShell size="lg" dismissible={!busy} onExited={onClose} glass={glass}>
       {(close) => (
-        <div className={glass ? "ng-on-glass flex min-h-0 flex-1 flex-col" : "contents"}>
+        <div className={glass ? "on-glass flex min-h-0 flex-1 flex-col" : "contents"}>
           <h3
             className={`shrink-0 ${
               glass

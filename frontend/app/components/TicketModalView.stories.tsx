@@ -4,7 +4,7 @@ import { useArgs } from "storybook/preview-api";
 import { fn } from "storybook/test";
 
 import { MarkdownEditorView } from "./MarkdownEditorView";
-import { FakeDesktop } from "~/ng/__fixtures__/desktop";
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
 import { TicketModalView, type TicketModalViewProps } from "./TicketModalView";
 import { makeClonePresets } from "./__fixtures__/presets";
 import { makeTeamPeople } from "./__fixtures__/people";
@@ -158,7 +158,7 @@ export const Interactive: Story = {
 /** Over /ng's clone screen, in its glass. */
 const overScreen: Decorator[] = [
   (Story) => (
-    <div className="ng-theme relative h-screen w-screen overflow-hidden bg-black">
+    <div className="relative h-screen w-screen overflow-hidden bg-black">
       <FakeDesktop />
       <Story />
     </div>

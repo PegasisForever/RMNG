@@ -1,9 +1,9 @@
 {
-  "id": "/ng",
+  "id": "/",
   "name": "RMNG",
   "short_name": "RMNG",
   "description": "RMNG on the phone",
-  "start_url": "/ng",
+  "start_url": "/",
   "scope": "/",
   "display": "fullscreen",
   "display_override": ["fullscreen", "standalone"],

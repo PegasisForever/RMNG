@@ -1,0 +1,56 @@
+import type { Meta, StoryObj } from "@storybook/react-vite";
+import { fn } from "storybook/test";
+
+import { FakeDesktop } from "./__fixtures__/screen";
+import { FloatingButtons } from "./FloatingButtons";
+
+/** Over a sideways phone's display (951 × 648), in its top-right corner, over a desktop. */
+const meta = {
+  title: "Desk/FloatingButtons",
+  component: FloatingButtons,
+  decorators: [
+    (Story) => (
+      <div className="relative bg-black" style={{ width: 951, height: 648 }}>
+        <FakeDesktop />
+        <Story />
+      </div>
+    ),
+  ],
+  parameters: { layout: "centered" },
+  args: {
+    controlPanelOpen: false,
+    keyboardOpen: false,
+    keyboardDocked: false,
+    fit: { fits: false, onFit: fn() },
+    badge: 0,
+    onControlPanel: fn(),
+    onKeyboard: fn(),
+    onKeyboardDock: fn(),
+    onLayout: fn(),
+    fullscreen: { on: false, toggle: fn() },
+    controlPanelKeys: "Super + Space (in fullscreen)",
+  },
+} satisfies Meta<typeof FloatingButtons>;
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+/** The clone's monitor is not this display's size: Fit is live. */
+export const Default: Story = {};
+
+/** The keyboard is open, and the monitor fits: Fit is dim. */
+export const KeyboardOpenFits: Story = { args: { keyboardOpen: true, fit: { fits: true, onFit: fn() } } };
+
+/** Two clones stopped working unseen: a count on Control panel. */
+export const Unread: Story = { args: { badge: 2, controlPanelOpen: true } };
+
+/** The keyboard is docked: lit, with a bar under its icon. */
+export const KeyboardDocked: Story = { args: { keyboardOpen: true, keyboardDocked: true } };
+
+/** A desktop layout of three monitors, two with no window open: the button at the left opens
+ *  them. */
+export const MonitorsToOpen: Story = { args: { monitors: { missing: [1, 2], onOpen: fn() } } };
+
+/** A desktop: no Fit (the Edit layout dialog fits each monitor; a right click on Fullscreen
+ *  opens it), and no keyboard in mouse mode. Hover a button for its tooltip. */
+export const Desktop: Story = { args: { fit: undefined, keyboard: false } };

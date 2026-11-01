@@ -16,7 +16,7 @@
 // The container closes the dialog when the last one is done, so the list behind it is already
 // the new one.
 //
-// `glass` draws it in /ng's glass (`~/ng/GLASS.md`), as the Edit layout dialog there: a glass
+// `glass` draws it in /ng's glass (`~/desk/GLASS.md`), as the Edit layout dialog there: a glass
 // panel, flat content on it.
 //
 // It renders from props alone. Every server call lives in ImportAccountModalContainer, and

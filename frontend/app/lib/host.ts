@@ -1,13 +1,12 @@
-// The window that owns the browser's features for this page: the /ng shell
-// (`public/ng-shell.html`) when this page runs in its frame, else this page's own window. The
+// The window that owns the browser's features for this page: the shell
+// (`public/shell.html`) when this page runs in its frame, else this page's own window. The
 // fullscreen and the key lock must be the shell's, so that a reload of the app (a new build)
 // does not end them; so must the window's name, address and title, which belong to the browser
 // window and not to the frame. The shell's own API (`rmngShell`) is only what the app cannot read
 // from its window directly.
 
-/** The shell's API. `insetTop`, then `insetLeft` and `insetRight`, came after version 1's
- *  first shell: an older shell open since then has none. */
-type Shell = { version: number; insetBottom(): number; insetTop?(): number; insetLeft?(): number; insetRight?(): number };
+/** The shell's API. */
+type Shell = { version: number; insetTop(): number; insetRight(): number; insetBottom(): number; insetLeft(): number };
 
 /** The shell's window, when this page is in its frame. */
 export function shellWindow(): (Window & { rmngShell: Shell }) | null {

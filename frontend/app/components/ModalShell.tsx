@@ -72,10 +72,10 @@ const PANEL: Record<ModalSize, string> = {
 const PANEL_CHROME =
   "rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800";
 
-/** The same in `/ng`'s glass (`~/ng/GLASS.md`), and its backdrop: darker, with no blur (the
+/** The same in `/ng`'s glass (`~/desk/GLASS.md`), and its backdrop: darker, with no blur (the
  *  panel blurs what is under it). Its corners are 26 px and its padding 16 px, so a button in a
  *  corner (10 px, `/ng`'s piece radius) is concentric with it (GLASS.md, Shape). */
-const GLASS_CHROME = "ng-glass ng-glass-thick rounded-[26px]";
+const GLASS_CHROME = "glass glass-thick rounded-[26px]";
 
 /** `PANEL` with the glass padding (16 px in place of 20). */
 const GLASS_PANEL: Record<ModalSize, string> = {
@@ -114,12 +114,12 @@ export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boole
   };
 }
 
-/** The window dialog's space round it: 1rem, plus /ng's unsafe edges (`--ng-safe-*`, set by
+/** The window dialog's space round it: 1rem, plus /ng's unsafe edges (`--safe-*`, set by
  *  `routes/ng.tsx`; none elsewhere), so a dialog there keeps clear of the clock bar, the home bar
  *  and a cut-out. */
 const AROUND =
-  "pt-[calc(1rem+var(--ng-safe-top,0px))] pr-[calc(1rem+var(--ng-safe-right,0px))] " +
-  "pb-[calc(1rem+var(--ng-safe-bottom,0px))] pl-[calc(1rem+var(--ng-safe-left,0px))]";
+  "pt-[calc(1rem+var(--safe-top,0px))] pr-[calc(1rem+var(--safe-right,0px))] " +
+  "pb-[calc(1rem+var(--safe-bottom,0px))] pl-[calc(1rem+var(--safe-left,0px))]";
 
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
 export function backdropClass(layer: ModalLayer, closing: boolean, glass = false): string {
@@ -153,7 +153,7 @@ export interface ModalShellProps {
   dismissible?: boolean;
   size?: ModalSize;
   layer?: ModalLayer;
-  /** In `/ng`'s glass (`~/ng/GLASS.md`), over the clone's screen; else the dashboard's panel. */
+  /** In `/ng`'s glass (`~/desk/GLASS.md`), over the clone's screen; else the dashboard's panel. */
   glass?: boolean;
   /** The dialog's own markup, given the shell's door out. */
   children: (close: ModalClose) => ReactNode;

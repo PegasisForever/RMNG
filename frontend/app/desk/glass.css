@@ -1,0 +1,289 @@
+/* /ng's glass: the material of the surfaces that float over the clone's screen (a button, a
+   tooltip, a dialog's panel). Only the surface: what is on it is flat. The rules are in
+   `./GLASS.md`; the samples are the `ng/Design/Glass` story.
+
+   One light, high above the top of the display. So, on every piece:
+   - the rim (a 1 px edge, `::before`) is brightest at the top and fades down the sides, with a
+     little light bounced back on the bottom edge;
+   - a sheen lights the top of the face and fades out before the middle;
+   - the shadow falls under the piece;
+   - a pressed control sinks: no sheen, dark at its top inside.
+
+   Two looks, by the app's `dark` variant (the OS's setting, or a `.dark` ancestor): light glass
+   with dark text, dark glass with light text. Each look is a palette (`--g-*`); the pieces and
+   their states take from it (`--glass-*`), so a variant changes only what it must. In the components
+   layer: a Tailwind utility on the same element wins, except `shadow-*` and `ring-*`, which put
+   back all of `box-shadow` (do not use them on glass). */
+@layer components {
+  .glass {
+    /* The light look's palette */
+    --g-thin: rgb(255 255 255 / 0.35);
+    --g-thick: rgb(255 255 255 / 0.55);
+    --g-sheen: rgb(255 255 255 / 0.45);
+    --g-rim-top: rgb(255 255 255 / 0.95);
+    --g-rim-side: rgb(255 255 255 / 0.35);
+    --g-rim-bottom: rgb(255 255 255 / 0.55);
+    --g-inner: inset 0 -1px 0 rgb(0 0 0 / 0.05);
+    /* A hairline round the piece: white glass on a white window needs an edge */
+    --g-drop: 0 0 0 0.5px rgb(0 0 0 / 0.1), 0 1px 2px rgb(0 0 0 / 0.1), 0 6px 16px -4px rgb(0 0 0 / 0.2);
+    --g-drop-long: 0 0 0 0.5px rgb(0 0 0 / 0.1), 0 2px 4px rgb(0 0 0 / 0.08), 0 24px 56px -12px rgb(0 0 0 / 0.3);
+    --g-text: rgb(0 0 0 / 0.85);
+    --g-scheme: light;
+    --g-hover-over: rgb(255 255 255 / 0.3);
+    --g-hover-rim: rgb(255 255 255);
+    --g-press-over: rgb(0 0 0 / 0.05);
+    --g-press-inner: inset 0 2px 4px rgb(0 0 0 / 0.15);
+    --g-focus: rgb(0 0 0 / 0.6);
+    /* Lit, in the light look: dark glass */
+    --g-lit-tint: rgb(23 23 23 / 0.82);
+    --g-lit-sheen: rgb(255 255 255 / 0.14);
+    --g-lit-rim-top: rgb(255 255 255 / 0.45);
+    --g-lit-rim-side: rgb(255 255 255 / 0.1);
+    --g-lit-rim-bottom: rgb(255 255 255 / 0.15);
+    --g-lit-inner: inset 0 -1px 0 rgb(0 0 0 / 0.25);
+    --g-lit-text: rgb(255 255 255 / 0.95);
+
+    @variant dark {
+      --g-thin: rgb(23 23 23 / 0.3);
+      --g-thick: rgb(23 23 23 / 0.5);
+      --g-sheen: rgb(255 255 255 / 0.14);
+      --g-rim-top: rgb(255 255 255 / 0.42);
+      --g-rim-side: rgb(255 255 255 / 0.08);
+      --g-rim-bottom: rgb(255 255 255 / 0.14);
+      --g-inner: inset 0 -1px 0 rgb(0 0 0 / 0.25);
+      --g-drop: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 16px -4px rgb(0 0 0 / 0.45);
+      --g-drop-long: 0 2px 4px rgb(0 0 0 / 0.3), 0 24px 56px -12px rgb(0 0 0 / 0.65);
+      --g-text: rgb(255 255 255 / 0.92);
+      --g-scheme: dark;
+      --g-hover-over: rgb(255 255 255 / 0.1);
+      --g-hover-rim: rgb(255 255 255 / 0.65);
+      --g-press-over: rgb(0 0 0 / 0.08);
+      --g-press-inner: inset 0 2px 5px rgb(0 0 0 / 0.35);
+      --g-focus: rgb(255 255 255 / 0.75);
+      /* Lit, in the dark look: frosted white */
+      --g-lit-tint: rgb(245 245 245 / 0.86);
+      --g-lit-sheen: rgb(255 255 255 / 0.6);
+      --g-lit-rim-top: rgb(255 255 255);
+      --g-lit-rim-side: rgb(255 255 255 / 0.45);
+      --g-lit-rim-bottom: rgb(255 255 255 / 0.6);
+      --g-lit-inner: inset 0 -1px 0 rgb(0 0 0 / 0.12);
+      --g-lit-text: rgb(0 0 0 / 0.88);
+    }
+
+    --glass-tint: var(--g-thin);
+    --glass-blur: 8px;
+    --glass-sheen: var(--g-sheen);
+    --glass-over: transparent;
+    --glass-rim-top: var(--g-rim-top);
+    --glass-rim-side: var(--g-rim-side);
+    --glass-rim-bottom: var(--g-rim-bottom);
+    --glass-inner: var(--g-inner);
+    --glass-drop: var(--g-drop);
+    position: relative;
+    color: var(--g-text);
+    color-scheme: var(--g-scheme);
+    background:
+      linear-gradient(to bottom, var(--glass-sheen), transparent min(55%, 140px)),
+      linear-gradient(var(--glass-over), var(--glass-over)),
+      var(--glass-tint);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.8);
+    backdrop-filter: blur(var(--glass-blur)) saturate(1.8);
+    box-shadow: var(--glass-inner), var(--glass-drop);
+  }
+  .glass::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    padding: 1px;
+    border-radius: inherit;
+    pointer-events: none;
+    background: linear-gradient(
+      to bottom,
+      var(--glass-rim-top),
+      var(--glass-rim-side) min(50%, 120px),
+      var(--glass-rim-side) calc(100% - 8px),
+      var(--glass-rim-bottom)
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box exclude,
+      linear-gradient(#000 0 0);
+  }
+
+  /* A surface with text to read (a dialog, a tooltip, the monitor's number): more tint, more
+     blur, a long shadow. */
+  .glass-thick {
+    --glass-tint: var(--g-thick);
+    --glass-blur: 14px;
+    --glass-drop: var(--g-drop-long);
+  }
+
+  /* Glass with nothing of its own behind it: no blur and no shadow, only the tint, the rim and the
+     sheen. For pieces on a backdrop that blurs and darkens the screen for them all (the wide
+     control panel's columns, `CONTROL_PANEL_BACKDROP`). After `glass-thick`, so it wins over its shadow. */
+  .glass-flat {
+    --glass-drop: 0 0 transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  /* On: a control whose thing is open. The other look's glass: dark in the light look, frosted
+     white in the dark one. */
+  .glass-lit {
+    --glass-tint: var(--g-lit-tint);
+    --glass-sheen: var(--g-lit-sheen);
+    --glass-rim-top: var(--g-lit-rim-top);
+    --glass-rim-side: var(--g-lit-rim-side);
+    --glass-rim-bottom: var(--g-lit-rim-bottom);
+    --glass-inner: var(--g-lit-inner);
+    color: var(--g-lit-text);
+  }
+
+  /* Green glass: the operator's own message in the assistant's chat, the send button's green
+     with the screen showing through, white text. The same in both looks. */
+  .glass-green {
+    /* Dense: over the light panel a thinner green reads washed out */
+    --glass-tint: rgb(5 150 105 / 0.92);
+    --glass-sheen: rgb(255 255 255 / 0.1);
+    --glass-rim-top: rgb(255 255 255 / 0.5);
+    --glass-rim-side: rgb(255 255 255 / 0.15);
+    --glass-rim-bottom: rgb(255 255 255 / 0.2);
+    color: rgb(255 255 255 / 0.97);
+  }
+
+  /* A control: a mouse over it adds light, a press sinks it. */
+  .glass-control {
+    cursor: pointer;
+    transition:
+      transform 150ms ease-out,
+      opacity 150ms ease-out;
+  }
+  @media (hover: hover) {
+    .glass-control:hover:not(:disabled) {
+      --glass-over: var(--g-hover-over);
+      --glass-rim-top: var(--g-hover-rim);
+    }
+    .glass-lit.glass-control:hover:not(:disabled) {
+      --glass-rim-top: var(--g-lit-rim-top);
+    }
+  }
+  .glass-control:active:not(:disabled) {
+    transform: scale(0.96);
+    --glass-sheen: transparent;
+    --glass-over: var(--g-press-over);
+    --glass-inner: var(--g-press-inner);
+  }
+  .glass-control:focus-visible {
+    outline: 2px solid var(--g-focus);
+    outline-offset: 2px;
+  }
+  .glass-control:disabled {
+    cursor: default;
+    opacity: 0.45;
+  }
+}
+
+/* The dashboard's parts on the glass, flat (`./GLASS.md`): Settings in the control panel reuses
+   the dashboard's panes, drawn in slate on white (light) and on slate-800 / -900 (dark). Under
+   `.on-glass` each slate shade takes the role it has in that look: in light, the light shades
+   (fills, lines) are black at a low opacity and the dark ones (text) are solid greys dark enough
+   to read; in dark, the light shades (text) are white at a high opacity and the dark ones (fills,
+   lines) are white or black at a low one. A white fill is see-through white. Outside any layer,
+   so it wins over the utilities. */
+.on-glass {
+  --color-slate-50: rgb(0 0 0 / 0.03);
+  --color-slate-100: rgb(0 0 0 / 0.05);
+  --color-slate-200: rgb(0 0 0 / 0.1);
+  --color-slate-300: rgb(0 0 0 / 0.15);
+  --color-slate-400: rgb(0 0 0 / 0.5);
+  --color-slate-500: rgb(0 0 0 / 0.6);
+  --color-slate-600: rgb(0 0 0 / 0.7);
+  --color-slate-700: rgb(0 0 0 / 0.8);
+  --color-slate-800: oklch(26.9% 0 0);
+  --color-slate-900: oklch(20.5% 0 0);
+  --color-slate-950: oklch(14.5% 0 0);
+}
+/* Light only: in dark the parts' own `dark:` fill is the one that shows */
+@media (prefers-color-scheme: light) {
+  /* A grey fill (an idle clone's dot): a light solid grey, not the 50 % black its shade is as
+     text */
+  .on-glass .bg-slate-400:not(.dark *) {
+    background-color: oklch(78% 0 0);
+  }
+  .on-glass .bg-white:not(.dark *) {
+    background-color: rgb(255 255 255 / 0.6);
+  }
+  .on-glass .hover\:bg-white:hover:not(.dark *) {
+    background-color: rgb(255 255 255 / 0.8);
+  }
+}
+@media (prefers-color-scheme: dark) {
+  .on-glass {
+    --color-slate-50: oklch(98.5% 0 0);
+    --color-slate-100: oklch(97% 0 0);
+    --color-slate-200: rgb(255 255 255 / 0.85);
+    --color-slate-300: rgb(255 255 255 / 0.75);
+    --color-slate-400: rgb(255 255 255 / 0.65);
+    --color-slate-500: rgb(255 255 255 / 0.5);
+    --color-slate-600: rgb(255 255 255 / 0.15);
+    --color-slate-700: rgb(255 255 255 / 0.1);
+    --color-slate-800: rgb(255 255 255 / 0.06);
+    --color-slate-900: rgb(0 0 0 / 0.3);
+    --color-slate-950: rgb(0 0 0 / 0.4);
+  }
+  /* Dark text on the one light fill (a choice that is on): solid, as it is not a fill */
+  .on-glass .dark\:text-slate-900 {
+    color: oklch(20.5% 0 0);
+  }
+}
+/* The same, under Storybook's forced dark (`.dark`) */
+.dark .on-glass {
+  --color-slate-50: oklch(98.5% 0 0);
+  --color-slate-100: oklch(97% 0 0);
+  --color-slate-200: rgb(255 255 255 / 0.85);
+  --color-slate-300: rgb(255 255 255 / 0.75);
+  --color-slate-400: rgb(255 255 255 / 0.65);
+  --color-slate-500: rgb(255 255 255 / 0.5);
+  --color-slate-600: rgb(255 255 255 / 0.15);
+  --color-slate-700: rgb(255 255 255 / 0.1);
+  --color-slate-800: rgb(255 255 255 / 0.06);
+  --color-slate-900: rgb(0 0 0 / 0.3);
+  --color-slate-950: rgb(0 0 0 / 0.4);
+}
+.dark .on-glass .dark\:text-slate-900 {
+  color: oklch(20.5% 0 0);
+}
+
+/* BlockNote's hint in an empty field (the ticket's description, the notes) is its own light grey,
+   which the glass washes out: on the glass it is the least text's grey (`./GLASS.md`). */
+.on-glass .bn-block-content:has(.ProseMirror-trailingBreak:only-child)::after {
+  color: rgb(0 0 0 / 0.4);
+}
+@media (prefers-color-scheme: dark) {
+  .on-glass .bn-block-content:has(.ProseMirror-trailingBreak:only-child)::after {
+    color: rgb(255 255 255 / 0.4);
+  }
+}
+.dark .on-glass .bn-block-content:has(.ProseMirror-trailingBreak:only-child)::after {
+  color: rgb(255 255 255 / 0.4);
+}
+
+/* A dropdown's list over the fields (`DropdownSelect`, `PrioritySelect`): what is under it is
+   blurred, as under any glass piece, so its rows read over the fields it covers. `[role]` twice:
+   it outweighs the light look's white fill (`.bg-white:not(.dark *)` above). */
+.on-glass [role="listbox"][role] {
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  backdrop-filter: blur(20px) saturate(1.8);
+  background-color: rgb(255 255 255 / 0.78);
+}
+@media (prefers-color-scheme: dark) {
+  .on-glass [role="listbox"][role] {
+    background-color: rgb(38 38 38 / 0.82);
+  }
+}
+.dark .on-glass [role="listbox"][role] {
+  background-color: rgb(38 38 38 / 0.82);
+}

@@ -1,6 +1,6 @@
 @import "tailwindcss";
-/* /ng's glass (`ng/GLASS.md`) */
-@import "./ng/glass.css";
+/* The glass (`desk/GLASS.md`) */
+@import "./desk/glass.css";
 
 /* `dark:*` applies when the OS is in dark mode (the app is auto/device-driven, no
    toggle) OR when a `.dark` ancestor is present. The media query keeps the real app
@@ -57,11 +57,11 @@ body {
   }
 }
 
-/* The installed app (`/ng`, Add to Home Screen) on iOS 26+: while the document is shorter
+/* The installed app (Add to Home Screen) on iOS 26+: while the document is shorter
    than the screen, iOS gives the page a viewport short by up to the clock bar's height and
    paints nothing below it (WebKit bug 301108; the fix from frappe-ui#1284). A document as tall
    as the screen gets all of it. Here in the stylesheet, so it holds from the first layout: set
-   from /ng's code after the page loaded, the first open kept the short page until the phone was
+   from the app's code after the page loaded, the first open kept the short page until the phone was
    turned. */
 @media (display-mode: standalone), (display-mode: fullscreen) {
   html {
@@ -69,10 +69,9 @@ body {
   }
 }
 
-/* /ng (the phone app) is black and grey, with no blue in its greys. Its control panel reuses the
-   dashboard's parts, which are drawn in slate; under `.ng-theme` (on <html> while /ng is open)
-   each slate shade is the neutral shade of the same lightness. */
-.ng-theme {
+/* The app is black and grey, with no blue in its greys: each slate shade is the neutral shade
+   of the same lightness. */
+:root {
   --color-slate-50: oklch(98.5% 0 0);
   --color-slate-100: oklch(97% 0 0);
   --color-slate-200: oklch(92.2% 0 0);

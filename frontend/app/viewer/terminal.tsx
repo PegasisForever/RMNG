@@ -3,7 +3,7 @@
 // sends each session's tmux output (`term_data`) and resizes every session to the one grid this
 // view reports (`term_resize`). xterm.js does the keys, the mouse modes, selection and
 // scrollback; Ctrl+Shift+C copies and Ctrl+Shift+V pastes. `useTermTabs` is the terminals
-// without the tab bar, for /ng (`~/ng/NgTerminal.tsx`), which draws its own.
+// without the tab bar, for /ng (`~/desk/TerminalScreen.tsx`), which draws its own.
 import "@xterm/xterm/css/xterm.css";
 
 import { FitAddon } from "@xterm/addon-fit";

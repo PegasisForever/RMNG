@@ -7,7 +7,7 @@
 // locale (`locale`) decides whether that label reads "15:30" or "3:30 PM". Both are required,
 // so a story renders identically on every load and on every machine.
 //
-// `glass` draws it in /ng's glass (`~/ng/GLASS.md`), on a glass panel over the clone's screen:
+// `glass` draws it in /ng's glass (`~/desk/GLASS.md`), on a glass panel over the clone's screen:
 // the assistant's bubbles are glass of their own (the operator's green glass, the send button's green), and
 // the field and the boxes are translucent rather than solid.
 import { CalendarClock, Clock, LoaderCircle, SendHorizontal, Square } from "lucide-react";
@@ -107,12 +107,12 @@ const SOLID = {
   radius: "rounded-md",
 };
 
-/** `~/ng/GLASS.md`: glass bubbles, and its flat content (a field, a button, a box) on the panel. */
+/** `~/desk/GLASS.md`: glass bubbles, and its flat content (a field, a button, a box) on the panel. */
 const GLASS: Look = {
   // The operator's own: green glass, the send button's green
-  user: "ng-glass ng-glass-green",
-  assistant: "ng-glass text-neutral-900 dark:text-white",
-  working: "ng-glass",
+  user: "glass glass-green",
+  assistant: "glass text-neutral-900 dark:text-white",
+  working: "glass",
   faint: "text-black/40 dark:text-white/40",
   quiet: "text-black/60 dark:text-white/60",
   line: "border-black/10 dark:border-white/10",
@@ -122,7 +122,7 @@ const GLASS: Look = {
   field:
     "border-black/10 bg-white/60 text-neutral-900 placeholder:text-black/40 focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-white/40 dark:focus:border-white/30",
   button: "border-black/15 bg-white/50 text-black/60 hover:bg-white/80 dark:border-white/15 dark:bg-white/5 dark:text-white/60 dark:hover:bg-white/10",
-  buttonOn: "ng-glass-lit border-transparent",
+  buttonOn: "glass-lit border-transparent",
   // Code in a bubble: a translucent box, not the solid slate one
   code: "[&_code]:bg-black/5 [&_pre]:bg-black/5 dark:[&_code]:bg-white/10 dark:[&_pre]:bg-white/10",
   // 6 px in from the panel's edge, so its corners are concentric with the panel's (16 − 6)

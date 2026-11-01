@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
-import { FakeDesktop } from "~/ng/__fixtures__/desktop";
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
 
 import { ImportAccountModalView } from "./ImportAccountModalView";
 
@@ -129,7 +129,7 @@ export const GlassReplacing: Story = {
   args: { replacing: "talktomedi.claude.dev.0@gmail.com", glass: true },
   decorators: [
     (Story) => (
-      <div className="ng-theme relative h-screen w-screen overflow-hidden bg-black">
+      <div className="relative h-screen w-screen overflow-hidden bg-black">
         <FakeDesktop />
         <Story />
       </div>

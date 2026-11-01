@@ -2,7 +2,7 @@ import type { Decorator, Meta, StoryObj } from "@storybook/react-vite";
 import { useCallback, useState } from "react";
 import { fn } from "storybook/test";
 
-import { FakeDesktop } from "~/ng/__fixtures__/desktop";
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
 
 import { CloneModalView } from "./CloneModalView";
 import { MarkdownEditorView } from "./MarkdownEditorView";
@@ -243,7 +243,7 @@ export const Interactive: Story = {
 /** Over /ng's clone screen: the glass dialog, laid out as /ng's Settings. */
 const overScreen: Decorator[] = [
   (Story) => (
-    <div className="ng-theme relative h-screen w-screen overflow-hidden bg-black">
+    <div className="relative h-screen w-screen overflow-hidden bg-black">
       <FakeDesktop />
       <Story />
     </div>

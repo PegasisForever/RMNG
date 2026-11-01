@@ -1,5 +1,5 @@
 // A monitor window's number while the Edit layout dialog is open, so the dialog's boxes can be
-// matched to the windows: a square of glass (`~/ng/GLASS.md`) in the top-left corner, always the
+// matched to the windows: a square of glass (`~/desk/GLASS.md`) in the top-left corner, always the
 // same size. It comes in and goes out as a dialog does (`MODAL_ANIMATION`), and is drawn on the
 // body over everything, dialogs and their backdrops too (the Edit layout dialog is one).
 import { useEffect, useState } from "react";
@@ -22,13 +22,13 @@ export function MonitorNumber({ monitor }: { monitor: number | null }) {
   return createPortal(
     <div
       aria-hidden={monitor === null}
-      className={`ng-glass ng-glass-thick pointer-events-none fixed z-[80] flex size-36 flex-col items-center justify-center rounded-2xl ${
+      className={`glass glass-thick pointer-events-none fixed z-[80] flex size-36 flex-col items-center justify-center rounded-2xl ${
         monitor !== null ? MODAL_ANIMATION.panel.enter : MODAL_ANIMATION.panel.exit
       }`}
       // /ng's insets where it set them (in its frame `env()` is 0), else the page's own
       style={{
-        top: "calc(var(--ng-safe-top, env(safe-area-inset-top)) + 8px)",
-        left: "calc(var(--ng-safe-left, env(safe-area-inset-left)) + 8px)",
+        top: "calc(var(--safe-top, env(safe-area-inset-top)) + 8px)",
+        left: "calc(var(--safe-left, env(safe-area-inset-left)) + 8px)",
       }}
     >
       <span className="text-7xl font-bold leading-none tabular-nums">{n}</span>

@@ -4,7 +4,7 @@ import { fn } from "storybook/test";
 
 import { LayoutEditorView } from "./LayoutEditorView";
 import { DEFAULT_DESKTOP_LAYOUT, type BrowserLayout } from "~/lib/clientLayout";
-import { FakeDesktop } from "~/ng/__fixtures__/screen";
+import { FakeDesktop } from "~/desk/__fixtures__/screen";
 
 /** The dialog on its own draft: drags, size edits, add and remove really change it. `windows`:
  *  a desktop browser's form (it opens a window per monitor), else a phone's. */

@@ -19,7 +19,7 @@
 // While the dialog is open, each monitor window shows its monitor's number large in its middle
 // (the container tells them), so the boxes here can be matched to the windows.
 //
-// In `/ng` its panel is glass and its content flat (`~/ng/GLASS.md`, the `glass` prop);
+// In `/ng` its panel is glass and its content flat (`~/desk/GLASS.md`, the `glass` prop);
 // elsewhere it is the dashboard's panel.
 //
 // Pure: the layout comes in and every change goes out, with what it does to the monitors'
