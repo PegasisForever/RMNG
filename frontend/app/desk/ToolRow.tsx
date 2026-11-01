@@ -6,20 +6,20 @@ import { GAP, TOOL_H } from "./geometry";
 /** The control panel the tool row opens, in place of the keyboard. */
 export type PanelTab = "usage" | "tickets" | "clones" | "notes" | "assistant" | "settings";
 
-/** Each tab: its button's label (the settings tab shows a gear) and its page's name. */
-export const TABS: { tab: PanelTab; label: string; page: string }[] = [
-  { tab: "usage", label: "Usage", page: "Account usage" },
-  { tab: "tickets", label: "Tickets", page: "Tickets" },
-  { tab: "clones", label: "Clones", page: "Other clones" },
-  { tab: "notes", label: "Notes", page: "Notes" },
-  { tab: "assistant", label: "Assistant", page: "Assistant" },
-  { tab: "settings", label: "Settings", page: "Settings" },
+/** Each tab: its button's label (the settings tab shows a gear) and its title. */
+export const TABS: { tab: PanelTab; label: string; title: string }[] = [
+  { tab: "usage", label: "Usage", title: "Account usage" },
+  { tab: "tickets", label: "Tickets", title: "Tickets" },
+  { tab: "clones", label: "Clones", title: "Other clones" },
+  { tab: "notes", label: "Notes", title: "Notes" },
+  { tab: "assistant", label: "Assistant", title: "Assistant" },
+  { tab: "settings", label: "Settings", title: "Settings" },
 ];
 
 /** The server's CPU, memory and disk, as text (`formatLxcUsage`). */
 export type ServerUsage = { cpu: string; mem: string; disk: string };
 
-/** Narrower than this (CSS px), the row has no room for the server's numbers: the Usage page
+/** Narrower than this (CSS px), the row has no room for the server's numbers: the Usage tab
  *  shows them. */
 export const ROW_STATS_MIN = 520;
 

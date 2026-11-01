@@ -1,4 +1,4 @@
-// The Tickets page: the ticket column, as a list, and one ticket at a time in the same page.
+// The Tickets tab: the ticket column, as a list, and one ticket at a time in the same tab.
 // The open Linear tickets no clone was made for, in the operator's order.
 //
 // A tap on a row opens the ticket, the ⋯ on a row opens a sheet of everything the card's menu
@@ -51,8 +51,8 @@ import {
   NO_WORD_SELECT,
   ON_GLASS,
   NO_SCROLLBARS,
-  Page,
-  PageHeader,
+  TabPanel,
+  TabHeader,
   PRESS,
   type SheetGroup,
   TEXT,
@@ -68,7 +68,7 @@ export interface TicketsViewProps {
   loading: boolean;
   /** Linear's last answer failed; the list keeps what it had. */
   error: string | null;
-  /** The ticket shown in the page, and its panel; null shows the list. */
+  /** The ticket shown in the tab, and its panel; null shows the list. */
   open: LinearTicket | null;
   detail?: ReactNode;
   onOpen: (ticket: LinearTicket) => void;
@@ -233,16 +233,16 @@ export function TicketsView(p: TicketsViewProps) {
     return (
       // The ticket scrolls with no bar
       <div className={`relative h-full ${NO_SCROLLBARS}`}>
-        <Page
+        <TabPanel
           fill
           header={
-            <PageHeader title="Tickets" sub={open.id} onBack={p.onBack}>
+            <TabHeader title="Tickets" sub={open.id} onBack={p.onBack}>
               <HeaderButton icon={Ellipsis} label={`Actions for ${open.id}`} onClick={(e) => openMenu(open, e)} />
-            </PageHeader>
+            </TabHeader>
           }
         >
           {p.detail}
-        </Page>
+        </TabPanel>
         {sheetView}
       </div>
     );
@@ -250,12 +250,12 @@ export function TicketsView(p: TicketsViewProps) {
 
   return (
     <div className="relative h-full">
-      <Page
+      <TabPanel
         error={p.error}
         header={
-          <PageHeader title="Tickets" sub={p.loading ? "Loading…" : `${p.tickets.length} without a clone`}>
+          <TabHeader title="Tickets" sub={p.loading ? "Loading…" : `${p.tickets.length} without a clone`}>
             {buttons}
-          </PageHeader>
+          </TabHeader>
         }
       >
         {tickets.length === 0 ? (
@@ -269,7 +269,7 @@ export function TicketsView(p: TicketsViewProps) {
             ))}
           </DropColumn>
         )}
-      </Page>
+      </TabPanel>
       {sheetView}
     </div>
   );

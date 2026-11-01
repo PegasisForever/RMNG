@@ -1,4 +1,4 @@
-// The Clones page: the board, as one list with a section per column. A tap on a clone puts it
+// The Clones tab: the board, as one list with a section per column. A tap on a clone puts it
 // on the screen above (the server streams the selected clone); an archived clone has no screen,
 // so a tap on one opens its notes instead. The control panel stays open; a double click (a
 // double tap) also closes it, so the clone's screen shows.
@@ -73,8 +73,8 @@ import {
   NO_DRAG,
   NO_WORD_SELECT,
   ON_GLASS,
-  Page,
-  PageHeader,
+  TabPanel,
+  TabHeader,
   PRESS,
   R_PIECE,
   type SheetGroup,
@@ -96,7 +96,7 @@ export interface ClonesViewProps {
   mutedClones: string[];
   /** The clone on the screen above. */
   selectedId: string | null;
-  /** The clone the Notes page is on, when it is not that one (an archived one). */
+  /** The clone the Notes tab is on, when it is not that one (an archived one). */
   notesId: string | null;
   /** A tap on a clone: a live one goes on the screen, an archived one opens its notes. */
   onSelect: (clone: Clone) => void;
@@ -429,7 +429,7 @@ export function ClonesView(p: ClonesViewProps) {
 
   return (
     <div className="relative h-full">
-      <Page header={<PageHeader title="Clones" sub={`${p.clones.length} clones`} />}>
+      <TabPanel header={<TabHeader title="Clones" sub={`${p.clones.length} clones`} />}>
         {columns.every((c) => c.cloneIds.length === 0) && p.clones.length === 0 ? (
           <EmptyLine>No clones yet. Make one with the + of a column.</EmptyLine>
         ) : null}
@@ -444,7 +444,7 @@ export function ClonesView(p: ClonesViewProps) {
             <ul className={`divide-y ${DIVIDE}`}>{items(column)}</ul>
           </DropColumn>
         ))}
-      </Page>
+      </TabPanel>
       {sheetView}
     </div>
   );
@@ -478,7 +478,7 @@ function CloneRow({
   /** A running operation on it: its step shows, and the menu waits. */
   op?: Operation;
   selected: boolean;
-  /** The Notes page is on it. */
+  /** The Notes tab is on it. */
   notes: boolean;
   muted: boolean;
   child: boolean;

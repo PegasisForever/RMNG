@@ -1,5 +1,5 @@
 // The control panel where it is narrow (a phone, a small window): the tool row
-// (`../ToolRow.tsx`) over the open page. The control panel comes in as `children` (`./ControlPanelContainer.tsx` keeps each one
+// (`../ToolRow.tsx`) over the open tab. The control panel comes in as `children` (`./ControlPanelContainer.tsx` keeps each one
 // it opened mounted, the others hidden).
 import type { ComponentProps, ReactNode } from "react";
 

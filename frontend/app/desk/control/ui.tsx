@@ -1,7 +1,7 @@
-// The parts every page of the control panel is made of. A page has a small space (a phone's, beside the clone's
+// The parts every tab of the control panel is made of. A tab has a small space (a phone's, beside the clone's
 // screen), so each one is a 36 px header over a body that scrolls, and every control is a
 // finger's size: nothing here waits for a hover, and a menu is a sheet of large tiles over the
-// page (`ActionSheet`), not a small list at a pointer.
+// tab (`ActionSheet`), not a small list at a pointer.
 //
 // The control panel is flat content (`../GLASS.md`): on the glass of its panel over the clone's
 // screen, or on the solid ground of their own window. Each color has its light value and its
@@ -86,7 +86,7 @@ export const LINE = "border-black/10 dark:border-white/10";
 export const DIVIDE = "divide-black/10 dark:divide-white/10";
 /** A row or a tile under the mouse (Tailwind's `hover:` is for a mouse only), or a finger. */
 export const PRESS = "hover:bg-black/5 active:bg-black/10 dark:hover:bg-white/5 dark:active:bg-white/10";
-/** A box on the page (a card, a field's ground, a hollow). */
+/** A box on the tab (a card, a field's ground, a hollow). */
 export const BOX = "bg-white/60 dark:bg-white/[0.06]";
 /** A button: a small box of its own. */
 const BUTTON = `bg-white/60 border border-black/10 dark:bg-white/10 dark:border-white/10 ${TEXT} active:bg-black/10 dark:active:bg-white/20`;
@@ -95,12 +95,12 @@ export const FIELD =
   "rounded-[10px] border border-black/10 bg-white/60 text-neutral-900 outline-none focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30";
 /** The one thing on: the other look (as lit glass). */
 export const LIT = "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
-/** The page's own row, lit: the clone on the screen. */
+/** The tab's own row, lit: the clone on the screen. */
 export const HERE = "bg-emerald-500/10 shadow-[inset_3px_0_0_var(--color-emerald-500)] dark:bg-emerald-400/10 dark:shadow-[inset_3px_0_0_var(--color-emerald-400)]";
 
-/** A page: its header, an error line when there is one, and the body. The body scrolls unless
- *  `fill` (the page lays out its own scrolling, as the chat does). */
-export function Page({
+/** A tab's content: its header, an error line when there is one, and the body. The body
+ *  scrolls unless `fill` (the tab lays out its own scrolling, as the chat does). */
+export function TabPanel({
   header,
   error,
   onDismissError,
@@ -132,8 +132,8 @@ export function Page({
 }
 
 /** The header row: a back button when there is somewhere to go back to, the title (with a
- *  second line in grey), and the page's buttons on the right. */
-export function PageHeader({
+ *  second line in grey), and the tab's buttons on the right. */
+export function TabHeader({
   title,
   sub,
   onBack,
@@ -142,7 +142,7 @@ export function PageHeader({
   title: ReactNode;
   sub?: ReactNode;
   onBack?: () => void;
-  /** The page's buttons. */
+  /** The tab's buttons. */
   children?: ReactNode;
 }) {
   return (
@@ -237,7 +237,7 @@ export type SheetAction = {
 /** A group of tiles in a sheet, under a small heading when it has one. */
 export type SheetGroup = { title?: string; actions: SheetAction[] };
 
-/** What a ⋯ button opens on a touch screen: a sheet over the page, with a tile per action, in
+/** What a ⋯ button opens on a touch screen: a sheet over the tab, with a tile per action, in
  *  groups. A tap on a tile does it and closes the sheet; a tap beside the sheet closes it. */
 export function ActionSheet({
   title,

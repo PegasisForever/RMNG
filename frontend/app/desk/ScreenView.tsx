@@ -10,7 +10,7 @@
 // - The notes over the screen: what dictation hears at the bottom, and why
 //   there is no screen to use in the middle.
 // - The keyboard at the bottom (touch mode), with the bar that sets its height.
-// - The control panel (`controlPanel.content`: the tool row and the open page, or, wide, the
+// - The control panel (`controlPanel.content`: the tool row and the open tab, or, wide, the
 //   columns), on a glass panel at the right under the buttons, on a backdrop that blurs and darkens the screen.
 //   They come in and go out as a dialog does.
 // - The right group: the floating buttons in the top-right corner, and under them, wide, the

@@ -6,13 +6,13 @@ import { accountsNow, makeClaudeAccounts } from "~/components/__fixtures__/accou
 import { makeSettingsDraft, makeUpdateStatus } from "~/components/__fixtures__/appConfig";
 import { makeBoardColumns } from "~/components/__fixtures__/board";
 
-import { inPageFrame } from "./__fixtures__/frame";
+import { inTabFrame } from "./__fixtures__/frame";
 import { SettingsView, type SettingsViewProps } from "./SettingsView";
 
 const meta = {
   title: "Desk/Control panel/SettingsView",
   component: SettingsView,
-  decorators: [inPageFrame],
+  decorators: [inTabFrame],
   parameters: { layout: "centered" },
   args: {
     draft: makeSettingsDraft(),

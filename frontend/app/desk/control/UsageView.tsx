@@ -1,10 +1,10 @@
-// The Usage page: every account's usage, in its pools (`groupAccounts`), and the
+// The Usage tab: every account's usage, in its pools (`groupAccounts`), and the
 // jobs the server is running. A touch screen has no hover, so the reset time of a window is on
 // its bar, as "in 2h 15m"; in the rail (a mouse), it is a tooltip on the bar.
 //
 // Pure: the accounts, the clock and the locale come in as props, and the refresh and the
 // sign-in go out as callbacks. The server's CPU, memory and disk are in the tool row above, or,
-// where it has no room for them, at the top of this page (`server`).
+// where it has no room for them, at the top of this tab (`server`).
 //
 // Wide (`rail`), it is the rail: one column of accounts at the left of the board,
 // which scrolls with no bar showing.
@@ -29,7 +29,7 @@ import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { SoundReport } from "~/viewer/protocol";
 
 import type { ServerUsage } from "../ToolRow";
-import { BOX, CARD_BOX, EmptyLine, HeaderButton, LINE, Page, PageHeader, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "./ui";
+import { BOX, CARD_BOX, EmptyLine, HeaderButton, LINE, TabPanel, TabHeader, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "./ui";
 
 export interface UsageViewProps {
   /** Both providers' accounts (`ControlState.claudeAccounts`). */
@@ -83,14 +83,14 @@ export function UsageView({
     .sort((a, b) => Number(b.startedAt) - Number(a.startedAt));
 
   return (
-    <Page
+    <TabPanel
       noScrollbar={rail}
       header={
-        <PageHeader title="Account usage" sub={accounts.length && !rail ? `${accounts.length} accounts` : undefined}>
+        <TabHeader title="Account usage" sub={accounts.length && !rail ? `${accounts.length} accounts` : undefined}>
           {accounts.length ? (
             <HeaderButton icon={RefreshCw} label={busy ? "Refreshing…" : "Refresh"} showLabel={!rail} disabled={busy} onClick={refresh} />
           ) : null}
-        </PageHeader>
+        </TabHeader>
       }
     >
       {/* The rail's cards sit as the board's columns' do (`CARD_LIST`'s inset) */}
@@ -135,7 +135,7 @@ export function UsageView({
         )}
         {sound ? <SoundLine r={sound} /> : null}
       </div>
-    </Page>
+    </TabPanel>
   );
 }
 

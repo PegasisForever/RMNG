@@ -6,7 +6,7 @@ import { cloneWorking, hosts, makeCloneOffline } from "~/components/__fixtures__
 import { deleteOperation } from "~/components/__fixtures__/operations";
 import { cloneTokens, stats } from "~/components/__fixtures__/stats";
 
-import { inPageFrame } from "./__fixtures__/frame";
+import { inTabFrame } from "./__fixtures__/frame";
 import { ClonesView } from "./ClonesView";
 
 const archived = makeCloneOffline({ id: "pega-old-3", displayName: "Old spike", archived: true, managed: true });
@@ -14,7 +14,7 @@ const archived = makeCloneOffline({ id: "pega-old-3", displayName: "Old spike", 
 const meta = {
   title: "Desk/Control panel/ClonesView",
   component: ClonesView,
-  decorators: [inPageFrame],
+  decorators: [inTabFrame],
   parameters: { layout: "centered" },
   args: {
     columns: makeBoardColumns(),

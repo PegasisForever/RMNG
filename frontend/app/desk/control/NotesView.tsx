@@ -1,11 +1,11 @@
 // The Notes and Assistant tabs: the clone's notes (or the ticket it was made from), and its
-// assistant chat. A narrow page is too short for two, so each is a tab of its own (`pane`).
+// assistant chat. A narrow tab is too short for two, so each is a tab of its own (`pane`).
 //
 // Wide (`only`), it is one of the two side panels (`./WideLayout.tsx`): the clone's name over
 // its notes, or its ticket filling the panel; the assistant under a small label.
 //
 // It is about the clone on the screen above. An archived clone has no screen, so a tap on one
-// in the Clones page opens its notes here, and the header then says so and offers the way
+// in the Clones tab opens its notes here, and the header then says so and offers the way
 // back to the clone on the screen.
 //
 // Pure: the notes, the ticket and the chat come in as slots (the real ones load lazily, in the
@@ -17,13 +17,13 @@ import { cloneTitle } from "~/lib/cloneTitle";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
-import { EmptyLine, HeaderButton, NO_SCROLLBARS, Page, PageHeader, TEXT, TEXT_3 } from "./ui";
+import { EmptyLine, HeaderButton, NO_SCROLLBARS, TabPanel, TabHeader, TEXT, TEXT_3 } from "./ui";
 
 /** Which of the two shows. */
 export type NotesPane = "notes" | "chat";
 
 export interface NotesViewProps {
-  /** The clone the page is about; null when no clone is selected. */
+  /** The clone the tab is about; null when no clone is selected. */
   clone: Clone | null;
   ticket?: CloneTicket;
   /** Narrow: which tab this is, the clone's notes or its assistant (each a tab of its own). */
@@ -32,7 +32,7 @@ export interface NotesViewProps {
   notesLabel: string;
   notes: ReactNode;
   chat: ReactNode;
-  /** The page is on an archived clone, not the one on the screen: the way back to that one. */
+  /** The tab is on an archived clone, not the one on the screen: the way back to that one. */
   onBackToScreen?: () => void;
   /** This one only, in a panel of its own (wide), with no switch. */
   only?: NotesPane;
@@ -53,9 +53,9 @@ export function NotesView({
 }: NotesViewProps) {
   if (!clone) {
     return (
-      <Page header={<PageHeader title={(only ?? pane) === "chat" ? "Assistant" : notesLabel} />}>
+      <TabPanel header={<TabHeader title={(only ?? pane) === "chat" ? "Assistant" : notesLabel} />}>
         <EmptyLine>No clone is selected. Pick one in Clones.</EmptyLine>
-      </Page>
+      </TabPanel>
     );
   }
   if (only === "chat") {
@@ -82,10 +82,10 @@ export function NotesView({
   return (
     // The notes and the chat scroll with no bars
     <div className={`h-full ${NO_SCROLLBARS}`}>
-      <Page
+      <TabPanel
         fill
         header={
-          <PageHeader
+          <TabHeader
             title={
               <span className="flex items-center gap-1.5">
                 <CloneStatusDot clone={clone} />
@@ -95,7 +95,7 @@ export function NotesView({
             sub={`${clone.id} · ${statusLabel(clone)}`}
           >
             {onBackToScreen ? <HeaderButton label="Back to screen" onClick={onBackToScreen} /> : null}
-          </PageHeader>
+          </TabHeader>
         }
       >
         {/* The notes are one long scroll; the chat is a column with its composer at the bottom */}
@@ -104,7 +104,7 @@ export function NotesView({
         ) : (
           chat
         )}
-      </Page>
+      </TabPanel>
     </div>
   );
 }

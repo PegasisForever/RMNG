@@ -1,6 +1,6 @@
-// The Settings page: every category and field of the server's settings, laid out for the
+// The Settings tab: every category and field of the server's settings, laid out for the
 // keyboard's space. The categories and Save are a column on the left, so the pane keeps the
-// whole height; it scrolls on its own. On a narrow page (a phone upright) the categories are
+// whole height; it scrolls on its own. On a narrow tab (a phone upright) the categories are
 // icons only, so the pane keeps the width. The panes are `SettingsPane`'s.
 //
 // Pure: the form and what it can do come from `useSettingsPanel`.

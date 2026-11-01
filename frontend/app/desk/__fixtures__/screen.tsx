@@ -121,7 +121,7 @@ export function FakeTerminal({ touch = true, cursor = null }: { touch?: boolean;
   );
 }
 
-/** A page the way the control panel container shows it (narrow: a tab's page). */
+/** A tab the way the control panel container shows it (narrow). */
 function Panel({ children }: { children: ReactNode }) {
   return (
     <div role="tabpanel" className="absolute inset-0 flex select-text flex-col overflow-hidden [&_button]:select-none">
@@ -154,13 +154,13 @@ const clonesArgs = ClonesStories.args as Parameters<typeof ClonesView>[0];
 const notesArgs = NotesStories.args as Parameters<typeof NotesView>[0];
 const settingsArgs = SettingsStories.args as Parameters<typeof SettingsView>[0];
 
-/** Each tab's page, with its own story's data. `server`: the server's numbers at the top of
+/** Each tab, with its own story's data. `server`: the server's numbers at the top of
  *  Usage (the tool row has no room for them). */
-function pageFor(tab: PanelTab, server = false): ReactNode {
-  return withDnd(tab, page(tab, server));
+function tabFor(tab: PanelTab, server = false): ReactNode {
+  return withDnd(tab, tabContent(tab, server));
 }
 
-/** The clone columns of the Clones page's story, for the drags. */
+/** The clone columns of the Clones tab's story, for the drags. */
 const lanes = () =>
   resolveColumns(withDefaults(clonesArgs.columns), clonesArgs.clones).map((c) => ({ id: c.id, cloneIds: c.cloneIds }));
 
@@ -176,7 +176,7 @@ function withDnd(tab: PanelTab, node: ReactNode): ReactNode {
   return node;
 }
 
-function page(tab: PanelTab, server: boolean): ReactNode {
+function tabContent(tab: PanelTab, server: boolean): ReactNode {
   switch (tab) {
     case "usage":
       return <Panel>{<UsageView {...usageArgs} server={server ? usage : undefined} />}</Panel>;
@@ -193,7 +193,7 @@ function page(tab: PanelTab, server: boolean): ReactNode {
   }
 }
 
-/** The side panels, wide: the clone's notes over its assistant, with the Notes page's data. */
+/** The side panels, wide: the clone's notes over its assistant, with the Notes tab's data. */
 export function sideFor(): ReactNode {
   return (
     <SidePanels
@@ -207,7 +207,7 @@ export function sideFor(): ReactNode {
   );
 }
 
-/** The control panel as the container lays it out `width` CSS px wide: the tool row over a tab's page,
+/** The control panel as the container lays it out `width` CSS px wide: the tool row over a tab,
  *  or (wide) the columns. */
 export function controlPanelFor({
   width,
@@ -265,7 +265,7 @@ export function controlPanelFor({
   }
   return (
     <NarrowLayout row={{ width: width - 12, usage, tab, onTab, badges, onPopOut }}>
-      {pageFor(tab, width - 12 < ROW_STATS_MIN)}
+      {tabFor(tab, width - 12 < ROW_STATS_MIN)}
     </NarrowLayout>
   );
 }

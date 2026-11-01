@@ -1,6 +1,6 @@
 // Drag and drop on the control panel (the arrangement is `~/lib/boardDrag.ts`'s): a clone moves within its column or to another one, and a ticket
 // moves within the tickets' column or, dropped on a clone column, asks for a clone. Narrow, the
-// Clones page's sections are the columns, and the Tickets page is the tickets' column.
+// Clones tab's sections are the columns, and the Tickets tab is the tickets' column.
 //
 // A mouse drags after 5 px, so a click still selects; a finger drags after a 250 ms press, so a
 // swipe still scrolls. What follows the pointer is the views' own card (`overlays`), portalled
@@ -56,7 +56,7 @@ export const useBoardDnd = () => useContext(DndCtx);
 
 /** What the card is being dropped on: what is under the pointer; in a column but between its
  *  cards, the nearest card. A column's cards are those inside it both ways, so it holds for the
- *  narrow page's sections, which are stacked, as for the wide columns, which are side by side. */
+ *  narrow tab's sections, which are stacked, as for the wide columns, which are side by side. */
 const collisionDetection: CollisionDetection = (args) => {
   const pointer = pointerWithin(args);
   const at = args.pointerCoordinates;
@@ -200,7 +200,7 @@ export function BoardDnd({
           : createPortal(
               <DragOverlay>
                 {overlay ? (
-                  // Lifted off the page: solid, with a long shadow
+                  // Lifted off the tab: solid, with a long shadow
                   <div className="overflow-hidden rounded-lg bg-white shadow-[0_12px_32px_rgb(0_0_0/0.3)] dark:bg-neutral-800">
                     {overlay}
                   </div>

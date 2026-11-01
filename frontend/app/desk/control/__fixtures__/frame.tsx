@@ -1,4 +1,4 @@
-// The space of a control panel page for the page stories: a phone's control panel (377 × 640 CSS px), on
+// The space of a control panel tab for the tab stories: a phone's control panel (377 × 640 CSS px), on
 // glass over a desktop picture darkened by the control panel's backdrop, as over the clone's
 // screen. `parameters.surface: "window"` puts
 // it on the solid ground of the control panel's own window instead; `parameters.frameWidth` makes it
@@ -8,10 +8,10 @@ import type { Decorator } from "@storybook/react-vite";
 import { FakeDesktop } from "../../__fixtures__/desktop";
 import { COLUMN_GLASS, CONTROL_PANEL_BACKDROP, CONTROL_PANEL_DIM, CONTROL_PANEL_GLASS } from "../ui";
 
-const PAGE_SIZE = { width: 377, height: 640 };
+const TAB_SIZE = { width: 377, height: 640 };
 
-export const inPageFrame: Decorator = (Story, ctx) => {
-  const size = { ...PAGE_SIZE, width: (ctx.parameters.frameWidth as number | undefined) ?? PAGE_SIZE.width };
+export const inTabFrame: Decorator = (Story, ctx) => {
+  const size = { ...TAB_SIZE, width: (ctx.parameters.frameWidth as number | undefined) ?? TAB_SIZE.width };
   return ctx.parameters.surface === "window" ? (
     <div className="relative overflow-hidden bg-neutral-100 dark:bg-neutral-950" style={size}>
       <Story />

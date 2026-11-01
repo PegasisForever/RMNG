@@ -9,7 +9,7 @@ import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_DIM, CONTROL_PANEL_GLASS } from "
 import { WIDE_MIN } from "./WideLayout";
 
 /** The control panel, in each of its layouts, as its container lays it out: narrow, the tool row
- *  over a tab's page; wide (`WIDE_MIN`), the columns. On glass over the clone's screen, or
+ *  over a tab; wide (`WIDE_MIN`), the columns. On glass over the clone's screen, or
  *  on the solid ground of their own window. The look is the toolbar's Theme. */
 function ControlPanel({ width, height, surface, tab: first }: { width: number; height: number; surface: "glass" | "window"; tab: PanelTab }) {
   const [tab, setTab] = useState(first);
@@ -43,10 +43,10 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** A phone upright: the tabs; the server's numbers are on the Usage page. */
+/** A phone upright: the tabs; the server's numbers are on the Usage tab. */
 export const Phone: Story = {};
 
-/** A phone upright, on the Usage page: the server's numbers at its top. */
+/** A phone upright, on the Usage tab: the server's numbers at its top. */
 export const PhoneUsage: Story = { args: { tab: "usage" } };
 
 /** A phone on its side: the tabs, with the server's numbers in the tool row. */

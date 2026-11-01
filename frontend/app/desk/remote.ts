@@ -89,7 +89,7 @@ export function useRemote({
   const live = useLiveState();
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
-  /** How the clone's sound plays here, for the Usage page. */
+  /** How the clone's sound plays here, for the Usage tab. */
   const [soundReport, setSoundReport] = useState<SoundReport | null>(null);
   /** The layout's scroll mode and speed, percent: the server says them when the socket opens. */
   const scroll = useRef<{ mode: ScrollMode; speed: number }>({ mode: "auto", speed: PHONE_SCROLL_SPEED });

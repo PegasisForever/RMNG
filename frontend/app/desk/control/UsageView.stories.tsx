@@ -4,13 +4,13 @@ import { fn } from "storybook/test";
 import { accountsNow, makeClaudeAccounts, makeGroups, makeUsage } from "~/components/__fixtures__/accounts";
 import { cloneOperation, deleteOperation } from "~/components/__fixtures__/operations";
 
-import { inPageFrame } from "./__fixtures__/frame";
+import { inTabFrame } from "./__fixtures__/frame";
 import { UsageView } from "./UsageView";
 
 const meta = {
   title: "Desk/Control panel/UsageView",
   component: UsageView,
-  decorators: [inPageFrame],
+  decorators: [inTabFrame],
   parameters: { layout: "centered" },
   args: {
     accounts: makeClaudeAccounts(accountsNow),

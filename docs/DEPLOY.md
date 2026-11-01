@@ -299,8 +299,7 @@ clone-daemon (a WARN says so at create time).
 
 ### In-product restart & update (Docker deployment)
 
-Once the control-server is running a build that includes the self-update feature, its
-Settings page has **Restart control-server** and **Update** buttons:
+The control panel's Settings tab has **Restart control-server** and **Update** buttons:
 
 - **Restart** does an in-place `docker restart` of the control-server container (it re-reads
   config.json on boot). It does NOT change the container's host-published port mapping — a

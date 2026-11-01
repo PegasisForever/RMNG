@@ -5,13 +5,13 @@ import { chatLocale, chatMessages, chatNow } from "~/components/__fixtures__/cha
 import { cloneIdle, cloneWorking } from "~/components/__fixtures__/clones";
 import { ChatView } from "~/components/ChatView";
 
-import { inPageFrame } from "./__fixtures__/frame";
+import { inTabFrame } from "./__fixtures__/frame";
 import { NotesView } from "./NotesView";
 
 const meta = {
   title: "Desk/Control panel/NotesView",
   component: NotesView,
-  decorators: [inPageFrame],
+  decorators: [inTabFrame],
   parameters: { layout: "centered" },
   args: {
     clone: cloneWorking,

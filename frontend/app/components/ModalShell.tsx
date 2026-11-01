@@ -93,7 +93,7 @@ const INLINE_PANEL: Record<ModalSize, string> = {
 };
 
 /** The inline frame: the box's whole space, on a solid ground of the page's look (it hides the
- *  page under it; on the control panel's glass, glass would show the page through). */
+ *  tab under it; on the control panel's glass, glass would show the tab through). */
 function inlineClasses(size: ModalSize, closing: boolean) {
   return {
     backdrop: `absolute inset-0 z-50 flex flex-col rounded-[10px] bg-neutral-100 dark:bg-neutral-900 ${

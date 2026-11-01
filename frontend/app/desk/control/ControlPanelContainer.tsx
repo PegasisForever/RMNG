@@ -3,10 +3,10 @@
 // dialogs. Each write has the same shape: show the change now, send it, put the old value back
 // if it is refused.
 //
-// Narrow, the control panel is tabs under the tool row (`../ToolRow.tsx`). Each page, once opened,
+// Narrow, the control panel is tabs under the tool row (`../ToolRow.tsx`). Each tab, once opened,
 // stays mounted while another one shows, so a half-typed setting, a scrolled list or an open
-// ticket is still there when the operator comes back. A dialog opens in the page that opened
-// it, in that page's space (`ModalPlacementProvider`), so the clone's screen stays in view.
+// ticket is still there when the operator comes back. A dialog opens in the tab that opened
+// it, in that tab's space (`ModalPlacementProvider`), so the clone's screen stays in view.
 //
 // Wide (`WIDE_MIN`), they are columns (`./WideLayout.tsx`): the usage rail, the
 // board's columns, the side panel; a dialog opens over them, in the middle.
@@ -104,7 +104,7 @@ function Loading({ label }: { label: string }) {
   return <p className="p-4 text-sm text-black/40 dark:text-white/40">{label}</p>;
 }
 
-/** A dialog that is open, and the page it opened in. */
+/** A dialog that is open, and the tab it opened in. */
 type Dialog =
   | { kind: "clone"; ticketUrl: string; columnId: string | null }
   | { kind: "ticket" }
@@ -139,9 +139,9 @@ export function ControlPanelContainer({
   badges?: Partial<Record<PanelTab, number>>;
   /** Move the control panel to a window of its own; absent where the browser opens none. */
   onPopOut?: () => void;
-  /** The page that shows; null while the keyboard shows. */
+  /** The tab that shows; null while the keyboard shows. */
   tab: PanelTab | null;
-  /** Show another page, or the keyboard (null). */
+  /** Show another tab, or the keyboard (null). */
   onTab: (tab: PanelTab | null) => void;
   state: ControlState;
   stats: Record<string, ContainerStats>;
@@ -259,7 +259,7 @@ export function ControlPanelContainer({
         .then(refetchTickets),
     );
   };
-  /** The open ticket leaves the list: the page goes to the one after it. */
+  /** The open ticket leaves the list: the tab goes to the one after it. */
   const advancePast = (ticket: LinearTicket) => {
     if (openTicket?.id !== ticket.id) return;
     setOpenTicketId(ticketAfter(visibleTickets, ticket.id)?.id ?? null, true);
@@ -281,8 +281,8 @@ export function ControlPanelContainer({
       (keys) => issueSetLabel(keys, t, label.id, on),
     );
 
-  // ---- the clone on the screen, and the one the Notes page is on ----
-  /** An archived clone the Notes page shows; null: the one on the screen. */
+  // ---- the clone on the screen, and the one the Notes tab is on ----
+  /** An archived clone the Notes tab shows; null: the one on the screen. */
   const addressed = selection.clone ? (clonesById.get(selection.clone) ?? null) : null;
   const notesId = addressed?.archived ? addressed.id : null;
   const notesClone = (notesId ? clonesById.get(notesId) : null) ?? (state.selected ? clonesById.get(state.selected) : null) ?? null;
@@ -343,7 +343,7 @@ export function ControlPanelContainer({
     notify,
   );
 
-  /** Where a parent or sub-issue goes: the ticket in this page, or the clone made for it. */
+  /** Where a parent or sub-issue goes: the ticket in this tab, or the clone made for it. */
   const resolveLink = (id: string, inList: boolean) => {
     const t = inList ? findTicket(id, visibleTickets) : null;
     if (t) return { title: `Show ${t.id}`, open: () => setOpenTicketId(t.id) };
@@ -558,7 +558,7 @@ export function ControlPanelContainer({
     const t = findTicket(ticketId, visibleTickets);
     if (t) open({ kind: "clone", ticketUrl: t.url, columnId });
   };
-  /** A page with what drags in it: the clones between their columns, the tickets in order. */
+  /** A tab with what drags in it: the clones between their columns, the tickets in order. */
   const withDnd = (t: PanelTab, node: ReactNode): ReactNode =>
     t === "clones" ? (
       <BoardDnd lanes={lanes} onMoveCard={dropClone}>
@@ -594,8 +594,8 @@ export function ControlPanelContainer({
     />
   );
 
-  /** A page, as the tabs show it, or (`wide`) as its column. */
-  const page = (t: PanelTab, wide = false): ReactNode => {
+  /** A tab's content, as the tabs show it, or (`wide`) as its column. */
+  const tabContent = (t: PanelTab, wide = false): ReactNode => {
     switch (t) {
       case "usage":
         return (
@@ -703,7 +703,7 @@ export function ControlPanelContainer({
               onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
               onPopOut={onPopOut}
               onLayout={onLayout}
-              rail={page("usage", true)}
+              rail={tabContent("usage", true)}
               board={
                 // One drag area for both: a ticket dropped on a clone column makes a clone
                 <BoardDnd
@@ -713,8 +713,8 @@ export function ControlPanelContainer({
                   onReorderTickets={applyTicketOrder}
                   onTicketToColumn={dropTicketOnColumn}
                 >
-                  {page("tickets", true)}
-                  {page("clones", true)}
+                  {tabContent("tickets", true)}
+                  {tabContent("clones", true)}
                 </BoardDnd>
               }
               // An open ticket takes the side panel; the clone's notes come
@@ -731,7 +731,7 @@ export function ControlPanelContainer({
                 setSideWidth(pct);
                 rememberSideWidth(pct);
               }}
-              settings={page("settings")}
+              settings={tabContent("settings")}
             />
           </div>
           {dialog ? dialogView(dialog.d) : null}
@@ -749,12 +749,12 @@ export function ControlPanelContainer({
             <div
               key={t}
               role="tabpanel"
-              aria-label={TAB_INFO.find((i) => i.tab === t)?.page}
+              aria-label={TAB_INFO.find((i) => i.tab === t)?.title}
               hidden={t !== tab}
               className="absolute inset-0 flex select-text flex-col overflow-hidden [&_button]:select-none"
             >
               {error ? <ErrorLine message={error} onDismiss={() => setError(null)} /> : null}
-              <div className="relative min-h-0 flex-1">{withDnd(t, page(t))}</div>
+              <div className="relative min-h-0 flex-1">{withDnd(t, tabContent(t))}</div>
               {dialog?.on === t ? dialogView(dialog.d) : null}
             </div>
           ))}

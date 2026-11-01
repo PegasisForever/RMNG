@@ -7,13 +7,13 @@ import { openTickets } from "~/lib/tickets";
 import { linearWorkspaces } from "~/components/__fixtures__/workspaces";
 import { TicketPanel } from "~/components/TicketPanel";
 
-import { inPageFrame } from "./__fixtures__/frame";
+import { inTabFrame } from "./__fixtures__/frame";
 import { TicketsView } from "./TicketsView";
 
 const meta = {
   title: "Desk/Control panel/TicketsView",
   component: TicketsView,
-  decorators: [inPageFrame],
+  decorators: [inTabFrame],
   parameters: { layout: "centered" },
   args: {
     // As the container gives them: open, no clone made for them yet, each once
@@ -41,7 +41,7 @@ type Story = StoryObj<typeof meta>;
 /** The open tickets no clone has, in the operator's order. ⋯ opens a row's actions. */
 export const Default: Story = {};
 
-/** One ticket open in the page, with its panel. */
+/** One ticket open in the tab, with its panel. */
 export const OpenTicket: Story = {
   args: {
     open: ticketDetailed,

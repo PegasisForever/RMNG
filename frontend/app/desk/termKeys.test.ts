@@ -43,7 +43,7 @@ describe("termBytes", () => {
     expect(termBytes("End", { ...none, shift: true }, false, false)).toBe("\x1b[1;2F");
   });
 
-  test("function keys, Page Up/Down, Delete", () => {
+  test("function keys, TabPanel Up/Down, Delete", () => {
     expect(termBytes("F1", none, false, false)).toBe("\x1bOP");
     expect(termBytes("F2", { ...none, shift: true }, false, false)).toBe("\x1b[1;2Q");
     expect(termBytes("F5", none, false, false)).toBe("\x1b[15~");
