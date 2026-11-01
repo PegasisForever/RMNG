@@ -39,6 +39,12 @@ no sheen, no shadow, no glow.
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
+The pages' panel (`./pages/ui.tsx`, `PAGES_GLASS`) is glass with a denser tint too: light grey at
+80 %, dark grey at 78 %, as it is full of small text. In the pages' own window there is no clone's
+screen under them: the same flat content sits on a solid ground (`bg-neutral-100` /
+`bg-neutral-950`), with no glass. A sheet or a dialog over the pages is solid
+(`bg-neutral-100` / `bg-neutral-900`): over a dimmed page, glass would look murky.
+
 The keyboard (`./KeyboardView.tsx`, `keyboardPanel`) is the one surface with a denser tint: it is
 large and full of keys, so each key must show over a white window or a black one. Light: grey
 (`neutral-300`) at 70 %, as a phone's light keyboard; dark: grey at 82 %. Its top corners are
@@ -65,6 +71,13 @@ Each color has its light value and its `dark:` value.
 | The button that ends the task (Done) | `rounded-lg bg-emerald-600 text-white`, mouse over `bg-emerald-500` | the same |
 | A small icon button | `rounded-md text-black/55`, mouse over `bg-black/5` | `text-white/60`, mouse over `bg-white/10` |
 | A remove button | `text-rose-600` | `text-rose-400` |
+| A line between rows | `divide-black/10` | `divide-white/10` |
+| A row under the mouse, under a finger | `hover:bg-black/5`, `active:bg-black/10` | `bg-white/5`, `bg-white/10` |
+| A card (a clone, a ticket, an account) | `rounded-lg border-black/10 bg-white/70` | `border-white/10 bg-white/[0.06]` |
+| A column of the board | `rounded-xl border-black/10 bg-black/[0.03]` | `border-white/10 bg-white/[0.03]` |
+| The clone on the screen | `bg-emerald-500/10`, a 3 px emerald bar at the left | `bg-emerald-400/10` |
+| The open tab, the one choice on | `bg-neutral-900 text-white` (the other look) | `bg-white text-neutral-900` |
+| An error line | `bg-rose-500/15 text-rose-700` | `text-rose-300` |
 | A key | `rounded-md border-black/10 bg-white/85 text-neutral-900` | `border-transparent bg-white/15 text-white` |
 | A pressed key | `bg-black/15` | `bg-white/35` |
 | A key that is on (Shift, Ctrl, Fn, Caps Lock) | `bg-neutral-800 text-white` (the other look) | `bg-neutral-100 text-neutral-900` |

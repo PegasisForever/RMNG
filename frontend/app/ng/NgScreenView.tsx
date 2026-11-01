@@ -10,7 +10,8 @@
 // - The notes over the screen: what dictation hears at the bottom, and why
 //   there is no screen to use in the middle.
 // - The keyboard at the bottom (touch mode), with the bar that sets its height.
-// - The pages: the tool row and the open page (`pages.content`), at the right under the buttons.
+// - The pages (`pages.content`: the tool row and the open page, or the dashboard's layout), on a
+//   glass panel at the right under the buttons.
 // - The floating buttons, a dialog, and the monitor's number while the Edit layout dialog is
 //   open in another window.
 import type { PointerEvent, ReactNode, Ref } from "react";
@@ -21,14 +22,15 @@ import type { CursorShape } from "~/lib/wire/CursorShape";
 import { Cursor } from "./Cursor";
 import type { DictationState } from "./dictation";
 import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
-import { GAP, TOOL_H } from "./geometry";
+import { GAP } from "./geometry";
 import type { InputMode } from "./inputMode";
 import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
+import { PAGES_GLASS } from "./pages/ui";
 import { KeyboardView, type KeyboardViewProps, type TouchKind, keyboardPanel } from "./KeyboardView";
-import { type NgTab, type ServerUsage, ToolRow } from "./ToolRow";
 
-/** The pages are at most this wide (CSS px), at the right, under the buttons. */
-const PANEL_MAX_W = 960;
+/** The pages are at most this wide (CSS px), at the right, under the buttons. A large screen
+ *  gives them the dashboard's layout (`./pages/WideLayout.tsx`). */
+const PANEL_MAX_W = 1600;
 
 type Box = { left: number; top: number; width: number; height: number };
 
@@ -78,16 +80,10 @@ export type NgScreenViewProps = {
   } | null;
   /** Said over the screen: dictation's state and words, why there is no screen. */
   notes: { dictation: DictationState; heard: string; note: string | null };
-  /** The pages: shown or not, the tab, the tool row's numbers and counts, the page itself, how
-   *  far the phone's keyboard lifts them, and the move to a window of their own (absent where
-   *  the browser opens none). */
+  /** The pages: shown or not, what they show (`./pages/NgPagesContainer.tsx`, for the panel's
+   *  width), and how far the phone's keyboard lifts them. */
   pages: {
     open: boolean;
-    tab: NgTab;
-    onTab: (tab: NgTab) => void;
-    usage: ServerUsage | null;
-    badges?: Partial<Record<NgTab, number>>;
-    onPopOut?: () => void;
     lift: number;
     content: ReactNode;
     panelRef?: Ref<HTMLDivElement>;
@@ -192,22 +188,8 @@ export function NgScreenView({
         className={`absolute z-40 transition-transform duration-300 ease-out ${pages.open ? "" : "hidden"}`}
         style={{ ...panel, transform: `translateY(${-pages.lift}px)` }}
       >
-        <div className="absolute inset-0 overflow-hidden rounded-xl border border-neutral-800 bg-black/95 backdrop-blur-xl">
-          <ToolRow
-            box={{ left: 4, top: 4, width: panel.width - 8, height: TOOL_H }}
-            usage={pages.usage}
-            tab={pages.open ? pages.tab : null}
-            onTab={pages.onTab}
-            badges={pages.badges}
-            onPopOut={pages.onPopOut}
-          />
-          <div
-            className="absolute"
-            style={{ left: 4, top: 4 + TOOL_H + GAP, width: panel.width - 8, height: panel.height - 8 - TOOL_H - GAP }}
-          >
-            {pages.content}
-          </div>
-        </div>
+        {/* Glass (`./GLASS.md`); what is fixed in it (a sheet, a dialog) takes its space */}
+        <div className={`absolute inset-0 overflow-hidden ${PAGES_GLASS}`}>{pages.content}</div>
       </div>
 
       {buttons ? <FloatingButtons {...buttons} /> : null}

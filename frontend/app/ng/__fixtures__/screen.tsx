@@ -7,6 +7,7 @@ import { fn } from "storybook/test";
 
 import type { CursorShape } from "~/lib/wire/CursorShape";
 
+export { FakeDesktop } from "./desktop";
 import { HANDLE_H } from "../KeyboardHandle";
 import { naturalKeysHeight } from "../geometry";
 import { NgTerminalView } from "../NgTerminalView";
@@ -20,7 +21,9 @@ import TicketsStories from "../pages/TicketsView.stories";
 import { TicketsView } from "../pages/TicketsView";
 import UsageStories from "../pages/UsageView.stories";
 import { UsageView } from "../pages/UsageView";
-import type { NgTab, ServerUsage } from "../ToolRow";
+import { NarrowLayout } from "../pages/NarrowLayout";
+import { WIDE_MIN, WideLayout } from "../pages/WideLayout";
+import { type NgTab, ROW_STATS_MIN, type ServerUsage } from "../ToolRow";
 
 /** The displays: CSS px, and the home bar's inset. */
 export const PHONE = { width: 393, height: 852, bottom: 34 };
@@ -89,31 +92,6 @@ export const arrowCursor: CursorShape = {
   ),
 } as CursorShape;
 
-/** A clone's GNOME desktop, drawn: the top bar, a terminal and an editor. In place of the video. */
-export function FakeDesktop() {
-  return (
-    <div className="absolute inset-0 overflow-hidden bg-[linear-gradient(135deg,#1e3a5f,#4a2c6b_60%,#a0456e)] font-sans">
-      <div className="flex h-[3.2%] min-h-4 items-center justify-between bg-black px-2 text-[10px] text-white">
-        <span>Activities</span>
-        <span>Thu 30 Oct 14:02</span>
-        <span>● ◐ ⏻</span>
-      </div>
-      <div className="absolute left-[4%] top-[8%] h-[52%] w-[54%] overflow-hidden rounded-lg bg-[#1e1e1e] shadow-2xl ring-1 ring-black/40">
-        <div className="h-5 bg-[#2d2d2d] text-center text-[10px] leading-5 text-neutral-300">pega@pega-we-142: ~/RMNG</div>
-        <pre className="p-2 font-mono text-[10px] leading-snug text-emerald-300">
-          {"$ cargo test -p control-server\n   Compiling control-server v0.1.0\n    Finished test [unoptimized]\n     Running 214 tests\ntest result: ok. 214 passed\n$ "}
-          <span className="bg-emerald-300 text-transparent">_</span>
-        </pre>
-      </div>
-      <div className="absolute right-[4%] top-[30%] h-[62%] w-[50%] overflow-hidden rounded-lg bg-[#fafafa] shadow-2xl ring-1 ring-black/20">
-        <div className="h-5 bg-[#ebebeb] text-center text-[10px] leading-5 text-neutral-600">FullDesk.tsx — Visual Studio Code</div>
-        <pre className="p-2 font-mono text-[10px] leading-snug text-neutral-700">
-          {"export function FullDesk(props) {\n  const mode = useInputMode();\n  const r = useRemote({ ... });\n  return <NgScreenView ... />;\n}"}
-        </pre>
-      </div>
-    </div>
-  );
-}
 
 /** A headless clone's terminal, drawn: its tab bar and a shell in tmux, in place of xterm.js.
  *  `cursor`: the drawn pointer (touch mode). */
@@ -134,27 +112,77 @@ export function FakeTerminal({ touch = true, cursor = null }: { touch?: boolean;
   );
 }
 
-/** A page the way the pages container shows it. */
+/** A page the way the pages container shows it (narrow: a tab's page). */
 function Panel({ children }: { children: ReactNode }) {
   return (
-    <div role="tabpanel" className="absolute inset-0 flex select-text flex-col overflow-hidden bg-black [&_button]:select-none">
+    <div role="tabpanel" className="absolute inset-0 flex select-text flex-col overflow-hidden [&_button]:select-none">
       <div className="relative min-h-0 flex-1">{children}</div>
     </div>
   );
 }
 
-/** Each tab's page, with its own story's data. */
-export function pageFor(tab: NgTab): ReactNode {
+const usageArgs = UsageStories.args as Parameters<typeof UsageView>[0];
+const ticketsArgs = TicketsStories.args as Parameters<typeof TicketsView>[0];
+const clonesArgs = ClonesStories.args as Parameters<typeof ClonesView>[0];
+const notesArgs = NotesStories.args as Parameters<typeof NotesView>[0];
+const settingsArgs = SettingsStories.args as Parameters<typeof SettingsView>[0];
+
+/** Each tab's page, with its own story's data. `server`: the server's numbers at the top of
+ *  Usage (the tool row has no room for them). */
+export function pageFor(tab: NgTab, server = false): ReactNode {
   switch (tab) {
     case "usage":
-      return <Panel>{<UsageView {...(UsageStories.args as Parameters<typeof UsageView>[0])} />}</Panel>;
+      return <Panel>{<UsageView {...usageArgs} server={server ? usage : undefined} />}</Panel>;
     case "tickets":
-      return <Panel>{<TicketsView {...(TicketsStories.args as Parameters<typeof TicketsView>[0])} />}</Panel>;
+      return <Panel>{<TicketsView {...ticketsArgs} />}</Panel>;
     case "clones":
-      return <Panel>{<ClonesView {...(ClonesStories.args as Parameters<typeof ClonesView>[0])} />}</Panel>;
+      return <Panel>{<ClonesView {...clonesArgs} />}</Panel>;
     case "notes":
-      return <Panel>{<NotesView {...(NotesStories.args as Parameters<typeof NotesView>[0])} />}</Panel>;
+      return <Panel>{<NotesView {...notesArgs} />}</Panel>;
     case "settings":
-      return <Panel>{<SettingsView {...(SettingsStories.args as Parameters<typeof SettingsView>[0])} />}</Panel>;
+      return <Panel>{<SettingsView {...settingsArgs} />}</Panel>;
   }
+}
+
+/** The pages as the container lays them out `width` CSS px wide: the tool row over a tab's page,
+ *  or (wide) the dashboard's layout. */
+export function pagesFor({
+  width,
+  tab,
+  onTab = fn(),
+  badges,
+  onPopOut,
+}: {
+  width: number;
+  tab: NgTab;
+  onTab?: (tab: NgTab) => void;
+  badges?: Partial<Record<NgTab, number>>;
+  onPopOut?: () => void;
+}): ReactNode {
+  if (width >= WIDE_MIN) {
+    return (
+      <div className="flex h-full flex-col p-2">
+        <WideLayout
+          usage={usage}
+          settingsOpen={tab === "settings"}
+          onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
+          onPopOut={onPopOut}
+          rail={<UsageView {...usageArgs} rail />}
+          board={
+            <>
+              <TicketsView {...ticketsArgs} column />
+              <ClonesView {...clonesArgs} columnsLayout />
+            </>
+          }
+          side={<NotesView {...notesArgs} stacked />}
+          settings={<SettingsView {...settingsArgs} />}
+        />
+      </div>
+    );
+  }
+  return (
+    <NarrowLayout row={{ width: width - 8, usage, tab, onTab, badges, onPopOut }}>
+      {pageFor(tab, width - 8 < ROW_STATS_MIN)}
+    </NarrowLayout>
+  );
 }

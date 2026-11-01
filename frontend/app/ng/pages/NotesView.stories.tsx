@@ -19,7 +19,7 @@ const meta = {
     onPaneChange: fn(),
     notesLabel: "Notes",
     notes: (
-      <div className="space-y-2 px-4 text-sm text-neutral-300">
+      <div className="space-y-2 px-4 text-sm text-neutral-700 dark:text-neutral-300">
         <p>The notes editor goes here (it loads in the browser only).</p>
         <p>Plan: normalize the sidebar CPU to a percent of the allowance.</p>
       </div>

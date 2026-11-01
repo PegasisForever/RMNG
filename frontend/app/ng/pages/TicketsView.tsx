@@ -6,6 +6,9 @@
 // column is Move up / Move down / Move to top in that sheet. A drag onto a clone column
 // (which makes a clone) is "Create a clone" in the sheet.
 //
+// Wide (`column`), the list is the board's first column, as on the dashboard, and the open
+// ticket shows beside the board (the container puts `detail` there).
+//
 // Pure: the open ticket's panel comes in as a slot (`detail`), because the real one loads its
 // description editor lazily, in the browser only.
 import {
@@ -28,7 +31,7 @@ import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
 
 import { type Move, movesFor } from "./order";
-import { ActionSheet, EmptyLine, HeaderButton, Page, PageHeader, type SheetGroup } from "./ui";
+import { ActionSheet, DIVIDE, EmptyLine, HeaderButton, LINE, Page, PageHeader, PRESS, type SheetGroup, TEXT, TEXT_2, TEXT_3 } from "./ui";
 
 export interface TicketsViewProps {
   /** Open tickets no clone has, in the operator's order (`openTickets`, `orderTickets`). */
@@ -54,6 +57,8 @@ export interface TicketsViewProps {
   onMove: (ticket: LinearTicket, move: Move) => void;
   onMoveToBacklog: (ticket: LinearTicket) => void;
   onCancel: (ticket: LinearTicket) => void;
+  /** The board's first column (wide): a card per ticket; the open one is lit, not shown here. */
+  column?: boolean;
 }
 
 const MOVE_ACTION = {
@@ -107,6 +112,50 @@ export function TicketsView(p: TicketsViewProps) {
       <ActionSheet title={`${sheet.id} ${sheet.title}`} groups={groupsFor(sheet)} onClose={() => setSheet(null)} />
     ) : null;
 
+  const buttons = (
+    <>
+      {p.workspaces.length ? (
+        <HeaderButton icon={ExternalLink} label="Linear" showLabel onClick={() => setSheet("workspaces")} />
+      ) : null}
+      {p.onNewTicket ? <HeaderButton icon={Plus} label="New ticket" showLabel primary onClick={p.onNewTicket} /> : null}
+    </>
+  );
+  const empty = p.loading ? null : <EmptyLine>{p.error ? "Nothing to show." : "Every open ticket has a clone."}</EmptyLine>;
+
+  if (p.column) {
+    return (
+      <section
+        aria-label="Tickets"
+        className={`flex h-full w-72 shrink-0 flex-col rounded-xl border ${LINE} bg-black/[0.03] dark:bg-white/[0.03]`}
+      >
+        <h3 className={`flex h-10 shrink-0 items-center gap-1.5 pl-3 pr-1 text-sm font-semibold ${TEXT}`}>
+          Tickets
+          <span className={`tabular-nums ${TEXT_3}`}>{p.loading ? "…" : p.tickets.length}</span>
+          <span className="flex-1" />
+          {buttons}
+        </h3>
+        {p.error ? <p className="px-3 pb-1 text-xs text-rose-600 dark:text-rose-400">{p.error}</p> : null}
+        {p.tickets.length === 0 ? (
+          empty
+        ) : (
+          <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain px-1.5 pb-1.5">
+            {p.tickets.map((t) => (
+              <TicketRow
+                key={t.id}
+                ticket={t}
+                card
+                open={p.open?.id === t.id}
+                onOpen={() => p.onOpen(t)}
+                onMenu={() => setSheet(t)}
+              />
+            ))}
+          </ul>
+        )}
+        {sheetView}
+      </section>
+    );
+  }
+
   if (p.open) {
     const open = p.open;
     return (
@@ -132,19 +181,14 @@ export function TicketsView(p: TicketsViewProps) {
         error={p.error}
         header={
           <PageHeader title="Tickets" sub={p.loading ? "Loading…" : `${p.tickets.length} without a clone`}>
-            {p.workspaces.length ? (
-              <HeaderButton icon={ExternalLink} label="Linear" showLabel onClick={() => setSheet("workspaces")} />
-            ) : null}
-            {p.onNewTicket ? <HeaderButton icon={Plus} label="New ticket" showLabel primary onClick={p.onNewTicket} /> : null}
+            {buttons}
           </PageHeader>
         }
       >
         {p.tickets.length === 0 ? (
-          p.loading ? null : (
-            <EmptyLine>{p.error ? "Nothing to show." : "Every open ticket has a clone."}</EmptyLine>
-          )
+          empty
         ) : (
-          <ul className="divide-y divide-neutral-800">
+          <ul className={`divide-y ${DIVIDE}`}>
             {p.tickets.map((t) => (
               <TicketRow key={t.id} ticket={t} onOpen={() => p.onOpen(t)} onMenu={() => setSheet(t)} />
             ))}
@@ -159,16 +203,28 @@ export function TicketsView(p: TicketsViewProps) {
 /** One ticket in the list: its marks and labels over the identifier and title. */
 export function TicketRow({
   ticket,
+  card = false,
+  open = false,
   onOpen,
   onMenu,
 }: {
   ticket: LinearTicket;
+  /** A card in the board's column (wide), not a row in a list. */
+  card?: boolean;
+  /** Its panel is open beside the board. */
+  open?: boolean;
   onOpen: () => void;
   onMenu: () => void;
 }) {
   return (
-    <li className="flex items-stretch">
-      <button type="button" onClick={onOpen} className="min-w-0 flex-1 px-3 py-2 text-left active:bg-neutral-900">
+    <li
+      className={`flex items-stretch ${
+        card
+          ? `overflow-hidden rounded-lg border ${open ? "border-neutral-900 dark:border-white" : `${LINE} bg-white/70 dark:bg-white/[0.06]`}`
+          : ""
+      }`}
+    >
+      <button type="button" onClick={onOpen} aria-current={open ? "true" : undefined} className={`min-w-0 flex-1 px-3 py-2 text-left ${PRESS}`}>
         <span className="flex flex-wrap items-center gap-1.5">
           <StateIcon state={ticket.state} label={ticket.stateName ?? undefined} />
           {ticket.priority ? <PriorityIcon level={ticket.priority} /> : null}
@@ -176,7 +232,7 @@ export function TicketRow({
             <LabelPill key={l.id || l.name} name={l.name} color={l.color} />
           ))}
         </span>
-        <span className="mt-1 line-clamp-2 block text-sm leading-snug text-neutral-100">
+        <span className={`mt-1 line-clamp-2 block text-sm leading-snug ${TEXT}`}>
           <span
             className={`mr-1 inline-block rounded px-1 py-0.5 align-middle text-[10px] font-semibold leading-none ${workspaceBadge(
               ticket.team ?? ticket.id.split("-")[0],
@@ -191,7 +247,7 @@ export function TicketRow({
         type="button"
         onClick={onMenu}
         aria-label={`Actions for ${ticket.id}`}
-        className="flex w-11 shrink-0 items-center justify-center text-neutral-400 active:bg-neutral-900"
+        className={`flex w-11 shrink-0 items-center justify-center ${TEXT_2} ${PRESS}`}
       >
         <Ellipsis aria-hidden className="size-4" />
       </button>

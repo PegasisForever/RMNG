@@ -1,7 +1,7 @@
 import { ExternalLink, Settings } from "lucide-react";
 import { type PointerEvent, type ReactNode } from "react";
 
-import { GAP } from "./geometry";
+import { GAP, TOOL_H } from "./geometry";
 
 /** The pages the tool row opens, in place of the keyboard. */
 export type NgTab = "usage" | "tickets" | "clones" | "notes" | "settings";
@@ -18,8 +18,13 @@ export const TABS: { tab: NgTab; label: string; page: string }[] = [
 /** The server's CPU, memory and disk, as the dashboard shows them (`formatLxcUsage`). */
 export type ServerUsage = { cpu: string; mem: string; disk: string };
 
+/** Narrower than this (CSS px), the row has no room for the server's numbers: the Usage page
+ *  shows them. */
+export const ROW_STATS_MIN = 520;
+
 type Props = {
-  box: { left: number; top: number; width: number; height: number };
+  /** The row's width, CSS px. */
+  width: number;
   /** Null until the server's first numbers arrive. */
   usage: ServerUsage | null;
   /** The open tab; null while the keyboard shows. */
@@ -32,14 +37,25 @@ type Props = {
   onPopOut?: () => void;
 };
 
-/** The /ng tool row, under the screen: the server's CPU, memory and disk, then tabs that act
- *  as tabs do. One is open at most, and its page takes the keyboard's place. */
-export function ToolRow({ box, usage, tab, onTab, badges, onPopOut }: Props) {
+/** A box on the row (a number, a tab), flat on the pages' surface (`./GLASS.md`). */
+const CHIP = "rounded-md border border-black/10 bg-white/50 dark:border-white/10 dark:bg-white/[0.06]";
+/** A tab or a button on the row, under the mouse. */
+const IDLE = `${CHIP} text-neutral-900 hover:bg-white/80 dark:text-white dark:hover:bg-white/10`;
+/** The open tab: the other look, as lit glass. */
+const ON = "rounded-md border border-transparent bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
+
+/** The /ng tool row, over the pages: the server's CPU, memory and disk (where there is room),
+ *  then tabs that act as tabs do. One is open at most. */
+export function ToolRow({ width, usage, tab, onTab, badges, onPopOut }: Props) {
   return (
-    <div className="absolute flex" style={{ ...box, gap: GAP }}>
-      <Stat label="CPU" value={usage?.cpu} />
-      <Stat label="Mem" value={usage?.mem} />
-      <Stat label="Disk" value={usage?.disk} />
+    <div className="flex shrink-0" style={{ height: TOOL_H, gap: GAP }}>
+      {width >= ROW_STATS_MIN ? (
+        <>
+          <Stat label="CPU" value={usage?.cpu} />
+          <Stat label="Mem" value={usage?.mem} />
+          <Stat label="Disk" value={usage?.disk} />
+        </>
+      ) : null}
       {TABS.map((t) => (
         <TabButton
           key={t.tab}
@@ -50,32 +66,37 @@ export function ToolRow({ box, usage, tab, onTab, badges, onPopOut }: Props) {
         >
           {t.tab === "settings" ? <Settings size={18} strokeWidth={1.75} aria-hidden /> : t.label}
           {badges?.[t.tab] ? (
-            <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-semibold leading-none text-white">
+            <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-semibold leading-none text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.4),0_1px_2px_rgb(0_0_0/0.45)]">
               {badges[t.tab]}
             </span>
           ) : null}
         </TabButton>
       ))}
-      {onPopOut ? (
-        <button
-          type="button"
-          aria-label="Open the pages in a window of their own"
-          title="Open the pages in a window of their own"
-          onClick={onPopOut}
-          className="flex w-9 shrink-0 items-center justify-center rounded-md bg-neutral-800 text-neutral-100 hover:bg-neutral-700"
-        >
-          <ExternalLink size={16} strokeWidth={1.75} aria-hidden />
-        </button>
-      ) : null}
+      {onPopOut ? <PopOutButton onPopOut={onPopOut} /> : null}
     </div>
+  );
+}
+
+/** Moves the pages to a window of their own. */
+export function PopOutButton({ onPopOut }: { onPopOut: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-label="Open the pages in a window of their own"
+      title="Open the pages in a window of their own"
+      onClick={onPopOut}
+      className={`flex size-9 shrink-0 items-center justify-center ${IDLE}`}
+    >
+      <ExternalLink size={16} strokeWidth={1.75} aria-hidden />
+    </button>
   );
 }
 
 function Stat({ label, value }: { label: string; value: string | undefined }) {
   return (
-    <div className="flex min-w-[58px] shrink-0 flex-col items-center justify-center rounded-md bg-neutral-900 px-1.5 leading-none">
-      <span className="text-[10px] text-neutral-500">{label}</span>
-      <span className="mt-0.5 font-mono text-xs text-neutral-200 tabular-nums">{value ?? "—"}</span>
+    <div className={`flex min-w-[58px] shrink-0 flex-col items-center justify-center px-1.5 leading-none ${CHIP}`}>
+      <span className="text-[10px] text-black/45 dark:text-white/45">{label}</span>
+      <span className="mt-0.5 font-mono text-xs tabular-nums text-neutral-900 dark:text-white">{value ?? "—"}</span>
     </div>
   );
 }
@@ -99,9 +120,9 @@ function TabButton({
       role="tab"
       aria-label={label}
       aria-selected={active}
-      className={`relative flex min-w-0 items-center justify-center rounded-md text-sm ${
+      className={`relative flex min-w-0 cursor-pointer items-center justify-center text-sm transition-colors duration-150 ${
         narrow ? "w-9 shrink-0" : "flex-1"
-      } ${active ? "bg-neutral-200 text-black" : "bg-neutral-800 text-neutral-100"}`}
+      } ${active ? ON : IDLE}`}
       onPointerDown={(e: PointerEvent<HTMLDivElement>) => {
         if (e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
         onTap();

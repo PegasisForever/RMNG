@@ -1,9 +1,36 @@
-// The parts every /ng page is made of. A page has a small space (in the stories 661 × 334
-// CSS px), so each one is a 36 px header over a body that scrolls, and every control is a
+// The parts every /ng page is made of. A page has a small space (a phone's, beside the clone's
+// screen), so each one is a 36 px header over a body that scrolls, and every control is a
 // finger's size: nothing here waits for a hover, and a menu is a sheet of large tiles over the
 // page (`ActionSheet`), not a small list at a pointer.
+//
+// The pages are flat content (`../GLASS.md`): on the glass of their panel over the clone's
+// screen, or on the solid ground of their own window. Each color has its light value and its
+// `dark:` one; the names below are the ones the pages share.
 import { ChevronLeft, type LucideIcon, X } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
+
+/** The pages' panel over the clone's screen: glass with a denser tint than the buttons' (as the
+ *  keyboard's), as it is full of small text that must read over a black window or a white one. */
+export const PAGES_GLASS =
+  "ng-glass ng-glass-thick rounded-2xl [--glass-tint:rgb(245_245_245/0.8)] dark:[--glass-tint:rgb(23_23_23/0.78)]";
+
+/** Main text, secondary text, the least text. */
+export const TEXT = "text-neutral-900 dark:text-white";
+export const TEXT_2 = "text-black/60 dark:text-white/60";
+export const TEXT_3 = "text-black/40 dark:text-white/40";
+/** A line round a box, and the lines between the rows of a list (with `divide-y`). */
+export const LINE = "border-black/10 dark:border-white/10";
+export const DIVIDE = "divide-black/10 dark:divide-white/10";
+/** A row or a tile under the mouse (Tailwind's `hover:` is for a mouse only), or a finger. */
+export const PRESS = "hover:bg-black/5 active:bg-black/10 dark:hover:bg-white/5 dark:active:bg-white/10";
+/** A box on the page (a card, a field's ground, a hollow). */
+export const BOX = "bg-white/60 dark:bg-white/[0.06]";
+/** A button: a small box of its own. */
+export const BUTTON = `bg-white/60 border border-black/10 dark:bg-white/10 dark:border-white/10 ${TEXT} active:bg-black/10 dark:active:bg-white/20`;
+/** The one thing on: the other look (as lit glass). */
+export const LIT = "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
+/** The page's own row, lit: the clone on the screen. */
+export const HERE = "bg-emerald-500/10 shadow-[inset_3px_0_0_var(--color-emerald-500)] dark:bg-emerald-400/10 dark:shadow-[inset_3px_0_0_var(--color-emerald-400)]";
 
 /** A page: its header, an error line when there is one, and the body. The body scrolls unless
  *  `fill` (the page lays out its own scrolling, as the chat does). */
@@ -48,13 +75,13 @@ export function PageHeader({
   children?: ReactNode;
 }) {
   return (
-    <div className="flex h-9 shrink-0 items-center gap-1 border-b border-neutral-800 pr-1">
+    <div className={`flex h-9 shrink-0 items-center gap-1 border-b pr-1 ${LINE}`}>
       {onBack ? (
         <button
           type="button"
           onClick={onBack}
           aria-label="Back"
-          className="flex h-9 w-9 shrink-0 items-center justify-center text-neutral-300 active:bg-neutral-800"
+          className={`flex h-9 w-9 shrink-0 items-center justify-center ${TEXT_2} ${PRESS}`}
         >
           <ChevronLeft aria-hidden className="size-5" />
         </button>
@@ -62,8 +89,8 @@ export function PageHeader({
         <span className="w-2 shrink-0" />
       )}
       <div className="flex min-w-0 flex-1 items-baseline gap-2">
-        <h2 className="truncate text-sm font-semibold text-neutral-100">{title}</h2>
-        {sub ? <span className="min-w-0 truncate text-xs text-neutral-500">{sub}</span> : null}
+        <h2 className={`truncate text-sm font-semibold ${TEXT}`}>{title}</h2>
+        {sub ? <span className={`min-w-0 truncate text-xs ${TEXT_3}`}>{sub}</span> : null}
       </div>
       {children}
     </div>
@@ -94,9 +121,7 @@ export function HeaderButton({
       disabled={disabled}
       aria-label={label}
       className={`flex h-7 min-w-8 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium disabled:opacity-40 ${
-        primary
-          ? "bg-neutral-100 text-black active:bg-neutral-300"
-          : "bg-neutral-800 text-neutral-100 active:bg-neutral-700"
+        primary ? "bg-emerald-600 text-white active:bg-emerald-500" : BUTTON
       }`}
     >
       {Icon ? <Icon aria-hidden className="size-4" /> : null}
@@ -110,7 +135,7 @@ export function ErrorLine({ message, onDismiss }: { message: string; onDismiss?:
   return (
     <p
       role="alert"
-      className="flex shrink-0 items-start gap-2 bg-rose-950 px-3 py-1.5 text-xs text-rose-200"
+      className="flex shrink-0 items-start gap-2 bg-rose-500/15 px-3 py-1.5 text-xs text-rose-700 dark:text-rose-300"
     >
       <span className="min-w-0 flex-1 break-words">{message}</span>
       {onDismiss ? (
@@ -124,7 +149,7 @@ export function ErrorLine({ message, onDismiss }: { message: string; onDismiss?:
 
 /** A grey line where a list has nothing to show. */
 export function EmptyLine({ children }: { children: ReactNode }) {
-  return <p className="px-4 py-8 text-center text-sm text-neutral-500">{children}</p>;
+  return <p className={`px-4 py-8 text-center text-sm ${TEXT_3}`}>{children}</p>;
 }
 
 /** A row of choices, one of them on. */
@@ -138,7 +163,7 @@ export function Segmented<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div role="tablist" className="flex shrink-0 gap-0.5 rounded-md bg-neutral-900 p-0.5">
+    <div role="tablist" className="flex shrink-0 gap-0.5 rounded-md bg-black/5 p-0.5 dark:bg-white/10">
       {options.map((o) => (
         <button
           key={o.value}
@@ -147,7 +172,7 @@ export function Segmented<T extends string>({
           aria-selected={o.value === value}
           onClick={() => onChange(o.value)}
           className={`flex h-6 items-center gap-1 rounded px-2.5 text-xs font-medium ${
-            o.value === value ? "bg-neutral-200 text-black" : "text-neutral-300 active:bg-neutral-800"
+            o.value === value ? LIT : `${TEXT_2} ${PRESS}`
           }`}
         >
           {o.label}
@@ -195,20 +220,22 @@ export function ActionSheet({
     });
   };
   return (
-    <div className="absolute inset-0 z-40 flex flex-col justify-end bg-black/60" onClick={onClose}>
+    // Over the whole panel (its glass is the containing block of what is fixed in it), or the
+    // whole window. The sheet is solid: on glass, over a dimmed page, glass would look murky.
+    <div className="fixed inset-0 z-40 flex flex-col items-center justify-end bg-black/25 dark:bg-black/50" onClick={onClose}>
       <div
         role="menu"
         aria-label={typeof title === "string" ? title : undefined}
-        className="max-h-full overflow-y-auto overscroll-contain rounded-t-xl border-t border-neutral-700 bg-neutral-900 px-2 pb-2"
+        className="max-h-full w-full max-w-xl overflow-y-auto overscroll-contain rounded-t-2xl bg-neutral-100 px-2 pb-2 shadow-[0_-8px_32px_rgb(0_0_0/0.25)] dark:bg-neutral-900"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="sticky top-0 flex h-9 items-center gap-2 bg-neutral-900 pl-1">
-          <div className="min-w-0 flex-1 truncate text-sm font-semibold text-neutral-100">{title}</div>
+        <div className="sticky top-0 flex h-10 items-center gap-2 bg-neutral-100 pl-1 dark:bg-neutral-900">
+          <div className={`min-w-0 flex-1 truncate text-sm font-semibold ${TEXT}`}>{title}</div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="flex h-8 w-8 items-center justify-center rounded-md text-neutral-400 active:bg-neutral-800"
+            className={`flex h-8 w-8 items-center justify-center rounded-md ${TEXT_2} ${PRESS}`}
           >
             <X aria-hidden className="size-4" />
           </button>
@@ -218,7 +245,7 @@ export function ActionSheet({
           .map((g, i) => (
             <div key={i} className="mt-1 first-of-type:mt-0">
               {g.title ? (
-                <div className="px-1 pb-1 pt-1 text-[11px] font-medium text-neutral-500">{g.title}</div>
+                <div className={`px-1 pb-1 pt-1 text-[11px] font-medium ${TEXT_3}`}>{g.title}</div>
               ) : null}
               <div className="grid grid-cols-4 gap-1.5">
                 {g.actions.map((a) => (
@@ -227,12 +254,12 @@ export function ActionSheet({
                     type="button"
                     role="menuitem"
                     onClick={() => select(a)}
-                    className={`flex h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-1 text-center text-xs leading-tight active:bg-neutral-700 ${
+                    className={`flex h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-1 text-center text-xs leading-tight ${
                       a.current
-                        ? "bg-neutral-200 text-black"
+                        ? LIT
                         : a.danger
-                          ? "bg-rose-950/70 text-rose-300"
-                          : "bg-neutral-800 text-neutral-100"
+                          ? "bg-rose-500/10 text-rose-600 active:bg-rose-500/20 dark:text-rose-400"
+                          : `bg-white text-neutral-900 active:bg-neutral-200 dark:bg-white/10 dark:text-white dark:active:bg-white/20`
                     }`}
                   >
                     <a.icon aria-hidden className="size-4 shrink-0" />

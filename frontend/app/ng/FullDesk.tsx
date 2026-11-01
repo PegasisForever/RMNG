@@ -465,15 +465,14 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       }}
       pages={{
         open: pages,
-        tab,
-        onTab: setTab,
-        usage: r.usage,
-        badges: r.unread ? { clones: r.unread } : undefined,
-        onPopOut: windows ? () => void popOut() : undefined,
         lift,
         panelRef,
         content: (
           <NgPagesContainer
+            width={panel.width}
+            usage={r.usage}
+            badges={r.unread ? { clones: r.unread } : undefined}
+            onPopOut={windows ? () => void popOut() : undefined}
             tab={pages ? tab : null}
             onTab={(t) => (t ? setTab(t) : setPages(false))}
             state={r.live.state}

@@ -3,10 +3,13 @@
 // dialogs. It is the phone app's counterpart of `DashboardContainer`, with the same writes in
 // the same shape: show the change now, send it, put the old value back if it is refused.
 //
-// The pages are in the keyboard's place. Each page, once opened, stays mounted while another
-// one shows, so a half-typed setting, a scrolled list or an open ticket is still there when the
-// operator comes back. A dialog opens in the page that opened it, in that page's space
-// (`ModalPlacementProvider`), so the clone's screen above stays in view.
+// Narrow, the pages are tabs under the tool row (`../ToolRow.tsx`). Each page, once opened,
+// stays mounted while another one shows, so a half-typed setting, a scrolled list or an open
+// ticket is still there when the operator comes back. A dialog opens in the page that opened
+// it, in that page's space (`ModalPlacementProvider`), so the clone's screen stays in view.
+//
+// Wide (`WIDE_MIN`), they are the dashboard's layout (`./WideLayout.tsx`): the usage rail, the
+// board's columns, the side panel; a dialog opens over them, in the middle.
 import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
 
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
@@ -77,14 +80,16 @@ import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { SoundReport } from "~/viewer/protocol";
 
-import { type NgTab, TABS as TAB_INFO } from "../ToolRow";
+import { type NgTab, ROW_STATS_MIN, type ServerUsage, TABS as TAB_INFO } from "../ToolRow";
 import { ClonesView } from "./ClonesView";
 import { NotesView, type NotesPane } from "./NotesView";
 import { type Move, moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
 import { ErrorLine } from "./ui";
+import { NarrowLayout } from "./NarrowLayout";
 import { UsageView } from "./UsageView";
+import { WIDE_MIN, WideLayout } from "./WideLayout";
 
 // Browser-only and heavy (BlockNote, the chat stream): loaded when first shown
 const NotesEditorContainer = lazy(() => import("~/components/NotesEditorContainer"));
@@ -94,7 +99,7 @@ const TicketDescription = lazy(() => import("~/components/TicketDescription"));
 const TABS: NgTab[] = ["usage", "tickets", "clones", "notes", "settings"];
 
 function Loading({ label }: { label: string }) {
-  return <p className="p-4 text-sm text-neutral-500">{label}</p>;
+  return <p className="p-4 text-sm text-black/40 dark:text-white/40">{label}</p>;
 }
 
 /** A dialog that is open, and the page it opened in. */
@@ -107,12 +112,24 @@ type Dialog =
   | { kind: "forward"; clone: Clone };
 
 export function NgPagesContainer({
+  width,
   tab,
   onTab,
+  usage,
+  badges,
+  onPopOut,
   state,
   stats,
   sound,
 }: {
+  /** The pages' width, CSS px: narrow (tabs) or wide (the dashboard's layout). */
+  width: number;
+  /** The server's CPU, memory and disk; null until they arrive. */
+  usage: ServerUsage | null;
+  /** A count on a tab. */
+  badges?: Partial<Record<NgTab, number>>;
+  /** Move the pages to a window of their own; absent where the browser opens none. */
+  onPopOut?: () => void;
   /** The page that shows; null while the keyboard shows. */
   tab: NgTab | null;
   /** Show another page, or the keyboard (null). */
@@ -460,11 +477,14 @@ export function NgPagesContainer({
         return <PortForwardModal clone={d.clone} sshPublicHost={sshHost} onClose={closeDialog} onCopy={copyText} />;
     }
   };
-  const page = (t: NgTab): ReactNode => {
+  /** A page, as the tabs show it, or (`wide`) as its part of the dashboard's layout. */
+  const page = (t: NgTab, wide = false): ReactNode => {
     switch (t) {
       case "usage":
         return (
           <UsageView
+            rail={wide}
+            server={wide || width - 8 >= ROW_STATS_MIN ? undefined : usage}
             accounts={accounts}
             accountOrder={acctOrder}
             groups={state.groups}
@@ -478,6 +498,7 @@ export function NgPagesContainer({
       case "tickets":
         return (
           <TicketsView
+            column={wide}
             tickets={visibleTickets}
             loading={ticketsLoading}
             error={ticketsError}
@@ -499,6 +520,7 @@ export function NgPagesContainer({
       case "clones":
         return (
           <ClonesView
+            columnsLayout={wide}
             columns={columns}
             clones={state.hosts}
             cloneTickets={liveCloneTickets}
@@ -530,6 +552,7 @@ export function NgPagesContainer({
       case "notes":
         return (
           <NotesView
+            stacked={wide}
             clone={notesClone}
             ticket={notesClone ? liveCloneTickets[notesClone.id] : undefined}
             pane={notesPane}
@@ -551,23 +574,57 @@ export function NgPagesContainer({
     }
   };
 
+  if (width >= WIDE_MIN) {
+    return (
+      // Fixed things in it (a sheet, a dialog) take its whole space: the glass of the panel
+      // over the screen, or the window
+      <ModalPlacementProvider value="window">
+        <div className="flex h-full select-text flex-col gap-2 p-2 [&_button]:select-none">
+          {error ? <ErrorLine message={error} onDismiss={() => setError(null)} /> : null}
+          <div className="min-h-0 flex-1">
+            <WideLayout
+              usage={usage}
+              settingsOpen={tab === "settings"}
+              onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
+              onPopOut={onPopOut}
+              rail={page("usage", true)}
+              board={
+                <>
+                  {page("tickets", true)}
+                  {page("clones", true)}
+                </>
+              }
+              // An open ticket takes the side panel, as on the dashboard; the clone's notes come
+              // back when it closes
+              side={openTicket ? page("tickets") : page("notes", true)}
+              settings={page("settings")}
+            />
+          </div>
+          {dialog ? dialogView(dialog.d) : null}
+        </div>
+      </ModalPlacementProvider>
+    );
+  }
+
   return (
     <ModalPlacementProvider value="inline">
-      {TABS.filter((t) => visited.has(t) || t === tab).map((t) => (
-        // Text can be selected and typed on the pages, not on the keys (WebKit inherits
-        // `user-select`); a long press on a button still selects nothing
-        <div
-          key={t}
-          role="tabpanel"
-          aria-label={TAB_INFO.find((i) => i.tab === t)?.page}
-          hidden={t !== tab}
-          className="absolute inset-0 flex select-text flex-col overflow-hidden bg-black [&_button]:select-none"
-        >
-          {error ? <ErrorLine message={error} onDismiss={() => setError(null)} /> : null}
-          <div className="relative min-h-0 flex-1">{page(t)}</div>
-          {dialog?.on === t ? dialogView(dialog.d) : null}
-        </div>
-      ))}
+      <NarrowLayout row={{ width: width - 8, usage, tab, onTab, badges, onPopOut }}>
+        {TABS.filter((t) => visited.has(t) || t === tab).map((t) => (
+            // Text can be selected and typed on the pages, not on the keys (WebKit inherits
+            // `user-select`); a long press on a button still selects nothing
+            <div
+              key={t}
+              role="tabpanel"
+              aria-label={TAB_INFO.find((i) => i.tab === t)?.page}
+              hidden={t !== tab}
+              className="absolute inset-0 flex select-text flex-col overflow-hidden [&_button]:select-none"
+            >
+              {error ? <ErrorLine message={error} onDismiss={() => setError(null)} /> : null}
+              <div className="relative min-h-0 flex-1">{page(t)}</div>
+              {dialog?.on === t ? dialogView(dialog.d) : null}
+            </div>
+          ))}
+      </NarrowLayout>
     </ModalPlacementProvider>
   );
 }

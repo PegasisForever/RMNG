@@ -92,10 +92,11 @@ const INLINE_PANEL: Record<ModalSize, string> = {
   panel: "overflow-hidden",
 };
 
-/** The inline frame: the box's whole space, on the page's own black. */
+/** The inline frame: the box's whole space, on a solid ground of the page's look (it hides the
+ *  page under it; on the /ng pages' glass, glass would show the page through). */
 export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boolean) {
   return {
-    backdrop: `absolute inset-0 ${LAYER[layer]} flex flex-col bg-black ${
+    backdrop: `absolute inset-0 ${LAYER[layer]} flex flex-col rounded-xl bg-neutral-100 dark:bg-neutral-900 ${
       closing ? MODAL_ANIMATION.backdrop.exit : MODAL_ANIMATION.backdrop.enter
     }`,
     panel: `flex min-h-0 w-full flex-1 flex-col ${INLINE_PANEL[size]}`,

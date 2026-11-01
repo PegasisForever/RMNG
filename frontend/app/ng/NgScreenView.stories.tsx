@@ -15,10 +15,9 @@ import {
   inDisplay,
   keys,
   keysHeight,
-  pageFor,
-  usage,
+  pagesFor,
 } from "./__fixtures__/screen";
-import { NgScreenView, type NgScreenViewProps } from "./NgScreenView";
+import { NgScreenView, type NgScreenViewProps, pagesBox } from "./NgScreenView";
 import type { NgTab } from "./ToolRow";
 
 /** The cursor at 1.5 CSS px per clone px, as on a phone at 2× with a 3× screen. */
@@ -38,10 +37,15 @@ const buttons = (over: Partial<NonNullable<NgScreenViewProps["buttons"]>> = {}):
   ...over,
 });
 
-const pages = (over: Partial<NgScreenViewProps["pages"]> = {}): NgScreenViewProps["pages"] => {
-  const tab = over.tab ?? "clones";
-  return { open: false, tab, onTab: fn(), usage, lift: 0, content: pageFor(tab), ...over };
-};
+/** The pages over a display `d` wide (their panel's width: `pagesBox`). */
+const pages = (
+  over: { open?: boolean; tab?: NgTab; onTab?: (tab: NgTab) => void; badges?: Partial<Record<NgTab, number>>; onPopOut?: () => void } = {},
+  d: { width: number; height: number; bottom: number } = PHONE,
+): NgScreenViewProps["pages"] => ({
+  open: over.open ?? false,
+  lift: 0,
+  content: pagesFor({ width: pagesBox(d.width, d.height, d.bottom).width, tab: over.tab ?? "clones", ...over }),
+});
 
 const keyboard = (d: typeof PHONE, docked = false): NgScreenViewProps["keyboard"] => ({
   docked,
@@ -135,7 +139,7 @@ export const PhoneSideways: Story = {
   args: {
     ...PHONE_SIDEWAYS,
     screen: { x: 0, y: 0, width: PHONE_SIDEWAYS.width, height: PHONE_SIDEWAYS.height },
-    pages: pages({ open: true, tab: "tickets" }),
+    pages: pages({ open: true, tab: "tickets" }, PHONE_SIDEWAYS),
     buttons: buttons({ pagesOpen: true }),
   },
 };
@@ -204,12 +208,12 @@ export const DesktopMonitorsToOpen: Story = {
   args: { ...desktop, buttons: buttons({ keyboard: false, fit: undefined, monitors: { missing: [1, 2], onOpen: fn() } }) },
 };
 
-/** The chord showed the pages, at the right, with the buttons above them (no keyboard button)
- *  and the button that moves them to a window of their own. */
+/** The chord showed the pages, under the buttons (no keyboard button). A large screen gives
+ *  them the dashboard's layout: the usage rail, the board's columns, the notes. */
 export const DesktopPages: Story = {
   args: {
     ...desktop,
-    pages: pages({ open: true, onPopOut: fn() }),
+    pages: pages({ open: true, onPopOut: fn() }, DESKTOP),
     buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
   },
 };
@@ -229,6 +233,19 @@ export const DesktopTerminalOtherMonitor: Story = {
   },
 };
 
+/** The pages over a small desktop window (900 px): the tabs, as on a phone, with the server's
+ *  numbers in the tool row. */
+export const DesktopSmallWindowPages: Story = {
+  args: {
+    ...desktop,
+    width: 900,
+    height: 700,
+    screen: { x: 0, y: 0, width: 900, height: 700 },
+    pages: pages({ open: true, onPopOut: fn() }, { width: 900, height: 700, bottom: 0 }),
+    buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
+  },
+};
+
 /** The Edit layout dialog is open in another window: this one shows its monitor's number. */
 export const DesktopIdentify: Story = {
   args: { ...desktop, identify: 1 },
@@ -239,7 +256,7 @@ export const DesktopIdentify: Story = {
 export const DesktopLayoutDialog: Story = {
   args: {
     ...desktop,
-    pages: pages({ open: true, onPopOut: fn() }),
+    pages: pages({ open: true, onPopOut: fn() }, DESKTOP),
     buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
     dialog: (
       <LayoutEditorView
@@ -280,7 +297,7 @@ export const PhoneInteractive: Story = {
         }
         cursor={{ shape: arrowCursor, x: 120, y: 300, scale: cursorScale() }}
         keyboard={kb}
-        pages={pages({ open, tab, onTab: setTab, content: pageFor(tab) })}
+        pages={pages({ open, tab, onTab: setTab })}
         buttons={buttons({
           pagesOpen: open,
           keyboardOpen: !!kb,
@@ -319,7 +336,7 @@ export const DesktopInteractive: Story = {
         >
           <NgScreenView
             {...args}
-            pages={pages({ open, tab, onTab: setTab, content: pageFor(tab), onPopOut: fn() })}
+            pages={pages({ open, tab, onTab: setTab, onPopOut: fn() }, DESKTOP)}
             buttons={buttons({
               pagesOpen: open,
               keyboard: false,
