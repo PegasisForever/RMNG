@@ -260,8 +260,8 @@ export function NgPagesContainer({
   const openTicketMeta = useTeamMeta(presets, openTicket);
   const notesTicketMeta = useTeamMeta(presets, notesTicket);
 
-  /** Put a clone on the screen and go back to the keyboard; an archived one has no screen, so
-   *  its notes open instead. */
+  /** Put a clone on the screen; the pages stay open (the operator closes them). An archived one
+   *  has no screen, so its notes open instead. */
   const selectClone = (clone: Clone) => {
     if (clone.archived) {
       setNotesId(clone.id);
@@ -270,7 +270,6 @@ export function NgPagesContainer({
     }
     setNotesId(null);
     if (state.selected !== clone.id) run(activate(clone.id));
-    onTab(null);
   };
 
   /** Where a parent or sub-issue goes: the ticket in this page, or the clone made for it. */
