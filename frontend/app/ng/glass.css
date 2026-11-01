@@ -142,6 +142,17 @@
     color: var(--g-lit-text);
   }
 
+  /* Green glass: the operator's own message in the assistant's chat, the send button's green
+     with the screen showing through, white text. The same in both looks. */
+  .ng-glass-green {
+    --glass-tint: rgb(5 150 105 / 0.72);
+    --glass-sheen: rgb(255 255 255 / 0.18);
+    --glass-rim-top: rgb(255 255 255 / 0.5);
+    --glass-rim-side: rgb(255 255 255 / 0.15);
+    --glass-rim-bottom: rgb(255 255 255 / 0.2);
+    color: rgb(255 255 255 / 0.97);
+  }
+
   /* A control: a mouse over it adds light, a press sinks it. */
   .ng-glass-control {
     cursor: pointer;

@@ -29,7 +29,8 @@ tooltip, a dialog's panel, the monitor's number, a note over the screen ("Connec
 words dictation hears), the keyboard's panel. What is on a surface (text, icons, fields,
 boxes, buttons in a dialog) is flat: solid or translucent fills, 1 px borders, no blur, no rim,
 no sheen, no shadow, no glow. The assistant's chat bubbles are glass too (`ng-glass`), as messages that float in the panel; the
-operator's own are green (`bg-emerald-600`, white text), as the send button; its field and buttons are the
+operator's own are green glass (`ng-glass ng-glass-green`: the send button's green, see-through,
+white text); its field and buttons are the
 flat ones below, translucent, not solid. The side panels, the notes, the chat and an open
 ticket scroll with no bar showing (`NO_SCROLLBARS`, `./control/ui.tsx`).
 Settings in the control panel is the dashboard's own panes, drawn in slate. Under `.ng-on-glass`
