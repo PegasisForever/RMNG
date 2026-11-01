@@ -11,12 +11,14 @@
 //   there is no screen to use in the middle.
 // - The keyboard at the bottom (touch mode), with the bar that sets its height.
 // - The pages (`pages.content`: the tool row and the open page, or the dashboard's layout), on a
-//   glass panel at the right under the buttons.
+//   glass panel at the right under the buttons. They come in and go out as a dialog does.
 // - The floating buttons, a dialog, and the monitor's number while the Edit layout dialog is
 //   open in another window.
-import type { PointerEvent, ReactNode, Ref } from "react";
+import { type PointerEvent, type ReactNode, type Ref, useEffect, useState } from "react";
 
+import { MODAL_ANIMATION } from "~/components/ModalShell";
 import { MonitorNumber } from "~/components/MonitorNumber";
+import { MODAL_EXIT_MS } from "~/lib/useModalExit";
 import type { CursorShape } from "~/lib/wire/CursorShape";
 
 import { Cursor } from "./Cursor";
@@ -125,6 +127,7 @@ export function NgScreenView({
   /** The part of the display not under the keyboard. */
   const visible = height - keysH;
   const panel = pagesBox(width, height, bottom);
+  const pagesShown = usePagesExit(pages.open);
   const place = { left: 0, top: 0, width: screen.width, height: screen.height };
   const on = (f: typeof onPad, kind: TouchKind) => (e: PointerEvent<HTMLDivElement>) => f(kind, e);
 
@@ -185,12 +188,19 @@ export function NgScreenView({
       {/* The pages: mounted from the start, so their data is there when they open */}
       <div
         ref={pages.panelRef}
-        className={`absolute z-40 transition-transform duration-300 ease-out ${pages.open ? "" : "hidden"}`}
+        className={`absolute z-40 transition-transform duration-300 ease-out ${pagesShown ? "" : "hidden"}`}
         style={{ ...panel, transform: `translateY(${-pages.lift}px)` }}
       >
         {/* Narrow, on one glass panel (`./GLASS.md`); wide, each column is glass of its own, with
             nothing round them all. What is fixed in it (a sheet, a dialog) takes its space. */}
-        <div className={`absolute inset-0 ${panel.width >= WIDE_MIN ? "" : `overflow-hidden ${PAGES_GLASS}`}`}>{pages.content}</div>
+        <div
+          className={`absolute inset-0 ${panel.width >= WIDE_MIN ? "" : `overflow-hidden ${PAGES_GLASS}`} ${
+            // In and out as a dialog is: from a blur, and back into one
+            pages.open ? MODAL_ANIMATION.panel.enter : pagesShown ? MODAL_ANIMATION.panel.exit : ""
+          }`}
+        >
+          {pages.content}
+        </div>
       </div>
 
       {buttons ? <FloatingButtons {...buttons} /> : null}
@@ -227,4 +237,18 @@ function ScreenNotes({
       ) : null}
     </>
   );
+}
+
+/** Whether the pages show: while `open`, and for their exit animation after (the dialogs' one,
+ *  `MODAL_EXIT_MS`; none where the screen asks for reduced motion). */
+function usePagesExit(open: boolean) {
+  const [shown, setShown] = useState(open);
+  useEffect(() => {
+    if (open) return setShown(true);
+    const reduced = typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced) return setShown(false);
+    const t = window.setTimeout(() => setShown(false), MODAL_EXIT_MS);
+    return () => window.clearTimeout(t);
+  }, [open]);
+  return open || shown;
 }
