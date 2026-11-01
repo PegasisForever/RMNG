@@ -29,19 +29,18 @@ import { PAGES_GLASS } from "./pages/ui";
 import { WIDE_MIN } from "./pages/WideLayout";
 import { KeyboardView, type KeyboardViewProps, type TouchKind, keyboardPanel } from "./KeyboardView";
 
-/** The pages are at most this wide (CSS px), at the right, under the buttons. A large screen
- *  gives them the dashboard's layout (`./pages/WideLayout.tsx`). */
-const PANEL_MAX_W = 1600;
-
 type Box = { left: number; top: number; width: number; height: number };
 
-/** Where the pages go on a display `width`×`height` with `bottom` kept for the home bar. */
+/** Where the pages go on a display `width`×`height` with `bottom` kept for the home bar: under
+ *  the buttons, FLOAT_GAP in from the sides. Wide enough for the dashboard's layout
+ *  (`./pages/WideLayout.tsx`), they take the display's whole width instead: their columns scroll
+ *  out to its edges, and keep the gap inside the row. */
 export function pagesBox(width: number, height: number, bottom: number): Box {
-  const w = Math.min(width - 2 * FLOAT_GAP, PANEL_MAX_W);
+  const inset = width - 2 * FLOAT_GAP;
   return {
-    left: width - FLOAT_GAP - w,
+    left: inset >= WIDE_MIN ? 0 : FLOAT_GAP,
     top: FLOAT_GAP * 2 + FLOAT_BUTTON,
-    width: w,
+    width: inset >= WIDE_MIN ? width : inset,
     height: height - FLOAT_GAP * 3 - FLOAT_BUTTON - bottom,
   };
 }

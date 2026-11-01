@@ -20,7 +20,11 @@ function Pages({ width, height, surface, tab: first }: { width: number; height: 
       {content}
     </div>
   ) : (
-    <div className="relative overflow-hidden p-2" style={{ width: width + 16, height: height + 16 }}>
+    // The pages' box over the screen: in from the sides narrow; the display's whole width wide
+    <div
+      className={`relative overflow-hidden ${width >= WIDE_MIN ? "py-2" : "p-2"}`}
+      style={{ width: width >= WIDE_MIN ? width : width + 16, height: height + 16 }}
+    >
       <FakeDesktop />
       {/* Narrow, one glass panel; wide, each column is glass of its own */}
       <div className={`relative h-full ${width >= WIDE_MIN ? "" : `overflow-hidden ${PAGES_GLASS}`}`}>{content}</div>

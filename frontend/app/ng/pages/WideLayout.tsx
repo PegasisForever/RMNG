@@ -6,9 +6,11 @@
 // scrolls under them, and its end has room to bring the last column out from under them.
 // Settings takes the place of the row and the side panels, beside the rail.
 //
-// Over the clone's screen (`glass`) each column is glass of its own, with nothing round them all;
-// in the pages' window, on its solid ground, they are flat hollows. The side panels are glass in
-// both: they are over the columns.
+// Over the clone's screen (`glass`) each column is glass of its own, with nothing round them all,
+// and the row takes the display's whole width: the columns scroll out to its edges, with the
+// gap from them inside the row. In the pages' window, on its solid ground, they are flat
+// hollows. The side panels are glass in both: they are over the columns. The row's scroll bar
+// is hidden: a touchpad, a wheel with Shift, or a finger scrolls it.
 //
 // Pure: each part comes in as a slot (`./NgPagesContainer.tsx` fills them).
 import { Settings } from "lucide-react";
@@ -85,7 +87,7 @@ export function WideLayout({
   if (settingsOpen) {
     return (
       <ColumnFrameProvider value={frame}>
-        <div className="flex h-full gap-2">
+        <div className={`flex h-full gap-2 ${glass ? "px-2" : ""}`}>
           {railColumn}
           <div className={`min-w-0 flex-1 ${frame}`}>{settings}</div>
         </div>
@@ -99,15 +101,18 @@ export function WideLayout({
         {/* Its columns keep only their up-and-down scrolls to themselves (`overscroll-y-`), so a
             sideways swipe over one scrolls the row; the row keeps its own, so the swipe does not
             go back in the browser's history */}
-        <div aria-label="Board" className="absolute inset-0 overflow-x-auto overscroll-x-contain">
-          <div className="flex h-full w-max gap-2">
+        <div
+          aria-label="Board"
+          className="absolute inset-0 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          <div className={`flex h-full w-max gap-2 ${glass ? "px-2" : ""}`}>
             {railColumn}
             {board}
             {/* Room to bring the last column out from under the side panels */}
             <div aria-hidden className="w-96 shrink-0" />
           </div>
         </div>
-        <div className="pointer-events-none absolute inset-y-0 right-0 flex w-96 flex-col gap-2">
+        <div className={`pointer-events-none absolute inset-y-0 flex w-96 flex-col gap-2 ${glass ? "right-2" : "right-0"}`}>
           {side.ticket ? (
             <section aria-label="Ticket" className={`flex-1 ${PANEL}`}>
               {side.ticket}

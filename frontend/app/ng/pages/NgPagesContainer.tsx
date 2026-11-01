@@ -588,7 +588,7 @@ export function NgPagesContainer({
       <ModalPlacementProvider value="window">
         <div className={`flex h-full select-text flex-col gap-2 [&_button]:select-none ${glass ? "" : "p-2"}`}>
           {error ? (
-            <div className={glass ? `shrink-0 overflow-hidden ${PAGES_GLASS}` : "shrink-0 overflow-hidden rounded-xl"}>
+            <div className={glass ? `mx-2 shrink-0 overflow-hidden ${PAGES_GLASS}` : "shrink-0 overflow-hidden rounded-xl"}>
               <ErrorLine message={error} onDismiss={() => setError(null)} />
             </div>
           ) : null}
