@@ -27,6 +27,8 @@
     /* A hairline round the piece: white glass on a white window needs an edge */
     --g-drop: 0 0 0 0.5px rgb(0 0 0 / 0.1), 0 1px 2px rgb(0 0 0 / 0.1), 0 6px 16px -4px rgb(0 0 0 / 0.2);
     --g-drop-long: 0 0 0 0.5px rgb(0 0 0 / 0.1), 0 2px 4px rgb(0 0 0 / 0.08), 0 24px 56px -12px rgb(0 0 0 / 0.3);
+    /* Under a piece in a row of others at its height: no wider than the 8 px gap */
+    --g-drop-row: 0 0 0 0.5px rgb(0 0 0 / 0.1), 0 1px 2px rgb(0 0 0 / 0.1), 0 6px 8px -4px rgb(0 0 0 / 0.18);
     --g-text: rgb(0 0 0 / 0.85);
     --g-scheme: light;
     --g-hover-over: rgb(255 255 255 / 0.3);
@@ -53,6 +55,7 @@
       --g-inner: inset 0 -1px 0 rgb(0 0 0 / 0.25);
       --g-drop: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 16px -4px rgb(0 0 0 / 0.45);
       --g-drop-long: 0 2px 4px rgb(0 0 0 / 0.3), 0 24px 56px -12px rgb(0 0 0 / 0.65);
+      --g-drop-row: 0 1px 2px rgb(0 0 0 / 0.3), 0 6px 8px -4px rgb(0 0 0 / 0.45);
       --g-text: rgb(255 255 255 / 0.92);
       --g-scheme: dark;
       --g-hover-over: rgb(255 255 255 / 0.1);
@@ -119,6 +122,12 @@
     --glass-tint: var(--g-thick);
     --glass-blur: 14px;
     --glass-drop: var(--g-drop-long);
+  }
+
+  /* A piece in a row of others at its height (the wide pages' columns): its shadow stays under
+     it, and does not fall on the next one. After `ng-glass-thick`, so it wins over its shadow. */
+  .ng-glass-row {
+    --glass-drop: var(--g-drop-row);
   }
 
   /* On: a control whose thing is open. The other look's glass: dark in the light look, frosted

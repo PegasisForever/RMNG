@@ -35,6 +35,7 @@ no sheen, no shadow, no glow.
 | `ng-glass` | Every surface: rim, sheen, short shadow. Blur 8 px. | White tint 35 %, dark text, a hairline edge. | Grey tint 30 %, white text. |
 | `ng-glass-thick` | A surface with text to read: a dialog, a tooltip, the monitor's number, a note. Blur 14 px, a long shadow. | White tint 55 %. | Grey tint 50 %. |
 | `ng-glass-control` | A surface that is itself a control (a floating button): more light under the mouse; sinks on a press; an outline on keyboard focus; 45 % when disabled. | Dark outline. | White outline. |
+| `ng-glass-row` | A piece in a row of others at its height (the wide pages' columns): a short shadow that stays under it, out of the 8 px gap, so it does not fall on the next one. | | |
 | `ng-glass-lit` | A control whose thing is open (the pages shown, fullscreen on): the other look's glass. | Dark glass, white text. | Frosted white glass, dark text. |
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
