@@ -71,3 +71,12 @@ export const SaveError: Story = { args: { error: "config: the preset name \"dev\
 
 /** The config is still loading. */
 export const Loading: Story = { args: { draft: null } };
+
+/** Presets, as wide as a desktop's control panel beside its rail. */
+export const PresetsWide: Story = { args: { category: "presets" }, parameters: { frameWidth: 900 } };
+
+/** LLM, wide. */
+export const LlmWide: Story = { args: { category: "llm" }, parameters: { frameWidth: 900 } };
+
+/** Server, wide. */
+export const ServerWide: Story = { args: { category: "server" }, parameters: { frameWidth: 900 } };

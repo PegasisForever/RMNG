@@ -36,6 +36,11 @@ The assistant's chat bubbles are glass too (`ng-glass`; the operator's own in th
 `ng-glass ng-glass-lit`), as messages that float in the panel; its field and buttons are the
 flat ones below, translucent, not solid. The side panels, the notes, the chat and an open
 ticket scroll with no bar showing (`NO_SCROLLBARS`, `./control/ui.tsx`).
+Settings in the control panel is the dashboard's own panes, drawn in slate. Under `.ng-on-glass`
+(`./glass.css`) their slate shades become this flat content: in light, the light shades (fills,
+lines) are black at a low opacity and the text shades are greys dark enough to read, and a white
+fill is see-through white; in dark, the text shades are white at a high opacity and the fills and
+lines are white or black at a low one. No solid white or blue box is left.
 
 | Class | Use it for | Light | Dark |
 |---|---|---|---|

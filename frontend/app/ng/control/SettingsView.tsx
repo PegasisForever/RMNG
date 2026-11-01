@@ -16,7 +16,8 @@ export function SettingsView(p: SettingsViewProps) {
   const categories = settingsCategories(p.boardColumns);
   const active = categories.find((c) => c.id === p.category) ?? categories[0];
   return (
-    <div className="@container flex h-full min-h-0">
+    // The dashboard's panes, flat on the glass (`.ng-on-glass`, `../glass.css`)
+    <div className="ng-on-glass @container flex h-full min-h-0">
       <nav aria-label="Settings categories" className={`flex w-12 shrink-0 flex-col gap-1 border-r p-1.5 @lg:w-32 ${LINE}`}>
         {categories.map(({ id, label, icon: Icon }) => (
           <button

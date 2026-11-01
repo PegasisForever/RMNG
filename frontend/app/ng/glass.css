@@ -173,3 +173,69 @@
     opacity: 0.45;
   }
 }
+
+/* The dashboard's parts on the glass, flat (`./GLASS.md`): Settings in the control panel reuses
+   the dashboard's panes, drawn in slate on white (light) and on slate-800 / -900 (dark). Under
+   `.ng-on-glass` each slate shade takes the role it has in that look: in light, the light shades
+   (fills, lines) are black at a low opacity and the dark ones (text) are solid greys dark enough
+   to read; in dark, the light shades (text) are white at a high opacity and the dark ones (fills,
+   lines) are white or black at a low one. A white fill is see-through white. Outside any layer,
+   so it wins over the utilities. */
+.ng-on-glass {
+  --color-slate-50: rgb(0 0 0 / 0.03);
+  --color-slate-100: rgb(0 0 0 / 0.05);
+  --color-slate-200: rgb(0 0 0 / 0.1);
+  --color-slate-300: rgb(0 0 0 / 0.15);
+  --color-slate-400: rgb(0 0 0 / 0.5);
+  --color-slate-500: rgb(0 0 0 / 0.6);
+  --color-slate-600: rgb(0 0 0 / 0.7);
+  --color-slate-700: rgb(0 0 0 / 0.8);
+  --color-slate-800: oklch(26.9% 0 0);
+  --color-slate-900: oklch(20.5% 0 0);
+  --color-slate-950: oklch(14.5% 0 0);
+}
+/* Light only: in dark the parts' own `dark:` fill is the one that shows */
+@media (prefers-color-scheme: light) {
+  .ng-on-glass .bg-white:not(.dark *) {
+    background-color: rgb(255 255 255 / 0.6);
+  }
+  .ng-on-glass .hover\:bg-white:hover:not(.dark *) {
+    background-color: rgb(255 255 255 / 0.8);
+  }
+}
+@media (prefers-color-scheme: dark) {
+  .ng-on-glass {
+    --color-slate-50: oklch(98.5% 0 0);
+    --color-slate-100: oklch(97% 0 0);
+    --color-slate-200: rgb(255 255 255 / 0.85);
+    --color-slate-300: rgb(255 255 255 / 0.75);
+    --color-slate-400: rgb(255 255 255 / 0.65);
+    --color-slate-500: rgb(255 255 255 / 0.5);
+    --color-slate-600: rgb(255 255 255 / 0.15);
+    --color-slate-700: rgb(255 255 255 / 0.1);
+    --color-slate-800: rgb(255 255 255 / 0.06);
+    --color-slate-900: rgb(0 0 0 / 0.3);
+    --color-slate-950: rgb(0 0 0 / 0.4);
+  }
+  /* Dark text on the one light fill (a choice that is on): solid, as it is not a fill */
+  .ng-on-glass .dark\:text-slate-900 {
+    color: oklch(20.5% 0 0);
+  }
+}
+/* The same, under Storybook's forced dark (`.dark`) */
+.dark .ng-on-glass {
+  --color-slate-50: oklch(98.5% 0 0);
+  --color-slate-100: oklch(97% 0 0);
+  --color-slate-200: rgb(255 255 255 / 0.85);
+  --color-slate-300: rgb(255 255 255 / 0.75);
+  --color-slate-400: rgb(255 255 255 / 0.65);
+  --color-slate-500: rgb(255 255 255 / 0.5);
+  --color-slate-600: rgb(255 255 255 / 0.15);
+  --color-slate-700: rgb(255 255 255 / 0.1);
+  --color-slate-800: rgb(255 255 255 / 0.06);
+  --color-slate-900: rgb(0 0 0 / 0.3);
+  --color-slate-950: rgb(0 0 0 / 0.4);
+}
+.dark .ng-on-glass .dark\:text-slate-900 {
+  color: oklch(20.5% 0 0);
+}
