@@ -13,7 +13,7 @@ import type { LinearWorkspace } from "~/lib/linear/types";
 
 /** The workspace behind whichever key posts it. Linear infers it from the key, so the query
  *  takes no argument. */
-export const ORGANIZATION_QUERY = "query { organization { id name urlKey } }";
+const ORGANIZATION_QUERY = "query { organization { id name urlKey } }";
 
 /** Where a workspace's home page lives.
  *

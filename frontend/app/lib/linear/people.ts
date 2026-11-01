@@ -27,7 +27,7 @@ export interface TicketPerson {
 
 /** A team's members and the key owner's own id, in one query. `active` is asked for because a
  *  deactivated member is still a member and Linear will not accept the assignment. */
-export const TEAM_PEOPLE_QUERY =
+const TEAM_PEOPLE_QUERY =
   "query($team: String!) { " +
   "teams(filter: { key: { eq: $team } }, first: 1) { " +
   "nodes { members(first: 100) { nodes { id name displayName email active } } } } " +

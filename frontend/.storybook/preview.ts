@@ -51,7 +51,8 @@ const preview: Preview = {
         const root = document.documentElement;
         root.classList.toggle("dark", dark);
         root.style.colorScheme = dark ? "dark" : "light";
-        document.body.style.background = dark ? "#0b0f1a" : "#f4f5f7";
+        // The solid ground of the control panel's own window (neutral-950 / neutral-100)
+        document.body.style.background = dark ? "#0a0a0a" : "#f5f5f5";
       }
       return Story();
     },

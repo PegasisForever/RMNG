@@ -29,22 +29,17 @@ import {
   archiveClone,
   deleteClone,
   getConfig,
-  getUpdateStatus,
   putBoardColumns,
-  putConfig,
   putMutedClones,
   putTicketOrder,
   rebaseClone,
   renameClone,
   refreshClaudeUsage,
   refreshCodexUsage,
-  restartServer,
   startClone,
   swapClaudeAccount,
   swapCodexAccount,
-  testConfig,
   unarchiveClone,
-  updateServer,
 } from "~/lib/api";
 import {
   archivesOnDrop,
@@ -150,7 +145,7 @@ export function ControlPanelContainer({
   onTab: (tab: PanelTab | null) => void;
   state: ControlState;
   stats: Record<string, ContainerStats>;
-  /** How the clone's sound plays on this phone; null before it plays. */
+  /** How the clone's sound plays in this window; null before it plays (or where none does). */
   sound: SoundReport | null;
   /** Wide, over the clone's screen: the screen's box for the side panels, which shows them
    *  without the control panel too (`./WideLayout.tsx`); null until it is there. */
@@ -448,13 +443,7 @@ export function ControlPanelContainer({
   const columnCounts = Object.fromEntries(resolveColumns(columns, state.hosts).map((c) => [c.id, c.cloneIds.length]));
   const settings = useSettingsPanel({
     accounts,
-    getConfig,
-    putConfig,
-    testConfig,
-    getUpdateStatus,
-    updateServer,
     operations: state.operations,
-    restartServer,
     onImportAccount: (provider, group) => open({ kind: "import", replacing: null, provider, group }),
     forkSources: state.hosts.filter((h) => h.managed).map((h) => h.id),
     boardColumns: columns,

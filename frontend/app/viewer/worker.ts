@@ -1,8 +1,8 @@
-// The viewer's worker: it owns the WebSocket, the H.264 decoder and the canvas, so a
-// busy page thread never delays a frame. With sound on, it also decodes the sound packets
-// (Opus: WebCodecs, or libopus in WebAssembly, `./opus.ts`) and sends the samples straight to
-// the page's sound worklet on a port of their own, so a busy page thread never delays the sound
-// either.
+// The media socket's worker (`~/desk/session.ts`): it owns the WebSocket, the H.264 decoder and
+// the canvas, so a busy page thread never delays a frame. With sound on, it also decodes the
+// sound packets (Opus: WebCodecs, or libopus in WebAssembly, `./opus.ts`) and sends the samples
+// straight to the page's sound worklet on a port of their own, so a busy page thread never
+// delays the sound either.
 //
 // Display: decoded frames are drawn straight onto the page's canvas, which the page gave to
 // this worker (`transferControlToOffscreen`). That is one GPU copy per frame, and every part of

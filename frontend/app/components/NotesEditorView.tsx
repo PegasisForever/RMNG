@@ -94,5 +94,3 @@ export function NotesEditorView({
     </BlockNoteView>
   );
 }
-
-export default NotesEditorView;

@@ -62,7 +62,6 @@ import {
   ActionSheet,
   BOX,
   boxOf,
-  CARD,
   CARD_BOX,
   CARD_LIST,
   DesktopMenu,
@@ -221,7 +220,6 @@ export function ClonesView(p: ClonesViewProps) {
       onRename: (name: string) => p.onRename(c, name),
       renaming: renamingClone === c.id,
       onRenamingChange: (on: boolean) => setRenamingClone(on ? c.id : null),
-      sshPublicHost: "",
       isChild: child,
       onMenuTouch: () => setSheet(c),
     });
@@ -454,7 +452,7 @@ export function ClonesView(p: ClonesViewProps) {
 
 /** One clone: its state, name and ticket on the first line, its accounts and numbers on the
  *  second. The one on the screen is lit. */
-export function CloneRow({
+function CloneRow({
   clone,
   ticket,
   stats,

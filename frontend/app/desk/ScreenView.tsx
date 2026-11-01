@@ -34,7 +34,7 @@ import type { CursorShape } from "~/lib/wire/CursorShape";
 import { Cursor } from "./Cursor";
 import type { DictationState } from "./dictation";
 import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
-import { GAP, type Insets } from "./geometry";
+import type { Insets } from "./geometry";
 import type { InputMode } from "./inputMode";
 import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
 import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_DIM, CONTROL_PANEL_GLASS } from "./control/ui";

@@ -1,5 +1,5 @@
-// The app's dropdown in its states: a plain list, headers plus a disabled row, and an
-// empty-list placeholder. Open menus are exercised by clicking the trigger (see the
+// The app's dropdown in its states: a plain list, headers plus a disabled row, an empty
+// list and a blank trigger. Open menus are exercised by clicking the trigger (see the
 // Interactive story); every state below is a prop combination.
 import { useState } from "react";
 
@@ -15,12 +15,10 @@ const field =
 function Controlled({
   rows,
   initial,
-  placeholder,
   label,
 }: {
   rows: DropdownRow[];
   initial: string;
-  placeholder?: string;
   label: string;
 }) {
   const [value, setValue] = useState(initial);
@@ -33,7 +31,6 @@ function Controlled({
           setValue(v);
           fn()(v);
         }}
-        placeholder={placeholder}
         label={label}
         className={field}
       />
@@ -106,16 +103,15 @@ export const Headers: Story = {
   ),
 };
 
-/** Nothing to pick: the trigger shows the placeholder until options arrive. */
+/** Nothing to pick yet (a still-loading lookup): the trigger is blank and the menu opens
+ *  empty. */
 export const Empty: Story = {
   args: { rows: [], value: "", onChange: fn() },
-  render: () => (
-    <Controlled rows={[]} initial="" placeholder="Loading…" label="Assignee" />
-  ),
+  render: () => <Controlled rows={[]} initial="" label="Assignee" />,
 };
 
-/** Blank trigger: the value matches no option and there is no placeholder (a picker
- *  waiting for its preset, like the clone dialog's source). The trigger must stand at
+/** Blank trigger: the value matches no option (a picker waiting for its preset, like the
+ *  clone dialog's source). The trigger must stand at
  *  exactly one text line, not collapse to the chevron. */
 export const Blank: Story = {
   args: { rows: plainRows, value: "", onChange: fn() },

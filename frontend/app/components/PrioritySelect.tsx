@@ -16,7 +16,7 @@ import { AnchoredList } from "~/components/AnchoredList";
 import { useModalEscape } from "~/lib/useModalEscape";
 
 /** The scale in the order Linear reads it: unranked first, then urgent down to low. */
-export const PRIORITY_LEVELS = [0, 1, 2, 3, 4];
+const PRIORITY_LEVELS = [0, 1, 2, 3, 4];
 
 export interface PrioritySelectProps {
   /** Linear's own value: 0 unranked, 1 urgent, 2 high, 3 medium, 4 low. */

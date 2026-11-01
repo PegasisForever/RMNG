@@ -129,7 +129,7 @@ Two traps here.
 
 To watch a clone on CT 101, open the web app over HTTPS (`tailscale serve`), or start
 Chrome with `--unsafely-treat-insecure-origin-as-secure=http://10.0.0.178:9000`. On plain
-HTTP the app shows a warning instead of the clone's screen.
+HTTP the app shows only a warning: no clone's screen and no control panel.
 
 ## Drive a real turn
 

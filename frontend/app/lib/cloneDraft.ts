@@ -163,14 +163,10 @@ export type CloneDialogEvent =
     [K in keyof CloneDraft]: { type: "edit"; key: K; value: CloneDraft[K] };
    }[keyof CloneDraft];
 
-export function emptyCloneDialog(
- ticket = "",
- source: string | null = null,
-): CloneDialog {
+export function emptyCloneDialog(ticket = ""): CloneDialog {
  return {
-  draft: { ...emptyCloneDraft(ticket), source },
-  // A source handed in (from a clone's own menu) counts as the operator's own pick.
-  touched: new Set(source ? (["source"] as Followed[]) : []),
+  draft: emptyCloneDraft(ticket),
+  touched: new Set(),
   presets: [],
   groups: [],
   configLoaded: false,

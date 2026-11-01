@@ -2,7 +2,7 @@
   "id": "/",
   "name": "RMNG",
   "short_name": "RMNG",
-  "description": "RMNG on the phone",
+  "description": "The RMNG clones' screens and their control panel",
   "start_url": "/",
   "scope": "/",
   "display": "fullscreen",

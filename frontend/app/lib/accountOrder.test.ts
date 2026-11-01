@@ -53,8 +53,7 @@ test("reordering one provider leaves the other provider's rows in place", () => 
 });
 
 test("a saved order naming an unknown bucket is ignored rather than dropping rows", () => {
-  // What a pre-existing localStorage value looks like: keys are old GROUP names, which
-  // match no provider bucket.
+  // A stored key that matches no provider bucket.
   const rows = [acct("c1", "claude"), acct("x1", "codex")];
 
   const out = orderedWithinBuckets(rows, bucketOf, keyOf, {

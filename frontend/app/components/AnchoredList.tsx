@@ -45,7 +45,7 @@ export function AnchoredList({ anchor, children }: { anchor: HTMLElement | null;
   if (!anchor || !place || typeof document === "undefined") return null;
   const glass = anchor.closest(".on-glass") ? "on-glass" : "";
   return createPortal(
-    // Over the dialogs (`ModalShell`: z-50, z-60)
+    // Over the dialogs (`ModalShell`: z-50)
     <div className={`fixed z-[70] ${glass}`} style={place}>
       {children}
     </div>,

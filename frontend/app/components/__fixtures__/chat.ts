@@ -20,7 +20,7 @@ export function makeChatMessage(overrides: Partial<ChatMessage> = {}): ChatMessa
   return {
     id: "m1",
     role: "user",
-    text: "Open the sidebar mockup in Figma.",
+    text: "Open the clone card mockup in Figma.",
     ts: chatNow - 60_000,
     ...overrides,
   };
@@ -29,7 +29,7 @@ export function makeChatMessage(overrides: Partial<ChatMessage> = {}): ChatMessa
 export const chatMessages: ChatMessage[] = [
   makeChatMessage({
     id: "m1",
-    text: "Open the sidebar mockup in Figma and compare it against the running dashboard.",
+    text: "Open the clone card mockup in Figma and compare it against the running app.",
     ts: chatNow - 9 * 60_000,
   }),
   makeChatMessage({
@@ -40,12 +40,12 @@ export const chatMessages: ChatMessage[] = [
       "Both are open side by side. Two differences:\n\n" +
       "- The metric row is **4px tighter** in the mockup.\n" +
       "- The token counts sit on the second line, not the first.\n\n" +
-      "The dashboard styles are in `frontend/app/components/CloneCard.tsx`.",
+      "The card's styles are in `frontend/app/components/CloneCard.tsx`.",
     ts: chatNow - 8 * 60_000,
   }),
   makeChatMessage({
     id: "m3",
-    text: "Make the running dashboard match, then take a screenshot.",
+    text: "Make the running app match, then take a screenshot.",
     ts: chatNow - 2 * 60_000,
   }),
 ];

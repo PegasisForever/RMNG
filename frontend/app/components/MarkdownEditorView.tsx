@@ -1,5 +1,5 @@
 // A compact BlockNote editor that yields **markdown**, used for the description of a ticket
-// that does not exist yet: the clone dialog's new-ticket tab and the board's New ticket dialog.
+// that does not exist yet: the clone dialog's new-ticket tab and the New ticket dialog.
 // Same engine as the per-clone notes (`NotesEditorView`), so pasting and image upload behave
 // identically, and the same metrics as `TicketDescription`, so a body reads the same size
 // before and after the issue is opened. This one is a controlled-ish field, though: it reports

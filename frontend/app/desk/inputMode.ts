@@ -11,7 +11,7 @@ export type InputMode = "touch" | "mouse";
 
 /** The mode a page starts in: mouse where the main pointer is a fine one (a mouse, a
  *  trackpad), touch where it is a finger. */
-export function startMode(): InputMode {
+function startMode(): InputMode {
   return typeof window !== "undefined" && window.matchMedia("(pointer: fine)").matches ? "mouse" : "touch";
 }
 

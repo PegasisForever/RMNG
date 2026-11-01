@@ -37,7 +37,7 @@ export const PHONE = { width: 393, height: 852, safe: { top: 59, right: 0, botto
 export const PHONE_SIDEWAYS = { width: 852, height: 393, safe: { top: 0, right: 59, bottom: 21, left: 59 } };
 export const DESKTOP = { width: 1440, height: 900, safe: NO_INSETS };
 /** The width of a display's safe area. */
-export const safeWidth = (d: { width: number; safe: Insets }) => d.width - d.safe.left - d.safe.right;
+const safeWidth = (d: { width: number; safe: Insets }) => d.width - d.safe.left - d.safe.right;
 
 /** The display's frame, its size from the story's `width` and `height`, in the app's greys, light or
  *  dark by the Theme in the toolbar (the app: by the OS). It holds what is fixed (a dialog) as
@@ -156,7 +156,7 @@ const settingsArgs = SettingsStories.args as Parameters<typeof SettingsView>[0];
 
 /** Each tab's page, with its own story's data. `server`: the server's numbers at the top of
  *  Usage (the tool row has no room for them). */
-export function pageFor(tab: PanelTab, server = false): ReactNode {
+function pageFor(tab: PanelTab, server = false): ReactNode {
   return withDnd(tab, page(tab, server));
 }
 

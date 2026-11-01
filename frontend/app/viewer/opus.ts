@@ -1,10 +1,10 @@
-// The Opus decoder for the clone's sound, in the viewer worker. WebCodecs' AudioDecoder where
+// The Opus decoder for the clone's sound, in the worker (`./worker.ts`). WebCodecs' AudioDecoder where
 // the browser has it and it takes Opus; libopus in WebAssembly (`opus-decoder`) where not, as
 // selkies does: Safari before 26 has no AudioDecoder, and a browser can have one that does not
 // take Opus. The WebAssembly decoder loads only when it is needed.
 import type { OpusDecoder } from "opus-decoder";
 
-export const OPUS_CONFIG: AudioDecoderConfig = { codec: "opus", sampleRate: 48000, numberOfChannels: 2 };
+const OPUS_CONFIG: AudioDecoderConfig = { codec: "opus", sampleRate: 48000, numberOfChannels: 2 };
 
 /** Whether this browser's WebCodecs decodes Opus. */
 const webcodecs: Promise<boolean> =

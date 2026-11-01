@@ -111,10 +111,7 @@ export function ImportAccountModalView({
   const site = provider === "codex" ? "ChatGPT" : "Claude";
 
   return (
-    // The `over` rung, because this dialog can be opened FROM the settings panel, which is
-    // itself Escape-closable. The Escape stack is LIFO, so whichever dialog mounted last owns
-    // the key — this one — and the z order has to match what the stack already decides.
-    <ModalShell size="sm" layer="over" open={open} onExited={onClose} glass>
+    <ModalShell size="sm" open={open} onExited={onClose} glass>
       {(close) => (
         <>
           {/* The account it is for in the title, so the line under it stays one line */}

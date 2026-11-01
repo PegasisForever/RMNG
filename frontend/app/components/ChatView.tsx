@@ -36,7 +36,7 @@ export function epochMsToLocalInput(ms: number): string {
 /** "Today 15:30" / "Mon 09:00" / a full date when it's further out, relative to `now`.
  *  `locale` is passed in rather than left to the host default: an ambient default renders
  *  "3:30 PM" on one machine and "15:30" on the next, which a story cannot pin down. */
-export function formatWhen(ms: number, now: number, locale: string): string {
+function formatWhen(ms: number, now: number, locale: string): string {
   const d = new Date(ms);
   const time = d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
   const today = new Date(now);
@@ -148,7 +148,7 @@ const MARKDOWN: Components = {
 
 /** The server's id for a message sent while the assistant worked, until the assistant takes
  *  it in at its next step. */
-export function isQueued(m: ChatMessage): boolean {
+function isQueued(m: ChatMessage): boolean {
   return m.id.startsWith("queued-");
 }
 
@@ -409,5 +409,3 @@ export function ChatView({
     </div>
   );
 }
-
-export default ChatView;

@@ -204,5 +204,3 @@ export function BoardColumnsEditor({
     </div>
   );
 }
-
-export default BoardColumnsEditor;

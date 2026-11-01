@@ -90,8 +90,8 @@ pub(crate) fn serve(app: App, monitor: u32, tab: Option<String>, ws: WebSocket) 
         mediaplane::join_viewer(&app, &plane, id, outbox.clone(), monitor, tab);
         tracing::info!("browser viewer {id} connected (monitor {monitor})");
         // Input follows the selection: what this socket holds in the old clone is released at
-        // its next input message (a switch made in another window blurs this one, which releases
-        // all) and at close.
+        // its next input message (the control panel's chord releases all, and so does a switch
+        // made in another window, which blurs this one) and at close.
         let mut held = Held::default();
         let mut upload = Upload::default();
         let mut pieces_in = 0u32;

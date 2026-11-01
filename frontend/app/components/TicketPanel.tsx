@@ -275,11 +275,10 @@ export interface TicketPanelProps {
   onCopyTicketLink: (url: string) => Promise<boolean>;
   /** Start a clone on this ticket. Absent ⇒ the button is not offered. */
   onCreateClone?: () => void;
-  /** Persist a new title to Linear. Absent ⇒ the title is read-only. */
-  onTitleChange?: (title: string) => void;
-  /** Move the ticket into another workflow state. Absent ⇒ the state mark is a glyph rather
-   *  than a menu, which is what a panel with no key behind it gets. */
-  onStateChange?: (state: TicketWorkflowState) => void;
+  /** Persist a new title to Linear. */
+  onTitleChange: (title: string) => void;
+  /** Move the ticket into another workflow state. */
+  onStateChange: (state: TicketWorkflowState) => void;
   /** The team's workflow, in its own order, for the state menu. */
   stateOptions?: TicketWorkflowState[];
   /** The workflow lookup is still in flight. The menu says so instead of looking empty. */
@@ -290,11 +289,11 @@ export interface TicketPanelProps {
   /** The label lookup is still in flight. The menu says so instead of claiming the team has
    *  none. */
   labelsLoading?: boolean;
-  /** Put a label on the ticket. Absent ⇒ no "+" button. */
-  onAddLabel?: (label: TicketLabel) => void;
-  /** Take a label off the ticket. Absent ⇒ the pills carry no X. A label that reached the
-   *  browser with no id is left alone either way: a write has nothing to name. */
-  onRemoveLabel?: (label: TicketLabel) => void;
+  /** Put a label on the ticket. */
+  onAddLabel: (label: TicketLabel) => void;
+  /** Take a label off the ticket. A label that reached the browser with no id carries no X:
+   *  a write has nothing to name. */
+  onRemoveLabel: (label: TicketLabel) => void;
   /** Where the parent and sub-issue rows go. Called per row with the referenced identifier.
    *  Return null when that issue is not in the control panel and the row should open Linear.
    *  Absent ⇒ every row opens Linear. */
@@ -314,7 +313,7 @@ function EditableTitle({
   onTitleChange,
 }: {
   ticket: LinearTicket;
-  onTitleChange?: (title: string) => void;
+  onTitleChange: (title: string) => void;
 }) {
   const [draft, setDraft] = useState(ticket.title);
   useEffect(() => setDraft(ticket.title), [ticket.id, ticket.title]);
@@ -325,16 +324,9 @@ function EditableTitle({
       setDraft(ticket.title);
       return;
     }
-    onTitleChange?.(next);
+    onTitleChange(next);
   };
 
-  if (!onTitleChange) {
-    return (
-      <h2 className="text-xl font-semibold leading-snug text-slate-900 dark:text-slate-100">
-        {ticket.title}
-      </h2>
-    );
-  }
   return (
     // Its height is the text's, by layout: a hidden copy of the text in the same grid cell sizes
     // the cell, and the field fills it. A height measured once (an autosize) goes wrong when
@@ -411,35 +403,27 @@ export function TicketPanel({
           >
             {ticket.id}
           </span>
-          {onStateChange ? (
-            <StateMenu
-              ticket={ticket}
-              states={stateOptions}
-              loading={statesLoading}
-              onStateChange={onStateChange}
-            />
-          ) : (
-            <StateIcon state={ticket.state} label={ticket.stateName ?? undefined} />
-          )}
+          <StateMenu
+            ticket={ticket}
+            states={stateOptions}
+            loading={statesLoading}
+            onStateChange={onStateChange}
+          />
           {ticket.priority ? <PriorityIcon level={ticket.priority} /> : null}
           {ticket.labels.map((label) => (
             <LabelPill
               key={label.id || label.name}
               name={label.name}
               color={label.color}
-              onRemove={
-                onRemoveLabel && label.id !== "" ? () => onRemoveLabel(label) : undefined
-              }
+              onRemove={label.id !== "" ? () => onRemoveLabel(label) : undefined}
             />
           ))}
-          {onAddLabel ? (
-            <AddLabelMenu
-              ticket={ticket}
-              options={labelOptions}
-              loading={labelsLoading}
-              onAddLabel={onAddLabel}
-            />
-          ) : null}
+          <AddLabelMenu
+            ticket={ticket}
+            options={labelOptions}
+            loading={labelsLoading}
+            onAddLabel={onAddLabel}
+          />
         </div>
         <CopyButton text={branchNameOf(ticket)} label="Copy branch name" icon={GitBranch} onCopy={onCopyBranchName} />
         <CopyButton text={ticket.url} label="Copy ticket link" icon={Link2} onCopy={onCopyTicketLink} />

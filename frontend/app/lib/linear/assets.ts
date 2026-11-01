@@ -28,7 +28,7 @@ export const ASSET_PROXY = "/api/linear/asset";
 
 /** The host whose files need the proxy at all. Everything else an editor holds is either
  *  already same-origin or already loadable, so this is what decides where a rewrite applies. */
-export const LINEAR_ASSET_HOST = "uploads.linear.app";
+const LINEAR_ASSET_HOST = "uploads.linear.app";
 
 /** True when `url` addresses a file only the proxy can fetch.
  *

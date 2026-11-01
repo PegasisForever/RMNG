@@ -23,20 +23,15 @@ const GESTURES = ["pointerdown", "pointerup", "touchend", "click", "keydown"] as
 /** The phone's audio session (Safari 16.4+), not in TypeScript's DOM types yet. */
 type WithAudioSession = Navigator & { audioSession?: { type: string } };
 
-export interface SoundOptions {
-  /** The AudioContext's latency hint: "interactive" keeps the delay short; "playback" gives the
-   *  phone's audio thread a longer output buffer, so it misses fewer deadlines while the same
-   *  phone decodes the video. */
-  latencyHint: AudioContextLatencyCategory;
-  /** The jitter buffer's range (`./sound-buffer.ts`). */
-  limits: BufferLimits;
-  /** The worklet's report, once a second. */
-  onReport: (r: SoundReport) => void;
-}
+/** The jitter buffer's range (`./sound-buffer.ts`), in 10 ms packets: 40 to 150 ms. Over a
+ *  phone's Wi-Fi packets come less evenly than to a desktop, and the phone also decodes the
+ *  video, so the buffer is deep. */
+const LIMITS: BufferLimits = { min: 4, max: 15 };
 
+/** Play the clone's sound; `onReport` gets the worklet's report, once a second. */
 export function attachSound(
   post: (m: WorkerIn, transfer?: Transferable[]) => void,
-  opts: SoundOptions,
+  onReport: (r: SoundReport) => void,
 ): {
   detach(): void;
 } {
@@ -46,7 +41,9 @@ export function attachSound(
   } catch {
     // the browser refused the type
   }
-  const ctx = new AudioContext({ sampleRate: 48000, latencyHint: opts.latencyHint });
+  // "playback" gives the phone's audio thread a longer output buffer than "interactive", so it
+  // misses fewer deadlines while the same phone decodes the video
+  const ctx = new AudioContext({ sampleRate: 48000, latencyHint: "playback" });
   /** The worker has its port to the worklet. */
   let ready = false;
   /** What the worker was last told: whether packets flow. */
@@ -71,13 +68,13 @@ export function attachSound(
     const node = new AudioWorkletNode(ctx, "rmng-sound", {
       numberOfInputs: 0,
       outputChannelCount: [2],
-      processorOptions: { limits: opts.limits },
+      processorOptions: { limits: LIMITS },
     });
     node.connect(ctx.destination);
     // For a look from the console or a test: `rmngSound` is the buffer's last report.
     node.port.onmessage = (e: MessageEvent<SoundStats>) => {
       (globalThis as { rmngSound?: SoundStats }).rmngSound = e.data;
-      opts.onReport({
+      onReport({
         ...e.data,
         sampleRate: ctx.sampleRate,
         baseLatency: ctx.baseLatency ?? 0,

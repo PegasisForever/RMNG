@@ -153,7 +153,7 @@ export function stateOf(value: unknown): TicketState | null {
  *
  *  A node with no `id` still maps. The identifier is what a write names, so a label without
  *  one cannot be taken off the issue, but it is still a label the panel should draw. */
-export function labelFromNode(value: unknown): TicketLabel | null {
+function labelFromNode(value: unknown): TicketLabel | null {
   const node = obj(value);
   if (!node || typeof node.name !== "string") return null;
   return {

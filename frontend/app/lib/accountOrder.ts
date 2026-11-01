@@ -6,9 +6,8 @@
 // renders accounts shares one order and updates together. localStorage's `storage` event
 // only fires in OTHER tabs, so a same-tab reorder must notify subscribers here explicitly.
 //
-// The order is bucketed per provider ("claude" / "codex"). The storage key and its
-// `Record<string, string[]>` shape predate the provider buckets, so entries under any
-// other key are inert — read past, never applied, never migrated.
+// The order is bucketed per provider ("claude" / "codex"). An entry under any other key is
+// never read.
 //
 // One interface for all of it: `ordered` sorts a single bucket by saved keys, and the two
 // helpers below adapt it to the two mixed shapes callers actually hold (a both-provider
@@ -54,7 +53,7 @@ function subscribe(cb: () => void): () => void {
   };
 }
 
-export function getAcctOrder(): AcctOrder {
+function getAcctOrder(): AcctOrder {
   return acctOrder;
 }
 

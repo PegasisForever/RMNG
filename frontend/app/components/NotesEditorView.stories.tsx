@@ -6,8 +6,8 @@ import { fn } from "storybook/test";
 import { NotesEditorView } from "./NotesEditorView";
 import { makeNotesBlocks } from "./__fixtures__/notes";
 
-/** The pane fills the notes card in the shell's side column, so the story gives it one of the
- *  same shape rather than letting it size to its contents. The document scrolls inside it. */
+/** The pane fills a side panel, so the story gives it one of a like shape rather than letting
+ *  it size to its contents. The document scrolls inside it. */
 function Frame({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-[34rem] w-[26rem] flex-col overflow-hidden rounded-2xl border border-slate-900/10 bg-white shadow-xl dark:border-white/10 dark:bg-slate-900">

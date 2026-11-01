@@ -41,9 +41,9 @@
   }
 }
 
+/* The page's ground is black (`root.tsx`); Storybook sets its own (`.storybook/preview.ts`). */
 html,
 body {
-  background: #f4f5f7;
   color: #0f172a;
   font-family:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -52,20 +52,7 @@ body {
 @media (prefers-color-scheme: dark) {
   html,
   body {
-    background: #0b0f1a;
     color: #e2e8f0;
-  }
-}
-
-/* The installed app (Add to Home Screen) on iOS 26+: while the document is shorter
-   than the screen, iOS gives the page a viewport short by up to the clock bar's height and
-   paints nothing below it (WebKit bug 301108; the fix from frappe-ui#1284). A document as tall
-   as the screen gets all of it. Here in the stylesheet, so it holds from the first layout: set
-   from the app's code after the page loaded, the first open kept the short page until the phone was
-   turned. */
-@media (display-mode: standalone), (display-mode: fullscreen) {
-  html {
-    min-height: min(100lvh, calc(100% + env(safe-area-inset-top)));
   }
 }
 
@@ -85,7 +72,7 @@ body {
   --color-slate-950: oklch(14.5% 0 0);
 }
 
-/* Notes: links are disabled (see HostEditor.tsx). New ones can't be created, but
+/* Notes: links are disabled (see NotesEditorView.tsx). New ones can't be created, but
    the link mark stays in the schema so old notes still load — render any legacy
    link as plain text instead of a clickable-looking anchor. */
 .bn-editor a {
@@ -95,9 +82,8 @@ body {
 }
 
 /* BlockNote paints the editor its own theme background (#1f1f1f dark / #fff light) that
-   clashes with the app's note pane (the surrounding <main>: slate-900 dark / white light).
-   Make the editor surface transparent UNCONDITIONALLY so it always inherits that pane in
-   both themes. Unscoped on purpose: the editor remounts on every clone switch, and its
+   clashes with what holds it (the control panel's glass, a dialog). Make the editor surface
+   transparent UNCONDITIONALLY so it always shows that ground in both themes. Unscoped on purpose: the editor remounts on every clone switch, and its
    `data-color-scheme` attr is driven by a JS prop that lands a frame late — scoping this to
    dark would let the base white show through for that frame (the "flash white" on switch).
    `!important` because BlockNote's own `.bn-editor{background-color:var(--bn-colors-editor-

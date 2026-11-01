@@ -33,14 +33,24 @@ setTimeout(function () {
 }, 8000);
 `;
 
+/** Black under the page too: iOS shows the strip below the page size. On iOS 26+ the installed
+ *  app gets a page shorter than the screen while the document is shorter than the screen, and
+ *  nothing is painted below that edge (WebKit bug 301108; the fix from frappe-ui#1284): a
+ *  document as tall as the screen gets the whole screen. Here in the page itself, so both hold
+ *  from the first paint. */
+const HTML_STYLE = { background: "#000", minHeight: "min(100lvh, calc(100% + env(safe-area-inset-top)))" };
+
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" style={HTML_STYLE}>
       <head>
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        {/* The installed app (Add to Home Screen) opens `/` full screen. The page draws under the
-            iOS clock bar (`~/desk/page.ts`). */}
+        {/* The page takes the whole screen, under the clock bar and the home bar, and cannot be
+            zoomed. The installed app (Add to Home Screen) opens `/` full screen. */}
+        <meta
+          name="viewport"
+          content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+        />
         <link rel="manifest" href="/manifest.webmanifest" />
         <link rel="apple-touch-icon" href="/icons/icon-180.png" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -51,7 +61,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <Meta />
         <Links />
       </head>
-      <body>
+      <body className="overflow-hidden">
         {children}
         <ScrollRestoration />
         <Scripts />
@@ -71,14 +81,13 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     message = error.message;
     detail = error.stack ?? "";
   }
+  // On the page's black ground, in a box of its own that scrolls (the page does not)
   return (
-    <main className="mx-auto max-w-2xl p-8">
-      <h1 className="text-xl font-semibold text-red-600 dark:text-red-400">{message}</h1>
-      {detail ? (
-        <pre className="mt-4 overflow-auto rounded bg-slate-100 p-4 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-          {detail}
-        </pre>
-      ) : null}
+    <main className="fixed inset-0 select-text overflow-auto p-8">
+      <div className="mx-auto max-w-2xl">
+        <h1 className="text-xl font-semibold text-red-400">{message}</h1>
+        {detail ? <pre className="mt-4 overflow-auto rounded bg-slate-800 p-4 text-xs text-slate-400">{detail}</pre> : null}
+      </div>
     </main>
   );
 }

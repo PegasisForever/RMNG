@@ -103,8 +103,6 @@ export interface LayoutEditorViewProps {
   matching: number | null;
   /** A short note on the last match that did nothing (no window open); null for none. */
   note: string | null;
-  /** The dialog is on screen; false plays the exit. */
-  open?: boolean;
   /** The dialog has gone (after its exit). */
   onClose: () => void;
 }
@@ -117,7 +115,6 @@ export function LayoutEditorView({
   here,
   matching,
   note,
-  open = true,
   onClose,
 }: LayoutEditorViewProps) {
   const windows = onOpenWindow !== undefined;
@@ -132,7 +129,7 @@ export function LayoutEditorView({
     });
 
   return (
-    <ModalShell size="md" open={open} onExited={onClose} glass>
+    <ModalShell size="md" onExited={onClose} glass>
       {(close) => (
         <>
           <h3 className={LOOK.title}>Edit layout</h3>

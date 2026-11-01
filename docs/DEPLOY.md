@@ -28,8 +28,8 @@ server, with no manual redeploy step (see [Upgrades](#upgrades)).
   `tailscale serve --bg 9000` (the tailnet must have HTTPS certificates enabled), then open
   `https://<machine>.<tailnet>.ts.net/`. If Tailscale runs on a different machine, run
   `tailscale serve --bg http://<ip>:9000` there. Use the `ts.net` name, not an IP: the
-  certificate is for the name, so `https://<ip>/` fails. Without HTTPS the app shows a
-  warning in place of the clone's screen (the first-run setup wizard still works).
+  certificate is for the name, so `https://<ip>/` fails. Without HTTPS the app shows only a
+  warning, with no clone's screen and no control panel (the first-run setup wizard still works).
 
 ## 1. Get the image
 
@@ -92,7 +92,7 @@ broken `docker.sock` is surfaced as a failing row in the wizard's environment ch
 ## 3. First-run setup wizard
 
 Open `http://<host>:9000`. A fresh deploy ships `config.json` with `"setupComplete": false`,
-so the web app opens the **first-run setup wizard** in place of the clone's screen. There is no
+so the web app opens the **first-run setup wizard** in place of the clone's screen and the control panel. There is no
 grandfather rule: an old `config.json` re-runs the wizard (new machine, no `rmng` network yet); a stale `proxmox` block is scrubbed on load and its `hostnamePrefix` is
 carried into `docker.hostnamePrefix`.
 
@@ -151,8 +151,8 @@ Consequences worth knowing before you deploy:
   features. The keys likewise still live in their original `data/` file for the same reason:
   pointing at a fresh path would mint new keys and invalidate every clone's identity at once.
 
-Accounts are added by **signing in to the provider from the web app** (Settings → the account
-panels). The server owns the OAuth pair from that moment and hands each clone a short-lived
+Accounts are added by **signing in to the provider from the web app** (the control panel's Settings → LLM,
+in a pool). The server owns the OAuth pair from that moment and hands each clone a short-lived
 access token with an empty refresh token, so no clone can rotate what the server holds. An
 account can join a pool as it is added. Named **pools** (the single `groups` list in
 `config.json`, Claude and Codex members mixed) are edited in Settings and balanced per-side by a

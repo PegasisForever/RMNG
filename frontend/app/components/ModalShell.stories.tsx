@@ -22,8 +22,8 @@ function SampleDialog({
       <div className="min-h-0 shrink space-y-2 overflow-y-auto pt-3">
         {Array.from({ length: lines }, (_, i) => (
           <p key={i} className="text-xs text-slate-500 dark:text-slate-400">
-            A dialog states what it is — how wide, which rung, whether Escape
-            may close it — and puts its own markup inside.
+            A dialog states what it is — how wide, whether Escape may close
+            it — and puts its own markup inside.
           </p>
         ))}
       </div>
@@ -98,10 +98,6 @@ export const Panel: Story = {
     ),
   },
 };
-
-/** The `over` rung, for a dialog opened from another one. It looks the same alone — what it
- *  buys shows only with a second dialog underneath. */
-export const Over: Story = { args: { size: "sm", layer: "over" } };
 
 /** An operation is running: Escape is dead, so the dialog cannot be closed out from under
  *  the job it started. The buttons are the dialog's own to disable. */

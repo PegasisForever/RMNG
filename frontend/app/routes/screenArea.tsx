@@ -1,5 +1,5 @@
 // `/screen-area`: a test page for the app's screen, opened from the control panel's
-// Settings ("Screen area"). It takes the page as the app does (`~/desk/page.ts`) and draws two boxes:
+// Settings ("Screen area"). It has the page the app has (`root.tsx`) and draws two boxes:
 // red, the whole area the page can draw in; green, the safe area (`env(safe-area-inset-*)`), the
 // part clear of the clock bar, the home bar, the round corners and the camera's cut-out. Their
 // numbers, and what the browser says of the window and the screen, are in the middle.
@@ -7,8 +7,6 @@
 // It opens in the browser's own window, not in the shell's frame (`public/shell.html`): a frame has
 // no safe area of its own.
 import { type ReactNode, useEffect, useRef, useState } from "react";
-
-import { takePage } from "~/desk/page";
 
 export function meta() {
   return [{ title: "RMNG screen area" }];
@@ -66,7 +64,6 @@ export default function ScreenArea() {
   useEffect(() => {
     // The installed app's safety net (`root.tsx`) waits for the page to say it shows
     window.__appReady = true;
-    const givePage = takePage();
     const measure = () => {
       if (!page.current || !safe.current || !vh.current) return;
       const s = getComputedStyle(safe.current);
@@ -94,7 +91,6 @@ export default function ScreenArea() {
       clearInterval(timer);
       window.removeEventListener("resize", measure);
       window.visualViewport?.removeEventListener("resize", measure);
-      givePage();
     };
   }, []);
 

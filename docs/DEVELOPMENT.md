@@ -80,7 +80,7 @@ Rust (edition 2024), `bun`, `clang`/`libclang`; `libpipewire-0.3-dev`, `libva-de
 *not* `gstreamer1.0-va`); a GPU render node (`/dev/dri/renderD128`) on the control-server host
 *and* every clone. With those dev libs the **whole workspace compiles on a plain Linux laptop**
 (a bare box without them builds only `wire`); the GPU box is only needed to *run* the
-capture/encode/server side. The viewer is a page in the frontend and runs in Chrome; it needs
+capture/encode/server side. The clone's screen is part of the web app and runs in Chrome or Safari; it needs
 HTTPS (or `localhost`) for WebCodecs and the clipboard. See the
 [dev loop](DEPLOY.md#the-dev-loop). **The clone template is built on the `ubuntu:26.04` base OS**
 (the patched gnome-shell is compiled against 26.04's GNOME only) — see

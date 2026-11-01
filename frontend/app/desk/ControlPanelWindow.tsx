@@ -11,7 +11,7 @@ import { formatLxcUsage } from "~/lib/format";
 import { ControlPanelContainer } from "./control/ControlPanelContainer";
 import type { PanelTab } from "./ToolRow";
 
-export function ControlPanelWindow({ width }: { width: number; height: number }) {
+export function ControlPanelWindow({ width }: { width: number }) {
   const live = useLiveState();
   const [tab, setTab] = useState<PanelTab>("clones");
   const unread = live.state.hosts.filter((h) => h.unread && !h.archived && h.id !== live.state.selected).length;

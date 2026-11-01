@@ -139,7 +139,7 @@ export function issueFromNode(
 
 /** The issue `ref` names, read with one key. Throws the sentence a banner shows when the key
  *  cannot see it, which is what makes `fetchIssueAny` able to move on to the next one. */
-export async function fetchIssue(
+async function fetchIssue(
  key: string,
  ref: IssueRef,
 ): Promise<ResolvedIssue> {
@@ -161,7 +161,7 @@ export async function fetchIssue(
  *
  *  A state the column does not model (`triage`, or anything Linear adds later) reads as a miss
  *  rather than as a ticket, because `ticketFromNode` refuses it. */
-export async function fetchTicket(
+async function fetchTicket(
  key: string,
  ref: IssueRef,
 ): Promise<LinearTicket> {

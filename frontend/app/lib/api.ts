@@ -193,14 +193,6 @@ export const swapClaudeAccount = (
   selection: string;
  }>;
 
-/** Delete an imported Claude account by email. Rejects (400) if a clone is pinned to it;
- *  auto/group clones are moved off first. `moved` lists the host ids that were reassigned. */
-export const deleteClaudeAccount = (account: string) =>
- postJson("/api/claude/delete", { account }) as Promise<{
-  ok: boolean;
-  moved: string[];
- }>;
-
 export const refreshCodexUsage = () => postJson("/api/codex/refresh", {});
 
 export const swapCodexAccount = (
@@ -213,13 +205,6 @@ export const swapCodexAccount = (
   account: string | null;
   group: string | null;
   selection: string;
- }>;
-
-/** Delete an imported Codex account by email (the Codex twin of `deleteClaudeAccount`). */
-export const deleteCodexAccount = (account: string) =>
- postJson("/api/codex/delete", { account }) as Promise<{
-  ok: boolean;
-  moved: string[];
  }>;
 
 // --- Settings / config (redacted read · partial write · validate) ----------

@@ -8,7 +8,7 @@ import type { ReactNode } from "react";
 import { FLOAT_BUTTON, FLOAT_GAP } from "./FloatingButtons";
 
 /** The bar's height under the clock bar, CSS px: the floating buttons' row. */
-export const TERM_BAR_H = FLOAT_GAP * 2 + FLOAT_BUTTON;
+const TERM_BAR_H = FLOAT_GAP * 2 + FLOAT_BUTTON;
 /** Room kept at its right for the floating buttons (as many as five), CSS px. */
 const BUTTONS_ROOM = FLOAT_GAP + 5 * (FLOAT_BUTTON + FLOAT_GAP);
 

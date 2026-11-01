@@ -46,8 +46,6 @@ type Dnd = {
   lanes: Lane[] | null;
   /** The tickets' order while one is in the air, or null. */
   ticketOrder: string[] | null;
-  /** The id of what is in the air. */
-  dragId: string | null;
   overlays: MutableRefObject<Overlays>;
 };
 
@@ -187,7 +185,7 @@ export function BoardDnd({
     : null;
 
   return (
-    <DndCtx.Provider value={{ lanes: preview, ticketOrder: ticketPreview, dragId, overlays }}>
+    <DndCtx.Provider value={{ lanes: preview, ticketOrder: ticketPreview, overlays }}>
       <DndContext
         sensors={sensors}
         collisionDetection={collisionDetection}

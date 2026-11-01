@@ -27,7 +27,6 @@ const meta = {
     ),
   ],
   args: {
-    sshPublicHost: "rmng.example.com",
     selected: false,
     onSelect: fn(),
     onDelete: fn(),
@@ -120,8 +119,8 @@ export const Selected: Story = {
 };
 
 /** Both clipboard paths refused, which is what an insecure context with `execCommand` blocked
- *  does. The menu row says so and stays open a beat longer, so the command in its tooltip can
- *  be selected and copied by hand. Open the ⋮ menu and pick "Copy SSH command" to see it. */
+ *  does. The menu row says so and stays open a beat longer. Open the ⋮ menu and pick "Copy SSH
+ *  command" to see it. */
 export const CopySshRefused: Story = {
   args: {
     clone: cloneWorking,

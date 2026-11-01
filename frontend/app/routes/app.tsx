@@ -16,7 +16,6 @@ import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import { FullDesk } from "~/desk/FullDesk";
 import { ControlPanelWindow } from "~/desk/ControlPanelWindow";
 import type { Insets } from "~/desk/geometry";
-import { takePage } from "~/desk/page";
 import { attachPwa } from "~/desk/pwa";
 import { isTyping } from "~/desk/systemKeyboard";
 
@@ -88,7 +87,6 @@ export default function App() {
 
   useEffect(() => {
     setSecure(window.isSecureContext);
-    const givePage = takePage();
 
     // The phone's keyboard can make the page shorter: while it is up the page stays as it was
     const update = () => probe.current && !isTyping() && setPage(measure(probe.current));
@@ -110,7 +108,6 @@ export default function App() {
       window.visualViewport?.removeEventListener("resize", update);
       document.removeEventListener("focusout", onFocusOut);
       shareInsets(null);
-      givePage();
     };
   }, []);
 
@@ -141,7 +138,7 @@ export default function App() {
           </div>
         </div>
       ) : null}
-      {secure && page && setup && controlPanelOnly ? <ControlPanelWindow width={page.size[0]} height={page.size[1]} /> : null}
+      {secure && page && setup && controlPanelOnly ? <ControlPanelWindow width={page.size[0]} /> : null}
       {secure && page && setup && !controlPanelOnly ? (
         <FullDesk
           width={page.size[0]}

@@ -8,7 +8,7 @@
 
 export type Os = "mac" | "windows" | "linux";
 
-export function currentOs(): Os {
+function currentOs(): Os {
   const p = typeof navigator === "undefined" ? "" : navigator.platform;
   return /Mac/.test(p) ? "mac" : /Win/.test(p) ? "windows" : "linux";
 }

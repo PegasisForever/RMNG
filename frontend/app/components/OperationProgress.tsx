@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useId, useState } from "react";
 
-import { CardFrame } from "~/components/CardFrame";
+import { GLASS_OUTLINE } from "~/lib/glass";
 import type { Operation } from "~/lib/types";
 
 const STATUS_COLOR: Record<Operation["status"], string> = {
@@ -40,13 +40,22 @@ export const VERB: Record<Operation["kind"], string> = {
   update: "Updating",
 };
 
+/** The card's own frame, where it sits on a solid surface (a dialog's running job): rounded,
+ *  opaque, with the hairline every card-shaped thing carries (`GLASS_OUTLINE`) and a shadow
+ *  tight enough to sit close to the surface under it. Dark mode runs the shadow's geometry
+ *  at roughly five times the alpha, in black: against a dark surface the light-mode values
+ *  come out to nothing. */
+const FRAME =
+  `rounded-lg bg-white dark:bg-slate-900 ${GLASS_OUTLINE} ` +
+  "shadow-[0_1px_6px_rgb(15_23_42_/_0.04),0_4px_16px_rgb(15_23_42_/_0.05)] dark:shadow-[0_1px_6px_rgb(0_0_0_/_0.22),0_4px_16px_rgb(0_0_0_/_0.26)]";
+
 export function OperationProgress({
   op,
   box,
 }: {
   op: Operation;
-  /** The card's frame and fill in place of `CardFrame` (a dialog's): the control panel's card,
-   *  as its accounts and clones wear it. */
+  /** The card's frame and fill in place of its own (a dialog's): the control panel's card, as
+   *  its accounts and clones wear it. */
   box?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -131,5 +140,6 @@ export function OperationProgress({
       </pre>
     </article>
   );
-  return box ? <div className={`select-none overflow-hidden ${box}`}>{card}</div> : <CardFrame>{card}</CardFrame>;
+  // Nothing in it is selectable but the log: its text is a label, not content anybody copies
+  return <div className={`select-none overflow-hidden ${box ?? FRAME}`}>{card}</div>;
 }

@@ -1,4 +1,4 @@
-// The browser viewer's input and cursor, on the page thread. Events come from the page's
+// Mouse and keyboard mode's input and cursor (`~/desk/remote.ts`), on the page thread. Events come from the page's
 // placeholder <canvas> (it stays in the DOM after `transferControlToOffscreen`, so pointer
 // events and pointer lock work on it) and keys from `window`. Each event becomes an `InputMsg`
 // that the page hands to the worker, which sends it on the socket.

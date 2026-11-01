@@ -6,8 +6,8 @@ import type { MonitorSpec } from "~/lib/wire/MonitorSpec";
 
 /** A monitor's side, in pixels: even (the encoder takes even sizes only) and in this range,
  *  as the server makes it (`sane_layout`). */
-export const MIN_SIDE = 320;
-export const MAX_SIDE = 8192;
+const MIN_SIDE = 320;
+const MAX_SIDE = 8192;
 /** The most monitors a layout may have (the server's MAX_MONITORS). */
 export const MAX_MONITORS = 8;
 /** Two monitors side by side share at least this much of an edge, pixels. */
@@ -17,7 +17,7 @@ const MIN_OVERLAP = 100;
 const ALIGN_PART = 0.1;
 
 /** A side as the server takes it. */
-export function sane(side: number): number {
+function sane(side: number): number {
   return Math.min(MAX_SIDE, Math.max(MIN_SIDE, Math.round(side))) & ~1;
 }
 

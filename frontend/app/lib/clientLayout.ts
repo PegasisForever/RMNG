@@ -60,7 +60,7 @@ export const DEFAULT_DESKTOP_LAYOUT: BrowserLayout = {
 
 const isScale = (v: unknown): v is number => (PIXEL_SCALES as readonly unknown[]).includes(v);
 
-const DESKTOP_KEY = "rmng.layout";
+const LAYOUT_KEY = "rmng.layout";
 
 function read(key: string): string | null {
   try {
@@ -91,19 +91,17 @@ export function clientId(kind: ClientKind): string {
 
 /** The layout this browser keeps; null before it has one. */
 export function readLayout(): BrowserLayout | null {
-  const raw = read(DESKTOP_KEY);
+  const raw = read(LAYOUT_KEY);
   if (!raw) return null;
   try {
-    // `pixelScale`: one scale for every monitor, as a build of 2026-10-29 kept it
-    const l = JSON.parse(raw) as Partial<BrowserLayout> & { pixelScale?: number };
+    const l = JSON.parse(raw) as Partial<BrowserLayout>;
     if (!Array.isArray(l.monitors) || !l.monitors.length) return null;
     const monitors = normalize(l.monitors.slice(0, MAX_MONITORS));
-    const fallback = isScale(l.pixelScale) ? l.pixelScale : 1;
     return {
       monitors,
       scrollMode: l.scrollMode ?? "auto",
       scrollSpeed: Number.isFinite(l.scrollSpeed) ? l.scrollSpeed! : 100,
-      scales: monitors.map((_, i) => (isScale(l.scales?.[i]) ? l.scales![i] : fallback)),
+      scales: monitors.map((_, i) => (isScale(l.scales?.[i]) ? l.scales![i] : 1)),
     };
   } catch {
     return null;
@@ -111,13 +109,12 @@ export function readLayout(): BrowserLayout | null {
 }
 
 export function saveLayout(layout: BrowserLayout) {
-  write(DESKTOP_KEY, JSON.stringify({ ...layout, monitors: normalize(layout.monitors) }));
+  write(LAYOUT_KEY, JSON.stringify({ ...layout, monitors: normalize(layout.monitors) }));
 }
 
 /** This browser's layout, made the first time from `seed`.
- *  A desktop starts from the layout in force instead when that is a desktop's (a browser that
- *  comes later starts where the last one left the clones; a server of an older build hands its
- *  active layout preset over that way). A phone keeps one monitor. */
+ *  A desktop starts from the layout in force instead when that is a desktop's: a browser that
+ *  comes later starts where the last one left the clones. A phone keeps one monitor. */
 export async function ensureLayout(kind: ClientKind, seed: () => BrowserLayout): Promise<BrowserLayout> {
   const have = readLayout();
   if (have) {

@@ -7,7 +7,6 @@
 // leaf. Callers hand options down and get the picked value back.
 import { ChevronDown } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
-import type { ReactNode } from "react";
 
 import { AnchoredList } from "~/components/AnchoredList";
 import { useModalEscape } from "~/lib/useModalEscape";
@@ -20,13 +19,9 @@ export type DropdownRow =
 export interface DropdownSelectProps {
   /** Every row, in menu order. Headers render as muted captions between options. */
   rows: DropdownRow[];
-  /** The picked value. Should match one option; unmatched shows `placeholder`. */
+  /** The picked value. Should match one option; unmatched leaves the trigger blank. */
   value: string;
   onChange: (value: string) => void;
-  /** Shown when `value` matches no option (an empty list, a still-loading lookup). */
-  placeholder?: string;
-  /** Leading glyph in the trigger, e.g. the priority bars. The menu rows carry none. */
-  icon?: ReactNode;
   /** Accessibility name for the trigger and the menu. Defaults to the visible label. */
   label?: string;
   disabled?: boolean;
@@ -43,8 +38,6 @@ export function DropdownSelect({
   rows,
   value,
   onChange,
-  placeholder = "",
-  icon,
   label,
   disabled,
   className,
@@ -68,7 +61,7 @@ export function DropdownSelect({
   }, [open]);
 
   const current = rows.find((r) => isOption(r) && r.value === value);
-  const shown = current && isOption(current) ? current.label : placeholder;
+  const shown = current && isOption(current) ? current.label : "";
 
   return (
     <div ref={root} className="relative min-w-0">
@@ -87,7 +80,6 @@ export function DropdownSelect({
         aria-label={label ?? (shown || undefined)}
         className={`flex w-full items-center gap-2 text-left disabled:opacity-50 ${className ?? ""}`}
       >
-        {icon}
         {/* `min-h-[1lh]` pins the trigger to one text line even when it shows
             nothing: an empty inline span contributes no height, so the button
             collapsed to the chevron and jumped ~6px the moment a value landed.

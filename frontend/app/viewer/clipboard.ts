@@ -108,7 +108,7 @@ async function readLocal(): Promise<Map<LocalType, Blob> | null> {
  *  (blocks and `<br>` become line breaks), so the HTML is put off-screen in the page for a
  *  moment; images become their alt text and styles, scripts and frames are dropped first, so
  *  nothing loads and the page's own look does not change. */
-export function htmlToText(html: string): string {
+function htmlToText(html: string): string {
   const doc = new DOMParser().parseFromString(html, "text/html");
   for (const img of doc.querySelectorAll("img")) img.replaceWith(img.alt);
   for (const e of doc.querySelectorAll("script,style,link,meta,iframe,object,embed,video,audio")) {
@@ -150,7 +150,7 @@ interface ClipboardOptions {
   sendData(d: ClipboardBytes): void;
 }
 
-interface ViewerClipboard {
+interface PageClipboard {
   /** An offer or a request from the server. */
   onMessage(msg: ClipboardMsg): void;
   /** Bytes for a request this window made. */
@@ -163,7 +163,7 @@ interface ViewerClipboard {
   detach(): void;
 }
 
-export function attachClipboard(o: ClipboardOptions): ViewerClipboard {
+export function attachClipboard(o: ClipboardOptions): PageClipboard {
   let connected = false;
   /** The local content this window offered last, kept to answer the server's requests. The
    *  server sends requests only to the current owner, so it is never cleared. */

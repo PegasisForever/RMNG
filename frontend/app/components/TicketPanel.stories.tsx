@@ -110,18 +110,3 @@ export const NoTeamLabels: Story = {
 export const EveryLabelOn: Story = {
   args: { ticket: { ...ticketDetailed, labels: teamLabels } },
 };
-
-/** No clone action, no title editing, and no writes: the title falls back to a plain heading,
- *  the state mark to a glyph, and the pills lose their X. Without a resolver every referenced
- *  issue opens Linear. */
-export const ReadOnly: Story = {
-  args: {
-    onCreateClone: undefined,
-    onTitleChange: undefined,
-    onStateChange: undefined,
-    stateOptions: undefined,
-    onAddLabel: undefined,
-    onRemoveLabel: undefined,
-    resolveLink: undefined,
-  },
-};

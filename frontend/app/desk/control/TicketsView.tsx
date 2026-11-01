@@ -40,7 +40,6 @@ import { type Move, movesFor } from "./order";
 import {
   ActionSheet,
   boxOf,
-  CARD,
   CARD_BOX,
   CARD_LIST,
   DesktopMenu,
@@ -277,7 +276,7 @@ export function TicketsView(p: TicketsViewProps) {
 }
 
 /** One ticket in the list: its marks and labels over the identifier and title. */
-export function TicketRow({
+function TicketRow({
   ticket,
   onOpen,
   onMenu,

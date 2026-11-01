@@ -9,7 +9,7 @@ import type { DropdownRow } from "~/components/DropdownSelect";
 import type { ClaudeUsage } from "~/lib/types";
 
 /** "me@pegasis.site — 5h 12% · 7d 40%" (usage suffix only when known). */
-export function accountLabel(a: ClaudeUsage): string {
+function accountLabel(a: ClaudeUsage): string {
   const bits: string[] = [];
   if (a.fiveHour) bits.push(`5h ${a.fiveHour.pct}%`);
   if (a.sevenDay) bits.push(`7d ${a.sevenDay.pct}%`);

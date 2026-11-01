@@ -1,6 +1,6 @@
-// The browser viewer's binary messages (`wire::browser`: video, clipboard pieces, sound), the
-// H.264 reframing the decoder needs for a video message (Annex B to avcC), and the messages between the page,
-// its worker and its sound worklet.
+// The media socket's binary messages (`wire::browser`: video, clipboard pieces, sound), the
+// H.264 reframing the decoder needs for a video message (Annex B to avcC), and the messages
+// between the page, its worker and its sound worklet.
 //
 // The worker imports this file, so it uses relative imports only: Vite builds the worker
 // without the app's path aliases.

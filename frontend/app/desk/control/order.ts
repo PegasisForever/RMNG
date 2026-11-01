@@ -5,7 +5,7 @@
 export type Move = "top" | "up" | "down";
 
 /** The index `id` goes to in `ids` for `move`, or null when it is already there (or absent). */
-export function moveTarget(ids: string[], id: string, move: Move): number | null {
+function moveTarget(ids: string[], id: string, move: Move): number | null {
   const from = ids.indexOf(id);
   if (from < 0) return null;
   const to = move === "top" ? 0 : move === "up" ? from - 1 : from + 1;

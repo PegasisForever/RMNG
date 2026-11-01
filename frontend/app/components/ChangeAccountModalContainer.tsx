@@ -13,7 +13,7 @@ import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
 /** The clone's pool: the shared binding, else a legacy sticky for a clone the server
  *  has not re-saved yet. */
-export function currentGroup(clone: Clone): string | null {
+function currentGroup(clone: Clone): string | null {
     return clone.group ?? clone.claudeGroup ?? clone.codexGroup ?? null;
 }
 

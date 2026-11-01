@@ -39,10 +39,8 @@ test("closing swaps the entry class for the exit one, at every size", () => {
     expect(panelClass(size, true)).toContain(MODAL_ANIMATION.panel.exit);
     expect(panelClass(size, true)).not.toContain(MODAL_ANIMATION.panel.enter);
   }
-  expect(backdropClass("base", false)).toContain(
-    MODAL_ANIMATION.backdrop.enter,
-  );
-  expect(backdropClass("base", true)).toContain(MODAL_ANIMATION.backdrop.exit);
+  expect(backdropClass(false)).toContain(MODAL_ANIMATION.backdrop.enter);
+  expect(backdropClass(true)).toContain(MODAL_ANIMATION.backdrop.exit);
 });
 
 test("the close swaps only the animation, never the panel's shape", () => {
@@ -59,13 +57,6 @@ test("the close swaps only the animation, never the panel's shape", () => {
         );
     expect(shape(true)).toEqual(shape(false));
   }
-});
-
-test("the over rung sits above the base one", () => {
-  // The sign-in dialog opens on top of the settings panel. The Escape stack already hands it
-  // the key; the z rungs have to agree, or the operator types into what looks like the panel.
-  expect(backdropClass("base", false)).toContain("z-50");
-  expect(backdropClass("over", false)).toContain("z-[60]");
 });
 
 test("the exit delay covers the frames it waits for", () => {

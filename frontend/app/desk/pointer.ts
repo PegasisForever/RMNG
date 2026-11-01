@@ -18,7 +18,7 @@ export function pointerGain(d: number, ms: number): number {
  *  scroll down. The layout's speed scales it (`scrollGain`); the phone's layout's is 15%
  *  (PHONE_SCROLL_SPEED), as this base was much too fast on a phone. It goes out as
  *  touchpad scroll (finger source, see `~/desk/remote.ts`), not as wheel notches. */
-export const SCROLL_BASE = -2;
+const SCROLL_BASE = -2;
 
 /** The phone's layout's scroll speed: what it claims, and what it scrolls at until the server's
  *  first word on it. */

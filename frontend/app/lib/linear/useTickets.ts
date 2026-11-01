@@ -107,7 +107,6 @@ export interface Tickets {
 export function useTickets(
   presets: LinearPreset[],
   linked: string[] = [],
-  { openIssues = true }: { openIssues?: boolean } = {},
 ): Tickets {
   const [tickets, setTickets] = useState<LinearTicket[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -178,19 +177,15 @@ export function useTickets(
     const poll = async () => {
       const mine = ++round;
       startedAt = Date.now();
-      // The open queues, unless the caller draws no column of them. A page that only needs its
-      // clones' own tickets asks for none of this: on the phone that was four requests a
-      // minute for a list nothing rendered.
-      const answers = openIssues
-        ? await Promise.all(
-            keys.map((key) =>
-              fetchOpenTickets(key).then(
-                (found) => ({ found, error: null as string | null }),
-                (e: Error) => ({ found: null, error: e.message }),
-              ),
-            ),
-          )
-        : [];
+      // Each key's open issues
+      const answers = await Promise.all(
+        keys.map((key) =>
+          fetchOpenTickets(key).then(
+            (found) => ({ found, error: null as string | null }),
+            (e: Error) => ({ found: null, error: e.message }),
+          ),
+        ),
+      );
       // A superseded round answers into the void: whatever replaced it is newer, and its own
       // answer is the one on screen.
       if (disposed || mine !== round) return;
@@ -271,7 +266,7 @@ export function useTickets(
       window.removeEventListener("online", onOnline);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [presetsKey, linkedKey, openIssues]);
+  }, [presetsKey, linkedKey]);
 
   const refetch = useCallback(() => forceTick.current(), []);
   const upsert = useCallback((ticket: LinearTicket) => {

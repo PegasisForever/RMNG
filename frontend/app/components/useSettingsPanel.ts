@@ -3,13 +3,19 @@
 // control-server's version check and its two self-directed actions, the shared account-order
 // store, and the confirms that guard destructive clicks.
 //
-// The server calls themselves arrive as arguments rather than being imported, so the panel
-// renders in isolation (Storybook) with mocked data. The markup is the Settings tab
-// (`~/desk/control/SettingsView.tsx`).
+// The markup is the Settings tab (`~/desk/control/SettingsView.tsx`).
 import { useEffect, useState } from "react";
 
 import type { SettingsCategory, SettingsPanelProps } from "~/components/SettingsPanes";
 import { useAccountOrder } from "~/lib/accountOrder";
+import {
+  getConfig,
+  getUpdateStatus,
+  putConfig,
+  restartServer,
+  testConfig,
+  updateServer,
+} from "~/lib/api";
 import type { BoardColumn } from "~/lib/board";
 import {
   settingsDraftFrom,
@@ -19,37 +25,16 @@ import {
 import type { ClaudeUsage, Operation } from "~/lib/types";
 import { useOperation } from "~/lib/useOperation";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
-import type { ConfigPutResponse } from "~/lib/wire/ConfigPutResponse";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
 interface SettingsPanelOptions {
   /** Live per-account usage (from `ControlState.claudeAccounts`). Despite the field name
-   *  it carries BOTH providers' rows tagged by `provider`; the two account/group sections
-   *  below split it by that tag. Used here only for the emails. */
+   *  it carries BOTH providers' rows tagged by `provider`. Handed through to the panes. */
   accounts: ClaudeUsage[];
-  // --- injected server calls ---
-  /** Read the current redacted config (each preset's Linear key comes back verbatim). */
-  getConfig: () => Promise<AppConfigRedacted>;
-  /** Persist a partial config patch; returns the merged config. */
-  putConfig: (patch: unknown) => Promise<ConfigPutResponse>;
-  /** Validate a setting (e.g. `"judge"` — puts one real question to the picked backend). */
-  /** `value` and `model` test unsaved fields the operator has just typed. */
-  testConfig: (
-    what: string,
-    value?: string,
-    model?: string,
-  ) => Promise<{ ok: boolean; message: string }>;
-  /** Read the control-server's own version + update-available status. */
-  getUpdateStatus: () => Promise<UpdateStatus>;
-  /** Pull the latest control-server image and swap the running container onto it. Returns
-   *  the driving Operation, whose progress renders inline below the button. */
-  updateServer: () => Promise<Operation>;
-  /** Live operations from the SSE state — used to follow the update op started above.
+  /** Live operations from the SSE state — used to follow the self-update op.
    *  Note the server restarts itself mid-update, so the op stream *will* cut out; the
    *  reconnected stream may or may not still carry it. */
   operations: Operation[];
-  /** Restart the control-server container in place. */
-  restartServer: () => Promise<{ ok: boolean }>;
   /** Open the import-from-a-clone modal. Accounts are never OAuth'd in the browser — the
    *  control-server harvests the tokens off a clone that's already signed in. Takes the
    *  provider tab + preselected group for the group tree's per-group import buttons. */
@@ -71,13 +56,7 @@ interface SettingsPanelOptions {
 /** Everything the settings form needs but cannot do itself. */
 export function useSettingsPanel({
   accounts,
-  getConfig,
-  putConfig,
-  testConfig,
-  getUpdateStatus,
-  updateServer,
   operations,
-  restartServer,
   onImportAccount,
   forkSources,
   boardColumns,
@@ -122,10 +101,8 @@ export function useSettingsPanel({
     setDraft(settingsDraftFrom(c));
   }
 
-  // Seed the form from the server ONCE, when the panel mounts. This must NOT depend on the
-  // callbacks (fresh inline arrows on every parent render): the control panel re-renders
-  // every few seconds on each `stats` SSE frame, and re-running this would re-seed the
-  // form from the server and wipe the user's in-progress edits.
+  // Seed the form from the server ONCE, when the panel mounts. Re-running this would re-seed
+  // the form from the server and wipe the user's in-progress edits.
   useEffect(() => {
     getConfig()
       .then(load)
@@ -137,7 +114,7 @@ export function useSettingsPanel({
     getUpdateStatus()
       .then(setServerStatus)
       .catch((e) => setServerMsg(`✗ ${(e as Error).message}`));
-  }, [getUpdateStatus]);
+  }, []);
 
   // The panel has ONE message slot for the check, the update and the restart, so the
   // update's verdict is written into it rather than derived: a later check has to be able to

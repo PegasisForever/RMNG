@@ -393,7 +393,7 @@ export async function issueSetLabel(
  *  Every ticket the live query returns carries one. A ticket that does not (a fixture, or one
  *  built from the server's older wire shape) costs one lookup by identifier rather than a
  *  crash, and a lookup that finds nothing says which identifier failed. */
-export async function issueUuid(key: string, ticket: IssueRef): Promise<string> {
+async function issueUuid(key: string, ticket: IssueRef): Promise<string> {
   const known = (ticket.uuid ?? "").trim();
   if (known !== "") return known;
 

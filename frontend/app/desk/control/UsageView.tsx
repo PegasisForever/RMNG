@@ -42,7 +42,7 @@ export interface UsageViewProps {
   now: number | null;
   /** All operations; the running ones show at the top. */
   operations: Operation[];
-  /** How the clone's sound plays on this phone (the line at the bottom); null before it plays. */
+  /** How the clone's sound plays in this window (the line at the bottom); null before it plays. */
   sound?: SoundReport | null;
   onRefresh: () => void | Promise<void>;
   /** Sign in to an account that takes over from this dead one. */
@@ -140,7 +140,7 @@ export function UsageView({
 }
 
 /** One account: who, what it costs, and a bar per usage window with its reset time. */
-export function AccountCard({
+function AccountCard({
   a,
   now,
   onReplace,
@@ -247,7 +247,7 @@ function UsageBar({
 
 /** How the clone's sound plays here: the buffer's depth now, the gaps (packets that came too
  *  late, each one a short break in the sound) and the packets dropped since the sound started,
- *  and the phone's audio settings. To tell crackles from the network from those of the phone. */
+ *  and this device's audio settings. To tell crackles from the network from those of the device. */
 function SoundLine({ r }: { r: SoundReport }) {
   const ms = (s: number) => `${Math.round(s * 1000)} ms`;
   return (

@@ -45,16 +45,12 @@ export const ColumnFrameProvider = ColumnFrame.Provider;
 export const useColumnFrame = () => useContext(ColumnFrame);
 
 /** Shape (`../GLASS.md`): corners that sit inside one another are concentric. A surface (a
- *  column, a panel) has 16 px corners; a piece set INSET (6 px) in from its edge, along it or in
- *  its corner, has 16 − 6 = 10 px (`R_PIECE`). Pieces in a row share the one radius. */
+ *  column, a panel) has 16 px corners; a piece set 6 px in from its edge, along it or in its
+ *  corner, has 16 − 6 = 10 px (`R_PIECE`). Pieces in a row share the one radius. */
 export const R_PIECE = "rounded-[10px]";
-/** A surface's inset: the room between its edge and the pieces along it (6 px). */
-export const INSET = "p-1.5";
 
-/** A card in a column (a clone, a ticket): its edge, and its fill (white on the column, light on
- *  a dark one) when nothing else fills it. Set INSET into the column, so R_PIECE. */
-export const CARD = `${R_PIECE} border border-black/10 dark:border-white/10`;
-export const CARD_FILL = "bg-white dark:bg-white/[0.06]";
+/** A card in a column (a clone, a ticket): its edge. Set 6 px into the column, so R_PIECE. */
+const CARD = `${R_PIECE} border border-black/10 dark:border-white/10`;
 /** A card on a column (an account, a ticket, a clone): one edge, one fill, for all three. Light:
  *  white at 60 %, so the column's glass shows through a little. */
 export const CARD_BOX = `${CARD} bg-white/60 dark:bg-white/[0.07]`;
@@ -93,7 +89,7 @@ export const PRESS = "hover:bg-black/5 active:bg-black/10 dark:hover:bg-white/5 
 /** A box on the page (a card, a field's ground, a hollow). */
 export const BOX = "bg-white/60 dark:bg-white/[0.06]";
 /** A button: a small box of its own. */
-export const BUTTON = `bg-white/60 border border-black/10 dark:bg-white/10 dark:border-white/10 ${TEXT} active:bg-black/10 dark:active:bg-white/20`;
+const BUTTON = `bg-white/60 border border-black/10 dark:bg-white/10 dark:border-white/10 ${TEXT} active:bg-black/10 dark:active:bg-white/20`;
 /** A field (a text box) on the panel, as `../GLASS.md`'s flat content has it. */
 export const FIELD =
   "rounded-[10px] border border-black/10 bg-white/60 text-neutral-900 outline-none focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30";
@@ -225,37 +221,6 @@ export function ErrorLine({ message, onDismiss }: { message: string; onDismiss?:
 /** A grey line where a list has nothing to show. */
 export function EmptyLine({ children }: { children: ReactNode }) {
   return <p className={`px-4 py-8 text-center text-sm ${TEXT_3}`}>{children}</p>;
-}
-
-/** A row of choices, one of them on. */
-export function Segmented<T extends string>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { value: T; label: string; badge?: ReactNode }[];
-  value: T;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div role="tablist" className="flex shrink-0 gap-0.5 rounded-md bg-black/5 p-0.5 dark:bg-white/10">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          role="tab"
-          aria-selected={o.value === value}
-          onClick={() => onChange(o.value)}
-          className={`flex h-6 items-center gap-1 rounded px-2.5 text-xs font-medium ${
-            o.value === value ? LIT : `${TEXT_2} ${PRESS}`
-          }`}
-        >
-          {o.label}
-          {o.badge}
-        </button>
-      ))}
-    </div>
-  );
 }
 
 /** One thing a sheet offers. `onSelect` may answer a promise: a copy says whether it landed,

@@ -14,23 +14,23 @@ describe("modal Escape stacking", () => {
   beforeEach(() => __resetModalEscapeStack());
 
   test("only the topmost modal owns Escape", () => {
-    const settings = Symbol("settings");
-    const login = Symbol("login");
-    __pushModal(settings);
-    __pushModal(login); // group-login opens on top of the settings panel
+    const dialog = Symbol("dialog");
+    const dropdown = Symbol("dropdown");
+    __pushModal(dialog);
+    __pushModal(dropdown); // a dropdown opens inside the dialog
 
-    expect(ownsEscape(login, true)).toBe(true);
-    expect(ownsEscape(settings, true)).toBe(false);
+    expect(ownsEscape(dropdown, true)).toBe(true);
+    expect(ownsEscape(dialog, true)).toBe(false);
   });
 
   test("the one underneath takes over once the top unmounts", () => {
-    const settings = Symbol("settings");
-    const login = Symbol("login");
-    __pushModal(settings);
-    __pushModal(login);
-    __popModal(login);
+    const dialog = Symbol("dialog");
+    const dropdown = Symbol("dropdown");
+    __pushModal(dialog);
+    __pushModal(dropdown);
+    __popModal(dropdown);
 
-    expect(ownsEscape(settings, true)).toBe(true);
+    expect(ownsEscape(dialog, true)).toBe(true);
   });
 
   test("a disabled top modal swallows Escape instead of passing it down", () => {

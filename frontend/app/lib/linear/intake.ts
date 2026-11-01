@@ -45,7 +45,7 @@ export const linear: LinearPort = {
 const LAST_TEAM_KEY = "rmng.lastTicketTeam";
 
 /** The team the last ticket was opened in, or null. Storage can be unavailable. */
-export function lastTeam(): string | null {
+function lastTeam(): string | null {
   try {
     return localStorage.getItem(LAST_TEAM_KEY);
   } catch {

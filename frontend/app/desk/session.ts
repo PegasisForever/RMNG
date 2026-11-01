@@ -50,10 +50,6 @@ export interface SessionEvents {
   onTermData(d: TermData): void;
 }
 
-/** The phone's sound buffer range, in 10 ms packets. */
-const PHONE_SOUND_MIN = 4;
-const PHONE_SOUND_MAX = 15;
-
 /** The monitor whose window plays the clone's sound, so two windows never play it twice. */
 const SOUND_MONITOR = 0;
 
@@ -110,17 +106,7 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
     },
     [offscreen],
   );
-  // Over a phone's Wi-Fi packets come less evenly than to a desktop, and the phone also decodes
-  // the video: a deeper jitter buffer (40 to 150 ms) and iOS's longer output buffer, so the
-  // sound does not crack.
-  const sound =
-    monitor === SOUND_MONITOR
-      ? attachSound(post, {
-          latencyHint: "playback",
-          limits: { min: PHONE_SOUND_MIN, max: PHONE_SOUND_MAX },
-          onReport: events.onSoundReport,
-        })
-      : null;
+  const sound = monitor === SOUND_MONITOR ? attachSound(post, events.onSoundReport) : null;
 
   return {
     canvas,

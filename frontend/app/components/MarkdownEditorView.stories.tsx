@@ -24,7 +24,7 @@ function Frame({ children }: { children: ReactNode }) {
 const previewUpload = async (file: File) => URL.createObjectURL(file);
 
 const meta = {
-  title: "Clone/Components/MarkdownEditorView",
+  title: "Tickets/Components/MarkdownEditorView",
   component: MarkdownEditorView,
   parameters: { layout: "centered" },
   args: {

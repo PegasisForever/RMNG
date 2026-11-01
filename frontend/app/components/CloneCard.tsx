@@ -28,7 +28,6 @@ import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
 import { cloneTitle } from "~/lib/cloneTitle";
 import { formatTokenCount } from "~/lib/format";
-import { BASTION_PORT, buildSshCommand } from "~/lib/ssh";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
@@ -239,9 +238,9 @@ export interface CloneCardProps {
   /** Restart a retained managed clone. */
   onUnarchive: () => void;
   /** Put this clone's `ssh -J …` one-liner on the clipboard, answering with whether it
-   *  landed. Writing there is a browser API, so the container owns the call and the menu row
-   *  says "Copied!" only when the answer is yes. */
-  onCopySshCommand: (command: string) => Promise<boolean>;
+   *  landed. The container builds the command (it knows the page's address) and owns the
+   *  write, a browser API; the menu row says "Copied!" only when the answer is yes. */
+  onCopySshCommand: () => Promise<boolean>;
   /** Show this clone's Linear ticket, which leaves the app. Handed the URL the card holds.
    *  A clone made without a ticket has no URL, so the item is not drawn and this is never
    *  called. */
@@ -261,10 +260,6 @@ export interface CloneCardProps {
    *  finger's sheet) opens it as the card's own menu does. */
   renaming: boolean;
   onRenamingChange: (renaming: boolean) => void;
-  /** The `-J` jump target for the copied command, already resolved: this page's own
-   *  address (no override exists anymore). The container reads the page's address, so a
-   *  card never has to. */
-  sshPublicHost: string;
   /** True when this row is a sub clone: it renders indented under its parent and is not
    *  drag-reorderable (nesting is a cosmetic one-level grouping). */
   isChild?: boolean;
@@ -335,20 +330,14 @@ export function RenameField({
   );
 }
 
-/** A single overflow-menu item that copies `command` to the clipboard and shows a
- *  brief "Copied!" label before asking the menu to close. Kept separate from the
+/** A single overflow-menu item that copies the clone's SSH command to the clipboard and
+ *  shows a brief "Copied!" label before asking the menu to close. Kept separate from the
  *  `item()` helper because it needs its own transient state + delayed close (the other
  *  items close immediately on click), and it draws the same icon-and-label row by hand.
  *
  *  The write itself is the container's, handed in as `onCopy`. What the row currently says
  *  and when it closes are this row's own, so they stay here. */
-function CopySshMenuItem({
-  command,
-  onCopy,
-}: {
-  command: string;
-  onCopy: (command: string) => Promise<boolean>;
-}) {
+function CopySshMenuItem({ onCopy }: { onCopy: () => Promise<boolean> }) {
   const onDone = useMenuClose();
   // `null` = idle, `true` = copied, `false` = copy failed (both clipboard paths refused,
   // e.g. execCommand blocked). Only claim "Copied!" on a genuine success so the label
@@ -361,17 +350,15 @@ function CopySshMenuItem({
       onPointerDown={(e) => e.stopPropagation()}
       onClick={async (e) => {
         e.stopPropagation();
-        const ok = await onCopy(command);
+        const ok = await onCopy();
         setResult(ok);
-        // On failure keep the menu open a beat longer so the user can select the
-        // command text (shown in the title) and copy it by hand.
+        // On failure keep the menu open a beat longer, so the failure can be read
         setTimeout(onDone, ok ? 900 : 1600);
       }}
-      title={command}
       className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
     >
       <Terminal className="size-4 shrink-0" />
-      {result === true ? "Copied!" : result === false ? "Copy failed — copy manually" : "Copy SSH command"}
+      {result === true ? "Copied!" : result === false ? "Copy failed" : "Copy SSH command"}
     </button>
   );
 }
@@ -390,7 +377,6 @@ function CloneMenu({
   onArchive,
   onUnarchive,
   onDelete,
-  sshCommand,
   onCopySshCommand,
   linearUrl,
   onOpenInLinear,
@@ -410,10 +396,7 @@ function CloneMenu({
   onArchive: () => void;
   onUnarchive: () => void;
   onDelete: () => void;
-  /** The ready-to-paste `ssh -J …` one-liner for this clone. Undefined for unmanaged
-   *  rows (no real container/sshd to jump to), which hides the menu item. */
-  sshCommand?: string;
-  onCopySshCommand: (command: string) => Promise<boolean>;
+  onCopySshCommand: () => Promise<boolean>;
   /** The clone's Linear ticket URL. Undefined for a clone made without a ticket, which
    *  hides the item rather than opening a dead link. */
   linearUrl?: string;
@@ -447,9 +430,7 @@ function CloneMenu({
           <MenuItem icon={UserCog} label="Change account…" onClick={onChangeAccount} />
           <MenuItem icon={Layers} label="Rebase…" onClick={onRebase} />
           <MenuItem icon={Network} label="Port forward…" onClick={onPortForward} />
-          {sshCommand ? (
-            <CopySshMenuItem command={sshCommand} onCopy={onCopySshCommand} />
-          ) : null}
+          <CopySshMenuItem onCopy={onCopySshCommand} />
           <MenuItem icon={Archive} label="Archive" onClick={onArchive} />
           <MenuDivider />
         </>
@@ -506,7 +487,6 @@ export function CloneCard({
   onRename,
   renaming,
   onRenamingChange,
-  sshPublicHost,
   isChild = false,
   childCount = 0,
   expanded = false,
@@ -530,11 +510,6 @@ export function CloneCard({
   // Managed clones (backed by a container named after the clone id) get the full menu;
   // plain unmanaged rows only get remove.
   const managed = clone.managed === true;
-  // Archived clones retain their container but deliberately hide runtime actions until they
-  // are restored; unmanaged rows have no container-backed SSH endpoint either.
-  const sshCommand = managed && !clone.archived
-    ? buildSshCommand(sshPublicHost, BASTION_PORT, clone.id)
-    : undefined;
   // Hollow on purpose. Every other dot is a reading; this one is the absence of one, and a
   // filled dot in a fourth colour would read as a fourth thing the agent might be doing.
   const status = clone.archived
@@ -679,7 +654,6 @@ export function CloneCard({
             onArchive={onArchive}
             onUnarchive={onUnarchive}
             onDelete={onDelete}
-            sshCommand={sshCommand}
             onCopySshCommand={onCopySshCommand}
             linearUrl={linearUrl}
             onOpenInLinear={onOpenInLinear}

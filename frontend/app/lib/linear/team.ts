@@ -23,7 +23,7 @@ import type { TicketLabel, TicketWorkflowState } from "~/lib/linear/types";
 /** How many labels one answer carries. Linear caps a page at 250 and this asks for the lot:
  *  a workspace past that has more labels than a dropdown could be read in anyway, and the
  *  overflow is lost silently, the same trade the open-issues query makes. */
-export const LABEL_PAGE = 250;
+const LABEL_PAGE = 250;
 
 /** What a team offers the ticket open in the panel. */
 export interface TeamMeta {
@@ -36,7 +36,7 @@ export interface TeamMeta {
  *  `retiredAt` rides along on both because neither filter has a field for it, so a retired one
  *  has to be dropped here instead of by Linear. `position` is what puts the states in the order
  *  the team's own board reads in. */
-export const TEAM_META_QUERY =
+const TEAM_META_QUERY =
   "query($team: String!) { " +
   "teams(filter: { key: { eq: $team } }, first: 1) { nodes { id " +
   "states { nodes { id name type position } } } } " +

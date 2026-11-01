@@ -7,7 +7,7 @@ import type { TouchKind } from "./KeyboardView";
 import { TermBar } from "./TermBar";
 
 /** The terminal's background (the xterm.js theme's, `~/viewer/terminal.tsx`). */
-export const TERM_BG = "#1c1c1f";
+const TERM_BG = "#1c1c1f";
 
 export function TerminalScreenView({
   sessions,

@@ -6,8 +6,7 @@
 // `useModalExit()` in every container to raise that flag. The frame was therefore not
 // anybody's: changing it meant changing it seven times, and a new dialog started by copying
 // an old one. It lives here now, and a dialog states only what is true of itself — how wide
-// it is, which z rung it sits on, whether Escape may close it — and puts its own markup
-// inside.
+// it is, whether Escape may close it — and puts its own markup inside.
 //
 // The markup goes in as a function of `close`, the shell's own door out. `close()` plays the
 // exit frames and then runs `onExited`; `close(then)` runs `then` instead, which is what a
@@ -28,11 +27,6 @@ import { useModalExit } from "~/lib/useModalExit";
  *  - `lg` a form tall enough to need a scrolling middle, which it pins itself
  *  - `panel` the two-pane fixed-height overlay (the clone dialog) */
 export type ModalSize = "sm" | "md" | "lg" | "panel";
-
-/** Which z rung the dialog sits on. `over` is for a dialog opened from another one — the
- *  sign-in dialog over Settings — and must stay above `base` for the Escape stack's LIFO
- *  order to match what the operator sees. */
-export type ModalLayer = "base" | "over";
 
 /** The shell's door out, as the markup inside it receives it. `close()` plays the exit frames
  *  and then runs `onExited`; `close(then)` runs `then` instead, for a button that both acts
@@ -55,11 +49,6 @@ export const MODAL_ANIMATION = {
 /** How long `app.css` runs both the entry and the exit frames. `MODAL_EXIT_MS` must cover it. */
 export const MODAL_ANIMATION_MS = 200;
 
-const LAYER: Record<ModalLayer, string> = {
-  base: "z-50",
-  over: "z-[60]",
-};
-
 const PANEL: Record<ModalSize, string> = {
   sm: "max-h-[min(90vh,100%)] w-full max-w-md overflow-y-auto p-5",
   md: "w-full max-w-lg p-5",
@@ -68,7 +57,7 @@ const PANEL: Record<ModalSize, string> = {
     "flex h-[42rem] max-h-[min(90vh,100%)] w-full max-w-4xl flex-col overflow-hidden",
 };
 
-/** The panel's own surface, identical in all seven dialogs. */
+/** The panel's plain surface, for a dialog not in glass. */
 const PANEL_CHROME =
   "rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800";
 
@@ -105,9 +94,9 @@ const INLINE_PANEL: Record<ModalSize, string> = {
 
 /** The inline frame: the box's whole space, on a solid ground of the page's look (it hides the
  *  page under it; on the control panel's glass, glass would show the page through). */
-export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boolean) {
+function inlineClasses(size: ModalSize, closing: boolean) {
   return {
-    backdrop: `absolute inset-0 ${LAYER[layer]} flex flex-col rounded-[10px] bg-neutral-100 dark:bg-neutral-900 ${
+    backdrop: `absolute inset-0 z-50 flex flex-col rounded-[10px] bg-neutral-100 dark:bg-neutral-900 ${
       closing ? MODAL_ANIMATION.backdrop.exit : MODAL_ANIMATION.backdrop.enter
     }`,
     panel: `flex min-h-0 w-full flex-1 flex-col ${INLINE_PANEL[size]}`,
@@ -121,9 +110,9 @@ const AROUND =
   "pb-[calc(1rem+var(--safe-bottom,0px))] pl-[calc(1rem+var(--safe-left,0px))]";
 
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
-export function backdropClass(layer: ModalLayer, closing: boolean, glass = false): string {
+export function backdropClass(closing: boolean, glass = false): string {
   return (
-    `fixed inset-0 ${LAYER[layer]} flex items-center justify-center ${glass ? "bg-black/20 dark:bg-black/35" : "bg-slate-900/30"} ${AROUND} ` +
+    `fixed inset-0 z-50 flex items-center justify-center ${glass ? "bg-black/20 dark:bg-black/35" : "bg-slate-900/30"} ${AROUND} ` +
     (closing ? MODAL_ANIMATION.backdrop.exit : MODAL_ANIMATION.backdrop.enter)
   );
 }
@@ -151,7 +140,6 @@ export interface ModalShellProps {
    *  at exactly that moment. */
   dismissible?: boolean;
   size?: ModalSize;
-  layer?: ModalLayer;
   /** In glass (`~/desk/GLASS.md`), over the clone's screen; else a plain white panel. */
   glass?: boolean;
   /** The dialog's own markup, given the shell's door out. */
@@ -163,7 +151,6 @@ export function ModalShell({
   onExited,
   dismissible = true,
   size = "sm",
-  layer = "base",
   glass = false,
   children,
 }: ModalShellProps) {
@@ -196,7 +183,7 @@ export function ModalShell({
   useModalEscape(close, dismissible);
 
   if (placement === "inline") {
-    const inline = inlineClasses(size, layer, closing);
+    const inline = inlineClasses(size, closing);
     return (
       <div role="dialog" className={inline.backdrop}>
         <div className={inline.panel}>{children(close)}</div>
@@ -205,7 +192,7 @@ export function ModalShell({
   }
 
   const dialog = (
-    <div data-modal className={backdropClass(layer, closing, glass)}>
+    <div data-modal className={backdropClass(closing, glass)}>
       {/* Backdrop is inert — clicking it must not close the dialog, because a stray click
           outside must never discard a half-filled form. Cancel and Escape are the ways out. */}
       <div className={panelClass(size, closing, glass)}>{children(close)}</div>

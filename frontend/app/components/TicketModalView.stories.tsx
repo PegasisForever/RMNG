@@ -29,7 +29,7 @@ const descriptionEditor = (
 const people = makeTeamPeople();
 
 const meta = {
-  title: "Board/Components/TicketModalView",
+  title: "Tickets/Components/TicketModalView",
   component: TicketModalView,
   parameters: { layout: "fullscreen" },
   args: {

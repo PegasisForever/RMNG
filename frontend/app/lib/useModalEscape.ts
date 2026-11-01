@@ -1,21 +1,19 @@
 // Escape-to-close for modal dialogs, stacked so only the TOPMOST open modal reacts.
 //
-// Clicking a modal's backdrop no longer closes it (a stray click outside must never discard
+// Clicking a modal's backdrop does not close it (a stray click outside must never discard
 // a half-filled dialog), which leaves Escape as the only keyboard dismissal. That is fine
-// until two modals are open at once — the settings panel (z-50) with GroupLoginModal (z-60) on
-// top of it. With each modal owning a plain `window` keydown listener, one Escape fires
-// BOTH and the operator loses the panel underneath as collateral.
+// until two are open at once — a dropdown open inside a dialog. With each owning a plain
+// `window` keydown listener, one Escape fires BOTH and the operator loses the dialog under
+// the dropdown as collateral.
 //
 // So the mounted modals keep a shared LIFO stack, and a modal handles Escape only when it
 // is on top. The stack is module-level rather than context because modals mount from
-// several unrelated places (the route, the settings panel) and threading a provider through all
-// of them buys nothing here.
+// several unrelated places and threading a provider through all of them buys nothing here.
 //
-// Every dialog reaches Escape through `ModalShell`, the one module that draws a dialog frame,
-// which is what keeps the stack's order the same as the z order the operator sees. The other
-// callers are the open dropdown popups (`DropdownSelect`, `PrioritySelect`), which take the
-// top slot for as long as they are open so Escape shuts the popup rather than the dialog it
-// was opened inside.
+// Every dialog reaches Escape through `ModalShell`, the one module that draws a dialog frame.
+// The other callers are the open dropdown popups (`DropdownSelect`, `PrioritySelect`), which
+// take the top slot for as long as they are open so Escape shuts the popup rather than the
+// dialog it was opened inside.
 import { useEffect } from "react";
 
 /** Mounted modals, oldest first. The last entry owns Escape. */

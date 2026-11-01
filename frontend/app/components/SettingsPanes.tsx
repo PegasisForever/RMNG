@@ -339,9 +339,7 @@ export interface SettingsPanelProps {
   onCategoryChange: (category: SettingsCategory) => void;
 
   /** Live per-account usage (from `ControlState.claudeAccounts`). Despite the field name it
-   *  carries BOTH providers' rows tagged by `provider`; the Claude and Codex panes split it
-   *  by that tag. The preset pickers take the list unordered, the way a dropdown of options
-   *  rather than a list of rows wants it. */
+   *  carries BOTH providers' rows tagged by `provider`; the LLM pane splits it by that tag. */
   accounts: ClaudeUsage[];
   /** The operator's own cosmetic ordering of those rows, per provider. It orders the
    *  group tree's account source. */
@@ -373,8 +371,8 @@ export interface SettingsPanelProps {
   onUpdateServer: () => void;
   onRestartServer: () => void;
 
-  /** A second slot rather than one shared string: the two tests live in different
-   *  categories, and one verdict overwriting the other reads as the wrong answer. */
+  /** The judge test's verdict, in a slot of its own: it is in another category than the
+   *  server's message, and one verdict overwriting the other would read as the wrong answer. */
   judgeTestMessage: string | null;
   onTestJudge: () => void;
 
