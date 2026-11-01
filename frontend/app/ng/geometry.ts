@@ -88,7 +88,7 @@ export function screenFit(
 }
 
 /** Device px per monitor px a phone starts with (its pixel scale, in its layout:
- *  `./firstLayout.ts`): 2, so text on the clone is as large as on the phone's own control panel. */
+ *  `./firstLayout.ts`): 2, so text on the clone is as large as in the phone's own apps. */
 export const PHONE_SCALE = 2;
 
 /** The monitor for a screen of `width`×`height` CSS px at `dpr`: `scale` (the window's pixel
