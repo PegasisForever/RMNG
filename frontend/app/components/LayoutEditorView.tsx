@@ -13,7 +13,8 @@
 // - How the viewer reads the wheel, and the scroll speed.
 //
 // A browser that cannot open windows (a phone: `canOpenWindows`) has one monitor, its own
-// screen: there is nothing to add, open or remove.
+// screen: there is nothing to arrange, add, open or remove. Its form has only the pixel scale, as
+// a dropdown, and the scroll settings.
 //
 // While the dialog is open, each monitor window shows its monitor's number large in its middle
 // (the container tells them), so the boxes here can be matched to the windows.
@@ -153,6 +154,13 @@ export function LayoutEditorView({
   const windows = onOpenWindow !== undefined;
   const mons = layout.monitors;
   const scales = layout.scales;
+  /** Monitor `i` at pixel scale `to`: its window's screen pixels stay as they were. */
+  const scale = (i: number, to: number) =>
+    onChange({
+      ...layout,
+      monitors: resize(mons, mons.map((m, k) => (k === i ? rescale(m, scales[i], to) : m))),
+      scales: scales.map((s, k) => (k === i ? to : s)),
+    });
 
   return (
     <ModalShell size="md" open={open} onExited={onClose} glass={glass}>
@@ -165,31 +173,44 @@ export function LayoutEditorView({
               : "This device's screen, as the clones get it while you use this device, and another device's while you use that one."}
           </p>
 
-          <Arrangement
-            look={look}
-            monitors={mons}
-            scales={scales}
-            matching={matching}
-            onDrop={(i, x, y) => onChange({ ...layout, monitors: dropMonitor(mons, i, x, y) })}
-            onScale={(i, to) =>
-              onChange({
-                ...layout,
-                monitors: resize(mons, mons.map((m, k) => (k === i ? rescale(m, scales[i], to) : m))),
-                scales: scales.map((s, k) => (k === i ? to : s)),
-              })
-            }
-            onPrimary={(i) => {
-              const map = primaryMap(mons.length, i);
-              onChange({ ...layout, monitors: makePrimary(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
-            }}
-            onMatchWindow={onMatchWindow}
-            onOpenWindow={onOpenWindow}
-            here={here}
-            onRemove={(i) => {
-              const map = removeMap(mons.length, i);
-              onChange({ ...layout, monitors: removeMonitor(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
-            }}
-          />
+          {windows ? (
+            <Arrangement
+              look={look}
+              monitors={mons}
+              scales={scales}
+              matching={matching}
+              onDrop={(i, x, y) => onChange({ ...layout, monitors: dropMonitor(mons, i, x, y) })}
+              onScale={scale}
+              onPrimary={(i) => {
+                const map = primaryMap(mons.length, i);
+                onChange({ ...layout, monitors: makePrimary(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
+              }}
+              onMatchWindow={onMatchWindow}
+              onOpenWindow={onOpenWindow}
+              here={here}
+              onRemove={(i) => {
+                const map = removeMap(mons.length, i);
+                onChange({ ...layout, monitors: removeMonitor(mons, i), scales: renumber(scales, map) }, { t: "renumber", map });
+              }}
+            />
+          ) : (
+            // A phone: its one screen, so only its pixel scale
+            <label className="mt-3 block">
+              <span className={`mb-0.5 block text-xs font-medium ${look.label}`}>Pixel scale</span>
+              <select
+                title="Screen pixels per clone pixel"
+                value={scales[0]}
+                onChange={(e) => scale(0, Number(e.target.value))}
+                className={look.input}
+              >
+                {PIXEL_SCALES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}×
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {note ? <p className={`mt-1 text-[11px] ${look.note}`}>{note}</p> : null}
 
           {windows ? (
