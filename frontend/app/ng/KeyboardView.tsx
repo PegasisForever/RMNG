@@ -89,7 +89,7 @@ export const KeyboardView = memo(function KeyboardView(p: KeyboardViewProps) {
 export function keyboardPanel(docked: boolean) {
   return docked
     ? "bg-neutral-300 text-neutral-900 dark:bg-neutral-950 dark:text-white"
-    : "ng-glass ng-glass-thick [--glass-tint:rgb(212_212_212/0.7)] dark:[--glass-tint:rgb(23_23_23/0.82)]";
+    : "ng-glass ng-glass-thick rounded-t-2xl [--glass-tint:rgb(212_212_212/0.7)] dark:[--glass-tint:rgb(23_23_23/0.82)]";
 }
 
 const KEY = "relative flex shrink-0 items-center justify-center rounded-md border border-black/10 leading-none dark:border-transparent";

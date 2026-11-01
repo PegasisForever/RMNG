@@ -41,9 +41,10 @@ Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
 The keyboard (`./KeyboardView.tsx`, `keyboardPanel`) is the one surface with a denser tint: it is
 large and full of keys, so each key must show over a white window or a black one. Light: grey
-(`neutral-300`) at 70 %, as a phone's light keyboard; dark: grey at 82 %. Docked, the keyboard
-is under the screen, not over it, so it is a solid panel in the same colors (`bg-neutral-300` /
-`bg-neutral-950`), with no blur.
+(`neutral-300`) at 70 %, as a phone's light keyboard; dark: grey at 82 %. Its top corners are
+round (16 px, `rounded-t-2xl`), as a panel's. Docked, the keyboard is under the screen, not over
+it, so it is a solid panel in the same colors (`bg-neutral-300` / `bg-neutral-950`), square, with
+no blur.
 
 ## Flat content
 
