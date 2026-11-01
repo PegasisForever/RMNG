@@ -42,7 +42,9 @@ Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
 The pages are flat glass (`ng-glass-flat`) on a shared backdrop: narrow, their one panel
 (`./pages/ui.tsx`, `PAGES_GLASS`); wide, each column, with no panel round them. Each side panel
-over the columns is the usual thick glass, as it floats over them. While the pages are open, a backdrop over the whole screen (under the pages and the
+over the columns is the usual thick glass, with its own blur and long shadow, as it floats over
+them. With a mouse on a large screen, the side panels also slide in over the clone's screen
+without the pages (the mouse at the right edge): the same thick glass, with no backdrop. While the pages are open, a backdrop over the whole screen (under the pages and the
 floating buttons) blurs and darkens it (`PAGES_BACKDROP`, `bg-black/25` / `bg-black/40`, blur
 12 px); it fades in and out with the pages (200 ms), and takes no touch or click. In the pages' own window there is no clone's
 screen under them: the same flat content sits on a solid ground (`bg-neutral-100` /

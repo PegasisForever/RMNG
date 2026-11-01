@@ -26,7 +26,7 @@ import { resolveColumns, withDefaults } from "~/lib/board";
 
 import { BoardDnd } from "../pages/BoardDnd";
 import { NarrowLayout } from "../pages/NarrowLayout";
-import { WIDE_MIN, WideLayout } from "../pages/WideLayout";
+import { SidePanels, WIDE_MIN, WideLayout } from "../pages/WideLayout";
 import { type NgTab, ROW_STATS_MIN, type ServerUsage } from "../ToolRow";
 
 /** The displays: CSS px, and the home bar's inset. */
@@ -184,6 +184,11 @@ function page(tab: NgTab, server: boolean): ReactNode {
     case "settings":
       return <Panel>{<SettingsView {...settingsArgs} />}</Panel>;
   }
+}
+
+/** The side panels, wide: the clone's notes over its assistant, with the Notes page's data. */
+export function sideFor(): ReactNode {
+  return <SidePanels notes={<NotesView {...notesArgs} only="notes" />} chat={<NotesView {...notesArgs} only="chat" />} />;
 }
 
 /** The pages as the container lays them out `width` CSS px wide: the tool row over a tab's page,

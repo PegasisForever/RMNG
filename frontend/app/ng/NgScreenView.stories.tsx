@@ -16,6 +16,7 @@ import {
   keys,
   keysHeight,
   pagesFor,
+  sideFor,
 } from "./__fixtures__/screen";
 import { NgScreenView, type NgScreenViewProps, pagesBox } from "./NgScreenView";
 import type { NgTab } from "./ToolRow";
@@ -218,6 +219,12 @@ export const DesktopPages: Story = {
   },
 };
 
+/** The mouse at the window's right edge, under the buttons' row: the side panels (the clone's
+ *  notes and its assistant) over the screen, without the pages and their backdrop. */
+export const DesktopSidePanels: Story = {
+  args: { ...desktop, side: { shown: true, content: sideFor() } },
+};
+
 /** A headless clone: its terminal, with the page's keys and mouse (xterm.js's own). */
 export const DesktopTerminal: Story = {
   args: { ...desktop, picture: null, terminal: <FakeTerminal touch={false} />, buttons: buttons({ keyboard: false, fit: undefined }) },
@@ -316,7 +323,8 @@ export const PhoneInteractive: Story = {
 };
 
 /** The mouse at the display's right edge, as high as the buttons, brings them in; away from
- *  them it sends them away.
+ *  them it sends them away. Lower down, the edge brings in the side panels; 48 px left of them
+ *  sends them away.
  *  The button at the bottom left stands for Super+Space: it shows or hides the pages. */
 export const DesktopInteractive: Story = {
   args: { ...desktop },
@@ -324,6 +332,7 @@ export const DesktopInteractive: Story = {
     const [open, setOpen] = useState(false);
     const [tab, setTab] = useState<NgTab>("clones");
     const [peek, setPeek] = useState(false);
+    const [side, setSide] = useState(false);
     return (
       <>
         <div
@@ -332,11 +341,15 @@ export const DesktopInteractive: Story = {
             const [x, y] = [e.clientX - r.left, e.clientY - r.top];
             if (x >= r.width - 2 && y <= 60) setPeek(true);
             else if (y > 84 || x < r.width - 260) setPeek(false);
+            if (x >= r.width - 2 && y > 60) setSide(true);
+            else if (e.buttons === 0 && x < r.width - 8 - 384 - 48) setSide(false);
           }}
         >
           <NgScreenView
             {...args}
             pages={pages({ open, tab, onTab: setTab, onPopOut: fn() }, DESKTOP)}
+            // The pages' own story data has the side panels in them while they are open
+            side={{ shown: side && !open, content: sideFor() }}
             buttons={buttons({
               pagesOpen: open,
               keyboard: false,

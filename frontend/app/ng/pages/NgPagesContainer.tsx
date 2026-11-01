@@ -123,6 +123,7 @@ export function NgPagesContainer({
   state,
   stats,
   sound,
+  sideAt,
 }: {
   /** The pages' width, CSS px: narrow (tabs) or wide (the dashboard's layout). */
   width: number;
@@ -143,6 +144,9 @@ export function NgPagesContainer({
   stats: Record<string, ContainerStats>;
   /** How the clone's sound plays on this phone; null before it plays. */
   sound: SoundReport | null;
+  /** Wide, over the clone's screen: the screen's box for the side panels, which shows them
+   *  without the pages too (`./WideLayout.tsx`); null until it is there. */
+  sideAt?: HTMLElement | null;
 }) {
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => p.then(() => setError(null)).catch((e: Error) => setError(e.message));
@@ -639,8 +643,14 @@ export function NgPagesContainer({
                 </BoardDnd>
               }
               // An open ticket takes the side panel, as on the dashboard; the clone's notes come
-              // back when it closes
-              side={{ ticket: openTicket ? page("tickets") : undefined, notes: notesView("notes"), chat: notesView("chat") }}
+              // back when it closes, and when the pages close (the side panels without the pages
+              // are the clone's)
+              side={{
+                ticket: openTicket && tab ? page("tickets") : undefined,
+                notes: notesView("notes"),
+                chat: notesView("chat"),
+              }}
+              sideAt={sideAt}
               settings={page("settings")}
             />
           </div>

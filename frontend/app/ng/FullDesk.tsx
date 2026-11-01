@@ -23,7 +23,9 @@
 // - Mouse and keyboard: the mouse, the keys and the clipboard go to the clone as in the viewer
 //   (`~/viewer/input.ts`). The same buttons, less the keyboard's, show when the mode starts,
 //   then slide out of the window to the right; the mouse at the window's right edge, by their
-//   row, brings them back. A
+//   row, brings them back. On a large screen (the pages' wide layout), the mouse at the right
+//   edge under their row brings in the side panels, the clone's notes and its assistant, over
+//   the screen; the mouse and the keys are theirs then, and a move away sends them out. A
 //   chord (`./shortcut.ts`) shows the pages, with the buttons above them, and hides them again;
 //   so does a click beside them.
 //
@@ -65,6 +67,7 @@ import { NgScreenView, pagesBox } from "./NgScreenView";
 import { NgTerminal } from "./NgTerminal";
 import { boxOnOtherScreen } from "./otherScreen";
 import { NgPagesContainer } from "./pages/NgPagesContainer";
+import { WIDE_MIN } from "./pages/WideLayout";
 import { clampTo } from "./pointer";
 import { useRemote } from "./remote";
 import { isPagesChord } from "./shortcut";
@@ -89,6 +92,8 @@ const INTRO_MS = 4000;
  *  brings the buttons in; this much (CSS px) away from their row, it sends them away again. */
 const RIGHT_EDGE_PX = 2;
 const BUTTONS_MARGIN_PX = 24;
+/** The mouse this far (CSS px) left of the side panels sends them out again. */
+const SIDE_MARGIN_PX = 48;
 /** The pages' own window: its name, and its size when it opens. */
 const PAGES_WINDOW = "rmng-pages";
 const PAGES_WINDOW_W = 560;
@@ -135,6 +140,11 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const [layoutOpen, setLayoutOpen] = useState(false);
   /** Mouse mode: the buttons are in the window (the mode is new, or the mouse is at the top). */
   const [peek, setPeek] = useState(false);
+  /** The pages' wide layout fits: the side panels can come in without them. */
+  const wide = pagesBox(width, height, bottom).width >= WIDE_MIN;
+  /** Mouse mode, wide: the side panels are in the window without the pages; and their box. */
+  const [sidePeek, setSidePeek] = useState(false);
+  const [sideAt, setSideAt] = useState<HTMLDivElement | null>(null);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
   const [fullscreen, setFullscreen] = useState<boolean | null>(null);
   useEffect(() => {
@@ -186,7 +196,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     else setPages((p) => !p);
   };
   /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. */
-  const mouseInput = mouse && !pages && !layoutOpen;
+  const mouseInput = mouse && !pages && !layoutOpen && !sidePeek;
   const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, onChord: togglePages });
 
   // The chord while the clone does not get the keys (the viewer's input takes it otherwise)
@@ -248,6 +258,26 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       window.removeEventListener("pointermove", onMove, { capture: true });
     };
   }, [mouse]);
+
+  // Wide, in mouse mode: the mouse at the window's right edge, under the buttons' row, brings the
+  // side panels in; away from them (no button held, as a text selection's drag), out again
+  useEffect(() => {
+    if (!mouse || !wide) return setSidePeek(false);
+    const onMove = (e: globalThis.PointerEvent) => {
+      if (e.pointerType !== "mouse") return;
+      if (e.clientX >= window.innerWidth - RIGHT_EDGE_PX && e.clientY > rowEnd.current) return setSidePeek(true);
+      const w = document.querySelector<HTMLElement>("[data-ng-side]")?.offsetWidth ?? 0;
+      if (e.buttons === 0 && e.clientX < window.innerWidth - FLOAT_GAP - w - SIDE_MARGIN_PX) setSidePeek(false);
+    };
+    window.addEventListener("pointermove", onMove, { capture: true, passive: true });
+    return () => window.removeEventListener("pointermove", onMove, { capture: true });
+  }, [mouse, wide]);
+  const sideShown = wide && (pages || sidePeek);
+  // Out of the window, the side panels keep no focus: the keys go back to the clone
+  useEffect(() => {
+    const a = document.activeElement;
+    if (!sideShown && a instanceof HTMLElement && a.closest("[data-ng-side]")) a.blur();
+  }, [sideShown]);
 
   // The Edit layout dialog finds this window by its name and its number
   useEffect(() => {
@@ -329,7 +359,13 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       (document.activeElement as HTMLElement).blur();
     }
     // With a mouse, a click beside the pages and the buttons puts the pages away
-    if (mouse && pages && !layoutOpen && !panelRef.current?.contains(target) && !target.closest("[data-ng-buttons]")) {
+    if (
+      mouse &&
+      pages &&
+      !layoutOpen &&
+      !panelRef.current?.contains(target) &&
+      !target.closest("[data-ng-buttons], [data-ng-side]")
+    ) {
       setPages(false);
     }
   };
@@ -479,9 +515,11 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
             state={r.live.state}
             stats={r.live.stats}
             sound={r.soundReport}
+            sideAt={wide ? sideAt : undefined}
           />
         ),
       }}
+      side={wide ? { shown: sideShown, ref: setSideAt } : null}
       buttons={{
         pagesOpen: pages,
         keyboard: !mouse,

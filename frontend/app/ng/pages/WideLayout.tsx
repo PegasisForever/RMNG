@@ -6,6 +6,9 @@
 // scrolls under them, and its end has room to bring the last column out from under them.
 // Settings takes the place of the row and the side panels, beside the rail.
 //
+// Over the clone's screen the side panels go in a box of the screen's (`sideAt`): there they
+// also slide in over the screen without the pages, when the mouse is at its right edge.
+//
 // Over the clone's screen (`glass`) each column is glass of its own, with nothing round them all,
 // and the row takes the display's whole width: the columns scroll out to its edges, with the
 // gap from them inside the row. In the pages' window, on its solid ground, they are flat
@@ -15,6 +18,7 @@
 // Pure: each part comes in as a slot (`./NgPagesContainer.tsx` fills them).
 import { Settings } from "lucide-react";
 import { type ReactNode, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { PopOutButton, type ServerUsage } from "../ToolRow";
 import { COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, TEXT, TEXT_2 } from "./ui";
@@ -36,6 +40,7 @@ export function WideLayout({
   rail,
   board,
   side,
+  sideAt,
   settings,
 }: {
   /** Over the clone's screen: each column is glass. */
@@ -50,12 +55,12 @@ export function WideLayout({
   /** The columns, the tickets' first. */
   board: ReactNode;
   /** The side panels: the open ticket, or the clone's notes and its assistant. */
-  side: { ticket?: ReactNode; notes: ReactNode; chat: ReactNode };
+  side: SideProps;
+  /** The screen's box for the side panels; absent: they float over the row's right end. */
+  sideAt?: HTMLElement | null;
   settings: ReactNode;
 }) {
   const frame = glass ? COLUMN_GLASS : COLUMN_SOLID;
-  /** The side panel touched last: three parts of the height to its one. */
-  const [focus, setFocus] = useState<"notes" | "chat">("notes");
 
   const railColumn = (
     <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${frame}`}>
@@ -112,31 +117,49 @@ export function WideLayout({
             <div aria-hidden className="w-96 shrink-0" />
           </div>
         </div>
-        <div className={`pointer-events-none absolute inset-y-0 flex w-96 flex-col gap-2 ${glass ? "right-2" : "right-0"}`}>
-          {side.ticket ? (
-            <section aria-label="Ticket" className={`flex-1 ${PANEL}`}>
-              {side.ticket}
-            </section>
-          ) : (
-            <>
-              <section
-                aria-label="Notes"
-                onPointerDownCapture={() => setFocus("notes")}
-                className={`${focus === "notes" ? "flex-[3]" : "flex-1"} ${PANEL}`}
-              >
-                {side.notes}
-              </section>
-              <section
-                aria-label="Assistant"
-                onPointerDownCapture={() => setFocus("chat")}
-                className={`${focus === "chat" ? "flex-[3]" : "flex-1"} ${PANEL}`}
-              >
-                {side.chat}
-              </section>
-            </>
-          )}
-        </div>
+        {sideAt === undefined ? (
+          <div className={`absolute inset-y-0 ${glass ? "right-2" : "right-0"}`}>
+            <SidePanels {...side} />
+          </div>
+        ) : sideAt ? (
+          createPortal(<SidePanels {...side} />, sideAt)
+        ) : null}
       </div>
     </ColumnFrameProvider>
+  );
+}
+
+type SideProps = { ticket?: ReactNode; notes: ReactNode; chat: ReactNode };
+
+/** The side panels, the full height of their box: the open ticket, or the clone's notes over its
+ *  assistant. Each is glass of its own, with its blur and its shadow. */
+export function SidePanels({ ticket, notes, chat }: SideProps) {
+  /** The side panel touched last: three parts of the height to its one. */
+  const [focus, setFocus] = useState<"notes" | "chat">("notes");
+  return (
+    <div className="pointer-events-none flex h-full w-96 flex-col gap-2">
+      {ticket ? (
+        <section aria-label="Ticket" className={`flex-1 ${PANEL}`}>
+          {ticket}
+        </section>
+      ) : (
+        <>
+          <section
+            aria-label="Notes"
+            onPointerDownCapture={() => setFocus("notes")}
+            className={`${focus === "notes" ? "flex-[3]" : "flex-1"} ${PANEL}`}
+          >
+            {notes}
+          </section>
+          <section
+            aria-label="Assistant"
+            onPointerDownCapture={() => setFocus("chat")}
+            className={`${focus === "chat" ? "flex-[3]" : "flex-1"} ${PANEL}`}
+          >
+            {chat}
+          </section>
+        </>
+      )}
+    </div>
   );
 }

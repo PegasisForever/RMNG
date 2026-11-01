@@ -13,6 +13,9 @@
 // - The pages (`pages.content`: the tool row and the open page, or the dashboard's layout), on a
 //   glass panel at the right under the buttons, on a backdrop that blurs and darkens the screen.
 //   They come in and go out as a dialog does.
+// - Wide, the side panels (the clone's notes and its assistant) at the right, under the buttons:
+//   with the pages, and without them when the mouse brings them in. Each is glass of its own,
+//   with its blur and shadow, and no backdrop; they slide in from the right and out again.
 // - The floating buttons, a dialog, and the monitor's number while the Edit layout dialog is
 //   open in another window.
 import { type PointerEvent, type ReactNode, type Ref, useEffect, useState } from "react";
@@ -33,6 +36,9 @@ import { WIDE_MIN } from "./pages/WideLayout";
 import { KeyboardView, type KeyboardViewProps, type TouchKind, keyboardPanel } from "./KeyboardView";
 
 type Box = { left: number; top: number; width: number; height: number };
+
+/** How far past its edge a glass panel's long shadow falls, CSS px (`./glass.css`). */
+const SIDE_SHADOW = 48;
 
 /** Where the pages go on a display `width`×`height` with `bottom` kept for the home bar: under
  *  the buttons, FLOAT_GAP in from the sides. Wide enough for the dashboard's layout
@@ -91,6 +97,9 @@ export type NgScreenViewProps = {
     content: ReactNode;
     panelRef?: Ref<HTMLDivElement>;
   };
+  /** Wide: the side panels' box (`ref`, where the pages put them; or a story's `content`), and
+   *  whether they are in the window (else slid out to the right); null: none. */
+  side?: { shown: boolean; ref?: Ref<HTMLDivElement>; content?: ReactNode } | null;
   /** The floating buttons (`away`: slid up out of the window); null: none. */
   buttons: Parameters<typeof FloatingButtons>[0] | null;
   /** A dialog over everything (the Edit layout dialog). */
@@ -116,6 +125,7 @@ export function NgScreenView({
   keyboard,
   notes,
   pages,
+  side,
   buttons,
   dialog,
   identify,
@@ -214,6 +224,24 @@ export function NgScreenView({
           {pages.content}
         </div>
       </div>
+
+      {side ? (
+        // Out: past the window's edge by its gap and its shadow; and out of reach of Tab
+        <div
+          ref={side.ref}
+          data-ng-side
+          inert={!side.shown}
+          className="pointer-events-none absolute z-40 transition-transform duration-300 ease-out"
+          style={{
+            top: panel.top,
+            right: FLOAT_GAP,
+            height: panel.height,
+            transform: side.shown ? "none" : `translateX(calc(100% + ${FLOAT_GAP + SIDE_SHADOW}px))`,
+          }}
+        >
+          {side.content}
+        </div>
+      ) : null}
 
       {buttons ? <FloatingButtons {...buttons} /> : null}
       {dialog}
