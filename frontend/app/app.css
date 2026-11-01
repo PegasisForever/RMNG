@@ -23,6 +23,24 @@
   color-scheme: light dark;
 }
 
+/* A control the mouse can press shows the hand: Tailwind's base gives a button the arrow. In
+   the base layer, so a part's own cursor (a card's grab, a resize band's) still wins, and a
+   disabled control keeps the arrow. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([aria-disabled="true"]),
+  [role="menuitemradio"]:not([aria-disabled="true"]),
+  [role="tab"]:not([aria-disabled="true"]),
+  [role="option"]:not([aria-disabled="true"]),
+  select:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled),
+  summary {
+    cursor: pointer;
+  }
+}
+
 html,
 body {
   background: #f4f5f7;
