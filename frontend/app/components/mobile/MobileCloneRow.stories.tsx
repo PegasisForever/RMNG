@@ -27,7 +27,7 @@ const meta = {
   args: {
     clone: cloneWorking,
     // Tapping a row opens that clone's screen, which is the phone's whole navigation.
-    onSelect: makeStoryLink("Mobile/Pages/MobileClone", "Chat"),
+    onSelect: makeStoryLink("Mobile/Screens/MobileClone", "Chat"),
   },
   render: (args) => (
     <Frame>

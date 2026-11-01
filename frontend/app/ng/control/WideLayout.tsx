@@ -1,4 +1,4 @@
-// The /ng pages where they are wide (the pages over a large screen, or their own window): the
+// The /ng control panel where it is wide (the control panel over a large screen, or its own window): the
 // dashboard's layout in place of the tabs. A row of columns that scrolls sideways: the rail (the
 // server's numbers, Settings, the accounts' usage), the tickets', then the clones'. On the right,
 // floating over the row, the side panels: the selected clone's notes over its assistant (the one
@@ -7,15 +7,15 @@
 // Settings takes the place of the row and the side panels, beside the rail.
 //
 // Over the clone's screen the side panels go in a box of the screen's (`sideAt`): there they
-// also slide in over the screen without the pages, when the mouse is at its right edge.
+// also slide in over the screen without the control panel, when the mouse is at its right edge.
 //
 // Over the clone's screen (`glass`) each column is glass of its own, with nothing round them all,
 // and the row takes the display's whole width: the columns scroll out to its edges, with the
-// gap from them inside the row. In the pages' window, on its solid ground, they are flat
+// gap from them inside the row. In the control panel's window, on its solid ground, they are flat
 // hollows. The side panels are glass in both: they are over the columns. The row's scroll bar
 // is hidden: a touchpad, a wheel with Shift, or a finger scrolls it.
 //
-// Pure: each part comes in as a slot (`./NgPagesContainer.tsx` fills them).
+// Pure: each part comes in as a slot (`./ControlPanelContainer.tsx` fills them).
 import { MonitorCog, Settings } from "lucide-react";
 
 import { clampSideWidth, SIDE_DEFAULT } from "~/lib/sidePanelWidth";
@@ -33,7 +33,7 @@ import { PopOutButton, type ServerUsage } from "../ToolRow";
 import { COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, NO_SCROLLBARS, TEXT, TEXT_2 } from "./ui";
 import { ServerStats } from "./UsageView";
 
-/** At least this wide (CSS px), the pages take this layout. */
+/** At least this wide (CSS px), the control panel takes this layout. */
 export const WIDE_MIN = 1000;
 
 /** A side panel: glass over the columns, with the usual thick tint (not the columns' denser one),
@@ -67,7 +67,7 @@ export function WideLayout({
   /** Open Settings, or close it. */
   onSettings: () => void;
   onPopOut?: () => void;
-  /** Open the Edit layout dialog; absent: no button (the pages' own window). */
+  /** Open the Edit layout dialog; absent: no button (the control panel's own window). */
   onLayout?: () => void;
   /** The accounts' usage. */
   rail: ReactNode;

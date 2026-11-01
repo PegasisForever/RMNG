@@ -2,15 +2,15 @@
 // `public/manifest.webmanifest` opens `/ng`) and on a desktop, with touch or with a mouse and a
 // keyboard (`~/ng/FullDesk.tsx`). `/ng` is the shell that holds it in a frame
 // (`public/ng-shell.html`), or sends a browser with no fullscreen here. `?monitor=N` shows
-// monitor N of this browser's layout (a desktop has one window per monitor); `?pages` shows
-// only the pages, in a window of their own (`~/ng/PagesWindow.tsx`). The update rules are in
+// monitor N of this browser's layout (a desktop has one window per monitor); `?control-panel` shows
+// only the control panel, in a window of its own (`~/ng/ControlPanelWindow.tsx`). The update rules are in
 // `~/ng/pwa.ts`.
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { shellWindow } from "~/lib/host";
 import { FullDesk } from "~/ng/FullDesk";
-import { PagesWindow } from "~/ng/PagesWindow";
+import { ControlPanelWindow } from "~/ng/ControlPanelWindow";
 import { attachPwa } from "~/ng/pwa";
 import { isTyping } from "~/ng/systemKeyboard";
 
@@ -37,7 +37,7 @@ function measure(probe: HTMLElement): Page {
 export default function Ng() {
   const [params, setParams] = useSearchParams();
   const monitor = Number(params.get("monitor") ?? 0) || 0;
-  const pagesOnly = params.has("pages");
+  const controlPanelOnly = params.has("control-panel");
   const setMonitor = (next: number) => {
     // The browser window's address too, so a reload of the shell shows the same monitor
     shellWindow()?.history.replaceState(null, "", `/ng?monitor=${next}`);
@@ -110,8 +110,8 @@ export default function Ng() {
           </div>
         </div>
       ) : null}
-      {secure && page && pagesOnly ? <PagesWindow width={page.size[0]} height={page.size[1]} /> : null}
-      {secure && page && !pagesOnly ? (
+      {secure && page && controlPanelOnly ? <ControlPanelWindow width={page.size[0]} height={page.size[1]} /> : null}
+      {secure && page && !controlPanelOnly ? (
         <FullDesk
           width={page.size[0]}
           height={page.size[1]}

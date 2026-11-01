@@ -9,8 +9,8 @@
 //   dialog.
 // - Keyboard (touch mode only): a tap shows or hides the floating keyboard; a long press docks
 //   it (always shown) or undocks it; a bar under its icon while docked.
-// - Pages: the pages (usage, tickets, clones, notes, settings), with a count of the clones that
-//   stopped working unseen.
+// - Control panel: the control panel (usage, tickets, clones, notes,
+//   settings), with a count of the clones that stopped working unseen.
 // - Monitors (a desktop whose layout has monitors with no window open): opens their windows,
 //   with how many there are on it.
 //
@@ -27,22 +27,22 @@ export const FLOAT_BUTTON = 44;
 export const FLOAT_GAP = 8;
 
 export function FloatingButtons({
-  pagesOpen,
+  controlPanelOpen,
   keyboard = true,
   keyboardOpen,
   keyboardDocked,
   fit,
   badge = 0,
-  onPages,
+  onControlPanel,
   onKeyboard,
   onKeyboardDock,
   onLayout,
   fullscreen,
   monitors,
-  pagesKeys,
+  controlPanelKeys,
   away = false,
 }: {
-  pagesOpen: boolean;
+  controlPanelOpen: boolean;
   /** The keyboard's button shows (not in mouse and keyboard mode). */
   keyboard?: boolean;
   keyboardOpen: boolean;
@@ -51,9 +51,9 @@ export function FloatingButtons({
   /** Fit: whether the clone's monitor has this window's size already, and the fit; absent where
    *  the browser opens windows of its own (the Edit layout dialog fits each there). */
   fit?: { fits: boolean; onFit: () => void };
-  /** A count on the pages button (clones that stopped working unseen). */
+  /** A count on the control panel button (clones that stopped working unseen). */
   badge?: number;
-  onPages: () => void;
+  onControlPanel: () => void;
   onKeyboard: () => void;
   /** A long press on the keyboard: dock it, or undock it. */
   onKeyboardDock: () => void;
@@ -64,9 +64,9 @@ export function FloatingButtons({
   /** The layout's monitors with no window open (their numbers), and the opening of their
    *  windows; absent when there are none, or the browser opens no windows. */
   monitors?: { missing: number[]; onOpen: () => void };
-  /** The key chord that shows and hides the pages (`./shortcut.ts`), for the Pages button's
+  /** The key chord that shows and hides the control panel (`./shortcut.ts`), for the Control panel button's
    *  tooltip; absent: none said. */
-  pagesKeys?: string;
+  controlPanelKeys?: string;
   /** Slid out of the window to the right, and out of reach. */
   away?: boolean;
 }) {
@@ -95,10 +95,10 @@ export function FloatingButtons({
         </Round>
       ) : null}
       <Round
-        label={pagesOpen ? "Hide the pages" : "Pages: usage, tickets, clones, notes, settings"}
-        keys={pagesKeys}
-        on={pagesOpen}
-        onClick={onPages}
+        label={controlPanelOpen ? "Hide the control panel" : "Control panel: usage, tickets, clones, notes, settings"}
+        keys={controlPanelKeys}
+        on={controlPanelOpen}
+        onClick={onControlPanel}
       >
         <LayoutGrid aria-hidden className="size-5" />
         {badge ? <Count n={badge} className="bg-rose-500" /> : null}

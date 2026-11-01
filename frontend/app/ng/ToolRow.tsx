@@ -3,7 +3,7 @@ import { type PointerEvent, type ReactNode } from "react";
 
 import { GAP, TOOL_H } from "./geometry";
 
-/** The pages the tool row opens, in place of the keyboard. */
+/** The control panel the tool row opens, in place of the keyboard. */
 export type NgTab = "usage" | "tickets" | "clones" | "notes" | "settings";
 
 /** Each tab: its button's label (the settings tab shows a gear) and its page's name. */
@@ -33,18 +33,18 @@ type Props = {
   onTab: (tab: NgTab) => void;
   /** A count on a tab's button. */
   badges?: Partial<Record<NgTab, number>>;
-  /** Move the pages to a window of their own; absent where the browser cannot open one. */
+  /** Move the control panel to a window of its own; absent where the browser cannot open one. */
   onPopOut?: () => void;
 };
 
-/** A box on the row (a number, a tab), flat on the pages' surface (`./GLASS.md`). */
+/** A box on the row (a number, a tab), flat on the control panel's surface (`./GLASS.md`). */
 const CHIP = "rounded-md border border-black/10 bg-white/50 dark:border-white/10 dark:bg-white/[0.06]";
 /** A tab or a button on the row, under the mouse. */
 const IDLE = `${CHIP} text-neutral-900 hover:bg-white/80 dark:text-white dark:hover:bg-white/10`;
 /** The open tab: the other look, as lit glass. */
 const ON = "rounded-md border border-transparent bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
 
-/** The /ng tool row, over the pages: the server's CPU, memory and disk (where there is room),
+/** The /ng tool row, over the control panel: the server's CPU, memory and disk (where there is room),
  *  then tabs that act as tabs do. One is open at most. */
 export function ToolRow({ width, usage, tab, onTab, badges, onPopOut }: Props) {
   return (
@@ -77,13 +77,13 @@ export function ToolRow({ width, usage, tab, onTab, badges, onPopOut }: Props) {
   );
 }
 
-/** Moves the pages to a window of their own. */
+/** Moves the control panel to a window of its own. */
 export function PopOutButton({ onPopOut }: { onPopOut: () => void }) {
   return (
     <button
       type="button"
-      aria-label="Open the pages in a window of their own"
-      title="Open the pages in a window of their own"
+      aria-label="Open the control panel in a window of its own"
+      title="Open the control panel in a window of its own"
       onClick={onPopOut}
       className={`flex size-9 shrink-0 items-center justify-center ${IDLE}`}
     >

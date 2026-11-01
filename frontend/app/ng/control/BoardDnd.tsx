@@ -1,11 +1,11 @@
-// Drag and drop on the /ng pages, as the dashboard's board has it (`~/components/Board.tsx`,
+// Drag and drop on the /ng control panel, as the dashboard's board has it (`~/components/Board.tsx`,
 // whose arrangement it uses): a clone moves within its column or to another one, and a ticket
 // moves within the tickets' column or, dropped on a clone column, asks for a clone. Narrow, the
 // Clones page's sections are the columns, and the Tickets page is the tickets' column.
 //
 // A mouse drags after 5 px, so a click still selects; a finger drags after a 250 ms press, so a
 // swipe still scrolls. What follows the pointer is the views' own card (`overlays`), portalled
-// to the body: the pages' panel moves (`translateY`), and fixed things in it would be off.
+// to the body: the control panel's box moves (`translateY`), and fixed things in it would be off.
 import {
   closestCenter,
   closestCorners,

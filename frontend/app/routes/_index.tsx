@@ -59,7 +59,7 @@ export default function Home({ loaderData }: Route.ComponentProps) {
     return <SetupWizardContainer initialConfig={cfg} onDone={refetchConfig} />;
   }
   if (mobile) {
-    // The phone tree sizes to the viewport here, so its pages can size to their container
+    // The phone tree sizes to the viewport here, so its screens can size to their container
     // and a Storybook frame can stand in for the screen.
     return (
       <div className="h-dvh">

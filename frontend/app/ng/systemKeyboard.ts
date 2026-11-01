@@ -1,4 +1,4 @@
-// The phone's own keyboard, for the text boxes on the /ng tab pages. While it is up, the whole
+// The phone's own keyboard, for the text boxes on the /ng tab control panel. While it is up, the whole
 // /ng screen moves up (`useLift`) so the open page is all above it, not only the text box:
 // the top of the clone's screen goes out of view for that time. iOS tells how much of the page
 // the keyboard leaves in view through `visualViewport`.

@@ -20,7 +20,7 @@ import { MAX_MONITORS, normalize } from "./monitorLayout";
 
 export type ClientKind = "desktop" | "phone";
 
-/** Whether this browser can open windows of its own, one per monitor (and the pages, out of
+/** Whether this browser can open windows of its own, one per monitor (and the control panel, out of
  *  `/ng`). A phone or a tablet opens a tab in their place, or nothing. */
 export function canOpenWindows(nav: Pick<Navigator, "userAgent" | "platform" | "maxTouchPoints"> = navigator): boolean {
   const data = (nav as { userAgentData?: { mobile?: boolean } }).userAgentData;

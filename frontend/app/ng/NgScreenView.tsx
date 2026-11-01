@@ -10,11 +10,11 @@
 // - The notes over the screen: what dictation hears at the bottom, and why
 //   there is no screen to use in the middle.
 // - The keyboard at the bottom (touch mode), with the bar that sets its height.
-// - The pages (`pages.content`: the tool row and the open page, or the dashboard's layout), on a
+// - The control panel (`controlPanel.content`: the tool row and the open page, or the dashboard's layout), on a
 //   glass panel at the right under the buttons, on a backdrop that blurs and darkens the screen.
 //   They come in and go out as a dialog does.
 // - Wide, the side panels (the clone's notes and its assistant) at the right, under the buttons:
-//   with the pages, and without them when the mouse brings them in. Each is glass of its own,
+//   with the control panel, and without it when the mouse brings them in. Each is glass of its own,
 //   with its blur and shadow, and no backdrop; they slide in from the right and out again.
 // - The floating buttons, a dialog, and the monitor's number while the Edit layout dialog is
 //   open in another window.
@@ -31,8 +31,8 @@ import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
 import { GAP } from "./geometry";
 import type { InputMode } from "./inputMode";
 import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
-import { PAGES_BACKDROP, PAGES_GLASS } from "./pages/ui";
-import { WIDE_MIN } from "./pages/WideLayout";
+import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_GLASS } from "./control/ui";
+import { WIDE_MIN } from "./control/WideLayout";
 import { KeyboardView, type KeyboardViewProps, type TouchKind, keyboardPanel } from "./KeyboardView";
 
 type Box = { left: number; top: number; width: number; height: number };
@@ -40,11 +40,11 @@ type Box = { left: number; top: number; width: number; height: number };
 /** How far past its edge a glass panel's long shadow falls, CSS px (`./glass.css`). */
 const SIDE_SHADOW = 48;
 
-/** Where the pages go on a display `width`×`height` with `bottom` kept for the home bar: under
+/** Where the control panel goes on a display `width`×`height` with `bottom` kept for the home bar: under
  *  the buttons, FLOAT_GAP in from the sides. Wide enough for the dashboard's layout
- *  (`./pages/WideLayout.tsx`), they take the display's whole width instead: their columns scroll
+ *  (`./control/WideLayout.tsx`), they take the display's whole width instead: their columns scroll
  *  out to its edges, and keep the gap inside the row. */
-export function pagesBox(width: number, height: number, bottom: number): Box {
+export function controlPanelBox(width: number, height: number, bottom: number): Box {
   const inset = width - 2 * FLOAT_GAP;
   return {
     left: inset >= WIDE_MIN ? 0 : FLOAT_GAP,
@@ -89,15 +89,15 @@ export type NgScreenViewProps = {
   } | null;
   /** Said over the screen: dictation's state and words, why there is no screen. */
   notes: { dictation: DictationState; heard: string; note: string | null };
-  /** The pages: shown or not, what they show (`./pages/NgPagesContainer.tsx`, for the panel's
+  /** The control panel: shown or not, what it shows (`./control/ControlPanelContainer.tsx`, for the panel's
    *  width), and how far the phone's keyboard lifts them. */
-  pages: {
+  controlPanel: {
     open: boolean;
     lift: number;
     content: ReactNode;
     panelRef?: Ref<HTMLDivElement>;
   };
-  /** Wide: the side panels' box (`ref`, where the pages put them; or a story's `content`), and
+  /** Wide: the side panels' box (`ref`, where the control panel puts them; or a story's `content`), and
    *  whether they are in the window (else slid out to the right); null: none. */
   side?: { shown: boolean; ref?: Ref<HTMLDivElement>; content?: ReactNode } | null;
   /** The floating buttons (`away`: slid up out of the window); null: none. */
@@ -124,7 +124,7 @@ export function NgScreenView({
   onTouchScreen,
   keyboard,
   notes,
-  pages,
+  controlPanel,
   side,
   buttons,
   dialog,
@@ -137,8 +137,8 @@ export function NgScreenView({
   const areaH = keyboard?.docked ? height - keysH : height;
   /** The part of the display not under the keyboard. */
   const visible = height - keysH;
-  const panel = pagesBox(width, height, bottom);
-  const pagesShown = usePagesExit(pages.open);
+  const panel = controlPanelBox(width, height, bottom);
+  const controlPanelShown = useControlPanelExit(controlPanel.open);
   const place = { left: 0, top: 0, width: screen.width, height: screen.height };
   const on = (f: typeof onPad, kind: TouchKind) => (e: PointerEvent<HTMLDivElement>) => f(kind, e);
 
@@ -196,32 +196,32 @@ export function NgScreenView({
         </div>
       ) : null}
 
-      {/* Under the pages and the buttons while the pages are open: the screen blurred and
+      {/* Under the control panel and the buttons while the control panel is open: the screen blurred and
           darkened, fading in and out with them as a dialog's backdrop does */}
-      {pagesShown ? (
+      {controlPanelShown ? (
         <div
           aria-hidden
-          className={`absolute inset-0 z-30 ${PAGES_BACKDROP} ${
-            pages.open ? MODAL_ANIMATION.backdrop.enter : MODAL_ANIMATION.backdrop.exit
+          className={`absolute inset-0 z-30 ${CONTROL_PANEL_BACKDROP} ${
+            controlPanel.open ? MODAL_ANIMATION.backdrop.enter : MODAL_ANIMATION.backdrop.exit
           }`}
         />
       ) : null}
 
-      {/* The pages: mounted from the start, so their data is there when they open */}
+      {/* The control panel: mounted from the start, so its data is there when it opens */}
       <div
-        ref={pages.panelRef}
-        className={`absolute z-40 transition-transform duration-300 ease-out ${pagesShown ? "" : "hidden"}`}
-        style={{ ...panel, transform: `translateY(${-pages.lift}px)` }}
+        ref={controlPanel.panelRef}
+        className={`absolute z-40 transition-transform duration-300 ease-out ${controlPanelShown ? "" : "hidden"}`}
+        style={{ ...panel, transform: `translateY(${-controlPanel.lift}px)` }}
       >
         {/* Narrow, on one glass panel (`./GLASS.md`); wide, each column is glass of its own, with
             nothing round them all. What is fixed in it (a sheet, a dialog) takes its space. */}
         <div
-          className={`absolute inset-0 ${panel.width >= WIDE_MIN ? "" : `overflow-hidden ${PAGES_GLASS}`} ${
+          className={`absolute inset-0 ${panel.width >= WIDE_MIN ? "" : `overflow-hidden ${CONTROL_PANEL_GLASS}`} ${
             // In and out as a dialog is: from a blur, and back into one
-            pages.open ? MODAL_ANIMATION.panel.enter : pagesShown ? MODAL_ANIMATION.panel.exit : ""
+            controlPanel.open ? MODAL_ANIMATION.panel.enter : controlPanelShown ? MODAL_ANIMATION.panel.exit : ""
           }`}
         >
-          {pages.content}
+          {controlPanel.content}
         </div>
       </div>
 
@@ -279,9 +279,9 @@ function ScreenNotes({
   );
 }
 
-/** Whether the pages show: while `open`, and for their exit animation after (the dialogs' one,
+/** Whether the control panel shows: while `open`, and for its exit animation after (the dialogs' one,
  *  `MODAL_EXIT_MS`; none where the screen asks for reduced motion). */
-function usePagesExit(open: boolean) {
+function useControlPanelExit(open: boolean) {
   const [shown, setShown] = useState(open);
   useEffect(() => {
     if (open) return setShown(true);

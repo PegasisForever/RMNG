@@ -16,10 +16,10 @@ import { SIDE_DEFAULT } from "~/lib/sidePanelWidth";
 import { FakeDesktop } from "../__fixtures__/desktop";
 import { DESKTOP } from "../__fixtures__/screen";
 import { NotesView } from "./NotesView";
-import { PAGES_BACKDROP } from "./ui";
+import { CONTROL_PANEL_BACKDROP } from "./ui";
 import { SidePanels, sideWidthPx } from "./WideLayout";
 
-/** A ticket's panel, as the pages' container draws it: the real description editor. */
+/** A ticket's panel, as the control panel's container draws it: the real description editor. */
 function Ticket({ ticket, own }: { ticket: LinearTicket; own: boolean }) {
   return (
     <TicketPanel
@@ -40,19 +40,19 @@ function Ticket({ ticket, own }: { ticket: LinearTicket; own: boolean }) {
 }
 
 /** The wide /ng side panels (`SidePanels`), at the right of a desktop's display, as the mouse
- *  at its right edge brings them over the clone's screen (`onPages`: on the pages' backdrop).
+ *  at its right edge brings them over the clone's screen (`onControlPanel`: on the control panel's backdrop).
  *  A click or a focus in a card gives it three quarters of the height; the band on their left
  *  edge sets their width. The look is the toolbar's Theme. */
 function Side({
   content,
   archived,
-  onPages,
+  onControlPanel,
 }: {
   /** The clone's notes (its editor), its own ticket in their place, an open ticket, or empty notes. */
   content: "notes" | "cloneTicket" | "openTicket" | "emptyNotes";
   /** The notes are an archived clone's, opened from Clones. */
   archived: boolean;
-  onPages: boolean;
+  onControlPanel: boolean;
 }) {
   const [blocks] = useState(makeNotesBlocks);
   const [width, setWidth] = useState(sideWidthPx(DESKTOP.width, SIDE_DEFAULT));
@@ -96,7 +96,7 @@ function Side({
   return (
     <div className="ng-theme relative overflow-hidden bg-black" style={{ width: DESKTOP.width, height: DESKTOP.height }}>
       <FakeDesktop />
-      {onPages ? <div className={`absolute inset-0 ${PAGES_BACKDROP}`} /> : null}
+      {onControlPanel ? <div className={`absolute inset-0 ${CONTROL_PANEL_BACKDROP}`} /> : null}
       {/* Where the screen puts them: under the buttons' row, 8 px in from the right */}
       <div className="absolute bottom-2 right-2 top-[60px]">
         <SidePanels
@@ -114,10 +114,10 @@ function Side({
 }
 
 const meta = {
-  title: "ng/Pages/SidePanels",
+  title: "ng/Control panel/SidePanels",
   component: Side,
   parameters: { layout: "centered" },
-  args: { content: "notes", archived: false, onPages: false },
+  args: { content: "notes", archived: false, onControlPanel: false },
   argTypes: { content: { control: "inline-radio", options: ["notes", "cloneTicket", "openTicket", "emptyNotes"] } },
 } satisfies Meta<typeof Side>;
 
@@ -131,7 +131,7 @@ export const NotesAndAssistant: Story = {};
 export const CloneTicket: Story = { args: { content: "cloneTicket" } };
 
 /** A ticket opened from the Tickets column takes the whole side. */
-export const OpenTicket: Story = { args: { content: "openTicket", onPages: true } };
+export const OpenTicket: Story = { args: { content: "openTicket", onControlPanel: true } };
 
 /** An archived clone's notes, opened from Clones: the way back to the clone on the screen. */
 export const ArchivedClone: Story = { args: { archived: true } };
@@ -139,5 +139,5 @@ export const ArchivedClone: Story = { args: { archived: true } };
 /** A clone whose notes nobody wrote yet. */
 export const EmptyNotes: Story = { args: { content: "emptyNotes" } };
 
-/** With the pages open: on their backdrop. */
-export const OnPages: Story = { args: { onPages: true } };
+/** With the control panel opens: on their backdrop. */
+export const OnControlPanel: Story = { args: { onControlPanel: true } };

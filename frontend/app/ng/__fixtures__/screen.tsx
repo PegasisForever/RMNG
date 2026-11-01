@@ -1,5 +1,5 @@
 // What the /ng screen stories (`../NgScreenView.stories.tsx`) draw from: a picture of a clone's
-// desktop in place of the video, its cursor, the pages with their own stories' data, and the
+// desktop in place of the video, its cursor, the control panel with its tabs' own stories' data, and the
 // displays the screen is shown on.
 import type { Decorator } from "@storybook/react-vite";
 import type { ReactNode } from "react";
@@ -11,22 +11,22 @@ export { FakeDesktop } from "./desktop";
 import { HANDLE_H } from "../KeyboardHandle";
 import { naturalKeysHeight } from "../geometry";
 import { NgTerminalView } from "../NgTerminalView";
-import ClonesStories from "../pages/ClonesView.stories";
-import { ClonesView } from "../pages/ClonesView";
-import NotesStories from "../pages/NotesView.stories";
-import { NotesView } from "../pages/NotesView";
-import SettingsStories from "../pages/SettingsView.stories";
-import { SettingsView } from "../pages/SettingsView";
-import TicketsStories from "../pages/TicketsView.stories";
-import { TicketsView } from "../pages/TicketsView";
+import ClonesStories from "../control/ClonesView.stories";
+import { ClonesView } from "../control/ClonesView";
+import NotesStories from "../control/NotesView.stories";
+import { NotesView } from "../control/NotesView";
+import SettingsStories from "../control/SettingsView.stories";
+import { SettingsView } from "../control/SettingsView";
+import TicketsStories from "../control/TicketsView.stories";
+import { TicketsView } from "../control/TicketsView";
 import { makeUsage } from "~/components/__fixtures__/accounts";
-import UsageStories from "../pages/UsageView.stories";
-import { UsageView } from "../pages/UsageView";
+import UsageStories from "../control/UsageView.stories";
+import { UsageView } from "../control/UsageView";
 import { resolveColumns, withDefaults } from "~/lib/board";
 
-import { BoardDnd } from "../pages/BoardDnd";
-import { NarrowLayout } from "../pages/NarrowLayout";
-import { SidePanels, sideWidthPx, WIDE_MIN, WideLayout } from "../pages/WideLayout";
+import { BoardDnd } from "../control/BoardDnd";
+import { NarrowLayout } from "../control/NarrowLayout";
+import { SidePanels, sideWidthPx, WIDE_MIN, WideLayout } from "../control/WideLayout";
 import { SIDE_DEFAULT } from "~/lib/sidePanelWidth";
 import { type NgTab, ROW_STATS_MIN, type ServerUsage } from "../ToolRow";
 
@@ -117,7 +117,7 @@ export function FakeTerminal({ touch = true, cursor = null }: { touch?: boolean;
   );
 }
 
-/** A page the way the pages container shows it (narrow: a tab's page). */
+/** A page the way the control panel container shows it (narrow: a tab's page). */
 function Panel({ children }: { children: ReactNode }) {
   return (
     <div role="tabpanel" className="absolute inset-0 flex select-text flex-col overflow-hidden [&_button]:select-none">
@@ -201,9 +201,9 @@ export function sideFor(): ReactNode {
   );
 }
 
-/** The pages as the container lays them out `width` CSS px wide: the tool row over a tab's page,
+/** The control panel as the container lays it out `width` CSS px wide: the tool row over a tab's page,
  *  or (wide) the dashboard's layout. */
-export function pagesFor({
+export function controlPanelFor({
   width,
   glass = true,
   tab,
@@ -212,7 +212,7 @@ export function pagesFor({
   onPopOut,
 }: {
   width: number;
-  /** Over the clone's screen (wide: each column glass), not in the pages' own window. */
+  /** Over the clone's screen (wide: each column glass), not in the control panel's own window. */
   glass?: boolean;
   tab: NgTab;
   onTab?: (tab: NgTab) => void;

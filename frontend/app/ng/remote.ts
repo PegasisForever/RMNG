@@ -37,7 +37,7 @@ import { KeySounds } from "./keySound";
 import { type ModState, Modifiers } from "./modifiers";
 import { PHONE_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
 import { type Session, openSession } from "./session";
-import { isPagesChord, pagesChordHolds } from "./shortcut";
+import { isControlPanelChord, controlPanelChordHolds } from "./shortcut";
 import { TermKeys } from "./termKeys";
 
 /** The monitor size assumed until the server says the monitor's size. */
@@ -74,7 +74,7 @@ export function useRemote({
   mouse: boolean;
   /** A pinch on the trackpad (the screen's): the view's zoom changes by `factor`. */
   onZoom?: (factor: number) => void;
-  /** The pages' chord was pressed (`./shortcut.ts`), in mouse mode. */
+  /** The control panel's chord was pressed (`./shortcut.ts`), in mouse mode. */
   onChord: () => void;
 }) {
   const session = useRef<Session | null>(null);
@@ -86,7 +86,7 @@ export function useRemote({
   const [mods, setMods] = useState<ReadonlyMap<number, ModState>>(new Map());
   /** The keys show as a trackpad (`./keypad.ts`: after a pointer gesture, for a while). */
   const [padMode, setPadMode] = useState(false);
-  // The server's state, kept live: the tool row's numbers and everything the pages show
+  // The server's state, kept live: the tool row's numbers and everything the control panel shows
   const live = useLiveState(useRef(emptyState()).current);
   const [fn, setFn] = useState(false);
   const [caps, setCaps] = useState(false);
@@ -215,7 +215,7 @@ export function useRemote({
       pasteByEvent: () => clip.pasteByEvent(),
       // The screen sizes the picture (`./FullDesk.tsx`)
       onResize: () => {},
-      chord: { is: (e) => isPagesChord(e), holds: pagesChordHolds(), run: () => chordRef.current() },
+      chord: { is: (e) => isControlPanelChord(e), holds: controlPanelChordHolds(), run: () => chordRef.current() },
     });
     const { spec: sp, cursor: c, connected: on } = last.current;
     if (sp) input.setLayout(sp.content.mode === "desktop" ? sp.monitors : []);

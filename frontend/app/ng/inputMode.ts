@@ -4,7 +4,7 @@
 // - touch: the floating buttons, the on-screen keyboard, and the screen as a trackpad (or, with
 //   the keyboard docked, as a touch screen).
 // - mouse: the mouse and the keyboard go to the clone as in the viewer (`~/viewer/input.ts`); no
-//   floating buttons; a shortcut opens the pages (`./shortcut.ts`).
+//   floating buttons; a shortcut opens the control panel (`./shortcut.ts`).
 import { useEffect, useState } from "react";
 
 export type InputMode = "touch" | "mouse";

@@ -1,7 +1,7 @@
 // The service worker of the installed /ng app (registered with scope "/ng", so the dashboard
 // and the viewer never get it). There is no offline copy:
 //
-// - Pages are not handled here, so each open loads the newest page from the network.
+// - HTML documents are not handled here, so each open loads the newest page from the network.
 // - Code files (`/assets/*`, whose names change with each build) come from the network and are
 //   kept as they load. After a deploy the server no longer has the old build's files, but iOS
 //   can still show a page of that build and have it ask for one. The server says 404 and the

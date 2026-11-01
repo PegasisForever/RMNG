@@ -8,7 +8,7 @@ import { inPageFrame } from "./__fixtures__/frame";
 import { UsageView } from "./UsageView";
 
 const meta = {
-  title: "ng/Pages/UsageView",
+  title: "ng/Control panel/UsageView",
   component: UsageView,
   decorators: [inPageFrame],
   parameters: { layout: "centered" },

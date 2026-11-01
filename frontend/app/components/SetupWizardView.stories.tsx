@@ -23,7 +23,7 @@ function base() {
 }
 
 const meta = {
-  title: "Setup/Pages/SetupWizardView",
+  title: "Setup/Screens/SetupWizardView",
   component: SetupWizardView,
   parameters: { layout: "fullscreen" },
   args: {

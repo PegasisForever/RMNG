@@ -1,9 +1,9 @@
-// The /ng tab pages' container: it holds what the five pages draw (the live server state, the
+// The /ng control panel's container: it holds what its five tabs draw (the live server state, the
 // Linear tickets), does what they ask (every write the dashboard can make), and opens the
 // dialogs. It is the phone app's counterpart of `DashboardContainer`, with the same writes in
 // the same shape: show the change now, send it, put the old value back if it is refused.
 //
-// Narrow, the pages are tabs under the tool row (`../ToolRow.tsx`). Each page, once opened,
+// Narrow, the control panel is tabs under the tool row (`../ToolRow.tsx`). Each page, once opened,
 // stays mounted while another one shows, so a half-typed setting, a scrolled list or an open
 // ticket is still there when the operator comes back. A dialog opens in the page that opened
 // it, in that page's space (`ModalPlacementProvider`), so the clone's screen stays in view.
@@ -88,7 +88,7 @@ import { NotesView, type NotesPane } from "./NotesView";
 import { type Move, moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
-import { ErrorLine, PAGES_GLASS } from "./ui";
+import { ErrorLine, CONTROL_PANEL_GLASS } from "./ui";
 import { BoardDnd } from "./BoardDnd";
 import { NarrowLayout } from "./NarrowLayout";
 import { UsageView } from "./UsageView";
@@ -114,7 +114,7 @@ type Dialog =
   | { kind: "rebase"; clone: Clone }
   | { kind: "forward"; clone: Clone };
 
-export function NgPagesContainer({
+export function ControlPanelContainer({
   width,
   glass,
   tab,
@@ -128,16 +128,16 @@ export function NgPagesContainer({
   sideAt,
   onLayout,
 }: {
-  /** The pages' width, CSS px: narrow (tabs) or wide (the dashboard's layout). */
+  /** The control panel's width, CSS px: narrow (tabs) or wide (the dashboard's layout). */
   width: number;
   /** Over the clone's screen: wide, each column is glass of its own (narrow, the screen's view
-   *  puts the whole pages on one glass panel). Not in the pages' own window. */
+   *  puts the whole control panel on one glass panel). Not in the control panel's own window. */
   glass: boolean;
   /** The server's CPU, memory and disk; null until they arrive. */
   usage: ServerUsage | null;
   /** A count on a tab. */
   badges?: Partial<Record<NgTab, number>>;
-  /** Move the pages to a window of their own; absent where the browser opens none. */
+  /** Move the control panel to a window of its own; absent where the browser opens none. */
   onPopOut?: () => void;
   /** The page that shows; null while the keyboard shows. */
   tab: NgTab | null;
@@ -148,9 +148,9 @@ export function NgPagesContainer({
   /** How the clone's sound plays on this phone; null before it plays. */
   sound: SoundReport | null;
   /** Wide, over the clone's screen: the screen's box for the side panels, which shows them
-   *  without the pages too (`./WideLayout.tsx`); null until it is there. */
+   *  without the control panel too (`./WideLayout.tsx`); null until it is there. */
   sideAt?: HTMLElement | null;
-  /** Open the Edit layout dialog; absent where there is none (the pages' own window). */
+  /** Open the Edit layout dialog; absent where there is none (the control panel's own window). */
   onLayout?: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -174,7 +174,7 @@ export function NgPagesContainer({
     if (stored !== null) setSideWidth(stored);
   }, []);
 
-  // The pages opened so far stay mounted (see the top of this file)
+  // The tabs opened so far stay mounted (see the top of this file)
   const [visited, setVisited] = useState<ReadonlySet<NgTab>>(new Set());
   useEffect(() => {
     if (tab && !visited.has(tab)) setVisited(new Set([...visited, tab]));
@@ -276,7 +276,7 @@ export function NgPagesContainer({
   const openTicketMeta = useTeamMeta(presets, openTicket);
   const notesTicketMeta = useTeamMeta(presets, notesTicket);
 
-  /** Put a clone on the screen; the pages stay open (the operator closes them). An archived one
+  /** Put a clone on the screen; the control panel stays open (the operator closes it). An archived one
    *  has no screen, so its notes open instead. Wide, as on the dashboard, an open ticket closes:
    *  the side panels are the clone's again. */
   const selectClone = (clone: Clone) => {
@@ -637,12 +637,12 @@ export function NgPagesContainer({
 
   if (width >= WIDE_MIN) {
     return (
-      // Fixed things in it (a sheet, a dialog) take its whole space: the pages' box over the
+      // Fixed things in it (a sheet, a dialog) take its whole space: the control panel's box over the
       // screen, or the window
       <ModalPlacementProvider value="window">
         <div className={`flex h-full select-text flex-col gap-2 [&_button]:select-none ${glass ? "" : "p-2"}`}>
           {error ? (
-            <div className={glass ? `mx-2 shrink-0 overflow-hidden ${PAGES_GLASS}` : "shrink-0 overflow-hidden rounded-xl"}>
+            <div className={glass ? `mx-2 shrink-0 overflow-hidden ${CONTROL_PANEL_GLASS}` : "shrink-0 overflow-hidden rounded-xl"}>
               <ErrorLine message={error} onDismiss={() => setError(null)} />
             </div>
           ) : null}
@@ -670,7 +670,7 @@ export function NgPagesContainer({
                 </BoardDnd>
               }
               // An open ticket takes the side panel, as on the dashboard; the clone's notes come
-              // back when it closes, and when the pages close (the side panels without the pages
+              // back when it closes, and when the control panel closes (the side panels without the control panel
               // are the clone's)
               side={{
                 ticket: openTicket && tab ? ticketPanel(openTicket, openTicketMeta, false) : undefined,
@@ -696,7 +696,7 @@ export function NgPagesContainer({
     <ModalPlacementProvider value="inline">
       <NarrowLayout row={{ width: width - 8, usage, tab, onTab, badges, onPopOut }}>
         {TABS.filter((t) => visited.has(t) || t === tab).map((t) => (
-            // Text can be selected and typed on the pages, not on the keys (WebKit inherits
+            // Text can be selected and typed on the control panel, not on the keys (WebKit inherits
             // `user-select`); a long press on a button still selects nothing
             <div
               key={t}

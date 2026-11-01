@@ -51,7 +51,7 @@ body {
   }
 }
 
-/* /ng (the phone app) is black and grey, with no blue in its greys. Its pages reuse the
+/* /ng (the phone app) is black and grey, with no blue in its greys. Its control panel reuses the
    dashboard's parts, which are drawn in slate; under `.ng-theme` (on <html> while /ng is open)
    each slate shade is the neutral shade of the same lightness. */
 .ng-theme {

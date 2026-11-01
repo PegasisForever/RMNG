@@ -3,42 +3,42 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { FakeDesktop } from "../__fixtures__/desktop";
-import { pagesFor } from "../__fixtures__/screen";
+import { controlPanelFor } from "../__fixtures__/screen";
 import type { NgTab } from "../ToolRow";
-import { PAGES_BACKDROP, PAGES_GLASS } from "./ui";
+import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_GLASS } from "./ui";
 import { WIDE_MIN } from "./WideLayout";
 
-/** The /ng pages, all of them, as their container lays them out: narrow, the tool row over a
+/** The /ng control panel, in each of its layouts, as its container lays it out: narrow, the tool row over a
  *  tab's page; wide (`WIDE_MIN`), the dashboard's layout. On glass over the clone's screen, or
  *  on the solid ground of their own window. The look is the toolbar's Theme. */
-function Pages({ width, height, surface, tab: first }: { width: number; height: number; surface: "glass" | "window"; tab: NgTab }) {
+function ControlPanel({ width, height, surface, tab: first }: { width: number; height: number; surface: "glass" | "window"; tab: NgTab }) {
   const [tab, setTab] = useState(first);
   const glass = surface === "glass";
-  const content = pagesFor({ width, glass, tab, onTab: setTab, badges: { clones: 2 }, onPopOut: glass ? fn() : undefined });
+  const content = controlPanelFor({ width, glass, tab, onTab: setTab, badges: { clones: 2 }, onPopOut: glass ? fn() : undefined });
   return surface === "window" ? (
     <div className="relative overflow-hidden bg-neutral-100 dark:bg-neutral-950" style={{ width, height }}>
       {content}
     </div>
   ) : (
-    // The pages' box over the screen: in from the sides narrow; the display's whole width wide
+    // The control panel's box over the screen: in from the sides narrow; the display's whole width wide
     <div
       className={`relative overflow-hidden ${width >= WIDE_MIN ? "py-2" : "p-2"}`}
       style={{ width: width >= WIDE_MIN ? width : width + 16, height: height + 16 }}
     >
       <FakeDesktop />
-      <div className={`absolute inset-0 ${PAGES_BACKDROP}`} />
+      <div className={`absolute inset-0 ${CONTROL_PANEL_BACKDROP}`} />
       {/* Narrow, one glass panel; wide, each column is glass of its own */}
-      <div className={`relative h-full ${width >= WIDE_MIN ? "" : `overflow-hidden ${PAGES_GLASS}`}`}>{content}</div>
+      <div className={`relative h-full ${width >= WIDE_MIN ? "" : `overflow-hidden ${CONTROL_PANEL_GLASS}`}`}>{content}</div>
     </div>
   );
 }
 
 const meta = {
-  title: "ng/Pages/Layout",
-  component: Pages,
+  title: "ng/Control panel/Layout",
+  component: ControlPanel,
   parameters: { layout: "centered" },
   args: { width: 377, height: 750, surface: "glass", tab: "clones" },
-} satisfies Meta<typeof Pages>;
+} satisfies Meta<typeof ControlPanel>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
@@ -55,11 +55,11 @@ export const PhoneSideways: Story = { args: { width: 935, height: 340, tab: "tic
 /** A desktop's large screen: the dashboard's layout, on glass. */
 export const Wide: Story = { args: { width: 1424, height: 820 } };
 
-/** The pages' own window, wide: the dashboard's layout on a solid ground. */
+/** The control panel's own window, wide: the dashboard's layout on a solid ground. */
 export const WideWindow: Story = { args: { width: 1440, height: 900, surface: "window" } };
 
 /** Wide, with Settings open in the board's place. */
 export const WideSettings: Story = { args: { width: 1424, height: 820, tab: "settings" } };
 
-/** The pages' own window, narrow. */
+/** The control panel's own window, narrow. */
 export const NarrowWindow: Story = { args: { width: 560, height: 900, surface: "window" } };

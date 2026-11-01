@@ -304,7 +304,7 @@ export function OverflowMenu({
   /** Which edge the panel lines up with. A card's ⋮ sits at its right corner and the panel
    *  hangs left off it; a menu under a column title hangs the other way. */
   align?: "left" | "right";
-  /** A tap with a finger (or a pen) calls this in place of opening the panel: the /ng pages
+  /** A tap with a finger (or a pen) calls this in place of opening the panel: the /ng control panel
    *  open their own sheet of large tiles on a touch screen. Absent ⇒ the panel opens. */
   onTouch?: () => void;
   children: ReactNode;

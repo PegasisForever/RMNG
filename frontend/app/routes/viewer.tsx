@@ -233,7 +233,7 @@ export default function Viewer() {
           <h1 className="text-lg font-semibold text-amber-400">This page is not HTTPS</h1>
           <p>
             The viewer decodes video with WebCodecs, and browsers allow WebCodecs only on HTTPS
-            pages. Open the dashboard at its HTTPS address (for example through Tailscale HTTPS)
+            sites. Open the dashboard at its HTTPS address (for example through Tailscale HTTPS)
             and open the viewer from there.
           </p>
         </div>

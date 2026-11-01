@@ -83,7 +83,7 @@ export function SettingsPanelContainer({
 }
 
 /** Everything the settings form needs but cannot do itself, for any view of it: the panel
- *  here, and the phone app's Settings page (`~/ng/pages`), which lays the same panes out its
+ *  here, and the phone app's Settings page (`~/ng/control`), which lays the same panes out its
  *  own way. */
 export function useSettingsPanel({
   accounts,

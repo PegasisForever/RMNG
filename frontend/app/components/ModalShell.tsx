@@ -76,7 +76,7 @@ const GLASS_CHROME = "ng-glass ng-glass-thick rounded-2xl";
 
 /** Where a dialog goes. `window`: over the whole page, on a dimmed backdrop. `inline`: it
  *  fills the nearest positioned box instead, with no backdrop and no frame. The phone app
- *  (`/ng`) shows its pages in the space of its keyboard, and a dialog opened from one of them
+ *  (`/ng`) shows its control panel in the space of its keyboard, and a dialog opened from one of its tabs
  *  takes that same space, so the clone's screen above stays in view. */
 export type ModalPlacement = "window" | "inline";
 
@@ -93,7 +93,7 @@ const INLINE_PANEL: Record<ModalSize, string> = {
 };
 
 /** The inline frame: the box's whole space, on a solid ground of the page's look (it hides the
- *  page under it; on the /ng pages' glass, glass would show the page through). */
+ *  page under it; on the /ng control panel's glass, glass would show the page through). */
 export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boolean) {
   return {
     backdrop: `absolute inset-0 ${LAYER[layer]} flex flex-col rounded-xl bg-neutral-100 dark:bg-neutral-900 ${

@@ -9,7 +9,7 @@ import { inPageFrame } from "./__fixtures__/frame";
 import { NotesView } from "./NotesView";
 
 const meta = {
-  title: "ng/Pages/NotesView",
+  title: "ng/Control panel/NotesView",
   component: NotesView,
   decorators: [inPageFrame],
   parameters: { layout: "centered" },

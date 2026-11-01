@@ -3,9 +3,9 @@
 // finger's size: nothing here waits for a hover, and a menu is a sheet of large tiles over the
 // page (`ActionSheet`), not a small list at a pointer.
 //
-// The pages are flat content (`../GLASS.md`): on the glass of their panel over the clone's
+// The control panel is flat content (`../GLASS.md`): on the glass of its panel over the clone's
 // screen, or on the solid ground of their own window. Each color has its light value and its
-// `dark:` one; the names below are the ones the pages share.
+// `dark:` one; the names below are the ones the control panel share.
 import { Check, ChevronLeft, type LucideIcon, X } from "lucide-react";
 import {
   createContext,
@@ -19,21 +19,21 @@ import {
 
 import { type Box, MenuDivider, MenuItem, MenuPanel } from "~/components/OverflowMenu";
 
-/** The pages' panel over the clone's screen (narrow): glass with no blur or shadow of its own,
- *  as the wide pages' columns are (`ng-glass-flat`): the backdrop under the pages
- *  (`PAGES_BACKDROP`) blurs and darkens the screen for them. */
-export const PAGES_GLASS = "ng-glass ng-glass-thick ng-glass-flat rounded-2xl";
+/** The control panel's panel over the clone's screen (narrow): glass with no blur or shadow of its own,
+ *  as the wide control panel's columns are (`ng-glass-flat`): the backdrop under the control panel
+ *  (`CONTROL_PANEL_BACKDROP`) blurs and darkens the screen for them. */
+export const CONTROL_PANEL_GLASS = "ng-glass ng-glass-thick ng-glass-flat rounded-2xl";
 
-/** A column of the wide pages (`./WideLayout.tsx`) on its own: over the clone's screen, glass
- *  with no blur or shadow of its own (`ng-glass-flat`: the backdrop under the pages blurs and
- *  darkens the screen for them all); a flat hollow on the solid ground of the pages' window. */
+/** A column of the wide control panel (`./WideLayout.tsx`) on its own: over the clone's screen, glass
+ *  with no blur or shadow of its own (`ng-glass-flat`: the backdrop under the control panel blurs and
+ *  darkens the screen for all of them); a flat hollow on the solid ground of the control panel's window. */
 export const COLUMN_GLASS = "ng-glass ng-glass-thick ng-glass-flat rounded-2xl overflow-hidden";
 
-/** Over the whole clone's screen while the pages are open, under them and the floating buttons:
- *  it blurs and darkens the screen. It takes no touch or click. */
 /** Everything inside scrolls with no bar showing (the side panels, the notes, a ticket). */
 export const NO_SCROLLBARS = "[&_*]:[scrollbar-width:none] [&_*::-webkit-scrollbar]:hidden";
-export const PAGES_BACKDROP = "pointer-events-none bg-black/25 backdrop-blur-md dark:bg-black/40";
+/** Over the whole clone's screen while the control panel is open, under it and the floating buttons:
+ *  it blurs and darkens the screen. It takes no touch or click. */
+export const CONTROL_PANEL_BACKDROP = "pointer-events-none bg-black/25 backdrop-blur-md dark:bg-black/40";
 export const COLUMN_SOLID =
   "overflow-hidden rounded-xl border border-black/10 bg-black/[0.03] dark:border-white/10 dark:bg-white/[0.03]";
 const ColumnFrame = createContext(COLUMN_SOLID);

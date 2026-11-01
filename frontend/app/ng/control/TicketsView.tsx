@@ -7,7 +7,7 @@
 // (which makes a clone) is "Create a clone" in the sheet.
 //
 // Wide (`column`), the list is the board's first column, with the dashboard's own card per
-// ticket (`TicketCardBody`) on the pages' glass, and the open ticket shows beside the board
+// ticket (`TicketCardBody`) on the control panel's glass, and the open ticket shows beside the board
 // (the container puts `detail` there).
 //
 // As on the dashboard: a ticket drags within the list, or (wide) onto a clone column, which

@@ -12,7 +12,7 @@ import { ClonesView } from "./ClonesView";
 const archived = makeCloneOffline({ id: "pega-old-3", displayName: "Old spike", archived: true, managed: true });
 
 const meta = {
-  title: "ng/Pages/ClonesView",
+  title: "ng/Control panel/ClonesView",
   component: ClonesView,
   decorators: [inPageFrame],
   parameters: { layout: "centered" },

@@ -73,7 +73,7 @@ function TicketFixture() {
 }
 
 const meta = {
-  title: "Mobile/Pages/MobileClone",
+  title: "Mobile/Screens/MobileClone",
   component: MobileClone,
   parameters: { layout: "centered" },
   args: {
@@ -81,7 +81,7 @@ const meta = {
     tab: "chat" as CloneTab,
     onTabChange: fn(),
     // The chevron leaves this screen for the list, which is the phone's other page.
-    onBack: makeStoryLink("Mobile/Pages/MobileHome", "Default"),
+    onBack: makeStoryLink("Mobile/Screens/MobileHome", "Default"),
     notes: <NotesFixture />,
     chat: <ChatFixture />,
     error: null,

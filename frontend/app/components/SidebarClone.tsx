@@ -224,7 +224,7 @@ export interface SidebarCloneProps {
   op?: Operation;
   onSelect: () => void;
   /** A double click on the card (not on a button in it): select it and go to it (/ng: close
-   *  the pages). Absent: a double click is two selects. */
+   *  the control panel). Absent: a double click is two selects. */
   onOpen?: () => void;
   onDelete: () => void;
   /** Change this clone's account-group binding. */
@@ -282,7 +282,7 @@ export interface SidebarCloneProps {
    *  Carries no keyboard activator: a card drags with the pointer only (see `BoardCard`). */
   dragListeners?: DraggableSyntheticListeners;
   /** The row's own fill, at rest (with its hover) and selected, in place of the dashboard's
-   *  solid white and green: the /ng pages draw the card on glass. */
+   *  solid white and green: the /ng control panel draws the card on glass. */
   fill?: { idle: string; selected: string };
   /** A finger can scroll the column over the card (the drag waits for a long press), so the
    *  card does not take every touch for itself (`touch-none`). */

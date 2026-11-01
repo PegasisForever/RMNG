@@ -1,5 +1,5 @@
 // The phone app's network half: it owns which clone is open, talks to the server, and
-// hands the two pure pages (MobileHome, MobileClone) everything they draw.
+// hands the two pure screens (MobileHome, MobileClone) everything they draw.
 //
 // It is the counterpart of `DashboardContainer`, not a wrapper around it. The board, its
 // drag handlers, and every modal except account import stay on the desktop side and are

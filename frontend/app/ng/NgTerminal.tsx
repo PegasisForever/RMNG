@@ -2,7 +2,7 @@
 // tab bar (`./TermBar.tsx`) and one xterm.js terminal per tmux session (`~/viewer/terminal.tsx`).
 //
 // - Mouse and keyboard mode: the terminal has the page's keys, mouse and selection, as in the
-//   viewer. The pages' chord is the page's.
+//   viewer. The control panel's chord is the page's.
 // - Touch mode: the /ng keyboard types into it (`./remote.ts`, `./termKeys.ts`); the terminal never
 //   brings up the system keyboard. Its area is a trackpad, as the keys are: they move a pointer
 //   drawn here (`cursor`), and its clicks, drags and scrolls go to the terminal as a mouse's.
@@ -15,7 +15,7 @@ import type { TermData } from "~/lib/wire/TermData";
 import { type TermApi, useTermTabs } from "~/viewer/terminal";
 
 import type { TouchKind } from "./KeyboardView";
-import { isPagesChord } from "./shortcut";
+import { isControlPanelChord } from "./shortcut";
 import { NgTerminalView } from "./NgTerminalView";
 
 export function NgTerminal({
@@ -52,7 +52,7 @@ export function NgTerminal({
     api,
     focus: !touch,
     ownKey: (e) => {
-      if (!isPagesChord(e)) return false;
+      if (!isControlPanelChord(e)) return false;
       if (e.type === "keydown") {
         e.preventDefault();
         if (!e.repeat) onChord();

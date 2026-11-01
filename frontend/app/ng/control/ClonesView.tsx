@@ -1,6 +1,6 @@
 // The /ng Clones page: the dashboard's board, as one list with a section per column. A tap on
 // a clone puts it on the screen above (the server streams the selected clone); an archived
-// clone has no screen, so a tap on one opens its notes instead. The pages stay open; a double
+// clone has no screen, so a tap on one opens its notes instead. The control panel stays open; a double
 // click (a double tap) also closes them, so the clone's screen shows.
 //
 // The card menu, the drags and the column buttons of the desktop are here as: the ⋯ on a row
@@ -10,7 +10,7 @@
 // Settings, Board, as on the desktop.
 //
 // Wide (`columnsLayout`), the sections are the board's columns side by side, with the
-// dashboard's own card per clone (`SidebarClone`), on the pages' glass.
+// dashboard's own card per clone (`SidebarClone`), on the control panel's glass.
 //
 // As on the dashboard: a clone drags within its column or into another one (`./BoardDnd.tsx`:
 // a mouse at once, a finger after a long press), a double-click on a column's title renames it,
@@ -99,7 +99,7 @@ export interface ClonesViewProps {
   notesId: string | null;
   /** A tap on a clone: a live one goes on the screen, an archived one opens its notes. */
   onSelect: (clone: Clone) => void;
-  /** A double click on a clone: as a tap, then the pages close (the clone's screen shows). */
+  /** A double click on a clone: as a tap, then the control panel closes (the clone's screen shows). */
   onOpen: (clone: Clone) => void;
   /** The clone's display name, the operator's own (empty: none); the hostname stays. */
   onRename: (clone: Clone, name: string) => void;

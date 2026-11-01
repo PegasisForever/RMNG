@@ -5,7 +5,7 @@ import { ROWS, ROW_UNITS } from "./keyboard";
 /** Space between keys, and around the keyboard at the sides and the top, CSS px. */
 export const GAP = 4;
 const PAD = 4;
-/** The tool row's height (over the pages), CSS px. */
+/** The tool row's height (over the control panel), CSS px. */
 export const TOOL_H = 36;
 /** A key is at most this many times as tall as a 1-unit key is wide: square. */
 export const KEY_ASPECT = 1;
@@ -88,7 +88,7 @@ export function screenFit(
 }
 
 /** Device px per monitor px a phone starts with (its pixel scale, in its layout:
- *  `./firstLayout.ts`): 2, so text on the clone is as large as on the phone's own pages. */
+ *  `./firstLayout.ts`): 2, so text on the clone is as large as on the phone's own control panel. */
 export const PHONE_SCALE = 2;
 
 /** The monitor for a screen of `width`×`height` CSS px at `dpr`: `scale` (the window's pixel

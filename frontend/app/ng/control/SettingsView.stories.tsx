@@ -10,7 +10,7 @@ import { inPageFrame } from "./__fixtures__/frame";
 import { SettingsView, type SettingsViewProps } from "./SettingsView";
 
 const meta = {
-  title: "ng/Pages/SettingsView",
+  title: "ng/Control panel/SettingsView",
   component: SettingsView,
   decorators: [inPageFrame],
   parameters: { layout: "centered" },

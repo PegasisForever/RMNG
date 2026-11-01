@@ -154,7 +154,7 @@ const toTicketModal = makeStoryLink(
 );
 // A ticket card fills the side panel with the ticket, which is a state of this shell rather
 // than a dialog somewhere else — so it links to this shell's own story for it.
-const toTicketOpen = makeStoryLink("Dashboard/Pages/AppShellV2", "TicketOpen");
+const toTicketOpen = makeStoryLink("Dashboard/Screens/AppShellV2", "TicketOpen");
 
 /** A ticket panel on fixtures. `onCreateClone` is the caller's: the column's panel offers the
  *  button, and a clone's own notes card does not, because that clone is the one it would make. */
@@ -273,7 +273,7 @@ function makeBoard() {
 }
 
 const meta = {
-  title: "Dashboard/Pages/AppShellV2",
+  title: "Dashboard/Screens/AppShellV2",
   component: AppShellV2,
   parameters: { layout: "fullscreen" },
   args: {

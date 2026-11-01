@@ -15,38 +15,38 @@ import {
   inDisplay,
   keys,
   keysHeight,
-  pagesFor,
+  controlPanelFor,
   sideFor,
 } from "./__fixtures__/screen";
-import { NgScreenView, type NgScreenViewProps, pagesBox } from "./NgScreenView";
+import { NgScreenView, type NgScreenViewProps, controlPanelBox } from "./NgScreenView";
 import type { NgTab } from "./ToolRow";
 
 /** The cursor at 1.5 CSS px per clone px, as on a phone at 2× with a 3× screen. */
 const cursorScale = () => 1.5 * (typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
 
 const buttons = (over: Partial<NonNullable<NgScreenViewProps["buttons"]>> = {}): NgScreenViewProps["buttons"] => ({
-  pagesOpen: false,
+  controlPanelOpen: false,
   keyboardOpen: false,
   keyboardDocked: false,
   fit: { fits: true, onFit: fn() },
   badge: 0,
-  onPages: fn(),
+  onControlPanel: fn(),
   onKeyboard: fn(),
   onKeyboardDock: fn(),
   onLayout: fn(),
   fullscreen: { on: false, toggle: fn() },
-  pagesKeys: "Super + Space (in fullscreen)",
+  controlPanelKeys: "Super + Space (in fullscreen)",
   ...over,
 });
 
-/** The pages over a display `d` wide (their panel's width: `pagesBox`). */
-const pages = (
+/** The control panel over a display `d` wide (their panel's width: `controlPanelBox`). */
+const controlPanel = (
   over: { open?: boolean; tab?: NgTab; onTab?: (tab: NgTab) => void; badges?: Partial<Record<NgTab, number>>; onPopOut?: () => void } = {},
   d: { width: number; height: number; bottom: number } = PHONE,
-): NgScreenViewProps["pages"] => ({
+): NgScreenViewProps["controlPanel"] => ({
   open: over.open ?? false,
   lift: 0,
-  content: pagesFor({ width: pagesBox(d.width, d.height, d.bottom).width, tab: over.tab ?? "clones", ...over }),
+  content: controlPanelFor({ width: controlPanelBox(d.width, d.height, d.bottom).width, tab: over.tab ?? "clones", ...over }),
 });
 
 const keyboard = (d: typeof PHONE, docked = false): NgScreenViewProps["keyboard"] => ({
@@ -61,7 +61,7 @@ const notes = { dictation: "off" as const, heard: "", note: null };
 
 /** A phone, upright: the clone's screen fills the display. */
 const meta = {
-  title: "ng/Pages/NgScreenView",
+  title: "ng/Control panel/NgScreenView",
   component: NgScreenView,
   decorators: [inDisplay],
   parameters: { layout: "centered" },
@@ -75,7 +75,7 @@ const meta = {
     onTouchScreen: fn(),
     keyboard: null,
     notes,
-    pages: pages(),
+    controlPanel: controlPanel(),
     buttons: buttons(),
     identify: null,
   },
@@ -86,7 +86,7 @@ type Story = StoryObj<typeof meta>;
 
 // ---- touch mode, on a phone ----
 
-/** The screen and the three buttons (Pages, Keyboard, Fullscreen, Fit). */
+/** The screen and the three buttons (Control panel, Keyboard, Fullscreen, Fit). */
 export const Phone: Story = {};
 
 /** The keyboard floats over the bottom of the screen; the screen moved up to keep the cursor
@@ -108,11 +108,11 @@ export const PhoneKeyboardDocked: Story = {
   },
 };
 
-/** The pages over the screen, on the Clones tab; two clones stopped working unseen. */
-export const PhonePages: Story = {
+/** The control panel over the screen, on the Clones tab; two clones stopped working unseen. */
+export const PhoneControlPanel: Story = {
   args: {
-    pages: pages({ open: true, badges: { clones: 2 } }),
-    buttons: buttons({ pagesOpen: true, badge: 2 }),
+    controlPanel: controlPanel({ open: true, badges: { clones: 2 } }),
+    buttons: buttons({ controlPanelOpen: true, badge: 2 }),
   },
 };
 
@@ -136,13 +136,13 @@ export const PhoneConnecting: Story = {
   args: { picture: null, cursor: null, notes: { ...notes, note: "Connecting…" } },
 };
 
-/** A phone on its side, with the pages on the Tickets tab. */
+/** A phone on its side, with the control panel on the Tickets tab. */
 export const PhoneSideways: Story = {
   args: {
     ...PHONE_SIDEWAYS,
     screen: { x: 0, y: 0, width: PHONE_SIDEWAYS.width, height: PHONE_SIDEWAYS.height },
-    pages: pages({ open: true, tab: "tickets" }, PHONE_SIDEWAYS),
-    buttons: buttons({ pagesOpen: true }),
+    controlPanel: controlPanel({ open: true, tab: "tickets" }, PHONE_SIDEWAYS),
+    buttons: buttons({ controlPanelOpen: true }),
   },
 };
 
@@ -210,18 +210,18 @@ export const DesktopMonitorsToOpen: Story = {
   args: { ...desktop, buttons: buttons({ keyboard: false, fit: undefined, monitors: { missing: [1, 2], onOpen: fn() } }) },
 };
 
-/** The chord showed the pages, under the buttons (no keyboard button). A large screen gives
+/** The chord showed the control panel, under the buttons (no keyboard button). A large screen gives
  *  them the dashboard's layout: the usage rail, the board's columns, the notes. */
-export const DesktopPages: Story = {
+export const DesktopControlPanel: Story = {
   args: {
     ...desktop,
-    pages: pages({ open: true, onPopOut: fn() }, DESKTOP),
-    buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
+    controlPanel: controlPanel({ open: true, onPopOut: fn() }, DESKTOP),
+    buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
   },
 };
 
 /** The mouse at the window's right edge, under the buttons' row: the side panels (the clone's
- *  notes and its assistant) over the screen, without the pages and their backdrop. */
+ *  notes and its assistant) over the screen, without the control panel and its backdrop. */
 export const DesktopSidePanels: Story = {
   args: { ...desktop, side: { shown: true, content: sideFor() } },
 };
@@ -241,16 +241,16 @@ export const DesktopTerminalOtherMonitor: Story = {
   },
 };
 
-/** The pages over a small desktop window (900 px): the tabs, as on a phone, with the server's
+/** The control panel over a small desktop window (900 px): the tabs, as on a phone, with the server's
  *  numbers in the tool row. */
-export const DesktopSmallWindowPages: Story = {
+export const DesktopSmallWindowControlPanel: Story = {
   args: {
     ...desktop,
     width: 900,
     height: 700,
     screen: { x: 0, y: 0, width: 900, height: 700 },
-    pages: pages({ open: true, onPopOut: fn() }, { width: 900, height: 700, bottom: 0 }),
-    buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
+    controlPanel: controlPanel({ open: true, onPopOut: fn() }, { width: 900, height: 700, bottom: 0 }),
+    buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
   },
 };
 
@@ -259,13 +259,13 @@ export const DesktopIdentify: Story = {
   args: { ...desktop, identify: 1 },
 };
 
-/** A right click on Fullscreen: the Edit layout dialog over the pages, and this window's
+/** A right click on Fullscreen: the Edit layout dialog over the control panel, and this window's
  *  monitor's number in its corner. */
 export const DesktopLayoutDialog: Story = {
   args: {
     ...desktop,
-    pages: pages({ open: true, onPopOut: fn() }, DESKTOP),
-    buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
+    controlPanel: controlPanel({ open: true, onPopOut: fn() }, DESKTOP),
+    buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
     dialog: (
       <LayoutEditorView
         layout={DEFAULT_DESKTOP_LAYOUT}
@@ -285,7 +285,7 @@ export const DesktopLayoutDialog: Story = {
 
 // ---- to play with ----
 
-/** The buttons work: Pages and the tabs, Keyboard (tap: floating; long press: docked), Fit. */
+/** The buttons work: Control panel and the tabs, Keyboard (tap: floating; long press: docked), Fit. */
 export const PhoneInteractive: Story = {
   render: function Render(args) {
     const [open, setOpen] = useState(false);
@@ -305,13 +305,13 @@ export const PhoneInteractive: Story = {
         }
         cursor={{ shape: arrowCursor, x: 120, y: 300, scale: cursorScale() }}
         keyboard={kb}
-        pages={pages({ open, tab, onTab: setTab })}
+        controlPanel={controlPanel({ open, tab, onTab: setTab })}
         buttons={buttons({
-          pagesOpen: open,
+          controlPanelOpen: open,
           keyboardOpen: !!kb,
           keyboardDocked: docked,
           fit: { fits, onFit: () => setFits(true) },
-          onPages: () => setOpen((o) => !o),
+          onControlPanel: () => setOpen((o) => !o),
           onKeyboard: () => !docked && setShown((s) => !s),
           onKeyboardDock: () => {
             setDocked((d) => !d);
@@ -326,7 +326,7 @@ export const PhoneInteractive: Story = {
 /** The mouse at the display's right edge, as high as the buttons, brings them in; away from
  *  them it sends them away. Lower down, the edge brings in the side panels; 48 px left of them
  *  sends them away.
- *  The button at the bottom left stands for Super+Space: it shows or hides the pages. */
+ *  The button at the bottom left stands for Super+Space: it shows or hides the control panel. */
 export const DesktopInteractive: Story = {
   args: { ...desktop },
   render: function Render(args) {
@@ -348,14 +348,14 @@ export const DesktopInteractive: Story = {
         >
           <NgScreenView
             {...args}
-            pages={pages({ open, tab, onTab: setTab, onPopOut: fn() }, DESKTOP)}
-            // The pages' own story data has the side panels in them while they are open
+            controlPanel={controlPanel({ open, tab, onTab: setTab, onPopOut: fn() }, DESKTOP)}
+            // The control panel's own story data has the side panels in it while it is open
             side={{ shown: side && !open, content: sideFor() }}
             buttons={buttons({
-              pagesOpen: open,
+              controlPanelOpen: open,
               keyboard: false,
               fit: undefined,
-              onPages: () => setOpen((o) => !o),
+              onControlPanel: () => setOpen((o) => !o),
               away: !open && !peek && !side,
             })}
           />

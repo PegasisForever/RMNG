@@ -123,7 +123,7 @@
 
   /* Glass with nothing of its own behind it: no blur and no shadow, only the tint, the rim and the
      sheen. For pieces on a backdrop that blurs and darkens the screen for them all (the wide
-     pages' columns, `PAGES_BACKDROP`). After `ng-glass-thick`, so it wins over its shadow. */
+     controlPanel' columns, `CONTROL_PANEL_BACKDROP`). After `ng-glass-thick`, so it wins over its shadow. */
   .ng-glass-flat {
     --glass-drop: 0 0 transparent;
     -webkit-backdrop-filter: none;

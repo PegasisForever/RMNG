@@ -295,7 +295,7 @@ export function toggleFullscreen() {
   else {
     const options = keyboard() ? undefined : { keyboardLock: "browser" };
     // Locked here too, not only when an input sees the change: a page that takes no keys
-    // now (`/ng` with its pages open) still gets them once it does
+    // now (`/ng` with its control panel open) still gets them once it does
     void document.documentElement
       .requestFullscreen(options as FullscreenOptions | undefined)
       .then(() => keyboard()?.lock())

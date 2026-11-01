@@ -35,27 +35,27 @@ it stands out of the flat card as a thing to press.
 The assistant's chat bubbles are glass too (`ng-glass`; the operator's own in the other look,
 `ng-glass ng-glass-lit`), as messages that float in the panel; its field and buttons are the
 flat ones below, translucent, not solid. The side panels, the notes, the chat and an open
-ticket scroll with no bar showing (`NO_SCROLLBARS`, `./pages/ui.tsx`).
+ticket scroll with no bar showing (`NO_SCROLLBARS`, `./control/ui.tsx`).
 
 | Class | Use it for | Light | Dark |
 |---|---|---|---|
 | `ng-glass` | Every surface: rim, sheen, short shadow. Blur 8 px. | White tint 35 %, dark text, a hairline edge. | Grey tint 30 %, white text. |
 | `ng-glass-thick` | A surface with text to read: a dialog, a tooltip, the monitor's number, a note. Blur 14 px, a long shadow. | White tint 55 %. | Grey tint 50 %. |
 | `ng-glass-control` | A surface that is itself a control (a floating button): more light under the mouse; sinks on a press; an outline on keyboard focus; 45 % when disabled. | Dark outline. | White outline. |
-| `ng-glass-flat` | A piece on a backdrop that already blurs and darkens the screen (the wide pages' columns): no blur and no shadow of its own, only the tint, the rim and the sheen. | | |
-| `ng-glass-lit` | A control whose thing is open (the pages shown, fullscreen on): the other look's glass. | Dark glass, white text. | Frosted white glass, dark text. |
+| `ng-glass-flat` | A piece on a backdrop that already blurs and darkens the screen (the wide control panel's columns): no blur and no shadow of its own, only the tint, the rim and the sheen. | | |
+| `ng-glass-lit` | A control whose thing is open (the control panel shown, fullscreen on): the other look's glass. | Dark glass, white text. | Frosted white glass, dark text. |
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
-The pages are flat glass (`ng-glass-flat`) on a shared backdrop: narrow, their one panel
-(`./pages/ui.tsx`, `PAGES_GLASS`); wide, each column, with no panel round them. Each side panel
+The control panel is flat glass (`ng-glass-flat`) on a shared backdrop: narrow, its one panel
+(`./control/ui.tsx`, `CONTROL_PANEL_GLASS`); wide, each column, with no panel round them. Each side panel
 over the columns is the usual thick glass, with its own blur and long shadow, as it floats over
 them. With a mouse on a large screen, the side panels also slide in over the clone's screen
-without the pages (the mouse at the right edge): the same thick glass, with no backdrop. While the pages are open, a backdrop over the whole screen (under the pages and the
-floating buttons) blurs and darkens it (`PAGES_BACKDROP`, `bg-black/25` / `bg-black/40`, blur
-12 px); it fades in and out with the pages (200 ms), and takes no touch or click. In the pages' own window there is no clone's
+without the control panel (the mouse at the right edge): the same thick glass, with no backdrop. While the control panel is open, a backdrop over the whole screen (under the control panel and the
+floating buttons) blurs and darkens it (`CONTROL_PANEL_BACKDROP`, `bg-black/25` / `bg-black/40`, blur
+12 px); it fades in and out with the control panel (200 ms), and takes no touch or click. In the control panel's own window there is no clone's
 screen under them: the same flat content sits on a solid ground (`bg-neutral-100` /
-`bg-neutral-950`), with no glass. A sheet or a dialog over the pages is solid
+`bg-neutral-950`), with no glass. A sheet or a dialog over the control panel is solid
 (`bg-neutral-100` / `bg-neutral-900`): over a dimmed page, glass would look murky.
 
 The keyboard (`./KeyboardView.tsx`, `keyboardPanel`) is the one surface with a denser tint: it is
@@ -119,7 +119,7 @@ Each color has its light value and its `dark:` value.
 ## Motion
 
 - A control's light and press: 150 ms, ease out.
-- A piece that comes in or goes out (the floating buttons, the pages): 300 ms, ease out, along
+- A piece that comes in or goes out (the floating buttons, the control panel): 300 ms, ease out, along
   the way it goes (to the right for the buttons).
 - A dialog: in from a blur, 200 ms (`~/components/ModalShell.tsx`).
 - A tooltip: comes after 300 ms of the mouse at rest, fades in.

@@ -11,7 +11,7 @@ import { inPageFrame } from "./__fixtures__/frame";
 import { TicketsView } from "./TicketsView";
 
 const meta = {
-  title: "ng/Pages/TicketsView",
+  title: "ng/Control panel/TicketsView",
   component: TicketsView,
   decorators: [inPageFrame],
   parameters: { layout: "centered" },

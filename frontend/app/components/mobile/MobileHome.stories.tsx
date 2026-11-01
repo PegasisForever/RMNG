@@ -38,7 +38,7 @@ function base() {
 }
 
 const meta = {
-  title: "Mobile/Pages/MobileHome",
+  title: "Mobile/Screens/MobileHome",
   component: MobileHome,
   parameters: { layout: "centered" },
   args: {
@@ -50,7 +50,7 @@ const meta = {
     // here: tapping a row is the phone's whole navigation, and the sign-in-again dialog is
     // mounted by the container beside this page, never inside it.
     onReplaceAccount: makeStoryLink("Settings/Components/ImportAccountModalView", "Replacing"),
-    onSelectClone: makeStoryLink("Mobile/Pages/MobileClone", "Chat"),
+    onSelectClone: makeStoryLink("Mobile/Screens/MobileClone", "Chat"),
     error: null,
   },
   render: (args) => (

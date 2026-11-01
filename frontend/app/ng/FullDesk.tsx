@@ -5,7 +5,8 @@
 // It has two modes, chosen by the input used last (`./inputMode.ts`):
 //
 // - Touch: three floating buttons (`./FloatingButtons.tsx`) open the rest:
-//   - Pages: the tab pages (usage, tickets, clones, notes, settings) over the screen.
+//   - Control panel: the control panel's tabs (usage, tickets, clones, notes,
+//     settings) over the screen.
 //   - Keyboard: a tap shows or hides the keys, floating over the bottom of the screen. The screen
 //     keeps its size; it moves up as far as it takes to keep the cursor above the keys
 //     (`followAxis`). A long press docks the keyboard, or undocks it (`./keyboardDock.ts`). A
@@ -23,14 +24,14 @@
 // - Mouse and keyboard: the mouse, the keys and the clipboard go to the clone as in the viewer
 //   (`~/viewer/input.ts`). The same buttons, less the keyboard's, show when the mode starts,
 //   then slide out of the window to the right; the mouse at the window's right edge, by their
-//   row, brings them back. On a large screen (the pages' wide layout), the mouse at the right
+//   row, brings them back. On a large screen (the control panel's wide layout), the mouse at the right
 //   edge under their row brings in the side panels, the clone's notes and its assistant, over
 //   the screen, and the buttons with them; the mouse and the keys are theirs then, and a move
 //   away sends both out. A
-//   chord (`./shortcut.ts`) shows the pages, with the buttons above them, and hides them again;
+//   chord (`./shortcut.ts`) shows the control panel, with the buttons above it, and hides it again;
 //   so does a click beside them.
 //
-// Where the browser can open windows, the pages can move to a window of their own (`?pages`);
+// Where the browser can open windows, the control panel can move to a window of its own (`?control panel`);
 // while the page is fullscreen, on another screen where there is one (`./otherScreen.ts`), as
 // one on this screen takes the page out of its fullscreen. A button opens the windows of the
 // layout's other monitors while any is not open.
@@ -64,14 +65,14 @@ import { useInputMode } from "./inputMode";
 import { HANDLE_H } from "./KeyboardHandle";
 import { type TouchKind } from "./KeyboardView";
 import { readKeyboardDocked, readKeyboardHeight, saveKeyboardDocked, saveKeyboardHeight } from "./keyboardDock";
-import { NgScreenView, pagesBox } from "./NgScreenView";
+import { NgScreenView, controlPanelBox } from "./NgScreenView";
 import { NgTerminal } from "./NgTerminal";
 import { boxOnOtherScreen } from "./otherScreen";
-import { NgPagesContainer } from "./pages/NgPagesContainer";
-import { WIDE_MIN } from "./pages/WideLayout";
+import { ControlPanelContainer } from "./control/ControlPanelContainer";
+import { WIDE_MIN } from "./control/WideLayout";
 import { clampTo } from "./pointer";
 import { useRemote } from "./remote";
-import { isPagesChord, pagesChordLabel } from "./shortcut";
+import { isControlPanelChord, controlPanelChordLabel } from "./shortcut";
 import { isTyping, useLift } from "./systemKeyboard";
 import type { NgTab } from "./ToolRow";
 
@@ -95,10 +96,10 @@ const RIGHT_EDGE_PX = 2;
 const BUTTONS_MARGIN_PX = 24;
 /** The mouse this far (CSS px) left of the side panels sends them out again. */
 const SIDE_MARGIN_PX = 48;
-/** The pages' own window: its name, and its size when it opens. */
-const PAGES_WINDOW = "rmng-pages";
-const PAGES_WINDOW_W = 560;
-const PAGES_WINDOW_H = 900;
+/** The control panel's own window: its name, and its size when it opens. */
+const CONTROL_PANEL_WINDOW = "rmng-control-panel";
+const CONTROL_PANEL_WINDOW_W = 560;
+const CONTROL_PANEL_WINDOW_H = 900;
 
 type Props = {
   /** The display, CSS px, and the clock bar's and the home bar's safe-area insets. */
@@ -118,7 +119,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const box = useRef<HTMLDivElement>(null);
   const overlay = useRef<HTMLImageElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  /** A desktop (it opens windows: one per monitor, and the pages') or a phone. */
+  /** A desktop (it opens windows: one per monitor, and the control panel's) or a phone. */
   const [kind] = useState(clientKind);
   const windows = kind === "desktop";
   const mode = useInputMode();
@@ -135,15 +136,15 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const [docked, setDocked] = useState(readKeyboardDocked);
   const dockedNow = docked && !mouse;
   const keysShown = !mouse && (keyboard || docked);
-  /** The pages over the screen, and the tab they show; the Edit layout dialog. */
-  const [pages, setPages] = useState(false);
+  /** The control panel over the screen, and the tab it shows; the Edit layout dialog. */
+  const [controlPanel, setControlPanel] = useState(false);
   const [tab, setTab] = useState<NgTab>("clones");
   const [layoutOpen, setLayoutOpen] = useState(false);
   /** Mouse mode: the buttons are in the window (the mode is new, or the mouse is at the top). */
   const [peek, setPeek] = useState(false);
-  /** The pages' wide layout fits: the side panels can come in without them. */
-  const wide = pagesBox(width, height, bottom).width >= WIDE_MIN;
-  /** Mouse mode, wide: the side panels are in the window without the pages; and their box. */
+  /** The control panel's wide layout fits: the side panels can come in without it. */
+  const wide = controlPanelBox(width, height, bottom).width >= WIDE_MIN;
+  /** Mouse mode, wide: the side panels are in the window without the control panel; and their box. */
   const [sidePeek, setSidePeek] = useState(false);
   const [sideAt, setSideAt] = useState<HTMLDivElement | null>(null);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
@@ -188,27 +189,27 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const mine = layout?.monitors[monitor];
   const fits = !mine || (mine.width === target.width && mine.height === target.height);
 
-  // A popped-out pages window, while it is open
+  // A popped-out control panel window, while it is open
   const popout = useRef<Window | null>(null);
-  /** The chord: the pages, or their own window when it is open. */
-  const togglePages = () => {
+  /** The chord: the control panel, or its own window when it is open. */
+  const toggleControlPanel = () => {
     const w = popout.current;
     if (w && !w.closed) w.focus();
-    else setPages((p) => !p);
+    else setControlPanel((p) => !p);
   };
   /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. */
-  const mouseInput = mouse && !pages && !layoutOpen && !sidePeek;
-  const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, onChord: togglePages });
+  const mouseInput = mouse && !controlPanel && !layoutOpen && !sidePeek;
+  const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, onChord: toggleControlPanel });
 
   // The chord while the clone does not get the keys (the viewer's input takes it otherwise)
-  const chordRef = useRef(togglePages);
-  chordRef.current = togglePages;
+  const chordRef = useRef(toggleControlPanel);
+  chordRef.current = toggleControlPanel;
   const mouseInputRef = useRef(mouseInput);
   mouseInputRef.current = mouseInput;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       // The terminal took it already (`./NgTerminal.tsx`)
-      if (mouseInputRef.current || e.defaultPrevented || !isPagesChord(e)) return;
+      if (mouseInputRef.current || e.defaultPrevented || !isControlPanelChord(e)) return;
       e.preventDefault();
       if (!e.repeat) chordRef.current();
     };
@@ -275,7 +276,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     window.addEventListener("pointermove", onMove, { capture: true, passive: true });
     return () => window.removeEventListener("pointermove", onMove, { capture: true });
   }, [mouse, wide]);
-  const sideShown = wide && (pages || sidePeek);
+  const sideShown = wide && (controlPanel || sidePeek);
   // Out of the window, the side panels keep no focus: the keys go back to the clone
   useEffect(() => {
     const a = document.activeElement;
@@ -350,31 +351,31 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const y = still ? fit.top : followAxis(prev.y, cy, h, visible, height, CURSOR_MARGIN, buttonsEnd);
   at.current = { x, y, shown };
 
-  // The phone's keyboard lifts the pages so all of the open one is above it
-  const panel = pagesBox(width, height, bottom);
+  // The phone's keyboard lifts the control panel so all of the open one is above it
+  const panel = controlPanelBox(width, height, bottom);
   const lift = useLift(panel.top + panel.height);
 
   const onDownCapture = (e: PointerEvent<HTMLDivElement>) => {
     r.sounds.unlock();
     const target = e.target as Element;
-    // A touch outside the pages puts the phone's keyboard away
+    // A touch outside the control panel puts the phone's keyboard away
     if (isTyping() && !target.closest("[role=tabpanel]")) {
       (document.activeElement as HTMLElement).blur();
     }
-    // With a mouse, a click beside the pages and the buttons puts the pages away. A menu of
+    // With a mouse, a click beside the control panel and the buttons puts the control panel away. A menu of
     // theirs (a card's ⋯) is drawn on the body, out of their box, and is theirs all the same.
     if (
       mouse &&
-      pages &&
+      controlPanel &&
       !layoutOpen &&
       !panelRef.current?.contains(target) &&
       !target.closest("[data-ng-buttons], [data-ng-side], [role=menu]")
     ) {
-      setPages(false);
+      setControlPanel(false);
     }
   };
 
-  // The whole display is the trackpad (under the keyboard, the pages and the buttons)
+  // The whole display is the trackpad (under the keyboard, the control panel and the buttons)
   const pad = (kind: TouchKind, e: PointerEvent<HTMLDivElement>) => {
     if (kind === "down" && e.pointerType === "mouse") e.currentTarget.setPointerCapture(e.pointerId);
     r.onPadTouch(kind, e.pointerId, e.clientX, e.clientY);
@@ -433,19 +434,19 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     setKeyboard(false);
     setZoom(1);
   };
-  /** Move the pages to a window of their own (an open one is only brought to the front). While
+  /** Move the control panel to a window of its own (an open one is only brought to the front). While
    *  the page is fullscreen, on another screen where there is one (an open one is moved there). */
   const popOut = async () => {
-    const box = fullscreen ? await boxOnOtherScreen(PAGES_WINDOW_W, PAGES_WINDOW_H) : null;
+    const box = fullscreen ? await boxOnOtherScreen(CONTROL_PANEL_WINDOW_W, CONTROL_PANEL_WINDOW_H) : null;
     const place = box ? `,left=${box.left},top=${box.top},width=${box.width},height=${box.height}` : "";
-    const win = window.open("", PAGES_WINDOW, `popup,width=${PAGES_WINDOW_W},height=${PAGES_WINDOW_H}${place}`);
+    const win = window.open("", CONTROL_PANEL_WINDOW, `popup,width=${CONTROL_PANEL_WINDOW_W},height=${CONTROL_PANEL_WINDOW_H}${place}`);
     // Blocked: the permission's question took the click's time; the next click opens it
     if (!win) return;
-    if (win.location.href === "about:blank") win.location.replace("/ng/app?pages");
+    if (win.location.href === "about:blank") win.location.replace("/ng/app?control-panel");
     else if (box) win.moveTo(box.left, box.top);
     win.focus();
     popout.current = win;
-    setPages(false);
+    setControlPanel(false);
   };
 
   return (
@@ -470,7 +471,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
               top={top}
               cursor={mouse ? null : r.termPos}
               onPad={pad}
-              onChord={togglePages}
+              onChord={toggleControlPanel}
             />
           ) : (
             <div className="absolute inset-0 bg-black" />
@@ -503,19 +504,19 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         heard: r.heard,
         note: r.note,
       }}
-      pages={{
-        open: pages,
+      controlPanel={{
+        open: controlPanel,
         lift,
         panelRef,
         content: (
-          <NgPagesContainer
+          <ControlPanelContainer
             width={panel.width}
             glass
             usage={r.usage}
             badges={r.unread ? { clones: r.unread } : undefined}
             onPopOut={windows ? () => void popOut() : undefined}
-            tab={pages ? tab : null}
-            onTab={(t) => (t ? setTab(t) : setPages(false))}
+            tab={controlPanel ? tab : null}
+            onTab={(t) => (t ? setTab(t) : setControlPanel(false))}
             state={r.live.state}
             stats={r.live.stats}
             sound={r.soundReport}
@@ -526,7 +527,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       }}
       side={wide ? { shown: sideShown, ref: setSideAt } : null}
       buttons={{
-        pagesOpen: pages,
+        controlPanelOpen: controlPanel,
         keyboard: !mouse,
         keyboardOpen: keysShown,
         keyboardDocked: docked,
@@ -534,16 +535,16 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         // A terminal fits by itself
         fit: r.termContent || (windows && fullscreen !== null) ? undefined : { fits, onFit: () => fitTo(target) },
         badge: r.unread,
-        onPages: () => setPages((p) => !p),
+        onControlPanel: () => setControlPanel((p) => !p),
         onKeyboard: () => !docked && setKeyboard((k) => !k),
         onKeyboardDock: toggleDock,
         onLayout: () => setLayoutOpen(true),
         fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
-        pagesKeys: pagesChordLabel(),
+        controlPanelKeys: controlPanelChordLabel(),
         monitors: missing.length ? { missing, onOpen: openMissing } : undefined,
         // In mouse mode, out of the window unless the mouse brought them in (or the side
-        // panels, which bring them too), or the pages or the dialog are open
-        away: mouse && !peek && !sidePeek && !pages && !layoutOpen,
+        // panels, which bring them too), or the control panel or the dialog are open
+        away: mouse && !peek && !sidePeek && !controlPanel && !layoutOpen,
       }}
       dialog={
         layoutOpen ? (

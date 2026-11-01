@@ -18,17 +18,17 @@ const meta = {
   ],
   parameters: { layout: "centered" },
   args: {
-    pagesOpen: false,
+    controlPanelOpen: false,
     keyboardOpen: false,
     keyboardDocked: false,
     fit: { fits: false, onFit: fn() },
     badge: 0,
-    onPages: fn(),
+    onControlPanel: fn(),
     onKeyboard: fn(),
     onKeyboardDock: fn(),
     onLayout: fn(),
     fullscreen: { on: false, toggle: fn() },
-    pagesKeys: "Super + Space (in fullscreen)",
+    controlPanelKeys: "Super + Space (in fullscreen)",
   },
 } satisfies Meta<typeof FloatingButtons>;
 
@@ -41,8 +41,8 @@ export const Default: Story = {};
 /** The keyboard is open, and the monitor fits: Fit is dim. */
 export const KeyboardOpenFits: Story = { args: { keyboardOpen: true, fit: { fits: true, onFit: fn() } } };
 
-/** Two clones stopped working unseen: a count on Pages. */
-export const Unread: Story = { args: { badge: 2, pagesOpen: true } };
+/** Two clones stopped working unseen: a count on Control panel. */
+export const Unread: Story = { args: { badge: 2, controlPanelOpen: true } };
 
 /** The keyboard is docked: lit, with a bar under its icon. */
 export const KeyboardDocked: Story = { args: { keyboardOpen: true, keyboardDocked: true } };
