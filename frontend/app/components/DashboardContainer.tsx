@@ -633,6 +633,7 @@ export function DashboardContainer({
       <TicketPanel
         ticket={selectedTicket}
         onCopyBranchName={copyText}
+        onCopyTicketLink={copyText}
         description={
           <ClientOnly>
             <Suspense
@@ -717,6 +718,7 @@ export function DashboardContainer({
             <TicketPanel
               ticket={openTicket}
               onCopyBranchName={copyText}
+              onCopyTicketLink={copyText}
               description={
                 <ClientOnly>
                   <Suspense

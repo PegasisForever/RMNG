@@ -217,6 +217,7 @@ export function MobileDashboardContainer({
             <TicketPanel
               ticket={openTicket}
               onCopyBranchName={copyText}
+              onCopyTicketLink={copyText}
               description={
                 <ClientOnly>
                   <Suspense fallback={<PaneFallback label="Loading description…" />}>

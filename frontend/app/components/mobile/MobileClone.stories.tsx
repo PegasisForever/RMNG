@@ -66,6 +66,7 @@ function TicketFixture() {
         <TicketDescription markdown={ticketCloned.description ?? ""} onSave={fn()} />
       }
       onCopyBranchName={fn(async () => true)}
+      onCopyTicketLink={fn(async () => true)}
       onTitleChange={fn()}
     />
   );

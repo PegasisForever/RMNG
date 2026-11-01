@@ -20,7 +20,7 @@
 //
 // Pure, like AppShellV2: the description arrives as a slot, because rendering markdown means
 // BlockNote, which is browser-only and lazily loaded.
-import { Check, ExternalLink, GitBranch, Plus } from "lucide-react";
+import { Check, ExternalLink, GitBranch, Link2, type LucideIcon, Plus } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import TextareaAutosize from "react-textarea-autosize";
 
@@ -30,7 +30,7 @@ import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import type { TicketLabel, TicketLink, TicketWorkflowState } from "~/lib/linear/types";
 import { workspaceBadge } from "~/lib/workspace";
 
-/** Copy the ticket's git branch name. It sits in the header rather than among the
+/** Copy the ticket's git branch name, or its link. It sits in the header rather than among the
  *  properties because it is the one property nobody reads — they copy it and paste it into
  *  a terminal, so the button is the whole point and the string is just its tooltip.
  *
@@ -38,33 +38,37 @@ import { workspaceBadge } from "~/lib/workspace";
  *  the button is currently showing a tick is this button's own business and nothing else's,
  *  so it stays here with the timer that clears it. Only a write that actually landed turns
  *  it on, which is why the callback answers with whether it did. */
-function CopyBranch({
-  ticket,
-  onCopyBranchName,
+function CopyButton({
+  text,
+  label,
+  icon: Icon,
+  onCopy,
 }: {
-  ticket: LinearTicket;
-  onCopyBranchName: (branch: string) => Promise<boolean>;
+  /** What goes on the clipboard; the tooltip shows it. */
+  text: string;
+  label: string;
+  icon: LucideIcon;
+  onCopy: (text: string) => Promise<boolean>;
 }) {
   const [copied, setCopied] = useState(false);
-  const branch = branchNameOf(ticket);
   return (
     <button
       type="button"
       onClick={() => {
-        void onCopyBranchName(branch).then((ok) => {
+        void onCopy(text).then((ok) => {
           if (!ok) return;
           setCopied(true);
           window.setTimeout(() => setCopied(false), 1200);
         });
       }}
-      title={`Copy branch name: ${branch}`}
-      aria-label="Copy branch name"
+      title={`${label}: ${text}`}
+      aria-label={label}
       className="shrink-0 cursor-pointer rounded p-1 text-slate-400 hover:bg-slate-500/10 hover:text-slate-600 dark:hover:text-slate-300"
     >
       {copied ? (
         <Check aria-hidden className="size-4 text-emerald-600 dark:text-emerald-400" />
       ) : (
-        <GitBranch aria-hidden className="size-4" />
+        <Icon aria-hidden className="size-4" />
       )}
     </button>
   );
@@ -268,6 +272,8 @@ export interface TicketPanelProps {
    *  Writing there is a browser API and its two paths can both refuse, so the container owns
    *  the call and the header shows its tick only on a real success. */
   onCopyBranchName: (branch: string) => Promise<boolean>;
+  /** Put the ticket's Linear link on the clipboard, answering with whether it landed. */
+  onCopyTicketLink: (url: string) => Promise<boolean>;
   /** Start a clone on this ticket. Absent ⇒ the button is not offered. */
   onCreateClone?: () => void;
   /** Persist a new title to Linear. Absent ⇒ the title is read-only. */
@@ -355,6 +361,7 @@ export function TicketPanel({
   ticket,
   description,
   onCopyBranchName,
+  onCopyTicketLink,
   onCreateClone,
   onTitleChange,
   onStateChange,
@@ -422,7 +429,8 @@ export function TicketPanel({
             />
           ) : null}
         </div>
-        <CopyBranch ticket={ticket} onCopyBranchName={onCopyBranchName} />
+        <CopyButton text={branchNameOf(ticket)} label="Copy branch name" icon={GitBranch} onCopy={onCopyBranchName} />
+        <CopyButton text={ticket.url} label="Copy ticket link" icon={Link2} onCopy={onCopyTicketLink} />
         <a
           href={ticket.url}
           target="_blank"

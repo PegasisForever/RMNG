@@ -49,6 +49,7 @@ export const OpenTicket: Story = {
       <TicketPanel
         ticket={ticketDetailed}
         onCopyBranchName={async () => true}
+        onCopyTicketLink={async () => true}
         onCreateClone={fn()}
         onTitleChange={fn()}
         onStateChange={fn()}

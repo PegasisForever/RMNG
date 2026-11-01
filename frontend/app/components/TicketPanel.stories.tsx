@@ -42,6 +42,7 @@ const meta = {
     // write landed. Answering `true` is what a working clipboard answers, so the story shows
     // the tick without touching the real one.
     onCopyBranchName: fn(async () => true),
+    onCopyTicketLink: fn(async () => true),
     onCreateClone: fn(),
     onTitleChange: fn(),
     onStateChange: fn(),

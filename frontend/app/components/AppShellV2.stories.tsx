@@ -176,6 +176,7 @@ function TicketFixture({
         />
       }
       onCopyBranchName={fn(async () => true)}
+      onCopyTicketLink={fn(async () => true)}
       onCreateClone={onCreateClone}
       onTitleChange={fn()}
       // The header's two menus, on the same fixtures the panel's own stories use, so the

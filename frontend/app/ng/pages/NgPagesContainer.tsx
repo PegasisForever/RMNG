@@ -301,6 +301,7 @@ export function NgPagesContainer({
     <TicketPanel
       ticket={t}
       onCopyBranchName={copyText}
+      onCopyTicketLink={copyText}
       description={
         <Suspense fallback={<Loading label="Loading…" />}>
           <TicketDescription key={t.id} markdown={t.description ?? ""} onSave={(md) => editTicket(t, { description: md })} />

@@ -25,6 +25,7 @@ function Ticket({ ticket, own }: { ticket: LinearTicket; own: boolean }) {
     <TicketPanel
       ticket={ticket}
       onCopyBranchName={async () => true}
+      onCopyTicketLink={async () => true}
       description={<TicketDescription markdown={ticket.description ?? ""} onSave={fn()} />}
       onTitleChange={fn()}
       onStateChange={fn()}
