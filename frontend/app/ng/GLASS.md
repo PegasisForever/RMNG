@@ -39,8 +39,9 @@ no sheen, no shadow, no glow.
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
-The pages' panel (`./pages/ui.tsx`, `PAGES_GLASS`) is glass with a denser tint too: light grey at
-80 %, dark grey at 78 %, as it is full of small text. In the pages' own window there is no clone's
+The pages' panel (`./pages/ui.tsx`, `PAGES_GLASS`, narrow) is glass with a denser tint too: light
+grey at 80 %, dark grey at 78 %, as it is full of small text. Wide, the pages have no panel: each
+column, and each side panel over the columns, is the usual thick glass. In the pages' own window there is no clone's
 screen under them: the same flat content sits on a solid ground (`bg-neutral-100` /
 `bg-neutral-950`), with no glass. A sheet or a dialog over the pages is solid
 (`bg-neutral-100` / `bg-neutral-900`): over a dimmed page, glass would look murky.
