@@ -18,6 +18,7 @@ import {
   controlPanelFor,
   sideFor,
 } from "./__fixtures__/screen";
+import { type Insets, NO_INSETS } from "./geometry";
 import { NgScreenView, type NgScreenViewProps, controlPanelBox } from "./NgScreenView";
 import type { NgTab } from "./ToolRow";
 
@@ -42,11 +43,11 @@ const buttons = (over: Partial<NonNullable<NgScreenViewProps["buttons"]>> = {}):
 /** The control panel over a display `d` wide (their panel's width: `controlPanelBox`). */
 const controlPanel = (
   over: { open?: boolean; tab?: NgTab; onTab?: (tab: NgTab) => void; badges?: Partial<Record<NgTab, number>>; onPopOut?: () => void } = {},
-  d: { width: number; height: number; bottom: number } = PHONE,
+  d: { width: number; height: number; safe: Insets } = PHONE,
 ): NgScreenViewProps["controlPanel"] => ({
   open: over.open ?? false,
   lift: 0,
-  content: controlPanelFor({ width: controlPanelBox(d.width, d.height, d.bottom).width, tab: over.tab ?? "clones", ...over }),
+  content: controlPanelFor({ width: controlPanelBox(d.width, d.height, d.safe).width, tab: over.tab ?? "clones", ...over }),
 });
 
 const keyboard = (d: typeof PHONE, docked = false): NgScreenViewProps["keyboard"] => ({
@@ -253,7 +254,7 @@ export const DesktopSmallWindowControlPanel: Story = {
     width: 900,
     height: 700,
     screen: { x: 0, y: 0, width: 900, height: 700 },
-    controlPanel: controlPanel({ open: true, onPopOut: fn() }, { width: 900, height: 700, bottom: 0 }),
+    controlPanel: controlPanel({ open: true, onPopOut: fn() }, { width: 900, height: 700, safe: NO_INSETS }),
     buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
   },
 };

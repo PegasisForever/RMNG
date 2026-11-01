@@ -9,7 +9,7 @@ import type { CursorShape } from "~/lib/wire/CursorShape";
 
 export { FakeDesktop } from "./desktop";
 import { HANDLE_H } from "../KeyboardHandle";
-import { naturalKeysHeight } from "../geometry";
+import { type Insets, NO_INSETS, naturalKeysHeight } from "../geometry";
 import { NgTerminalView } from "../NgTerminalView";
 import ClonesStories from "../control/ClonesView.stories";
 import { ClonesView } from "../control/ClonesView";
@@ -30,10 +30,13 @@ import { SidePanels, sideWidthPx, WIDE_MIN, WideLayout } from "../control/WideLa
 import { SIDE_DEFAULT } from "~/lib/sidePanelWidth";
 import { type NgTab, ROW_STATS_MIN, type ServerUsage } from "../ToolRow";
 
-/** The displays: CSS px, and the home bar's inset. */
-export const PHONE = { width: 393, height: 852, bottom: 34 };
-export const PHONE_SIDEWAYS = { width: 852, height: 393, bottom: 21 };
-export const DESKTOP = { width: 1440, height: 900, bottom: 0 };
+/** The displays: CSS px, and their unsafe edges (an iPhone's: the clock bar and the camera
+ *  upright, the camera at a side and the home bar sideways). */
+export const PHONE = { width: 393, height: 852, safe: { top: 59, right: 0, bottom: 34, left: 0 } };
+export const PHONE_SIDEWAYS = { width: 852, height: 393, safe: { top: 0, right: 59, bottom: 21, left: 59 } };
+export const DESKTOP = { width: 1440, height: 900, safe: NO_INSETS };
+/** The width of a display's safe area. */
+export const safeWidth = (d: { width: number; safe: Insets }) => d.width - d.safe.left - d.safe.right;
 
 /** The display's frame, its size from the story's `width` and `height`, in /ng's greys, light or
  *  dark by the Theme in the toolbar (the app: by the OS). It holds what is fixed (a dialog) as
@@ -61,8 +64,8 @@ export const keys = {
 };
 
 /** The keyboard's height on a display: its keys square, at most 45% of it. */
-export const keysHeight = (d: { width: number; height: number; bottom: number }) =>
-  Math.round(Math.min(Math.ceil(naturalKeysHeight(d.width, d.bottom) + HANDLE_H), d.height * 0.45));
+export const keysHeight = (d: { width: number; height: number; safe: Insets }) =>
+  Math.round(Math.min(Math.ceil(naturalKeysHeight(safeWidth(d), d.safe.bottom) + HANDLE_H), d.height * 0.45));
 
 /** An arrow cursor, as the daemon sends it: BGRA, premultiplied, base64. */
 const ARROW = [

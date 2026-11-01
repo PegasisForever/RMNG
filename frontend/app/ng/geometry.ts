@@ -17,6 +17,14 @@ const TOP_ROWS = 2;
 
 type Box = { left: number; top: number; width: number; height: number };
 
+/** The parts of the display at its four edges that are not safe, CSS px: under the clock bar,
+ *  the home bar, the camera's cut-out, the round corners. The clone's screen may show there;
+ *  the cursor, the keys, the buttons and the control panel stay out of them. */
+export type Insets = { top: number; right: number; bottom: number; left: number };
+
+/** A display that is safe to its edges (a desktop's). */
+export const NO_INSETS: Insets = { top: 0, right: 0, bottom: 0, left: 0 };
+
 export type KeysLayout = {
   /** One key unit plus the gap after it: a 1-unit key is `pitch - GAP` wide. */
   pitch: number;

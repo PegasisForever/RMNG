@@ -61,11 +61,11 @@ const LAYER: Record<ModalLayer, string> = {
 };
 
 const PANEL: Record<ModalSize, string> = {
-  sm: "max-h-[90vh] w-full max-w-md overflow-y-auto p-5",
+  sm: "max-h-[min(90vh,100%)] w-full max-w-md overflow-y-auto p-5",
   md: "w-full max-w-lg p-5",
-  lg: "flex max-h-[90vh] w-full max-w-lg flex-col p-5",
+  lg: "flex max-h-[min(90vh,100%)] w-full max-w-lg flex-col p-5",
   panel:
-    "flex h-[42rem] max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden",
+    "flex h-[42rem] max-h-[min(90vh,100%)] w-full max-w-4xl flex-col overflow-hidden",
 };
 
 /** The panel's own surface, identical in all seven dialogs. */
@@ -79,10 +79,10 @@ const GLASS_CHROME = "ng-glass ng-glass-thick rounded-[26px]";
 
 /** `PANEL` with the glass padding (16 px in place of 20). */
 const GLASS_PANEL: Record<ModalSize, string> = {
-  sm: "max-h-[90vh] w-full max-w-md overflow-y-auto p-4",
+  sm: "max-h-[min(90vh,100%)] w-full max-w-md overflow-y-auto p-4",
   md: "w-full max-w-lg p-4",
-  lg: "flex max-h-[90vh] w-full max-w-lg flex-col p-4",
-  panel: "flex h-[42rem] max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden",
+  lg: "flex max-h-[min(90vh,100%)] w-full max-w-lg flex-col p-4",
+  panel: "flex h-[42rem] max-h-[min(90vh,100%)] w-full max-w-4xl flex-col overflow-hidden",
 };
 
 /** Where a dialog goes. `window`: over the whole page, on a dimmed backdrop. `inline`: it
@@ -114,10 +114,17 @@ export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boole
   };
 }
 
+/** The window dialog's space round it: 1rem, plus /ng's unsafe edges (`--ng-safe-*`, set by
+ *  `routes/ng.tsx`; none elsewhere), so a dialog there keeps clear of the clock bar, the home bar
+ *  and a cut-out. */
+const AROUND =
+  "pt-[calc(1rem+var(--ng-safe-top,0px))] pr-[calc(1rem+var(--ng-safe-right,0px))] " +
+  "pb-[calc(1rem+var(--ng-safe-bottom,0px))] pl-[calc(1rem+var(--ng-safe-left,0px))]";
+
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
 export function backdropClass(layer: ModalLayer, closing: boolean, glass = false): string {
   return (
-    `fixed inset-0 ${LAYER[layer]} flex items-center justify-center ${glass ? "bg-black/20 dark:bg-black/35" : "bg-slate-900/30"} p-4 ` +
+    `fixed inset-0 ${LAYER[layer]} flex items-center justify-center ${glass ? "bg-black/20 dark:bg-black/35" : "bg-slate-900/30"} ${AROUND} ` +
     (closing ? MODAL_ANIMATION.backdrop.exit : MODAL_ANIMATION.backdrop.enter)
   );
 }

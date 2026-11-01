@@ -53,6 +53,7 @@ export const KeyboardView = memo(function KeyboardView(p: KeyboardViewProps) {
           to the keys, which are the trackpad. */}
       <PadOutline box={k.keys} shown={p.pad} />
       <div
+        data-ng-keys
         className={`absolute flex flex-col transition-opacity duration-200 ${p.pad ? "opacity-0" : "opacity-100"}`}
         style={{ ...k.keys, gap: GAP }}
         onPointerDown={touch.down}

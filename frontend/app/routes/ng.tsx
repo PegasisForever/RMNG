@@ -15,6 +15,7 @@ import { shellWindow } from "~/lib/host";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
 import { FullDesk } from "~/ng/FullDesk";
 import { ControlPanelWindow } from "~/ng/ControlPanelWindow";
+import type { Insets } from "~/ng/geometry";
 import { takePage } from "~/ng/page";
 import { attachPwa } from "~/ng/pwa";
 import { isTyping } from "~/ng/systemKeyboard";
@@ -23,16 +24,33 @@ export function meta() {
   return [{ title: "RMNG" }];
 }
 
-type Page = { size: [number, number]; top: number; bottom: number };
+type Page = { size: [number, number]; safe: Insets };
 
 function measure(probe: HTMLElement): Page {
-  // A frame has no home bar inset of its own: the shell's window has it
-  const shell = shellWindow();
+  // A frame has no insets of its own: the shell's window has them
+  const shell = shellWindow()?.rmngShell;
+  const s = getComputedStyle(probe);
+  const px = (v: string) => parseFloat(v) || 0;
   return {
     size: [window.innerWidth, window.innerHeight],
-    top: Math.round(shell ? (shell.rmngShell.insetTop?.() ?? 0) : parseFloat(getComputedStyle(probe).paddingTop) || 0),
-    bottom: Math.round(shell ? shell.rmngShell.insetBottom() : parseFloat(getComputedStyle(probe).paddingBottom) || 0),
+    safe: {
+      top: Math.round(shell ? (shell.insetTop?.() ?? 0) : px(s.paddingTop)),
+      right: Math.round(shell ? (shell.insetRight?.() ?? 0) : px(s.paddingRight)),
+      bottom: Math.round(shell ? shell.insetBottom() : px(s.paddingBottom)),
+      left: Math.round(shell ? (shell.insetLeft?.() ?? 0) : px(s.paddingLeft)),
+    },
   };
+}
+
+/** The insets as CSS variables on the page, for what is drawn outside the screen's view (a
+ *  dialog on the body, the monitor's number): `--ng-safe-top`… in a frame, where
+ *  `env(safe-area-inset-*)` is 0. */
+function shareInsets(safe: Insets | null) {
+  const style = document.documentElement.style;
+  for (const side of ["top", "right", "bottom", "left"] as const) {
+    if (safe) style.setProperty(`--ng-safe-${side}`, `${safe[side]}px`);
+    else style.removeProperty(`--ng-safe-${side}`);
+  }
 }
 
 export default function Ng() {
@@ -91,9 +109,15 @@ export default function Ng() {
       window.removeEventListener("orientationchange", update);
       window.visualViewport?.removeEventListener("resize", update);
       document.removeEventListener("focusout", onFocusOut);
+      shareInsets(null);
       givePage();
     };
   }, []);
+
+  const safeKey = page ? JSON.stringify(page.safe) : "";
+  useEffect(() => {
+    if (safeKey) shareInsets(JSON.parse(safeKey) as Insets);
+  }, [safeKey]);
 
   if (setup && !setup.done) {
     // The dashboard's wizard, on its own page: it scrolls, and its text can be selected
@@ -108,7 +132,7 @@ export default function Ng() {
 
   return (
     <div className="fixed inset-0 touch-none select-none overflow-hidden bg-black text-white">
-      <div ref={probe} className="pointer-events-none absolute inset-0 pb-[env(safe-area-inset-bottom)] pt-[env(safe-area-inset-top)]" />
+      <div ref={probe} className="pointer-events-none absolute inset-0 pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)]" />
       {message && page ? (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-8 text-center text-slate-500">
           <div>{message}</div>
@@ -122,8 +146,7 @@ export default function Ng() {
         <FullDesk
           width={page.size[0]}
           height={page.size[1]}
-          top={page.top}
-          bottom={page.bottom}
+          safe={page.safe}
           monitor={monitor}
           onMonitor={setMonitor}
         />

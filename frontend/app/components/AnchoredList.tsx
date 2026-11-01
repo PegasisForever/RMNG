@@ -14,10 +14,16 @@ const GAP = 4;
 
 type Place = { left: number; width: number; top?: number; bottom?: number };
 
+/** An unsafe edge of /ng's display (the clock bar, the home bar), CSS px; 0 elsewhere. */
+function inset(side: "top" | "bottom"): number {
+  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue(`--ng-safe-${side}`)) || 0;
+}
+
 function placeFor(field: HTMLElement): Place {
   const r = field.getBoundingClientRect();
-  const below = window.innerHeight - r.bottom;
-  const up = below < LIST_MAX + GAP && r.top > below;
+  // The room in the safe area under the field, and over it
+  const below = window.innerHeight - inset("bottom") - r.bottom;
+  const up = below < LIST_MAX + GAP && r.top - inset("top") > below;
   return up
     ? { left: r.left, width: r.width, bottom: window.innerHeight - r.top + GAP }
     : { left: r.left, width: r.width, top: r.bottom + GAP };

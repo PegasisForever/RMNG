@@ -61,7 +61,7 @@ import { uploadToClone } from "~/viewer/upload";
 import { attachEditKeys } from "./editKeys";
 import { firstLayout, startScale } from "./firstLayout";
 import { FLOAT_BUTTON, FLOAT_GAP } from "./FloatingButtons";
-import { followAxis, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
+import { followAxis, type Insets, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
 import { useInputMode } from "./inputMode";
 import { HANDLE_H } from "./KeyboardHandle";
 import { type TouchKind } from "./KeyboardView";
@@ -107,11 +107,10 @@ const CONTROL_PANEL_WINDOW_W = 560;
 const CONTROL_PANEL_WINDOW_H = 900;
 
 type Props = {
-  /** The display, CSS px, and the clock bar's and the home bar's safe-area insets. */
+  /** The display, CSS px, and its unsafe edges (the clock bar, the home bar, a cut-out). */
   width: number;
   height: number;
-  top: number;
-  bottom: number;
+  safe: Insets;
   /** The monitor this window shows. */
   monitor: number;
   /** The monitor has another number now (the Edit layout dialog renumbered them). */
@@ -120,7 +119,8 @@ type Props = {
 
 type Size = { width: number; height: number };
 
-export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Props) {
+export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
+  const { top, bottom } = safe;
   const box = useRef<HTMLDivElement>(null);
   const overlay = useRef<HTMLImageElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -150,7 +150,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const [peek, setPeek] = useState(false);
   const [overGroup, setOverGroup] = useState(false);
   /** The control panel's wide layout fits: the side panels can come in without it. */
-  const wide = controlPanelBox(width, height, bottom).width >= WIDE_MIN;
+  const wide = controlPanelBox(width, height, safe).width >= WIDE_MIN;
   /** Touch mode, wide: a swipe from the right edge brought the side panels in. Their box. */
   const [swiped, setSwiped] = useState(false);
   const [sideAt, setSideAt] = useState<HTMLDivElement | null>(null);
@@ -170,7 +170,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   // display, until its bar sets another height
   const keysH = Math.round(
     dragH ??
-      (keysPart ? height * keysPart : Math.min(Math.ceil(naturalKeysHeight(width, bottom) + HANDLE_H), height * KEYBOARD_PART)),
+      (keysPart ? height * keysPart : Math.min(Math.ceil(naturalKeysHeight(width - safe.left - safe.right, bottom) + HANDLE_H), height * KEYBOARD_PART)),
   );
   /** The clone's screen's area: the display, or the part above the docked keyboard. */
   const areaH = dockedNow ? height - keysH : height;
@@ -424,8 +424,8 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   const w = (r.monitor.width * shown) / dpr;
   const h = (r.monitor.height * shown) / dpr;
 
-  /** The part of the display not under the keyboard. */
-  const visible = keysShown ? height - keysH : height;
+  /** Where the view ends at the bottom: the keyboard's top, or the home bar's. */
+  const visible = keysShown ? height - keysH : height - bottom;
 
   // Where the screen goes: as before, but moved as little as keeps the cursor in sight. A zoom
   // keeps the cursor where it was on the display.
@@ -437,18 +437,24 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     const k = shown / prev.shown;
     prev = { x: prev.x + (r.pos.x * prev.shown) / dpr * (1 - k), y: prev.y + (r.pos.y * prev.shown) / dpr * (1 - k), shown };
   }
-  // Docked, or with a mouse, the screen stays in the middle of its area: there is no zoom, and
-  // no keyboard over it
-  const still = dockedNow || mouse;
-  const x = still ? fit.left : followAxis(prev.x, cx, w, width, width, CURSOR_MARGIN);
-  // In touch mode the buttons are always there: the cursor stays below their row too, and the
-  // screen moves down for it, its start no lower than the row's end (black above it)
+  // With a mouse, the screen stays in the middle of its area: the cursor is the mouse's own. In
+  // touch mode the screen may fill the display, but the cursor stays in the safe area: clear of
+  // the sides' insets, above the home bar and the keyboard
+  const x = mouse ? fit.left : followAxis(prev.x, cx, w, width - safe.right, width, CURSOR_MARGIN, safe.left);
+  // The buttons are always there: the cursor stays below their row too, and the screen moves
+  // down for it, its start no lower than the row's end (black above it). Docked, the screen
+  // rests in the middle of its area above the keys, and moves only to keep the cursor out of the
+  // clock bar (a finger there would touch the buttons, or nothing)
   const buttonsEnd = top + FLOAT_GAP * 2 + FLOAT_BUTTON;
-  const y = still ? fit.top : followAxis(prev.y, cy, h, visible, height, CURSOR_MARGIN, buttonsEnd);
+  const y = mouse
+    ? fit.top
+    : dockedNow
+      ? followAxis(prev.y, cy, h, areaH, areaH, CURSOR_MARGIN, top)
+      : followAxis(prev.y, cy, h, visible, height, CURSOR_MARGIN, buttonsEnd);
   at.current = { x, y, shown };
 
   // The phone's keyboard lifts the control panel so all of the open one is above it
-  const panel = controlPanelBox(width, height, bottom);
+  const panel = controlPanelBox(width, height, safe);
   const lift = useLift(panel.top + panel.height);
 
   const onDownCapture = (e: PointerEvent<HTMLDivElement>) => {
@@ -463,7 +469,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         e.stopPropagation();
         return;
       }
-      if (!swiped && e.clientX >= window.innerWidth - SWIPE_EDGE_PX && document.querySelector("[data-ng-side] section")) {
+      if (!swiped && e.clientX >= window.innerWidth - safe.right - SWIPE_EDGE_PX && document.querySelector("[data-ng-side] section")) {
         swipe.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
         e.stopPropagation();
         return;
@@ -565,7 +571,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     <NgScreenView
       width={width}
       height={height}
-      bottom={bottom}
+      safe={safe}
       mode={mode}
       screen={{ x, y, width: w, height: h }}
       boxRef={box}

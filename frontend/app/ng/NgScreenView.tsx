@@ -20,6 +20,10 @@
 //   (`away`), the buttons and the panels by the same distance; in touch mode the buttons stay,
 //   and the panels slide alone (`side.shown`).
 // - A dialog, and the monitor's number while the Edit layout dialog is open in another window.
+//
+// The clone's screen may fill the whole display; everything else stays in the safe area (`safe`:
+// clear of the clock bar, the home bar, a camera's cut-out). The keyboard's and the terminal's
+// grounds reach the edges; their keys and text do not.
 import { type PointerEvent, type ReactNode, type Ref, useEffect, useState } from "react";
 
 import { MODAL_ANIMATION } from "~/components/ModalShell";
@@ -30,7 +34,7 @@ import type { CursorShape } from "~/lib/wire/CursorShape";
 import { Cursor } from "./Cursor";
 import type { DictationState } from "./dictation";
 import { FLOAT_BUTTON, FLOAT_GAP, FloatingButtons } from "./FloatingButtons";
-import { GAP } from "./geometry";
+import { GAP, type Insets } from "./geometry";
 import type { InputMode } from "./inputMode";
 import { HANDLE_H, KeyboardHandle } from "./KeyboardHandle";
 import { CONTROL_PANEL_BACKDROP, CONTROL_PANEL_GLASS } from "./control/ui";
@@ -42,25 +46,27 @@ type Box = { left: number; top: number; width: number; height: number };
 /** How far past its edge a glass panel's long shadow falls, CSS px (`./glass.css`). */
 const SIDE_SHADOW = 48;
 
-/** Where the control panel goes on a display `width`×`height` with `bottom` kept for the home bar: under
- *  the buttons, FLOAT_GAP in from the sides. Wide enough for the dashboard's layout
- *  (`./control/WideLayout.tsx`), they take the display's whole width instead: their columns scroll
- *  out to its edges, and keep the gap inside the row. */
-export function controlPanelBox(width: number, height: number, bottom: number): Box {
-  const inset = width - 2 * FLOAT_GAP;
+/** Where the control panel goes on a display `width`×`height` with `safe` its safe area: under the
+ *  buttons, FLOAT_GAP in from the safe area's sides. Wide enough for the dashboard's layout
+ *  (`./control/WideLayout.tsx`), they take the safe area's whole width instead: their columns
+ *  scroll out to its edges, and keep the gap inside the row. */
+export function controlPanelBox(width: number, height: number, safe: Insets): Box {
+  const room = width - safe.left - safe.right;
+  const inset = room - 2 * FLOAT_GAP;
+  const top = safe.top + FLOAT_GAP * 2 + FLOAT_BUTTON;
   return {
-    left: inset >= WIDE_MIN ? 0 : FLOAT_GAP,
-    top: FLOAT_GAP * 2 + FLOAT_BUTTON,
-    width: inset >= WIDE_MIN ? width : inset,
-    height: height - FLOAT_GAP * 3 - FLOAT_BUTTON - bottom,
+    left: safe.left + (inset >= WIDE_MIN ? 0 : FLOAT_GAP),
+    top,
+    width: inset >= WIDE_MIN ? room : inset,
+    height: height - top - FLOAT_GAP - safe.bottom,
   };
 }
 
 export type NgScreenViewProps = {
-  /** The display, CSS px, and the home bar's safe-area inset. */
+  /** The display, CSS px, and its unsafe edges. */
   width: number;
   height: number;
-  bottom: number;
+  safe: Insets;
   mode: InputMode;
   /** The clone's screen on the display, CSS px. */
   screen: { x: number; y: number; width: number; height: number };
@@ -117,7 +123,7 @@ export type NgScreenViewProps = {
 export function NgScreenView({
   width,
   height,
-  bottom,
+  safe,
   mode,
   screen,
   boxRef,
@@ -143,7 +149,10 @@ export function NgScreenView({
   const areaH = keyboard?.docked ? height - keysH : height;
   /** The part of the display not under the keyboard. */
   const visible = height - keysH;
-  const panel = controlPanelBox(width, height, bottom);
+  const { bottom } = safe;
+  const panel = controlPanelBox(width, height, safe);
+  /** The safe area's width. */
+  const safeW = width - safe.left - safe.right;
   const controlPanelShown = useControlPanelExit(controlPanel.open);
   const place = { left: 0, top: 0, width: screen.width, height: screen.height };
   const on = (f: typeof onPad, kind: TouchKind) => (e: PointerEvent<HTMLDivElement>) => f(kind, e);
@@ -164,8 +173,9 @@ export function NgScreenView({
       </div>
       <img ref={overlayRef} alt="" hidden className="pointer-events-none fixed left-0 top-0 max-w-none" />
       {terminal ? (
-        // Down to the keyboard, or to the home bar
-        <div className="absolute left-0 top-0" style={{ width, height: keyboard ? visible : height - bottom }}>
+        // Down to the keyboard, or to the home bar; clear of the sides' insets (the terminal's own
+        // bar keeps clear of the clock bar)
+        <div className="absolute top-0" style={{ left: safe.left, width: safeW, height: keyboard ? visible : height - bottom }}>
           {terminal}
         </div>
       ) : mouse ? null : keyboard?.docked ? (
@@ -188,7 +198,7 @@ export function NgScreenView({
           onPointerCancel={on(onPad, "cancel")}
         />
       )}
-      <div className="pointer-events-none absolute left-0 top-0" style={{ width, height: visible }}>
+      <div className="pointer-events-none absolute" style={{ left: safe.left, top: safe.top, width: safeW, height: visible - safe.top }}>
         <ScreenNotes {...notes} bottom={(keyboard ? 0 : bottom) + 12} />
       </div>
 
@@ -198,7 +208,9 @@ export function NgScreenView({
           style={{ width, height: keysH }}
         >
           <KeyboardHandle height={keysH} onHeight={keyboard.onHeight} onDone={keyboard.onHeightDone} />
-          <KeyboardView width={width} height={keysH - HANDLE_H} bottom={bottom} {...keyboard.keys} />
+          <div style={{ marginLeft: safe.left }}>
+            <KeyboardView width={safeW} height={keysH - HANDLE_H} bottom={bottom} {...keyboard.keys} />
+          </div>
         </div>
       ) : null}
 
@@ -216,6 +228,7 @@ export function NgScreenView({
       {/* The control panel: mounted from the start, so its data is there when it opens */}
       <div
         ref={controlPanel.panelRef}
+        data-ng-control-panel
         className={`absolute z-40 transition-transform duration-300 ease-out ${controlPanelShown ? "" : "hidden"}`}
         style={{ ...panel, transform: `translateY(${-controlPanel.lift}px)` }}
       >
@@ -244,8 +257,8 @@ export function NgScreenView({
         }`}
         style={{
           gap: FLOAT_GAP,
-          paddingTop: `calc(env(safe-area-inset-top) + ${FLOAT_GAP}px)`,
-          paddingRight: `calc(env(safe-area-inset-right) + ${FLOAT_GAP}px)`,
+          paddingTop: FLOAT_GAP + safe.top,
+          paddingRight: FLOAT_GAP + safe.right,
           paddingBottom: FLOAT_GAP + bottom,
           transform: away ? `translateX(calc(100% + ${SIDE_SHADOW}px))` : undefined,
         }}
