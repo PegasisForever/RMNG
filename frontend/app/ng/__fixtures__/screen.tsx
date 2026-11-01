@@ -9,6 +9,7 @@ import type { CursorShape } from "~/lib/wire/CursorShape";
 
 import { HANDLE_H } from "../KeyboardHandle";
 import { naturalKeysHeight } from "../geometry";
+import { NgTerminalView } from "../NgTerminalView";
 import ClonesStories from "../pages/ClonesView.stories";
 import { ClonesView } from "../pages/ClonesView";
 import NotesStories from "../pages/NotesView.stories";
@@ -111,6 +112,25 @@ export function FakeDesktop() {
         </pre>
       </div>
     </div>
+  );
+}
+
+/** A headless clone's terminal, drawn: its tab bar and a shell in tmux, in place of xterm.js.
+ *  `cursor`: the drawn pointer (touch mode). */
+export function FakeTerminal({ touch = true, cursor = null }: { touch?: boolean; cursor?: { x: number; y: number } | null }) {
+  const g = "text-[#57e389]";
+  const b = "text-[#51a1ff]";
+  return (
+    <NgTerminalView sessions={["main", "build"]} active="main" onPick={fn()} onNew={fn()} top={0} touch={touch} cursor={cursor} onPad={fn()}>
+      <pre className="absolute inset-0 overflow-hidden font-mono text-[14px] leading-[1.1] text-white">
+        <span className={g}>rmng@pega-we-151</span>:<span className={b}>~/RMNG</span>$ cargo test -p wire{"\n"}
+        {"   Compiling wire v0.1.0\n    Finished test [unoptimized] in 4.2s\n     Running 58 tests\n"}
+        {"test result: "}<span className={g}>ok</span>{". 58 passed; 0 failed\n"}
+        <span className={g}>rmng@pega-we-151</span>:<span className={b}>~/RMNG</span>$ git status --short{"\n"}
+        {" M frontend/app/ng/NgTerminal.tsx\n"}
+        <span className={g}>rmng@pega-we-151</span>:<span className={b}>~/RMNG</span>$ <span className="bg-white text-transparent">_</span>
+      </pre>
+    </NgTerminalView>
   );
 }
 

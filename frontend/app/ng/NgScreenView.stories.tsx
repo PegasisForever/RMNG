@@ -8,6 +8,7 @@ import { DEFAULT_DESKTOP_LAYOUT } from "~/lib/clientLayout";
 import {
   DESKTOP,
   FakeDesktop,
+  FakeTerminal,
   PHONE,
   PHONE_SIDEWAYS,
   arrowCursor,
@@ -161,6 +162,23 @@ export const PhoneLayoutDialog: Story = {
   },
 };
 
+/** A headless clone: its terminal in place of the screen, the keyboard always under it, and
+ *  the pointer the keys move drawn over it. The buttons are in the terminal's tab bar (no Fit). */
+export const PhoneTerminal: Story = {
+  args: {
+    picture: null,
+    cursor: null,
+    terminal: <FakeTerminal cursor={{ x: 180, y: 120 }} />,
+    keyboard: keyboard(PHONE, true),
+    buttons: buttons({ keyboardOpen: true, fit: undefined }),
+  },
+};
+
+/** A headless clone with the keyboard hidden: the terminal down to the home bar. */
+export const PhoneTerminalNoKeyboard: Story = {
+  args: { picture: null, cursor: null, terminal: <FakeTerminal />, buttons: buttons({ fit: undefined }) },
+};
+
 // ---- mouse and keyboard mode, on a desktop ----
 
 const desktop = {
@@ -193,6 +211,21 @@ export const DesktopPages: Story = {
     ...desktop,
     pages: pages({ open: true, onPopOut: fn() }),
     buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
+  },
+};
+
+/** A headless clone: its terminal, with the page's keys and mouse (xterm.js's own). */
+export const DesktopTerminal: Story = {
+  args: { ...desktop, picture: null, terminal: <FakeTerminal touch={false} />, buttons: buttons({ keyboard: false, fit: undefined }) },
+};
+
+/** A headless clone in monitor 1's window: its terminal is in monitor 0's. */
+export const DesktopTerminalOtherMonitor: Story = {
+  args: {
+    ...desktop,
+    picture: null,
+    terminal: <div className="absolute inset-0 bg-black" />,
+    notes: { ...notes, note: "This clone has no desktop. Its terminal is in the monitor 0 window." },
   },
 };
 

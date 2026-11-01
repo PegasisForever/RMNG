@@ -4,6 +4,12 @@
 // the modifiers, Fn, Caps Lock, the key clicks and dictation. In mouse and keyboard mode
 // (`./inputMode.ts`): the viewer's own input and clipboard (`~/viewer/input.ts`). And the layout
 // claim. The screen only lays things out.
+//
+// A headless clone has a terminal in place of a desktop (`./NgTerminal.tsx`, in monitor 0's
+// window): the keys type into it (`./termKeys.ts`), Space's drag too (arrows), and dictation's
+// words. The trackpads move a pointer the page draws over the terminal; its clicks, drags and
+// scrolls go to the terminal as a mouse's events, so it selects, or the app that asked for the
+// mouse gets them.
 import { type RefObject, useCallback, useEffect, useRef, useState } from "react";
 
 import { formatLxcUsage } from "~/components/BoardRail";
@@ -12,13 +18,16 @@ import { emptyState } from "~/lib/types";
 import { useLiveState } from "~/lib/useLiveState";
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
 import type { CursorShape } from "~/lib/wire/CursorShape";
+import type { FromBrowser } from "~/lib/wire/FromBrowser";
 import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { ScrollMode } from "~/lib/wire/ScrollMode";
+import type { TermData } from "~/lib/wire/TermData";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 import { attachClipboard } from "~/viewer/clipboard";
 import { type Input, attachInput } from "~/viewer/input";
 import { CODE_TO_EVDEV } from "~/viewer/keycodes";
 import type { SoundReport } from "~/viewer/protocol";
+import type { TermApi } from "~/viewer/terminal";
 
 import { Dictation, type DictationState, textToKeysyms } from "./dictation";
 import { BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, type TouchKind } from "./KeyboardView";
@@ -29,6 +38,7 @@ import { type ModState, Modifiers } from "./modifiers";
 import { PHONE_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
 import { type Session, openSession } from "./session";
 import { isPagesChord, pagesChordHolds } from "./shortcut";
+import { TermKeys } from "./termKeys";
 
 /** The monitor size assumed until the server says the monitor's size. */
 const START_MONITOR = { width: 1002, height: 808 };
@@ -96,7 +106,45 @@ export function useRemote({
   const scale = useRef(1);
 
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
-  const send = (msg: InputMsg) => session.current?.send(msg);
+
+  /** A headless clone: its terminal's output goes into `termSink`; `termApi` is its shown tab
+   *  (`./NgTerminal.tsx` sets both). */
+  const terminal = spec?.content.mode === "terminal";
+  const terminalRef = useRef(terminal);
+  terminalRef.current = terminal;
+  const termSink = useRef<((d: TermData) => void) | null>(null);
+  const termApi = useRef<TermApi | null>(null);
+  const termKeys = useRef(new TermKeys()).current;
+  /** The terminal's pointer, CSS px in the terminal (drawn there), and a mouse's `buttons` down;
+   *  null until a trackpad moves it. */
+  const [termPos, setTermPos] = useState<{ x: number; y: number } | null>(null);
+  const termPointer = useRef({ x: -1, y: -1, buttons: 0 });
+  /** The terminal's pointer, put in its middle the first time, and kept inside it. */
+  const termAt = (dx = 0, dy = 0) => {
+    const p = termPointer.current;
+    const size = termApi.current?.size();
+    if (!size) return p;
+    if (p.x < 0) [p.x, p.y] = [size.width / 2, size.height / 2];
+    p.x = clampTo(p.x + dx, size.width);
+    p.y = clampTo(p.y + dy, size.height);
+    setTermPos({ x: p.x, y: p.y });
+    return p;
+  };
+  const send = (msg: InputMsg) => {
+    if (!terminalRef.current) return session.current?.send(msg);
+    const api = termApi.current;
+    if (msg.kind === "key_code") {
+      const bytes = termKeys.key(msg.keycode, msg.pressed, api?.appCursor() ?? false);
+      if (bytes) api?.input(bytes);
+    } else if (msg.kind === "button") {
+      const button = msg.button === BTN_RIGHT ? 2 : msg.button === BTN_MIDDLE ? 1 : 0;
+      const bit = [1, 4, 2][button];
+      const p = termAt();
+      p.buttons = msg.pressed ? p.buttons | bit : p.buttons & ~bit;
+      api?.mouse(msg.pressed ? "mousedown" : "mouseup", p.x, p.y, { button, buttons: p.buttons, ...termKeys.mods() });
+    }
+  };
+  const sendTerm = useCallback((msg: FromBrowser) => session.current?.sendTerm(msg), []);
 
   /** Mouse mode's input and clipboard while they are attached, and what they are told when
    *  they attach: the last view spec, cursor and connection state. */
@@ -140,6 +188,7 @@ export function useRemote({
       },
       onClipboard: (msg) => viewer.current?.clip.onMessage(msg),
       onClipboardData: (d) => viewer.current?.clip.onData(d),
+      onTermData: (d) => termSink.current?.(d),
       onSoundReport: setSoundReport,
     });
     setSessionNo((n) => n + 1);
@@ -251,6 +300,7 @@ export function useRemote({
       state: setDictation,
       interim: setHeard,
       final: (text) => {
+        if (terminalRef.current) return termApi.current?.input(text);
         for (const keysym of textToKeysyms(text)) {
           send({ kind: "key", keysym, pressed: true });
           send({ kind: "key", keysym, pressed: false });
@@ -305,6 +355,12 @@ export function useRemote({
         keyCode(o.key.code, o.pressed);
         break;
       case "move": {
+        if (terminalRef.current) {
+          const g = pointerGain(Math.hypot(o.dx, o.dy), o.ms);
+          const p = termAt(o.dx * g, o.dy * g);
+          termApi.current?.mouse("mousemove", p.x, p.y, { buttons: p.buttons, ...termKeys.mods() });
+          break;
+        }
         // Screen px for this finger motion, then monitor px
         const g = (pointerGain(Math.hypot(o.dx, o.dy), o.ms) * dpr) / scale.current;
         const c = cursor.current;
@@ -317,11 +373,17 @@ export function useRemote({
         break;
       }
       case "scroll": {
+        // The terminal's lines follow the fingers
+        if (terminalRef.current) {
+          const p = termAt();
+          return termApi.current?.wheel(-o.dy, p.x, p.y);
+        }
         const gain = scrollGain(scroll.current.speed);
         send({ kind: "axis_continuous", dx: o.dx * gain, dy: o.dy * gain, flags: AXIS_FINGER });
         break;
       }
       case "swipe":
+        if (terminalRef.current) break;
         // Up or down: the Win key (GNOME's overview); left or right: Ctrl+Alt+arrow (the
         // workspace beside), the other way, as the content follows the fingers: a swipe to the
         // left brings in the workspace on the right. Chords of their own, past the page's
@@ -336,7 +398,7 @@ export function useRemote({
         send({ kind: "axis_continuous", dx: 0, dy: 0, flags: AXIS_FINGER | AXIS_FINISH });
         break;
       case "zoom":
-        zoomRef.current?.(o.factor);
+        if (!terminalRef.current) zoomRef.current?.(o.factor);
         break;
       case "pad":
         break;
@@ -376,13 +438,14 @@ export function useRemote({
     [],
   );
 
-  const terminal = spec?.content.mode === "terminal";
   const note = !connected
     ? "Connecting…"
     : spec && spec.monitors.length === 0
       ? "No clone is selected."
       : terminal
-        ? "This clone has no desktop."
+        ? monitor === 0
+          ? null
+          : "This clone has no desktop. Its terminal is in the monitor 0 window."
         : live.state.layout && live.state.layout.client !== clientId(kind)
           ? `In use on ${live.state.layout.label === kind ? "another" : "the"} ${live.state.layout.label}. ${
               mouse ? "Click" : "Touch"
@@ -396,6 +459,12 @@ export function useRemote({
     monitor: screen,
     connected,
     terminal,
+    /** The terminal's sessions, and the clone they are of; null: no headless clone. */
+    termContent: spec?.content.mode === "terminal" ? spec.content : null,
+    termSink,
+    termApi,
+    termPos,
+    sendTerm,
     note,
     shape,
     hidden,

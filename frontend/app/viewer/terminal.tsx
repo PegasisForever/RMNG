@@ -2,7 +2,8 @@
 // One xterm.js terminal per tmux session, as tabs, with a "+" that makes a new session. The server (`control-server/src/termplane.rs`)
 // sends each session's tmux output (`term_data`) and resizes every session to the one grid this
 // view reports (`term_resize`). xterm.js does the keys, the mouse modes, selection and
-// scrollback; Ctrl+Shift+C copies and Ctrl+Shift+V pastes.
+// scrollback; Ctrl+Shift+C copies and Ctrl+Shift+V pastes. `useTermTabs` is the terminals
+// without the tab bar, for /ng (`~/ng/NgTerminal.tsx`), which draws its own.
 import "@xterm/xterm/css/xterm.css";
 
 import { FitAddon } from "@xterm/addon-fit";
@@ -52,16 +53,58 @@ interface Tab {
   el: HTMLDivElement;
 }
 
-export function TermView({
-  sessions,
-  send,
-  sink,
-}: {
+/** The shown tab's terminal, for a page that types into it with keys of its own (the /ng
+ *  keyboard) and scrolls it with fingers. */
+export interface TermApi {
+  /** Type `data` (the bytes the keys make) into the shown session. */
+  input(data: string): void;
+  /** A mouse event at `x`, `y` (CSS px from the terminal's top-left corner), as a mouse makes it:
+   *  xterm.js selects, or reports it to the app that asked for the mouse. */
+  mouse(type: "mousedown" | "mouseup" | "mousemove", x: number, y: number, init: MouseEventInit): void;
+  /** Scroll as a mouse wheel at `x`, `y` does, CSS px down. */
+  wheel(deltaY: number, x: number, y: number): void;
+  /** The terminal's size, CSS px. */
+  size(): { width: number; height: number } | null;
+  /** The cursor keys send their application-mode codes (`ESC O A`, not `ESC [ A`). */
+  appCursor(): boolean;
+}
+
+/** `term`'s API for a page with keys and a pointer of its own. */
+function termApi(term: Terminal): TermApi {
+  const screen = () => term.element?.querySelector<HTMLElement>(".xterm-screen") ?? null;
+  const at = (x: number, y: number) => {
+    const r = term.element!.getBoundingClientRect();
+    return { clientX: r.left + x, clientY: r.top + y, bubbles: true, cancelable: true, view: window };
+  };
+  return {
+    input: (data) => term.input(data, true),
+    mouse: (type, x, y, init) => screen()?.dispatchEvent(new MouseEvent(type, { ...at(x, y), ...init })),
+    wheel: (deltaY, x, y) => screen()?.dispatchEvent(new WheelEvent("wheel", { ...at(x, y), deltaY })),
+    size: () => {
+      const r = term.element?.getBoundingClientRect();
+      return r ? { width: r.width, height: r.height } : null;
+    },
+    appCursor: () => term.modes.applicationCursorKeysMode,
+  };
+}
+
+export interface TermTabsOptions {
   sessions: string[];
   send(msg: FromBrowser): void;
   /** The page puts each `term_data` it gets into this. */
   sink: { current: ((d: TermData) => void) | null };
-}) {
+  /** A key the page keeps for itself: true, and xterm.js does nothing with it. */
+  ownKey?: (e: KeyboardEvent) => boolean;
+  /** The shown tab takes the page's keys (xterm.js's textarea has the focus). False on a touch
+   *  screen, where the focus would bring up the system keyboard. Default true. */
+  focus?: boolean;
+  /** Set to the shown tab's terminal while there is one. */
+  api?: { current: TermApi | null };
+}
+
+/** One xterm.js terminal per session, in the box (`box`) the page puts where it wants them,
+ *  and which one is shown. */
+export function useTermTabs({ sessions, send, sink, ownKey, focus = true, api }: TermTabsOptions) {
   const box = useRef<HTMLDivElement>(null);
   const tabs = useRef(new Map<string, Tab>());
   const [active, setActive] = useState<string | null>(null);
@@ -69,6 +112,8 @@ export function TermView({
   const grid = useRef<{ cols: number; rows: number } | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const ownKeyRef = useRef(ownKey);
+  ownKeyRef.current = ownKey;
 
   /** Fit the shown tab to the box, give every tab that grid (the server resizes every session
    *  to it), and tell the server when it changed. */
@@ -108,6 +153,8 @@ export function TermView({
       box.current?.append(el);
       const term = new Terminal({
         theme: THEME,
+        // Without the focus the cursor is still a block, not an outline
+        cursorInactiveStyle: focus ? "outline" : "block",
         fontFamily: '"DejaVu Sans Mono", "Ubuntu Mono", monospace',
         fontSize: 14,
         lineHeight: 1.1,
@@ -116,6 +163,8 @@ export function TermView({
       const f = new FitAddon();
       term.loadAddon(f);
       term.open(el);
+      // On a touch screen the page has its own keys: the focus brings up no system keyboard
+      if (!focus) term.textarea?.setAttribute("inputmode", "none");
       const g = grid.current;
       if (g) term.resize(g.cols, g.rows);
       const input = (data: string) =>
@@ -124,6 +173,7 @@ export function TermView({
       // Old-style mouse reports are bytes, not text.
       term.onBinary((data) => send({ t: "term_input", session: name, data: btoa(data) }));
       term.attachCustomKeyEventHandler((e) => {
+        if (ownKeyRef.current?.(e)) return false;
         if (!(e.ctrlKey && e.shiftKey && (e.code === "KeyC" || e.code === "KeyV"))) return true;
         if (e.type === "keydown" && e.code === "KeyC") {
           e.preventDefault(); // Chrome's element inspector
@@ -148,9 +198,23 @@ export function TermView({
   useEffect(() => {
     for (const [name, t] of tabs.current) t.el.classList.toggle("invisible", name !== active);
     fit();
-    if (active) tabs.current.get(active)?.term.focus();
+    const shown = active ? tabs.current.get(active) : undefined;
+    if (shown && focus) shown.term.focus();
+    if (api) api.current = shown ? termApi(shown.term) : null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active]);
+
+  // Touch screen or keys: the keys' focus and the cursor's look follow
+  useEffect(() => {
+    for (const t of tabs.current.values()) {
+      t.term.options.cursorInactiveStyle = focus ? "outline" : "block";
+      if (focus) t.term.textarea?.removeAttribute("inputmode");
+      else t.term.textarea?.setAttribute("inputmode", "none");
+    }
+    const shown = tabs.current.get(activeRef.current ?? "");
+    if (focus) shown?.term.focus();
+    else shown?.term.blur();
+  }, [focus]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -165,10 +229,25 @@ export function TermView({
       ro.disconnect();
       for (const t of all.values()) t.term.dispose();
       all.clear();
+      if (api) api.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  return { box, active, setActive };
+}
+
+export function TermView({
+  sessions,
+  send,
+  sink,
+}: {
+  sessions: string[];
+  send(msg: FromBrowser): void;
+  /** The page puts each `term_data` it gets into this. */
+  sink: { current: ((d: TermData) => void) | null };
+}) {
+  const { box, active, setActive } = useTermTabs({ sessions, send, sink });
   return (
     <div className="flex h-full w-full flex-col bg-[#1c1c1f]">
       <div className="flex shrink-0 gap-0.5 bg-black px-1 pt-1 text-xs text-slate-300">

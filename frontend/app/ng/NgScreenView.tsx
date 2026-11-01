@@ -3,6 +3,8 @@
 //
 // - The clone's screen, at `screen` (the container moves it to keep the cursor in sight). The
 //   app draws the picture on a canvas in `boxRef`; a story puts a `picture` there instead.
+// - Or, for a headless clone, its terminal (`terminal`), from the top down to the keyboard, with
+//   no touch surface of this view's over it (it has its own: `./NgTerminal.tsx`).
 // - Touch mode's surface: the whole display as a trackpad, or, with the keyboard docked, the
 //   area above it as a touch screen. Mouse mode has none: the mouse goes to the canvas.
 // - The notes over the screen: what dictation hears at the bottom, and why
@@ -53,6 +55,9 @@ export type NgScreenViewProps = {
   boxRef?: Ref<HTMLDivElement>;
   /** What shows in that box instead (a story's picture of a desktop). */
   picture?: ReactNode;
+  /** A headless clone's terminal, in place of the screen (over the box, which stays for the
+   *  canvas); null: the screen. */
+  terminal?: ReactNode;
   /** The clone's cursor, drawn in touch mode (`x`, `y` in monitor px; `scale` device px per
    *  monitor px); null: none. */
   cursor: { shape: CursorShape; x: number; y: number; scale: number } | null;
@@ -104,6 +109,7 @@ export function NgScreenView({
   screen,
   boxRef,
   picture,
+  terminal,
   cursor,
   overlayRef,
   onPad,
@@ -141,7 +147,12 @@ export function NgScreenView({
         </div>
       </div>
       <img ref={overlayRef} alt="" hidden className="pointer-events-none fixed left-0 top-0 max-w-none" />
-      {mouse ? null : keyboard?.docked ? (
+      {terminal ? (
+        // Down to the keyboard, or to the home bar
+        <div className="absolute left-0 top-0" style={{ width, height: keyboard ? visible : height - bottom }}>
+          {terminal}
+        </div>
+      ) : mouse ? null : keyboard?.docked ? (
         <div
           aria-label="Touch screen"
           className="absolute left-0 top-0"

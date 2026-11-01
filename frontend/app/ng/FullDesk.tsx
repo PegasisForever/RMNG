@@ -40,6 +40,9 @@
 // fit), not stretched. This browser's layout is in force while it is in use: a window opens,
 // comes to the front, or is touched or clicked.
 //
+// A headless clone has a terminal in place of a desktop: monitor 0's window shows it
+// (`./NgTerminal.tsx`), the others say where it is. Its keyboard is always under it, not over it.
+//
 // The connection and the input are `./remote.ts`'s; the drawing is `./NgScreenView.tsx`'s.
 import { type PointerEvent, useEffect, useRef, useState } from "react";
 
@@ -59,6 +62,7 @@ import { HANDLE_H } from "./KeyboardHandle";
 import { type TouchKind } from "./KeyboardView";
 import { readKeyboardDocked, readKeyboardHeight, saveKeyboardDocked, saveKeyboardHeight } from "./keyboardDock";
 import { NgScreenView, pagesBox } from "./NgScreenView";
+import { NgTerminal } from "./NgTerminal";
 import { boxOnOtherScreen } from "./otherScreen";
 import { NgPagesContainer } from "./pages/NgPagesContainer";
 import { clampTo } from "./pointer";
@@ -192,7 +196,8 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
   mouseInputRef.current = mouseInput;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (mouseInputRef.current || !isPagesChord(e)) return;
+      // The terminal took it already (`./NgTerminal.tsx`)
+      if (mouseInputRef.current || e.defaultPrevented || !isPagesChord(e)) return;
       e.preventDefault();
       if (!e.repeat) chordRef.current();
     };
@@ -411,6 +416,27 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       mode={mode}
       screen={{ x, y, width: w, height: h }}
       boxRef={box}
+      terminal={
+        r.termContent ? (
+          monitor === 0 ? (
+            // A new clone: new terminals, their tabs empty
+            <NgTerminal
+              key={r.termContent.clone}
+              sessions={r.termContent.sessions}
+              send={r.sendTerm}
+              sink={r.termSink}
+              api={r.termApi}
+              touch={!mouse}
+              top={top}
+              cursor={mouse ? null : r.termPos}
+              onPad={pad}
+              onChord={togglePages}
+            />
+          ) : (
+            <div className="absolute inset-0 bg-black" />
+          )
+        ) : null
+      }
       cursor={r.shape && !r.hidden && !r.terminal && r.connected ? { shape: r.shape, x: r.pos.x, y: r.pos.y, scale: shown } : null}
       overlayRef={overlay}
       onPad={pad}
@@ -418,7 +444,8 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       keyboard={
         keysShown
           ? {
-              docked: dockedNow,
+              // Under the terminal, never over it
+              docked: dockedNow || r.termContent !== null,
               height: keysH,
               keys: { fn: r.fn, mods: r.mods, caps: r.caps, onKeyTouch: r.onKeyTouch, pad: r.padMode, dictation: r.dictation },
               onHeight: (h) => setDragH(Math.max(MIN_KEYS_H, Math.min(height * MAX_KEYS_PART, h))),
@@ -461,7 +488,8 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         keyboardOpen: keysShown,
         keyboardDocked: docked,
         // A browser that opens windows fits each monitor in the Edit layout dialog
-        fit: windows && fullscreen !== null ? undefined : { fits, onFit: () => fitTo(target) },
+        // A terminal fits by itself
+        fit: r.termContent || (windows && fullscreen !== null) ? undefined : { fits, onFit: () => fitTo(target) },
         badge: r.unread,
         onPages: () => setPages((p) => !p),
         onKeyboard: () => !docked && setKeyboard((k) => !k),

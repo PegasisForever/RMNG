@@ -8,10 +8,12 @@
 // clipboard is shared (`~/viewer/clipboard.ts`).
 import type { ClipboardMsg } from "~/lib/wire/ClipboardMsg";
 import type { CursorMeta } from "~/lib/wire/CursorMeta";
+import type { FromBrowser } from "~/lib/wire/FromBrowser";
 import type { InputMsg } from "~/lib/wire/InputMsg";
 import type { TouchMsg } from "~/lib/wire/TouchMsg";
 import type { ToBrowser } from "~/lib/wire/ToBrowser";
 import type { ScrollMode } from "~/lib/wire/ScrollMode";
+import type { TermData } from "~/lib/wire/TermData";
 import type { ViewSpec } from "~/lib/wire/ViewSpec";
 import type { ClipboardBytes, SoundReport, WorkerIn, WorkerOut } from "~/viewer/protocol";
 import { attachSound } from "~/viewer/sound";
@@ -24,6 +26,9 @@ export interface Session {
   sendClipboardData(d: ClipboardBytes): void;
   /** A finger on the screen, as a touch screen's touch. */
   touch(msg: TouchMsg): void;
+  /** A message for a headless clone's terminal (`term_input`, `term_resize`,
+   *  `term_new_session`). */
+  sendTerm(msg: FromBrowser): void;
   /** The box is now `width`×`height` device pixels. */
   resize(width: number, height: number): void;
   detach(): void;
@@ -40,6 +45,8 @@ export interface SessionEvents {
   /** The clone's clipboard: a message, and a reply's bytes. */
   onClipboard(msg: ClipboardMsg): void;
   onClipboardData(d: ClipboardBytes): void;
+  /** A headless clone's terminal output (to monitor 0's window only). */
+  onTermData(d: TermData): void;
 }
 
 /** The phone's sound buffer range, in 10 ms packets. */
@@ -81,6 +88,9 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
       case "clipboard":
         events.onClipboard(msg);
         break;
+      case "term_data":
+        events.onTermData(msg);
+        break;
     }
   };
   worker.onmessage = (e: MessageEvent<WorkerOut>) => {
@@ -118,6 +128,7 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
     sendClipboard: (msg) => post({ type: "send", msg: { t: "clipboard", ...msg } }),
     sendClipboardData: (d) => post({ type: "clipboard", data: d }, [d.bytes.buffer]),
     touch: (msg) => post({ type: "send", msg: { t: "touch", ...msg } }),
+    sendTerm: (msg) => post({ type: "send", msg }),
     resize: (width, height) => post({ type: "resize", width, height }),
     detach() {
       sound?.detach();
