@@ -218,6 +218,7 @@ export function pagesFor({
           settingsOpen={tab === "settings"}
           onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
           onPopOut={onPopOut}
+          onLayout={glass ? fn() : undefined}
           rail={<UsageView {...railArgs} rail />}
           board={
             <BoardDnd

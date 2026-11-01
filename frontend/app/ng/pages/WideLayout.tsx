@@ -16,7 +16,7 @@
 // is hidden: a touchpad, a wheel with Shift, or a finger scrolls it.
 //
 // Pure: each part comes in as a slot (`./NgPagesContainer.tsx` fills them).
-import { Settings } from "lucide-react";
+import { MonitorCog, Settings } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -29,6 +29,9 @@ export const WIDE_MIN = 1000;
 
 /** A side panel: glass over the columns, with the usual thick tint (not the columns' denser one),
  *  so the columns under it show through. */
+/** A button in the rail's header. */
+const RAIL_BUTTON = `border-black/10 bg-white/50 hover:bg-white/80 dark:border-white/10 dark:bg-white/[0.06] dark:hover:bg-white/10 ${TEXT_2}`;
+
 const PANEL = `ng-glass ng-glass-thick rounded-2xl pointer-events-auto flex min-h-0 flex-col overflow-hidden transition-[flex-grow] duration-300 ease-out`;
 
 export function WideLayout({
@@ -37,6 +40,7 @@ export function WideLayout({
   settingsOpen,
   onSettings,
   onPopOut,
+  onLayout,
   rail,
   board,
   side,
@@ -50,6 +54,8 @@ export function WideLayout({
   /** Open Settings, or close it. */
   onSettings: () => void;
   onPopOut?: () => void;
+  /** Open the Edit layout dialog; absent: no button (the pages' own window). */
+  onLayout?: () => void;
   /** The accounts' usage. */
   rail: ReactNode;
   /** The columns, the tickets' first. */
@@ -66,6 +72,17 @@ export function WideLayout({
     <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${frame}`}>
       <div className="flex h-12 shrink-0 items-center gap-1.5 pl-3 pr-1.5">
         <h2 className={`min-w-0 flex-1 truncate text-sm font-semibold ${TEXT}`}>RMNG Control</h2>
+        {onLayout ? (
+          <button
+            type="button"
+            onClick={onLayout}
+            aria-label="Edit layout"
+            title="Edit layout"
+            className={`flex size-9 items-center justify-center rounded-md border ${RAIL_BUTTON}`}
+          >
+            <MonitorCog aria-hidden className="size-[18px]" strokeWidth={1.75} />
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={onSettings}
@@ -75,7 +92,7 @@ export function WideLayout({
           className={`flex size-9 items-center justify-center rounded-md border ${
             settingsOpen
               ? `border-transparent ${LIT}`
-              : `border-black/10 bg-white/50 hover:bg-white/80 dark:border-white/10 dark:bg-white/[0.06] dark:hover:bg-white/10 ${TEXT_2}`
+              : RAIL_BUTTON
           }`}
         >
           <Settings aria-hidden className="size-[18px]" strokeWidth={1.75} />

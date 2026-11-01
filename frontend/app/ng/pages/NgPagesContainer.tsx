@@ -124,6 +124,7 @@ export function NgPagesContainer({
   stats,
   sound,
   sideAt,
+  onLayout,
 }: {
   /** The pages' width, CSS px: narrow (tabs) or wide (the dashboard's layout). */
   width: number;
@@ -147,6 +148,8 @@ export function NgPagesContainer({
   /** Wide, over the clone's screen: the screen's box for the side panels, which shows them
    *  without the pages too (`./WideLayout.tsx`); null until it is there. */
   sideAt?: HTMLElement | null;
+  /** Open the Edit layout dialog; absent where there is none (the pages' own window). */
+  onLayout?: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => p.then(() => setError(null)).catch((e: Error) => setError(e.message));
@@ -628,6 +631,7 @@ export function NgPagesContainer({
               settingsOpen={tab === "settings"}
               onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
               onPopOut={onPopOut}
+              onLayout={onLayout}
               rail={page("usage", true)}
               board={
                 // One drag area for both: a ticket dropped on a clone column makes a clone

@@ -516,6 +516,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
             stats={r.live.stats}
             sound={r.soundReport}
             sideAt={wide ? sideAt : undefined}
+            onLayout={() => setLayoutOpen(true)}
           />
         ),
       }}

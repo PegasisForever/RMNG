@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
-import { accountsNow, makeClaudeAccounts, makeGroups } from "~/components/__fixtures__/accounts";
+import { accountsNow, makeClaudeAccounts, makeGroups, makeUsage } from "~/components/__fixtures__/accounts";
 import { cloneOperation, deleteOperation } from "~/components/__fixtures__/operations";
 
 import { inPageFrame } from "./__fixtures__/frame";
@@ -44,3 +44,23 @@ export const WithSound: Story = {
 
 /** No accounts imported yet. */
 export const NoAccounts: Story = { args: { accounts: [] } };
+
+/** An account whose refresh token the provider rejected, with no numbers: only its sign-in
+ *  button, not the server's error. */
+export const SignedOut: Story = {
+  args: {
+    groups: [],
+    accounts: [
+      makeUsage({
+        email: "talktomedi.claude.dev.0@gmail.com",
+        assignable: false,
+        error:
+          "talktomedi.claude.dev.0@gmail.com's Claude refresh token was rejected by the provider, so no refresh is attempted until it is signed in again: refresh 400",
+      }),
+      ...makeClaudeAccounts(accountsNow),
+    ],
+  },
+};
+
+/** The rail (wide, a mouse): one column; the reset times are tooltips, and the scroll has no bar. */
+export const Rail: Story = { args: { rail: true }, parameters: { frameWidth: 256 } };

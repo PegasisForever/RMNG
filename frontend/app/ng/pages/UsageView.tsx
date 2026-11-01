@@ -1,12 +1,13 @@
 // The /ng Usage page: every account's usage, in the pools the dashboard's rail shows, and the
-// jobs the server is running. On the desktop the reset time of a window is a tooltip; a touch
-// screen has no hover, so here it is on the bar, as "in 2h 15m".
+// jobs the server is running. A touch screen has no hover, so the reset time of a window is on
+// its bar, as "in 2h 15m"; in the rail (a mouse), it is a tooltip on the bar.
 //
 // Pure: the accounts, the clock and the locale come in as props, and the refresh and the
 // sign-in go out as callbacks. The server's CPU, memory and disk are in the tool row above, or,
 // where it has no room for them, at the top of this page (`server`).
 //
-// Wide (`rail`), it is the dashboard's rail: one column of accounts at the left of the board.
+// Wide (`rail`), it is the dashboard's rail: one column of accounts at the left of the board,
+// which scrolls with no bar showing.
 import { Folder, RefreshCw } from "lucide-react";
 import { useState } from "react";
 
@@ -83,6 +84,7 @@ export function UsageView({
 
   return (
     <Page
+      noScrollbar={rail}
       header={
         <PageHeader title="Account usage" sub={accounts.length && !rail ? `${accounts.length} accounts` : undefined}>
           {accounts.length ? (
@@ -122,7 +124,7 @@ export function UsageView({
                 ) : (
                   <div className={grid}>
                     {section.accounts.map((a) => (
-                      <AccountCard key={a.id} a={a} now={now} onReplace={onReplaceAccount} />
+                      <AccountCard key={a.id} a={a} now={now} onReplace={onReplaceAccount} hoverReset={rail} />
                     ))}
                   </div>
                 )}
@@ -141,14 +143,20 @@ export function AccountCard({
   a,
   now,
   onReplace,
+  hoverReset = false,
 }: {
   a: ClaudeUsage;
   now: number | null;
   onReplace: (account: ClaudeUsage) => void;
+  /** The reset times are tooltips (a mouse), not on the bars. */
+  hoverReset?: boolean;
 }) {
   const codex = a.provider === "codex";
   const credits = codex && a.resetCredits != null ? Number(a.resetCredits) : null;
   const empty = !a.fiveHour && !a.sevenDay && !a.fable;
+  /** Its tokens no longer work: the sign-in button says all of it, so the server's error (the
+   *  provider's own words) does not show. */
+  const signedOut = a.assignable === false;
   return (
     <article className={`min-w-0 rounded-lg border px-2.5 py-2 ${LINE} ${BOX}`}>
       <div className="flex items-center gap-1.5">
@@ -165,22 +173,24 @@ export function AccountCard({
           </span>
         )}
       </div>
-      {a.assignable === false ? (
+      {signedOut ? (
         <button
           type="button"
           onClick={() => onReplace(a)}
-          className="mt-1.5 w-full rounded-md bg-rose-500/15 py-1.5 text-xs font-medium text-rose-700 active:bg-rose-500/25 dark:text-rose-300"
+          className="ng-glass ng-glass-control mt-1.5 w-full rounded-lg py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400"
         >
           Token expired. Sign in again
         </button>
       ) : null}
       {empty ? (
-        <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">Usage not available{a.error ? `: ${a.error}` : ""}</p>
+        signedOut ? null : (
+          <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-400">Usage not available{a.error ? `: ${a.error}` : ""}</p>
+        )
       ) : (
         <div className={`mt-1.5 space-y-1 ${a.stale ? "opacity-60" : ""}`}>
-          <UsageBar label="5h" win={a.fiveHour} windowMs={FIVE_H_MS} now={now} />
-          <UsageBar label="7d" win={a.sevenDay} windowMs={SEVEN_D_MS} now={now} />
-          <UsageBar label="fable" win={a.fable} windowMs={SEVEN_D_MS} now={now} />
+          <UsageBar label="5h" win={a.fiveHour} windowMs={FIVE_H_MS} now={now} hoverReset={hoverReset} />
+          <UsageBar label="7d" win={a.sevenDay} windowMs={SEVEN_D_MS} now={now} hoverReset={hoverReset} />
+          <UsageBar label="fable" win={a.fable} windowMs={SEVEN_D_MS} now={now} hoverReset={hoverReset} />
           {a.stale ? <p className={`text-[10px] ${TEXT_3}`}>Last refresh failed: old numbers</p> : null}
         </div>
       )}
@@ -188,24 +198,29 @@ export function AccountCard({
   );
 }
 
-/** A usage window: the bar with the even-pace mark, the percent, and when it resets. */
+/** A usage window: the bar with the even-pace mark, the percent, and when it resets (beside it,
+ *  or, `hoverReset`, in a tooltip over the row). */
 function UsageBar({
   label,
   win,
   windowMs,
   now,
+  hoverReset,
 }: {
   label: string;
   win?: ClaudeUsageWindow;
   windowMs: number;
   now: number | null;
+  hoverReset: boolean;
 }) {
   if (!win) return null;
   const pct = Math.min(100, Math.max(0, win.pct));
   const pace = now == null ? null : pacePct(win.resetsAt, windowMs, now);
   const reset = now == null || !win.resetsAt ? null : Date.parse(win.resetsAt);
+  const resetText =
+    reset == null || Number.isNaN(reset) ? "" : reset <= (now ?? 0) ? "reset" : `in ${until(reset - (now ?? 0))}`;
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="group relative flex items-center gap-1.5">
       <span className={`w-7 shrink-0 text-[10px] font-medium ${TEXT_3}`}>{label}</span>
       <div className="relative h-1.5 flex-1 overflow-hidden rounded-sm bg-black/10 dark:bg-white/15">
         <div className={`h-full ${barColor(pct)}`} style={{ width: `${Math.max(1, pct)}%` }} />
@@ -214,9 +229,17 @@ function UsageBar({
         )}
       </div>
       <span className={`w-8 shrink-0 text-right text-[11px] font-medium tabular-nums ${TEXT}`}>{pct}%</span>
-      <span className={`w-14 shrink-0 text-right text-[10px] tabular-nums ${TEXT_3}`}>
-        {reset == null || Number.isNaN(reset) ? "" : reset <= (now ?? 0) ? "reset" : `in ${until(reset - (now ?? 0))}`}
-      </span>
+      {!hoverReset ? (
+        <span className={`w-14 shrink-0 text-right text-[10px] tabular-nums ${TEXT_3}`}>{resetText}</span>
+      ) : resetText ? (
+        // Over the row's right end, after the mouse rests on it (`../GLASS.md`, Motion)
+        <span
+          role="tooltip"
+          className="ng-glass ng-glass-thick pointer-events-none absolute bottom-full right-0 z-10 mb-1 whitespace-nowrap rounded-lg px-2 py-1 text-[11px] tabular-nums opacity-0 transition-opacity group-hover:opacity-100 group-hover:delay-300"
+        >
+          {resetText === "reset" ? `${label}: reset` : `${label} resets ${resetText}`}
+        </span>
+      ) : null}
     </div>
   );
 }

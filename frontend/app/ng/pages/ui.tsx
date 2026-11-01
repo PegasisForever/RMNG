@@ -69,12 +69,15 @@ export function Page({
   error,
   onDismissError,
   fill = false,
+  noScrollbar = false,
   children,
 }: {
   header?: ReactNode;
   error?: string | null;
   onDismissError?: () => void;
   fill?: boolean;
+  /** It scrolls with no bar showing (a narrow column, where the bar takes room). */
+  noScrollbar?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -82,7 +85,9 @@ export function Page({
       {header}
       {error ? <ErrorLine message={error} onDismiss={onDismissError} /> : null}
       <div
-        className={`min-h-0 flex-1 ${fill ? "flex flex-col overflow-hidden" : "overflow-y-auto overscroll-y-contain"}`}
+        className={`min-h-0 flex-1 ${fill ? "flex flex-col overflow-hidden" : "overflow-y-auto overscroll-y-contain"} ${
+          noScrollbar ? "[scrollbar-width:none] [&::-webkit-scrollbar]:hidden" : ""
+        }`}
       >
         {children}
       </div>
