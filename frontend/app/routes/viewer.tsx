@@ -146,6 +146,7 @@ export default function Viewer() {
       overlay: overlay.current,
       monitor,
       send: (msg) => post({ type: "send", msg: { t: "input", ...msg } }),
+      sendLocks: (caps) => post({ type: "send", msg: { t: "locks", caps } }),
       onGesture: () => clip.onGesture(),
       pasteByEvent: () => clip.pasteByEvent(),
       onResize: (width, height) => {

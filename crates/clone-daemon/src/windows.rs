@@ -71,7 +71,7 @@ fn window_id(arg: Option<&Value>) -> Result<u64, String> {
 
 /// Run a JS snippet via `Eval`; return the JSON result string, or a clear error for
 /// the three gnome-shell failure shapes ((false,"")=gated off, (false,err)=threw).
-async fn eval(conn: &zbus::Connection, script: &str) -> Result<String, String> {
+pub(crate) async fn eval(conn: &zbus::Connection, script: &str) -> Result<String, String> {
     let proxy = ShellEvalProxy::new(conn).await.map_err(|e| e.to_string())?;
     let (success, result) = proxy.eval(script).await.map_err(|e| {
         let s = e.to_string();

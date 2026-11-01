@@ -303,6 +303,9 @@ export function toggleFullscreen() {
   }
 }
 
+/** The keys Caps Lock changes: before one goes to the clone, its Caps Lock is brought in step. */
+const LETTER = /^Key[A-Z]$/;
+
 interface InputOptions {
   /** The placeholder canvas: the event target, the CSS cursor host and the pointer lock target. */
   canvas: HTMLCanvasElement;
@@ -311,6 +314,9 @@ interface InputOptions {
   monitor: number;
   /** Send one event. While the socket is down the worker holds it (`holdInput`). */
   send(msg: InputMsg): void;
+  /** Send this keyboard's Caps Lock (on or off), for the clone's to follow: the clone-daemon
+   *  reads the clone's own and taps it when the two differ (`wire::socket::LockState`). */
+  sendLocks(caps: boolean): void;
   /** A key press or click: the user activation the browser wants for some calls (a clipboard
    *  write it refused before). */
   onGesture(): void;
@@ -550,9 +556,11 @@ export function attachInput(o: InputOptions): Input {
       toggleFullscreen();
       return;
     }
-    if (isMac && e.code === "CapsLock") return capsTap(e);
+    if (e.code === "CapsLock") return capsSync(e);
     const k = evdevFor(e.code, isMac);
     if (k === undefined) return;
+    // A letter: the clone's Caps Lock is this keyboard's before it lands
+    if (!e.repeat && LETTER.test(e.code)) o.sendLocks(e.getModifierState("CapsLock"));
     const paste =
       e.code === "KeyV" && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey && o.pasteByEvent();
     if (!paste) e.preventDefault();
@@ -596,7 +604,7 @@ export function attachInput(o: InputOptions): Input {
 
   function onKeyUp(e: KeyboardEvent) {
     if (forPage(e) || !size) return;
-    if (isMac && e.code === "CapsLock") return capsTap(e);
+    if (e.code === "CapsLock") return capsSync(e);
     const k = evdevFor(e.code, isMac);
     if (k === undefined) return;
     e.preventDefault();
@@ -616,12 +624,14 @@ export function attachInput(o: InputOptions): Input {
     if (isMac && (e.code === "MetaLeft" || e.code === "MetaRight")) releaseAll();
   }
 
-  /** Chrome on macOS reports Caps Lock as down when the lock goes on and up when it goes off, so
-   *  each event is one press of the key: a tap flips the clone's own lock. */
-  function capsTap(e: KeyboardEvent) {
+  /** Caps Lock is not sent as a key: a press only flips the clone's lock, and once the two
+   *  disagree every press keeps them apart. Its state is sent instead, on its down and on its
+   *  up (one of them may still say the old state: X11 reports the new one only on the up, and
+   *  Chrome on macOS sends a down when the lock goes on and an up when it goes off), and the
+   *  clone's follows it. */
+  function capsSync(e: KeyboardEvent) {
     e.preventDefault();
-    send({ kind: "key_code", keycode: 58, pressed: true });
-    send({ kind: "key_code", keycode: 58, pressed: false });
+    o.sendLocks(e.getModifierState("CapsLock"));
   }
 
   function onPointerMove(e: PointerEvent) {

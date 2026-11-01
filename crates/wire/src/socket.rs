@@ -130,6 +130,21 @@ pub enum TouchMsg {
     Up { slot: u32 },
 }
 
+/// The lock keys as the operator's own keyboard has them, so the clone's can be brought into
+/// step: the daemon reads the clone's Caps Lock and taps it when the two differ. The browser
+/// sends it in place of the Caps Lock key itself, and before each letter, so a lock the two
+/// sides disagree on (the key went to another window, another device typed, a lost keyup) is
+/// mended at the next letter instead of lasting.
+///
+/// A message of its own, not an [`InputMsg`] kind, for the reason [`TouchMsg`] is: an older
+/// daemon decodes it to `Unknown` and ignores it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../frontend/app/lib/wire/")]
+pub struct LockState {
+    /// Caps Lock is on.
+    pub caps: bool,
+}
+
 /// Mutter `NotifyPointerAxis` flags (org.gnome.Mutter.RemoteDesktop.Session).
 pub mod axis_flags {
     pub const FINISH: u32 = 1 << 0;
@@ -261,6 +276,8 @@ pub enum ServerMsg {
     Input(InputMsg),
     /// A touch screen's touch (see [`TouchMsg`]).
     Touch(TouchMsg),
+    /// The operator's lock keys (see [`LockState`]).
+    Locks(LockState),
     /// Apply a new monitor layout live (no session restart, apps stay open). The daemon
     /// rebuilds a fresh Mutter session with this set, switches capture + input to it, then
     /// stops the old session (make-before-break). Sent on the daemon's `Hello` and on every

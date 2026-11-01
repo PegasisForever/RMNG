@@ -26,6 +26,8 @@ export interface Session {
   sendClipboardData(d: ClipboardBytes): void;
   /** A finger on the screen, as a touch screen's touch. */
   touch(msg: TouchMsg): void;
+  /** This keyboard's Caps Lock, for the clone's to follow. */
+  locks(caps: boolean): void;
   /** A message for a headless clone's terminal (`term_input`, `term_resize`,
    *  `term_new_session`). */
   sendTerm(msg: FromBrowser): void;
@@ -128,6 +130,7 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
     sendClipboard: (msg) => post({ type: "send", msg: { t: "clipboard", ...msg } }),
     sendClipboardData: (d) => post({ type: "clipboard", data: d }, [d.bytes.buffer]),
     touch: (msg) => post({ type: "send", msg: { t: "touch", ...msg } }),
+    locks: (caps) => post({ type: "send", msg: { t: "locks", caps } }),
     sendTerm: (msg) => post({ type: "send", msg }),
     resize: (width, height) => post({ type: "resize", width, height }),
     detach() {

@@ -211,6 +211,7 @@ export function useRemote({
       overlay: overlay.current,
       monitor,
       send: s.send,
+      sendLocks: s.locks,
       onGesture: () => clip.onGesture(),
       pasteByEvent: () => clip.pasteByEvent(),
       // The screen sizes the picture (`./FullDesk.tsx`)

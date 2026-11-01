@@ -391,6 +391,11 @@ impl MediaHandle {
         self.send_msg(clone, &ServerMsg::Touch(touch))
     }
 
+    /// The operator's lock keys, to one clone-daemon (see [`wire::socket::LockState`]).
+    pub fn send_locks(&self, clone: &str, locks: wire::socket::LockState) -> Result<(), String> {
+        self.send_msg(clone, &ServerMsg::Locks(locks))
+    }
+
     fn send_msg(&self, clone: &str, msg: &ServerMsg) -> Result<(), String> {
         let conn = self.conns.lock().unwrap().get(clone).cloned();
         match conn {
@@ -1601,6 +1606,11 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
         FromBrowser::Touch(touch) => {
             if let Some(clone) = app.store.selected() {
                 let _ = handle.send_touch(&clone, touch);
+            }
+        }
+        FromBrowser::Locks(locks) => {
+            if let Some(clone) = app.store.selected() {
+                let _ = handle.send_locks(&clone, locks);
             }
         }
         FromBrowser::Clipboard(msg) => {

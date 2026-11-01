@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::socket::{ClipboardData, ClipboardMsg, CursorMeta, InputMsg, TouchMsg};
+use crate::socket::{ClipboardData, ClipboardMsg, CursorMeta, InputMsg, LockState, TouchMsg};
 
 /// Byte 0 of a binary message: a video frame ([`VideoHeader`]).
 pub const KIND_VIDEO: u8 = 0;
@@ -160,6 +160,8 @@ pub enum FromBrowser {
     Input(InputMsg),
     /// A touch on the selected clone's monitor, from a touch screen (`/ng`).
     Touch(TouchMsg),
+    /// The operator's lock keys, for the selected clone's to follow (see [`LockState`]).
+    Locks(LockState),
     Clipboard(ClipboardMsg),
     TermInput(TermInput),
     TermResize(TermResize),

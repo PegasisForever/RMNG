@@ -13,6 +13,7 @@ mod clipboard;
 mod holder;
 mod ipc;
 mod keysym;
+mod locks;
 mod mcp;
 mod mutter;
 mod session;
@@ -224,11 +225,18 @@ async fn run_shipping(
     {
         let (transport, flags, holder) = (transport.clone(), in_flight.clone(), holder.clone());
         let capture_ctl = capture_ctl.clone();
+        let mut caps = locks::CapsSync::new(tokio::runtime::Handle::current());
         std::thread::spawn(move || {
             loop {
                 match transport.recv() {
                     Ok(ServerMsg::Input(im)) => holder.send(ToHolder::Input(im)),
                     Ok(ServerMsg::Touch(t)) => holder.send(ToHolder::Touch(t)),
+                    // In the reader's own order: the tap is queued before the keys after it
+                    Ok(ServerMsg::Locks(l)) => {
+                        for m in caps.sync(l.caps) {
+                            holder.send(ToHolder::Input(m));
+                        }
+                    }
                     Ok(ServerMsg::Ack(a)) => {
                         if let Some(f) = flags.lock().unwrap().get(&a.monitor_id) {
                             f.store(false, Ordering::Relaxed);
