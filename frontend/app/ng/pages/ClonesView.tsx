@@ -1,6 +1,7 @@
 // The /ng Clones page: the dashboard's board, as one list with a section per column. A tap on
 // a clone puts it on the screen above (the server streams the selected clone); an archived
-// clone has no screen, so a tap on one opens its notes instead.
+// clone has no screen, so a tap on one opens its notes instead. The pages stay open; a double
+// click (a double tap) also closes them, so the clone's screen shows.
 //
 // The card menu, the drags and the column buttons of the desktop are here as: the ⋯ on a row
 // opens a sheet with all the card's actions, "Move to" a column (into an archive column
@@ -93,6 +94,8 @@ export interface ClonesViewProps {
   notesId: string | null;
   /** A tap on a clone: a live one goes on the screen, an archived one opens its notes. */
   onSelect: (clone: Clone) => void;
+  /** A double click on a clone: as a tap, then the pages close (the clone's screen shows). */
+  onOpen: (clone: Clone) => void;
   onNewClone: (columnId: string) => void;
   /** Into `columnId`, at its end. The container archives or restores it when the column says. */
   onMoveToColumn: (clone: Clone, columnId: string) => void;
@@ -168,6 +171,7 @@ export function ClonesView(p: ClonesViewProps) {
         expanded={expanded.has(clone.id)}
         onToggleExpand={() => toggle(clone.id)}
         onSelect={() => p.onSelect(clone)}
+        onOpen={() => p.onOpen(clone)}
         onMenu={(e) => openMenu(clone, e)}
       />
     );
@@ -184,6 +188,7 @@ export function ClonesView(p: ClonesViewProps) {
       op: running.get(c.id),
       selected: c.id === p.selectedId,
       onSelect: () => p.onSelect(c),
+      onOpen: () => p.onOpen(c),
       onDelete: () => p.onDelete(c),
       onChangeAccount: () => p.onChangeAccount(c),
       onRebase: () => p.onRebase(c),
@@ -446,6 +451,7 @@ export function CloneRow({
   expanded,
   onToggleExpand,
   onSelect,
+  onOpen,
   onMenu,
 }: {
   clone: Clone;
@@ -463,6 +469,7 @@ export function CloneRow({
   expanded: boolean;
   onToggleExpand: () => void;
   onSelect: () => void;
+  onOpen: () => void;
   onMenu: (e: MouseEvent<HTMLButtonElement>) => void;
 }) {
   const title = ticket?.title ?? clone.displayName ?? clone.id;
@@ -532,6 +539,7 @@ export function CloneRow({
       <button
         type="button"
         onClick={onSelect}
+        onDoubleClick={onOpen}
         aria-current={selected ? "true" : undefined}
         className={`min-w-0 flex-1 py-1.5 pr-1 text-left ${PRESS} ${child ? "pl-8" : "pl-3"}`}
       >

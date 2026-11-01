@@ -27,6 +27,7 @@ const meta = {
     selectedId: cloneWorking.id,
     notesId: null,
     onSelect: fn(),
+    onOpen: fn(),
     onNewClone: fn(),
     onMoveToColumn: fn(),
     onMove: fn(),

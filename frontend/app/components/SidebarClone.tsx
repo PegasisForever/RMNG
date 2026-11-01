@@ -221,6 +221,9 @@ export interface SidebarCloneProps {
    *  post-add `wait-swap` step), if any. */
   op?: Operation;
   onSelect: () => void;
+  /** A double click on the card (not on a button in it): select it and go to it (/ng: close
+   *  the pages). Absent: a double click is two selects. */
+  onOpen?: () => void;
   onDelete: () => void;
   /** Change this clone's account-group binding. */
   onChangeAccount: () => void;
@@ -425,6 +428,7 @@ export function SidebarClone({
   selected,
   op,
   onSelect,
+  onOpen,
   onDelete,
   onChangeAccount,
   onRebase,
@@ -515,6 +519,9 @@ export function SidebarClone({
       {...dragListeners}
       aria-pressed={selected}
       onClick={onSelect}
+      onDoubleClick={(e) => {
+        if (!(e.target as Element).closest("button")) onOpen?.();
+      }}
       title={clone.id}
       className={`group flex ${touchScroll ? "" : "touch-none"} items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
         // Sub clone rows are indented under their parent; top-level rows keep the normal gutter.

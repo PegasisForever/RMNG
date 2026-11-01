@@ -587,6 +587,11 @@ export function NgPagesContainer({
             selectedId={state.selected ?? null}
             notesId={notesId}
             onSelect={selectClone}
+            onOpen={(clone) => {
+              selectClone(clone);
+              // An archived one has no screen: its notes stay open
+              if (!clone.archived) onTab(null);
+            }}
             onNewClone={(columnId) => open({ kind: "clone", ticketUrl: "", columnId })}
             onMoveToColumn={(clone, columnId) => moveToColumn(clone, columnId)}
             onRenameColumn={(id, title) => applyColumns(columns.map((c) => (c.id === id ? { ...c, title } : c)))}
