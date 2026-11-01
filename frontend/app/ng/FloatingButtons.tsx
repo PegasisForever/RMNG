@@ -1,15 +1,23 @@
-// The three buttons of the /ng screen (`./FullDesk.tsx`), on top in the screen's top-right
-// corner: the pages (usage, tickets, clones, notes, settings), the keyboard, and the fit, which
-// gives the clone's monitor this window's size. A tap on the keyboard shows or hides the floating
-// keyboard; a long press docks it (always shown) or undocks it. A long press on the fit opens the
-// Edit layout dialog. A button whose thing is open is lit; the docked keyboard's has a bar under
-// its icon; the fit is dim when the monitor fits already. A right click is a long press, for a
-// mouse. In mouse and keyboard mode they have no keyboard button, and they slide out of the
-// window to the right when they are not in use (`away`; `./FullDesk.tsx` says when).
-// Where the browser has fullscreen, a fourth button turns it on and off (the page's own
-// fullscreen: only that one hands the system's chords, such as Super+Space, to the page). On a
-// desktop whose layout has monitors with no window open, a button at the left opens their
-// windows, with how many there are on it.
+// The floating buttons of the /ng screen (`./FullDesk.tsx`), on top in the screen's top-right
+// corner, right to left:
+//
+// - Fit (only where the browser opens no windows of its own: a phone, a tablet): gives the
+//   clone's monitor this window's size; dim when it has it already. A long press opens the Edit
+//   layout dialog.
+// - Fullscreen (where the browser has it): the page's own fullscreen, the only one that hands
+//   the system's chords, such as Super+Space, to the page. A long press opens the Edit layout
+//   dialog.
+// - Keyboard (touch mode only): a tap shows or hides the floating keyboard; a long press docks
+//   it (always shown) or undocks it; a bar under its icon while docked.
+// - Pages: the pages (usage, tickets, clones, notes, settings), with a count of the clones that
+//   stopped working unseen.
+// - Monitors (a desktop whose layout has monitors with no window open): opens their windows,
+//   with how many there are on it.
+//
+// A button whose thing is open is lit. A right click is a long press, for a mouse. With a mouse
+// each button says what it does, and what its long press does, in a tooltip under it. In mouse
+// and keyboard mode they slide out of the window to the right when they are not in use (`away`;
+// `./FullDesk.tsx` says when).
 import { Expand, Keyboard, LayoutGrid, Maximize, Minimize, Monitor } from "lucide-react";
 import { type ReactNode, useRef } from "react";
 
@@ -22,13 +30,12 @@ export function FloatingButtons({
   keyboard = true,
   keyboardOpen,
   keyboardDocked,
-  fits,
+  fit,
   badge = 0,
   onPages,
   onKeyboard,
   onKeyboardDock,
-  onFit,
-  onFitSettings,
+  onLayout,
   fullscreen,
   monitors,
   away = false,
@@ -39,17 +46,17 @@ export function FloatingButtons({
   keyboardOpen: boolean;
   /** The keyboard is docked: always shown, under the clone's screen. */
   keyboardDocked: boolean;
-  /** The clone's monitor has this screen's size already. */
-  fits: boolean;
+  /** Fit: whether the clone's monitor has this window's size already, and the fit; absent where
+   *  the browser opens windows of its own (the Edit layout dialog fits each there). */
+  fit?: { fits: boolean; onFit: () => void };
   /** A count on the pages button (clones that stopped working unseen). */
   badge?: number;
   onPages: () => void;
   onKeyboard: () => void;
   /** A long press on the keyboard: dock it, or undock it. */
   onKeyboardDock: () => void;
-  onFit: () => void;
-  /** A long press on Fit: the Edit layout dialog. */
-  onFitSettings: () => void;
+  /** A long press on Fit or on Fullscreen: the Edit layout dialog. */
+  onLayout: () => void;
   /** Fullscreen: on or not, and the switch; absent where the browser has none. */
   fullscreen?: { on: boolean; toggle: () => void };
   /** The layout's monitors with no window open (their numbers), and the opening of their
@@ -82,13 +89,14 @@ export function FloatingButtons({
           <Count n={monitors.missing.length} className="bg-emerald-500" />
         </Round>
       ) : null}
-      <Round label="Pages" on={pagesOpen} onClick={onPages}>
+      <Round label={pagesOpen ? "Hide the pages" : "Pages: usage, tickets, clones, notes, settings"} on={pagesOpen} onClick={onPages}>
         <LayoutGrid aria-hidden className="size-5" />
         {badge ? <Count n={badge} className="bg-rose-500" /> : null}
       </Round>
       {keyboard ? (
         <Round
-          label={keyboardDocked ? "Keyboard, docked" : "Keyboard"}
+          label={keyboardDocked ? "Keyboard, docked" : keyboardOpen ? "Hide the keyboard" : "Keyboard"}
+          hold={keyboardDocked ? "undock it" : "dock it under the screen"}
           on={keyboardOpen}
           onClick={onKeyboard}
           onLongPress={onKeyboardDock}
@@ -98,18 +106,27 @@ export function FloatingButtons({
         </Round>
       ) : null}
       {fullscreen ? (
-        <Round label={fullscreen.on ? "Leave fullscreen" : "Fullscreen"} on={fullscreen.on} onClick={fullscreen.toggle}>
+        <Round
+          label={fullscreen.on ? "Leave fullscreen" : "Fullscreen"}
+          hold="edit the layout"
+          on={fullscreen.on}
+          onClick={fullscreen.toggle}
+          onLongPress={onLayout}
+        >
           {fullscreen.on ? <Minimize aria-hidden className="size-5" /> : <Maximize aria-hidden className="size-5" />}
         </Round>
       ) : null}
-      <Round
-        label={fits ? "The clone fits this window. Hold for the layout" : "Fit the clone to this window. Hold for the layout"}
-        dim={fits}
-        onClick={() => !fits && onFit()}
-        onLongPress={onFitSettings}
-      >
-        <Expand aria-hidden className="size-5" />
-      </Round>
+      {fit ? (
+        <Round
+          label={fit.fits ? "The clone fits this window" : "Fit the clone to this window"}
+          hold="edit the layout"
+          dim={fit.fits}
+          onClick={() => !fit.fits && fit.onFit()}
+          onLongPress={onLayout}
+        >
+          <Expand aria-hidden className="size-5" />
+        </Round>
+      ) : null}
     </div>
   );
 }
@@ -130,6 +147,7 @@ const LONG_PRESS_MS = 500;
 
 function Round({
   label,
+  hold,
   on = false,
   dim = false,
   onClick,
@@ -137,6 +155,8 @@ function Round({
   children,
 }: {
   label: string;
+  /** What the long press does, for the tooltip. */
+  hold?: string;
   on?: boolean;
   dim?: boolean;
   onClick: () => void;
@@ -177,14 +197,23 @@ function Round({
         if (!long.current) onClick();
         long.current = false;
       }}
-      className={`relative flex items-center justify-center rounded-full border shadow-lg backdrop-blur-md ${
+      className={`group relative flex items-center justify-center rounded-full border shadow-lg backdrop-blur-md ${
         on
           ? "border-neutral-200 bg-neutral-100 text-black"
           : "border-white/15 bg-black/55 text-white active:bg-neutral-700"
-      } ${dim ? "opacity-40" : ""}`}
+      }`}
       style={{ width: FLOAT_BUTTON, height: FLOAT_BUTTON, WebkitTouchCallout: "none" }}
     >
-      {children}
+      <span className={`contents ${dim ? "[&>*]:opacity-40" : ""}`}>{children}</span>
+      {/* Under the button, from its right edge, so it stays in the window; only with a mouse
+          (Tailwind's hover needs a device that hovers) */}
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute right-0 top-full z-10 mt-2 flex flex-col items-end whitespace-nowrap rounded-md bg-neutral-900/95 px-2 py-1 text-xs text-white opacity-0 shadow-lg ring-1 ring-white/10 transition-opacity group-hover:opacity-100 group-hover:delay-300"
+      >
+        <span>{label}</span>
+        {hold ? <span className="text-neutral-400">Right-click or hold: {hold}</span> : null}
+      </span>
     </button>
   );
 }

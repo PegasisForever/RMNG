@@ -32,24 +32,22 @@ describe("isPagesChord", () => {
     ...m,
   });
 
-  test("Super+Space, on every system", () => {
-    for (const os of ["linux", "mac", "windows"] as const) expect(isPagesChord(key({ metaKey: true }), os)).toBe(true);
+  test("Super+Space on Linux and Windows", () => {
+    expect(isPagesChord(key({ metaKey: true }), "linux")).toBe(true);
+    expect(isPagesChord(key({ metaKey: true }), "windows")).toBe(true);
+    expect(isPagesChord(key({ altKey: true }), "linux")).toBe(false);
   });
 
-  test("Command+Shift+Space on macOS", () => {
-    expect(isPagesChord(key({ metaKey: true, shiftKey: true }), "mac")).toBe(true);
+  test("Option+Space on macOS, not Command+Space (Spotlight)", () => {
+    expect(isPagesChord(key({ altKey: true }), "mac")).toBe(true);
+    expect(isPagesChord(key({ metaKey: true }), "mac")).toBe(false);
   });
 
-  test("Ctrl+Alt+Space on Linux and Windows, not on macOS (its input source)", () => {
-    expect(isPagesChord(key({ ctrlKey: true, altKey: true }), "windows")).toBe(true);
-    expect(isPagesChord(key({ ctrlKey: true, altKey: true }), "linux")).toBe(true);
-    expect(isPagesChord(key({ ctrlKey: true, altKey: true }), "mac")).toBe(false);
-  });
-
-  test("not Space, or Space alone, or with Ctrl, is not it", () => {
+  test("the old chords, another key, or more modifiers are not it", () => {
+    expect(isPagesChord(key({ ctrlKey: true, altKey: true }), "linux")).toBe(false);
+    expect(isPagesChord(key({ metaKey: true, shiftKey: true }), "mac")).toBe(false);
     expect(isPagesChord(key({ metaKey: true }, "KeyA"), "linux")).toBe(false);
     expect(isPagesChord(key({}), "linux")).toBe(false);
-    expect(isPagesChord(key({ ctrlKey: true }), "linux")).toBe(false);
-    expect(isPagesChord(key({ metaKey: true, ctrlKey: true }), "mac")).toBe(false);
+    expect(isPagesChord(key({ metaKey: true, altKey: true }), "windows")).toBe(false);
   });
 });

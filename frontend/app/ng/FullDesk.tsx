@@ -430,7 +430,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         dictation: r.dictation,
         heard: r.heard,
         note: r.note,
-        hint: hint && !pages ? `The right edge at the top shows the buttons, ${pagesChordLabel()} the pages` : null,
+        hint: hint && !pages ? `The right edge at the top shows the buttons; in fullscreen, ${pagesChordLabel()} the pages` : null,
       }}
       pages={{
         open: pages,
@@ -456,13 +456,13 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         keyboard: !mouse,
         keyboardOpen: keysShown,
         keyboardDocked: docked,
-        fits,
+        // A browser that opens windows fits each monitor in the Edit layout dialog
+        fit: windows && fullscreen !== null ? undefined : { fits, onFit: () => fitTo(target) },
         badge: r.unread,
         onPages: () => setPages((p) => !p),
         onKeyboard: () => !docked && setKeyboard((k) => !k),
         onKeyboardDock: toggleDock,
-        onFit: () => fitTo(target),
-        onFitSettings: () => setLayoutOpen(true),
+        onLayout: () => setLayoutOpen(true),
         fullscreen: fullscreen === null ? undefined : { on: fullscreen, toggle: toggleFullscreen },
         monitors: missing.length ? { missing, onOpen: openMissing } : undefined,
         // In mouse mode, out of the window unless the mouse brought them in, or the pages or

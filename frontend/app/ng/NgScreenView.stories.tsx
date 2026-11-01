@@ -27,13 +27,12 @@ const buttons = (over: Partial<NonNullable<NgScreenViewProps["buttons"]>> = {}):
   pagesOpen: false,
   keyboardOpen: false,
   keyboardDocked: false,
-  fits: true,
+  fit: { fits: true, onFit: fn() },
   badge: 0,
   onPages: fn(),
   onKeyboard: fn(),
   onKeyboardDock: fn(),
-  onFit: fn(),
-  onFitSettings: fn(),
+  onLayout: fn(),
   fullscreen: { on: false, toggle: fn() },
   ...over,
 });
@@ -116,7 +115,7 @@ export const PhoneDictation: Story = {
     notes: { ...notes, dictation: "listening", heard: "run the tests again please" },
     keyboard: { ...keyboard(PHONE)!, keys: { ...keys, dictation: "listening" } },
     screen: { x: 0, y: -120, width: PHONE.width, height: PHONE.height },
-    buttons: buttons({ keyboardOpen: true, fits: false }),
+    buttons: buttons({ keyboardOpen: true, fit: { fits: false, onFit: fn() } }),
   },
 };
 
@@ -147,7 +146,7 @@ const desktop = {
   mode: "mouse" as const,
   screen: { x: 0, y: 0, width: DESKTOP.width, height: DESKTOP.height },
   cursor: null,
-  buttons: buttons({ keyboard: false, away: true }),
+  buttons: buttons({ keyboard: false, fit: undefined, away: true }),
 };
 
 /** Only the clone's screen: the buttons slid up out of the window. */
@@ -159,15 +158,15 @@ export const Desktop: Story = { args: { ...desktop } };
 export const DesktopButtonsIn: Story = {
   args: {
     ...desktop,
-    buttons: buttons({ keyboard: false }),
-    notes: { ...notes, hint: "The right edge at the top shows the buttons, Ctrl Alt Space the pages" },
+    buttons: buttons({ keyboard: false, fit: undefined }),
+    notes: { ...notes, hint: "The right edge at the top shows the buttons; in fullscreen, Super Space the pages" },
   },
 };
 
 /** First open of the site with a layout of three monitors: this window shows monitor 0, and
  *  the button at the left opens the other two. */
 export const DesktopMonitorsToOpen: Story = {
-  args: { ...desktop, buttons: buttons({ keyboard: false, monitors: { missing: [1, 2], onOpen: fn() } }) },
+  args: { ...desktop, buttons: buttons({ keyboard: false, fit: undefined, monitors: { missing: [1, 2], onOpen: fn() } }) },
 };
 
 /** The chord showed the pages, at the right, with the buttons above them (no keyboard button)
@@ -176,7 +175,7 @@ export const DesktopPages: Story = {
   args: {
     ...desktop,
     pages: pages({ open: true, onPopOut: fn() }),
-    buttons: buttons({ pagesOpen: true, keyboard: false }),
+    buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
   },
 };
 
@@ -190,7 +189,7 @@ export const DesktopLayoutDialog: Story = {
   args: {
     ...desktop,
     pages: pages({ open: true, onPopOut: fn() }),
-    buttons: buttons({ pagesOpen: true, keyboard: false }),
+    buttons: buttons({ pagesOpen: true, keyboard: false, fit: undefined }),
     dialog: (
       <LayoutEditorView
         layout={DEFAULT_DESKTOP_LAYOUT}
@@ -233,14 +232,13 @@ export const PhoneInteractive: Story = {
           pagesOpen: open,
           keyboardOpen: !!kb,
           keyboardDocked: docked,
-          fits,
+          fit: { fits, onFit: () => setFits(true) },
           onPages: () => setOpen((o) => !o),
           onKeyboard: () => !docked && setShown((s) => !s),
           onKeyboardDock: () => {
             setDocked((d) => !d);
             setShown(false);
           },
-          onFit: () => setFits(true),
         })}
       />
     );
@@ -249,7 +247,7 @@ export const PhoneInteractive: Story = {
 
 /** The mouse at the display's right edge, as high as the buttons, brings them in; away from
  *  them it sends them away.
- *  The button at the bottom left stands for Ctrl+Alt+Space: it shows or hides the pages. */
+ *  The button at the bottom left stands for Super+Space: it shows or hides the pages. */
 export const DesktopInteractive: Story = {
   args: { ...desktop },
   render: function Render(args) {
@@ -272,6 +270,7 @@ export const DesktopInteractive: Story = {
             buttons={buttons({
               pagesOpen: open,
               keyboard: false,
+              fit: undefined,
               onPages: () => setOpen((o) => !o),
               away: !open && !peek,
             })}
@@ -282,7 +281,7 @@ export const DesktopInteractive: Story = {
           onClick={() => setOpen((o) => !o)}
           className="absolute bottom-3 left-3 z-50 rounded bg-white/90 px-2 py-1 text-xs text-black"
         >
-          Ctrl Alt Space
+          Super Space
         </button>
       </>
     );

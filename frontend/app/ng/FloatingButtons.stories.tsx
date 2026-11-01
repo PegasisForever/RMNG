@@ -19,13 +19,13 @@ const meta = {
     pagesOpen: false,
     keyboardOpen: false,
     keyboardDocked: false,
-    fits: false,
+    fit: { fits: false, onFit: fn() },
     badge: 0,
     onPages: fn(),
     onKeyboard: fn(),
     onKeyboardDock: fn(),
-    onFit: fn(),
-    onFitSettings: fn(),
+    onLayout: fn(),
+    fullscreen: { on: false, toggle: fn() },
   },
 } satisfies Meta<typeof FloatingButtons>;
 
@@ -36,7 +36,7 @@ type Story = StoryObj<typeof meta>;
 export const Default: Story = {};
 
 /** The keyboard is open, and the monitor fits: Fit is dim. */
-export const KeyboardOpenFits: Story = { args: { keyboardOpen: true, fits: true } };
+export const KeyboardOpenFits: Story = { args: { keyboardOpen: true, fit: { fits: true, onFit: fn() } } };
 
 /** Two clones stopped working unseen: a count on Pages. */
 export const Unread: Story = { args: { badge: 2, pagesOpen: true } };
@@ -47,3 +47,7 @@ export const KeyboardDocked: Story = { args: { keyboardOpen: true, keyboardDocke
 /** A desktop layout of three monitors, two with no window open: the button at the left opens
  *  them. */
 export const MonitorsToOpen: Story = { args: { monitors: { missing: [1, 2], onOpen: fn() } } };
+
+/** A desktop: no Fit (the Edit layout dialog fits each monitor; a right click on Fullscreen
+ *  opens it), and no keyboard in mouse mode. Hover a button for its tooltip. */
+export const Desktop: Story = { args: { fit: undefined, keyboard: false } };

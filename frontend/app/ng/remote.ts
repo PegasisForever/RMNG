@@ -28,7 +28,7 @@ import { KeySounds } from "./keySound";
 import { type ModState, Modifiers } from "./modifiers";
 import { PHONE_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
 import { type Session, openSession } from "./session";
-import { isPagesChord } from "./shortcut";
+import { isPagesChord, pagesChordHolds } from "./shortcut";
 
 /** The monitor size assumed until the server says the monitor's size. */
 const START_MONITOR = { width: 1002, height: 808 };
@@ -166,7 +166,7 @@ export function useRemote({
       pasteByEvent: () => clip.pasteByEvent(),
       // The screen sizes the picture (`./FullDesk.tsx`)
       onResize: () => {},
-      chord: { is: (e) => isPagesChord(e), run: () => chordRef.current() },
+      chord: { is: (e) => isPagesChord(e), holds: pagesChordHolds(), run: () => chordRef.current() },
     });
     const { spec: sp, cursor: c, connected: on } = last.current;
     if (sp) input.setLayout(sp.content.mode === "desktop" ? sp.monitors : []);
