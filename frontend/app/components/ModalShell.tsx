@@ -71,8 +71,17 @@ const PANEL_CHROME =
   "rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800";
 
 /** The same in `/ng`'s glass (`~/ng/GLASS.md`), and its backdrop: darker, with no blur (the
- *  panel blurs what is under it). */
-const GLASS_CHROME = "ng-glass ng-glass-thick rounded-2xl";
+ *  panel blurs what is under it). Its corners are 26 px and its padding 16 px, so a button in a
+ *  corner (10 px, `/ng`'s piece radius) is concentric with it (GLASS.md, Shape). */
+const GLASS_CHROME = "ng-glass ng-glass-thick rounded-[26px]";
+
+/** `PANEL` with the glass padding (16 px in place of 20). */
+const GLASS_PANEL: Record<ModalSize, string> = {
+  sm: "max-h-[90vh] w-full max-w-md overflow-y-auto p-4",
+  md: "w-full max-w-lg p-4",
+  lg: "flex max-h-[90vh] w-full max-w-lg flex-col p-4",
+  panel: "flex h-[42rem] max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden",
+};
 
 /** Where a dialog goes. `window`: over the whole page, on a dimmed backdrop. `inline`: it
  *  fills the nearest positioned box instead, with no backdrop and no frame. The phone app
@@ -96,7 +105,7 @@ const INLINE_PANEL: Record<ModalSize, string> = {
  *  page under it; on the /ng control panel's glass, glass would show the page through). */
 export function inlineClasses(size: ModalSize, layer: ModalLayer, closing: boolean) {
   return {
-    backdrop: `absolute inset-0 ${LAYER[layer]} flex flex-col rounded-xl bg-neutral-100 dark:bg-neutral-900 ${
+    backdrop: `absolute inset-0 ${LAYER[layer]} flex flex-col rounded-[10px] bg-neutral-100 dark:bg-neutral-900 ${
       closing ? MODAL_ANIMATION.backdrop.exit : MODAL_ANIMATION.backdrop.enter
     }`,
     panel: `flex min-h-0 w-full flex-1 flex-col ${INLINE_PANEL[size]}`,
@@ -114,7 +123,7 @@ export function backdropClass(layer: ModalLayer, closing: boolean, glass = false
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
 export function panelClass(size: ModalSize, closing: boolean, glass = false): string {
   return (
-    `${glass ? GLASS_CHROME : PANEL_CHROME} ${PANEL[size]} ` +
+    `${glass ? `${GLASS_CHROME} ${GLASS_PANEL[size]}` : `${PANEL_CHROME} ${PANEL[size]}`} ` +
     (closing ? MODAL_ANIMATION.panel.exit : MODAL_ANIMATION.panel.enter)
   );
 }

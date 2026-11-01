@@ -29,7 +29,7 @@ import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { SoundReport } from "~/viewer/protocol";
 
 import type { ServerUsage } from "../ToolRow";
-import { BOX, CARD_BOX, EmptyLine, HeaderButton, LINE, Page, PageHeader, TEXT, TEXT_2, TEXT_3 } from "./ui";
+import { BOX, CARD_BOX, EmptyLine, HeaderButton, LINE, Page, PageHeader, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "./ui";
 
 export interface UsageViewProps {
   /** Both providers' accounts (`ControlState.claudeAccounts`). */
@@ -178,7 +178,7 @@ export function AccountCard({
         <button
           type="button"
           onClick={() => onReplace(a)}
-          className="ng-glass ng-glass-control mt-1.5 w-full rounded-lg py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400"
+          className={`ng-glass ng-glass-control mt-1.5 w-full ${R_PIECE} py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400`}
         >
           Token expired. Sign in again
         </button>
@@ -266,7 +266,7 @@ export function ServerStats({ usage }: { usage: ServerUsage | null }) {
     ["Disk", usage?.disk],
   ];
   return (
-    <div className={`grid grid-cols-3 divide-x rounded-lg border ${LINE} ${BOX} [&>*]:border-black/10 dark:[&>*]:border-white/10`}>
+    <div className={`grid grid-cols-3 divide-x ${R_PIECE} border ${LINE} ${BOX} [&>*]:border-black/10 dark:[&>*]:border-white/10`}>
       {stats.map(([label, value]) => (
         <div key={label} className="px-2.5 py-1.5 leading-tight">
           <div className={`text-[10px] ${TEXT_3}`}>{label}</div>

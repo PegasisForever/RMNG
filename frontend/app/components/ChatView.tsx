@@ -102,6 +102,9 @@ const SOLID = {
   buttonOn:
     "border-emerald-600 bg-emerald-50 text-emerald-700 dark:border-emerald-500 dark:bg-emerald-950/40 dark:text-emerald-400",
   code: "",
+  /** The composer's inset, and the radius of its field and buttons. */
+  composer: "p-2",
+  radius: "rounded-md",
 };
 
 /** `~/ng/GLASS.md`: glass bubbles, and its flat content (a field, a button, a box) on the panel. */
@@ -121,10 +124,13 @@ const GLASS: Look = {
   buttonOn: "ng-glass-lit border-transparent",
   // Code in a bubble: a translucent box, not the solid slate one
   code: "[&_code]:bg-black/5 [&_pre]:bg-black/5 dark:[&_code]:bg-white/10 dark:[&_pre]:bg-white/10",
+  // 6 px in from the panel's edge, so its corners are concentric with the panel's (16 − 6)
+  composer: "p-1.5",
+  radius: "rounded-[10px]",
 };
 
 /** A composer button: the height of the one-line field beside it (34 px), so the two line up. */
-const SQUARE = "flex size-[34px] shrink-0 items-center justify-center rounded-md border";
+const SQUARE = "flex size-[34px] shrink-0 items-center justify-center border";
 
 // The assistant answers in markdown. There is no typography plugin in this app, so each element
 // gets its own few classes here. Raw HTML in a reply is not rendered (react-markdown's default).
@@ -284,7 +290,7 @@ export function ChatView({
           {scheduled.map((m) => (
             <li
               key={m.id}
-              className={`flex items-center gap-2 rounded-md border px-2 py-1 text-xs ${look.item}`}
+              className={`flex items-center gap-2 border px-2 py-1 text-xs ${look.radius} ${look.item}`}
             >
               <span className="shrink-0 font-medium text-emerald-700 dark:text-emerald-400">
                 {formatWhen(Number(m.at), now, locale)}
@@ -306,7 +312,7 @@ export function ChatView({
       ) : null}
 
       <form
-        className={`flex flex-col gap-2 border-t p-2 ${look.line}`}
+        className={`flex flex-col gap-2 border-t ${look.composer} ${look.line}`}
         onSubmit={(e) => {
           e.preventDefault();
           submit();
@@ -323,12 +329,12 @@ export function ChatView({
               value={scheduleAt}
               min={epochMsToLocalInput(now)}
               onChange={(e) => onScheduleAtChange(e.target.value)}
-              className={`min-w-0 flex-1 rounded-md border px-2 py-1 text-sm focus:outline-none ${look.field}`}
+              className={`min-w-0 flex-1 border px-2 py-1 text-sm focus:outline-none ${look.radius} ${look.field}`}
             />
             <button
               type="button"
               onClick={() => onScheduleAtChange("")}
-              className={`shrink-0 rounded-md border px-2 py-1 text-xs ${look.button}`}
+              className={`shrink-0 border px-2 py-1 text-xs ${look.radius} ${look.button}`}
             >
               Cancel
             </button>
@@ -370,7 +376,7 @@ export function ChatView({
               // Typing stays enabled while the assistant works: a message then steers it, the
               // way a new Slack message in its thread does.
               disabled={archived}
-              className={`min-w-0 resize-none overflow-y-auto whitespace-pre-wrap break-words rounded-md border px-2 py-1.5 text-sm leading-5 [grid-area:1/1] placeholder:truncate focus:outline-none disabled:opacity-60 ${look.field}`}
+              className={`min-w-0 resize-none overflow-y-auto whitespace-pre-wrap break-words ${look.radius} border px-2 py-1.5 text-sm leading-5 [grid-area:1/1] placeholder:truncate focus:outline-none disabled:opacity-60 ${look.field}`}
             />
           </div>
           <button
@@ -380,7 +386,7 @@ export function ChatView({
             title={picking ? "Send now instead" : "Schedule this message for later"}
             aria-label={picking ? "Send now instead" : "Schedule this message for later"}
             aria-pressed={picking}
-            className={`${SQUARE} disabled:opacity-40 ${picking ? look.buttonOn : look.button}`}
+            className={`${SQUARE} ${look.radius} disabled:opacity-40 ${picking ? look.buttonOn : look.button}`}
           >
             <Clock className="size-4" />
           </button>
@@ -390,7 +396,7 @@ export function ChatView({
               disabled={archived || !input.trim() || !scheduleAt}
               title="Schedule this message"
               aria-label="Schedule this message"
-              className={`${SQUARE} border-transparent bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40`}
+              className={`${SQUARE} ${look.radius} border-transparent bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40`}
             >
               <CalendarClock className="size-4" />
             </button>
@@ -403,7 +409,7 @@ export function ChatView({
                   disabled={stopping}
                   title={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
                   aria-label={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
-                  className={`${SQUARE} border-transparent bg-red-600 text-white hover:bg-red-700 disabled:opacity-50`}
+                  className={`${SQUARE} ${look.radius} border-transparent bg-red-600 text-white hover:bg-red-700 disabled:opacity-50`}
                 >
                   {/* The spinner is the only way an icon-only button can say the stop is in
                       flight, now that "Stopping…" is not there to read. */}
@@ -419,7 +425,7 @@ export function ChatView({
                 disabled={archived || !input.trim()}
                 title={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
                 aria-label={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
-                className={`${SQUARE} border-transparent bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40`}
+                className={`${SQUARE} ${look.radius} border-transparent bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40`}
               >
                 <SendHorizontal className="size-4" />
               </button>

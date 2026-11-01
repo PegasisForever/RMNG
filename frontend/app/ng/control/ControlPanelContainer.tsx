@@ -556,7 +556,7 @@ export function ControlPanelContainer({
         return (
           <UsageView
             rail={wide}
-            server={wide || width - 8 >= ROW_STATS_MIN ? undefined : usage}
+            server={wide || width - 12 >= ROW_STATS_MIN ? undefined : usage}
             accounts={accounts}
             accountOrder={acctOrder}
             groups={state.groups}
@@ -694,7 +694,7 @@ export function ControlPanelContainer({
 
   return (
     <ModalPlacementProvider value="inline">
-      <NarrowLayout row={{ width: width - 8, usage, tab, onTab, badges, onPopOut }}>
+      <NarrowLayout row={{ width: width - 12, usage, tab, onTab, badges, onPopOut }}>
         {TABS.filter((t) => visited.has(t) || t === tab).map((t) => (
             // Text can be selected and typed on the control panel, not on the keys (WebKit inherits
             // `user-select`); a long press on a button still selects nothing

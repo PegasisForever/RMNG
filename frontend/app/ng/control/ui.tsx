@@ -41,9 +41,16 @@ const ColumnFrame = createContext(COLUMN_SOLID);
 export const ColumnFrameProvider = ColumnFrame.Provider;
 export const useColumnFrame = () => useContext(ColumnFrame);
 
+/** Shape (`../GLASS.md`): corners that sit inside one another are concentric. A surface (a
+ *  column, a panel) has 16 px corners; a piece set INSET (6 px) in from its edge, along it or in
+ *  its corner, has 16 − 6 = 10 px (`R_PIECE`). Pieces in a row share the one radius. */
+export const R_PIECE = "rounded-[10px]";
+/** A surface's inset: the room between its edge and the pieces along it (6 px). */
+export const INSET = "p-1.5";
+
 /** A card in a column (a clone, a ticket): its edge, and its fill (white on the column, light on
- *  a dark one) when nothing else fills it. */
-export const CARD = "rounded-lg border border-black/10 dark:border-white/10";
+ *  a dark one) when nothing else fills it. Set INSET into the column, so R_PIECE. */
+export const CARD = `${R_PIECE} border border-black/10 dark:border-white/10`;
 export const CARD_FILL = "bg-white dark:bg-white/[0.06]";
 /** A card on a column (an account, a ticket, a clone): one edge, one fill, for all three. */
 export const CARD_BOX = `${CARD} bg-white/80 dark:bg-white/[0.07]`;
@@ -66,7 +73,7 @@ export const BUTTON = `bg-white/60 border border-black/10 dark:bg-white/10 dark:
 /** The one thing on: the other look (as lit glass). */
 /** A field (a text box) on the panel, as `../GLASS.md`'s flat content has it. */
 export const FIELD =
-  "rounded-lg border border-black/10 bg-white/60 text-neutral-900 outline-none focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30";
+  "rounded-[10px] border border-black/10 bg-white/60 text-neutral-900 outline-none focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30";
 export const LIT = "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
 /** The page's own row, lit: the clone on the screen. */
 export const HERE = "bg-emerald-500/10 shadow-[inset_3px_0_0_var(--color-emerald-500)] dark:bg-emerald-400/10 dark:shadow-[inset_3px_0_0_var(--color-emerald-400)]";
@@ -164,7 +171,7 @@ export function HeaderButton({
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
-      className={`flex h-7 min-w-8 shrink-0 items-center justify-center gap-1 rounded-md px-2 text-xs font-medium disabled:opacity-40 ${
+      className={`flex h-7 min-w-8 shrink-0 items-center justify-center gap-1 ${R_PIECE} px-2 text-xs font-medium disabled:opacity-40 ${
         primary ? "bg-emerald-600 text-white active:bg-emerald-500" : BUTTON
       }`}
     >

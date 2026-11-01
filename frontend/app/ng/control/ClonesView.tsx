@@ -76,6 +76,7 @@ import {
   Page,
   PageHeader,
   PRESS,
+  R_PIECE,
   type SheetGroup,
   TEXT,
   TEXT_2,
@@ -362,7 +363,7 @@ export function ClonesView(p: ClonesViewProps) {
       disabled={cloning}
       aria-label={`New clone in ${column.title}`}
       title={`Create a clone in ${column.title}`}
-      className={`flex h-7 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium normal-case tracking-normal disabled:opacity-40 ${TEXT_2} ${PRESS}`}
+      className={`flex h-7 shrink-0 items-center gap-1 ${R_PIECE} px-2 text-xs font-medium normal-case tracking-normal disabled:opacity-40 ${TEXT_2} ${PRESS}`}
     >
       <Plus aria-hidden className="size-3.5" />
       New clone
@@ -386,7 +387,7 @@ export function ClonesView(p: ClonesViewProps) {
           onKeyDown={(e) => e.key === "Escape" && setRenaming(null)}
           onBlur={() => setRenaming(null)}
           aria-label="Column name"
-          className={`min-w-0 flex-1 rounded-md border border-black/10 bg-white/60 px-2 py-0.5 text-sm font-normal focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:focus:border-white/30 ${TEXT}`}
+          className={`min-w-0 flex-1 ${R_PIECE} border border-black/10 bg-white/60 px-2 py-0.5 text-sm font-normal focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:focus:border-white/30 ${TEXT}`}
         />
       </form>
     ) : (
@@ -413,7 +414,7 @@ export function ClonesView(p: ClonesViewProps) {
             aria-label={column.title}
             className={`flex h-full w-72 shrink-0 flex-col ${frame}`}
           >
-            <h3 className={`flex h-10 shrink-0 items-center gap-2 pl-3 pr-1 text-sm font-semibold ${TEXT}`}>{heading(column)}</h3>
+            <h3 className={`flex h-10 shrink-0 items-center gap-2 pl-3 pr-1.5 text-sm font-semibold ${TEXT}`}>{heading(column)}</h3>
             <DropColumn
               id={column.id}
               items={column.cloneIds}

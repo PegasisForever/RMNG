@@ -255,8 +255,8 @@ export function controlPanelFor({
     );
   }
   return (
-    <NarrowLayout row={{ width: width - 8, usage, tab, onTab, badges, onPopOut }}>
-      {pageFor(tab, width - 8 < ROW_STATS_MIN)}
+    <NarrowLayout row={{ width: width - 12, usage, tab, onTab, badges, onPopOut }}>
+      {pageFor(tab, width - 12 < ROW_STATS_MIN)}
     </NarrowLayout>
   );
 }

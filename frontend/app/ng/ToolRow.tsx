@@ -38,11 +38,11 @@ type Props = {
 };
 
 /** A box on the row (a number, a tab), flat on the control panel's surface (`./GLASS.md`). */
-const CHIP = "rounded-md border border-black/10 bg-white/50 dark:border-white/10 dark:bg-white/[0.06]";
+const CHIP = "rounded-[10px] border border-black/10 bg-white/50 dark:border-white/10 dark:bg-white/[0.06]";
 /** A tab or a button on the row, under the mouse. */
 const IDLE = `${CHIP} text-neutral-900 hover:bg-white/80 dark:text-white dark:hover:bg-white/10`;
 /** The open tab: the other look, as lit glass. */
-const ON = "rounded-md border border-transparent bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
+const ON = "rounded-[10px] border border-transparent bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
 
 /** The /ng tool row, over the control panel: the server's CPU, memory and disk (where there is room),
  *  then tabs that act as tabs do. One is open at most. */

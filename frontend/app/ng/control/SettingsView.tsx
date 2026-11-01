@@ -8,7 +8,7 @@ import { Save } from "lucide-react";
 
 import { SettingsPane, settingsCategories, type SettingsPanelViewProps } from "~/components/SettingsPanelView";
 
-import { EmptyLine, ErrorLine, LINE, LIT, PRESS, TEXT_2 } from "./ui";
+import { EmptyLine, ErrorLine, LINE, LIT, PRESS, R_PIECE, TEXT_2 } from "./ui";
 
 export type SettingsViewProps = Omit<SettingsPanelViewProps, "onClose">;
 
@@ -27,7 +27,7 @@ export function SettingsView(p: SettingsViewProps) {
             aria-current={id === active.id ? "page" : undefined}
             aria-label={label}
             title={label}
-            className={`flex h-9 items-center justify-center gap-2 rounded-md px-2 text-left text-sm @lg:justify-start ${
+            className={`flex h-9 items-center justify-center gap-2 ${R_PIECE} px-2 text-left text-sm @lg:justify-start ${
               id === active.id ? `${LIT} font-medium` : `${TEXT_2} ${PRESS}`
             }`}
           >
@@ -42,7 +42,7 @@ export function SettingsView(p: SettingsViewProps) {
           onClick={p.onSave}
           disabled={!p.draft || p.saving}
           aria-label="Save"
-          className="flex h-9 items-center justify-center gap-1.5 rounded-md bg-emerald-600 text-sm font-medium text-white active:bg-emerald-500 disabled:opacity-40"
+          className={`flex h-9 items-center justify-center gap-1.5 ${R_PIECE} bg-emerald-600 text-sm font-medium text-white active:bg-emerald-500 disabled:opacity-40`}
         >
           <Save aria-hidden className="size-4" />
           <span className="hidden @lg:inline">{p.saving ? "Saving…" : "Save"}</span>

@@ -204,7 +204,7 @@ export function TicketsView(p: TicketsViewProps) {
         aria-label="Tickets"
         className={`flex h-full w-72 shrink-0 flex-col ${frame}`}
       >
-        <h3 className={`flex h-10 shrink-0 items-center gap-1.5 pl-3 pr-1 text-sm font-semibold ${TEXT}`}>
+        <h3 className={`flex h-10 shrink-0 items-center gap-1.5 pl-3 pr-1.5 text-sm font-semibold ${TEXT}`}>
           Tickets
           <span className={`tabular-nums ${TEXT_3}`}>{p.loading ? "…" : p.tickets.length}</span>
           <span className="flex-1" />

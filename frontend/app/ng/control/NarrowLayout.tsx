@@ -8,7 +8,7 @@ import { ToolRow } from "../ToolRow";
 
 export function NarrowLayout({ row, children }: { row: ComponentProps<typeof ToolRow>; children: ReactNode }) {
   return (
-    <div className="flex h-full flex-col p-1" style={{ gap: GAP }}>
+    <div className="flex h-full flex-col p-1.5" style={{ gap: GAP }}>
       <ToolRow {...row} />
       <div className="relative min-h-0 flex-1">{children}</div>
     </div>

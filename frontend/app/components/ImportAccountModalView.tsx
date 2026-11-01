@@ -60,22 +60,24 @@ const LOOKS = {
     late: "rounded-md bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
     ok: "text-emerald-600 dark:text-emerald-400",
     lateIcon: "text-amber-600 dark:text-amber-400",
+    radius: "rounded-lg",
   },
   glass: {
     title: "text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-white",
     text: "text-black/60 dark:text-white/60",
     strong: "font-medium text-neutral-900 dark:text-white",
     input:
-      "w-full rounded-lg border border-black/10 bg-white/60 px-2.5 py-2 text-sm text-neutral-900 placeholder:text-black/40 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-white/40 dark:focus:border-white/30",
+      "w-full rounded-[10px] border border-black/10 bg-white/60 px-2.5 py-2 text-sm text-neutral-900 placeholder:text-black/40 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-white/40 dark:focus:border-white/30",
     open: "border border-black/15 bg-white/50 text-neutral-900 hover:bg-white/80 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10",
     tab: "bg-black/5 text-black/60 dark:bg-white/10 dark:text-white/60",
     tabOn: "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900",
-    cancel: "rounded-lg px-3 py-1.5 text-sm text-black/60 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10",
-    done: "rounded-lg bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-40",
-    error: "rounded-lg bg-rose-500/15 text-rose-700 dark:text-rose-300",
-    late: "rounded-lg bg-amber-500/15 text-amber-800 dark:text-amber-300",
+    cancel: "rounded-[10px] px-3 py-1.5 text-sm text-black/60 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10",
+    done: "rounded-[10px] bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-40",
+    error: "rounded-[10px] bg-rose-500/15 text-rose-700 dark:text-rose-300",
+    late: "rounded-[10px] bg-amber-500/15 text-amber-800 dark:text-amber-300",
     ok: "text-emerald-700 dark:text-emerald-300",
     lateIcon: "text-amber-700 dark:text-amber-300",
+    radius: "rounded-[10px]",
   },
 };
 type Look = (typeof LOOKS)["plain"];
@@ -178,7 +180,7 @@ export function ImportAccountModalView({
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-disabled={!loginUrl}
-                className={`mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium ${look.open} ${
+                className={`mt-3 flex w-full items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium ${look.radius} ${look.open} ${
                   loginUrl ? "" : "pointer-events-none opacity-50"
                 }`}
               >

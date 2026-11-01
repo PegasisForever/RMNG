@@ -100,11 +100,11 @@ const LOOKS = {
     icon: "rounded-md p-0.5 text-black/55 hover:bg-black/5 hover:text-black dark:text-white/60 dark:hover:bg-white/10 dark:hover:text-white",
     danger: "rounded-md p-0.5 text-rose-600 hover:bg-rose-500/15 dark:text-rose-400 dark:hover:bg-rose-500/20 dark:hover:text-rose-300",
     tip: "rounded-md bg-neutral-900 px-1.5 py-0.5 text-white dark:bg-neutral-950",
-    add: "inline-flex items-center gap-1 rounded-lg border border-black/15 bg-white/50 px-3 py-1.5 text-xs font-medium text-neutral-900 hover:bg-white/80 disabled:opacity-40 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10",
+    add: "inline-flex items-center gap-1 rounded-[10px] border border-black/15 bg-white/50 px-3 py-1.5 text-xs font-medium text-neutral-900 hover:bg-white/80 disabled:opacity-40 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10",
     label: "text-black/60 dark:text-white/60",
     input:
-      "w-full rounded-lg border border-black/10 bg-white/60 px-2.5 py-1.5 text-sm text-neutral-900 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30",
-    done: "rounded-lg bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500",
+      "w-full rounded-[10px] border border-black/10 bg-white/60 px-2.5 py-1.5 text-sm text-neutral-900 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30",
+    done: "rounded-[10px] bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500",
   },
 };
 type Look = (typeof LOOKS)["plain"];

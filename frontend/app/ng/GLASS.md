@@ -115,8 +115,16 @@ Each color has its light value and its `dark:` value.
 ## Shape
 
 - A floating button is round, 44 px.
-- A panel's corners: 16 px (`rounded-2xl`). A piece in it: 8 px (`rounded-lg`). A small control
-  in a box: 6 px (`rounded-md`).
+- Corners that sit inside one another are concentric: a piece set `i` px in from a surface's edge
+  has the surface's radius less `i`. Pieces in one row share one radius.
+
+  | Thing | Radius | Inset of what is in it |
+  |---|---|---|
+  | A surface: a column, a side panel, the narrow control panel, the keyboard's top | 16 px (`rounded-2xl`) | 6 px (`INSET`, `p-1.5`) |
+  | A piece in a surface: a card, a column's header button (a 40 px header, 28 px buttons, 6 px from the right), a tab on the tool row, a Settings category and Save, the assistant's field and buttons, a field | 10 px (`R_PIECE`, `rounded-[10px]`) | — |
+  | A glass dialog | 26 px (`rounded-[26px]`) | 16 px (`p-4`): its buttons and fields are 10 px |
+  | A small control inside a piece (a ⋯, a chip) | 6 px (`rounded-md`) | — |
+- Cards in a column: 6 px from its sides and its bottom, and 6 px apart (`CARD_LIST`).
 - The monitor's number: a 144 px square (`size-36`), always the same size, in the top-left
   corner.
 - Space between floating pieces, and from the display's edges: 8 px.

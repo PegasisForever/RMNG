@@ -30,7 +30,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { PopOutButton, type ServerUsage } from "../ToolRow";
-import { COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, NO_SCROLLBARS, TEXT, TEXT_2 } from "./ui";
+import { COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, NO_SCROLLBARS, R_PIECE, TEXT, TEXT_2 } from "./ui";
 import { ServerStats } from "./UsageView";
 
 /** At least this wide (CSS px), the control panel takes this layout. */
@@ -120,7 +120,7 @@ export function WideLayout({
             onClick={onLayout}
             aria-label="Edit layout"
             title="Edit layout"
-            className={`flex size-9 items-center justify-center rounded-md border ${RAIL_BUTTON}`}
+            className={`flex size-9 items-center justify-center ${R_PIECE} border ${RAIL_BUTTON}`}
           >
             <MonitorCog aria-hidden className="size-[18px]" strokeWidth={1.75} />
           </button>
@@ -131,7 +131,7 @@ export function WideLayout({
           aria-pressed={settingsOpen}
           aria-label="Settings"
           title="Settings"
-          className={`flex size-9 items-center justify-center rounded-md border ${
+          className={`flex size-9 items-center justify-center ${R_PIECE} border ${
             settingsOpen
               ? `border-transparent ${LIT}`
               : RAIL_BUTTON
@@ -141,7 +141,7 @@ export function WideLayout({
         </button>
         {onPopOut ? <PopOutButton onPopOut={onPopOut} /> : null}
       </div>
-      <div className="shrink-0 px-2 pb-2">
+      <div className="shrink-0 px-1.5 pb-1.5">
         <ServerStats usage={usage} />
       </div>
       <div className="min-h-0 flex-1">{rail}</div>
