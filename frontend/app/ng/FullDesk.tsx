@@ -361,13 +361,14 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     if (isTyping() && !target.closest("[role=tabpanel]")) {
       (document.activeElement as HTMLElement).blur();
     }
-    // With a mouse, a click beside the pages and the buttons puts the pages away
+    // With a mouse, a click beside the pages and the buttons puts the pages away. A menu of
+    // theirs (a card's ⋯) is drawn on the body, out of their box, and is theirs all the same.
     if (
       mouse &&
       pages &&
       !layoutOpen &&
       !panelRef.current?.contains(target) &&
-      !target.closest("[data-ng-buttons], [data-ng-side]")
+      !target.closest("[data-ng-buttons], [data-ng-side], [role=menu]")
     ) {
       setPages(false);
     }

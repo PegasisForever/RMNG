@@ -53,6 +53,9 @@ export interface Clone {
  linearBranch?: string;
  /** Ticket title — shown as the card's display name (falls back to `id`). */
  displayName?: string;
+ /** The operator renamed it: `displayName` is their name, shown over the ticket's title
+  *  (`~/lib/cloneTitle.ts`). */
+ named?: boolean;
  /** First Linear label on the ticket, if any. */
  linearLabel?: string;
  /**

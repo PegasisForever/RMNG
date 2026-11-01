@@ -32,6 +32,7 @@ import {
   ExternalLink,
   Layers,
   Network,
+  Pencil,
   Plus,
   Terminal,
   Trash2,
@@ -45,7 +46,8 @@ import { SidebarClone } from "~/components/SidebarClone";
 import chatgptLogo from "~/assets/chatgpt.svg";
 import claudeLogo from "~/assets/claude.svg";
 import { CloneStatusDot, statusLabel } from "~/components/mobile/CloneStatus";
-import { formatCloneUsage } from "~/components/SidebarClone";
+import { formatCloneUsage, RenameField } from "~/components/SidebarClone";
+import { cloneTitle } from "~/lib/cloneTitle";
 import { type BoardColumn, resolveColumns, subCloneTree, withDefaults } from "~/lib/board";
 import { formatTokenCount } from "~/lib/format";
 import { cloneIndex, isMutedByParent, mutedSet } from "~/lib/mute";
@@ -65,6 +67,7 @@ import {
   DesktopMenu,
   DIVIDE,
   EmptyLine,
+  FIELD,
   HERE,
   isMouseClick,
   NO_DRAG,
@@ -96,6 +99,8 @@ export interface ClonesViewProps {
   onSelect: (clone: Clone) => void;
   /** A double click on a clone: as a tap, then the pages close (the clone's screen shows). */
   onOpen: (clone: Clone) => void;
+  /** The clone's display name, the operator's own (empty: none); the hostname stays. */
+  onRename: (clone: Clone, name: string) => void;
   onNewClone: (columnId: string) => void;
   /** Into `columnId`, at its end. The container archives or restores it when the column says. */
   onMoveToColumn: (clone: Clone, columnId: string) => void;
@@ -129,6 +134,13 @@ export function ClonesView(p: ClonesViewProps) {
   /** The dashboard's menu, opened by a mouse, and where. */
   const [menu, setMenu] = useState<{ clone: Clone; at: Box } | null>(null);
   const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
+  /** The clone whose title is a field for a new name (Rename… in its menu). */
+  const [renamingClone, setRenamingClone] = useState<string | null>(null);
+  /** The field is done: a new name (a changed one only), or null (Escape). */
+  const renameDone = (clone: Clone, title: string) => (name: string | null) => {
+    setRenamingClone(null);
+    if (name !== null && name.trim() !== title) p.onRename(clone, name.trim());
+  };
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   // While a clone is in the air, the columns as it would leave them
   const columns = resolveColumns(withDefaults(p.columns), p.clones).map((c) => ({
@@ -172,6 +184,8 @@ export function ClonesView(p: ClonesViewProps) {
         onToggleExpand={() => toggle(clone.id)}
         onSelect={() => p.onSelect(clone)}
         onOpen={() => p.onOpen(clone)}
+        renaming={renamingClone === clone.id}
+        onRenameDone={renameDone(clone, cloneTitle(clone, p.cloneTickets[clone.id]))}
         onMenu={(e) => openMenu(clone, e)}
       />
     );
@@ -200,12 +214,16 @@ export function ClonesView(p: ClonesViewProps) {
       muted: muted.has(c.id),
       mutedByParent: isMutedByParent(c, byId, muted),
       onToggleMute: () => p.onToggleMute(c),
+      onRename: (name: string) => p.onRename(c, name),
+      renaming: renamingClone === c.id,
+      onRenamingChange: (on: boolean) => setRenamingClone(on ? c.id : null),
       sshPublicHost: "",
       isChild: child,
       fill: {
         idle: "bg-transparent hover:bg-black/[0.03] dark:hover:bg-white/5",
         selected: "bg-emerald-500/10 dark:bg-emerald-400/10",
       },
+      renameField: `mt-1.5 w-full px-1.5 py-0.5 text-sm font-medium ${FIELD}`,
       touchScroll: true,
       onMenuTouch: () => setSheet(c),
     });
@@ -246,6 +264,7 @@ export function ClonesView(p: ClonesViewProps) {
     const groups: SheetGroup[] = [
       {
         actions: [
+          { icon: Pencil, label: "Rename", onSelect: () => setRenamingClone(clone.id) },
           ...(url ? [{ icon: ExternalLink, label: "Open in Linear", onSelect: () => p.onOpenInLinear(url) }] : []),
           ...(managed && !archived
             ? [
@@ -304,7 +323,7 @@ export function ClonesView(p: ClonesViewProps) {
     <>
       {sheet ? (
         <ActionSheet
-          title={p.cloneTickets[sheet.id]?.title ?? sheet.displayName ?? sheet.id}
+          title={cloneTitle(sheet, p.cloneTickets[sheet.id])}
           groups={groupsFor(sheet)}
           onClose={() => setSheet(null)}
         />
@@ -452,6 +471,8 @@ export function CloneRow({
   onToggleExpand,
   onSelect,
   onOpen,
+  renaming,
+  onRenameDone,
   onMenu,
 }: {
   clone: Clone;
@@ -470,9 +491,12 @@ export function CloneRow({
   onToggleExpand: () => void;
   onSelect: () => void;
   onOpen: () => void;
+  /** The title is a field for a new name; `onRenameDone` takes it (null: Escape). */
+  renaming: boolean;
+  onRenameDone: (name: string | null) => void;
   onMenu: (e: MouseEvent<HTMLButtonElement>) => void;
 }) {
-  const title = ticket?.title ?? clone.displayName ?? clone.id;
+  const title = cloneTitle(clone, ticket);
   const usage = clone.archived ? null : (formatCloneUsage(stats) ?? { cpu: "0%", mem: "0.0GB" });
   const busy = op !== undefined;
   const marks = (
@@ -536,30 +560,37 @@ export function CloneRow({
 
   return (
     <li className={`flex items-stretch ${selected ? HERE : notes ? BOX : ""}`}>
-      <button
-        type="button"
-        onClick={onSelect}
-        onDoubleClick={onOpen}
-        aria-current={selected ? "true" : undefined}
-        className={`min-w-0 flex-1 py-1.5 pr-1 text-left ${PRESS} ${child ? "pl-8" : "pl-3"}`}
-      >
-        <span className="flex items-center gap-1.5">
+      {renaming ? (
+        <div className={`flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pr-2 ${child ? "pl-8" : "pl-3"}`}>
           {marks}
-          <span className={`min-w-0 flex-1 truncate text-sm ${TEXT}`}>{title}</span>
-          {state}
-        </span>
-        <span className={`mt-0.5 flex items-center gap-2 text-[11px] ${TEXT_3}`}>
-          {clone.managed ? (
-            <>
-              <Account logo={claudeLogo} email={clone.claudeAccountEmail} selection={clone.claudeSelection} group={clone.group ?? clone.claudeGroup} />
-              <Account logo={chatgptLogo} invert email={clone.codexAccountEmail} selection={clone.codexSelection} group={clone.group ?? clone.codexGroup} />
-            </>
-          ) : (
-            <span className="min-w-0 flex-1 truncate">{clone.id}</span>
-          )}
-          {tokensLine}
-        </span>
-      </button>
+          <RenameField initial={title} onDone={onRenameDone} className={`min-w-0 flex-1 px-1.5 py-0.5 text-sm ${FIELD}`} />
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onSelect}
+          onDoubleClick={onOpen}
+          aria-current={selected ? "true" : undefined}
+          className={`min-w-0 flex-1 py-1.5 pr-1 text-left ${PRESS} ${child ? "pl-8" : "pl-3"}`}
+        >
+          <span className="flex items-center gap-1.5">
+            {marks}
+            <span className={`min-w-0 flex-1 truncate text-sm ${TEXT}`}>{title}</span>
+            {state}
+          </span>
+          <span className={`mt-0.5 flex items-center gap-2 text-[11px] ${TEXT_3}`}>
+            {clone.managed ? (
+              <>
+                <Account logo={claudeLogo} email={clone.claudeAccountEmail} selection={clone.claudeSelection} group={clone.group ?? clone.claudeGroup} />
+                <Account logo={chatgptLogo} invert email={clone.codexAccountEmail} selection={clone.codexSelection} group={clone.group ?? clone.codexGroup} />
+              </>
+            ) : (
+              <span className="min-w-0 flex-1 truncate">{clone.id}</span>
+            )}
+            {tokensLine}
+          </span>
+        </button>
+      )}
       {subs}
       {menu}
     </li>

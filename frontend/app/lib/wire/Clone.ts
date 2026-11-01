@@ -80,7 +80,13 @@ linearWorkspace: string | null, linearTicket: string | null, linearTicketUrl: st
  * reconciliation can rebuild `/etc/environment` without relying on a guest-side
  * legacy env file. Older clones may not have it.
  */
-presetName: string | null, displayName: string | null, linearLabel: string | null, 
+presetName: string | null, displayName: string | null, 
+/**
+ * The operator renamed the clone (`PUT /api/hosts/:id/name`): `display_name` is their
+ * name, and the UI shows it over the live title of the clone's ticket. False: the
+ * ticket's title shows when there is one, `display_name` (set at create) otherwise.
+ */
+named: boolean, linearLabel: string | null, 
 /**
  * Current server-owned lifecycle state. Derived from Docker liveness plus the clone's own
  * Claude Code session registry and agent hooks, never reported by a clone-local process.

@@ -60,6 +60,9 @@ export const BOX = "bg-white/60 dark:bg-white/[0.06]";
 /** A button: a small box of its own. */
 export const BUTTON = `bg-white/60 border border-black/10 dark:bg-white/10 dark:border-white/10 ${TEXT} active:bg-black/10 dark:active:bg-white/20`;
 /** The one thing on: the other look (as lit glass). */
+/** A field (a text box) on the panel, as `../GLASS.md`'s flat content has it. */
+export const FIELD =
+  "rounded-lg border border-black/10 bg-white/60 text-neutral-900 outline-none focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30";
 export const LIT = "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
 /** The page's own row, lit: the clone on the screen. */
 export const HERE = "bg-emerald-500/10 shadow-[inset_3px_0_0_var(--color-emerald-500)] dark:bg-emerald-400/10 dark:shadow-[inset_3px_0_0_var(--color-emerald-400)]";

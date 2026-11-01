@@ -10,6 +10,7 @@ import { ChevronLeft } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { CloneStatusDot, statusLabel } from "~/components/mobile/CloneStatus";
+import { cloneTitle } from "~/lib/cloneTitle";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
@@ -70,7 +71,7 @@ export function MobileClone({
         </button>
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
-            {ticket?.title ?? clone.displayName ?? clone.id}
+            {cloneTitle(clone, ticket)}
           </h1>
           <p className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
             <CloneStatusDot clone={clone} />

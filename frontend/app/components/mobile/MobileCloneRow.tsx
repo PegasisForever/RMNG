@@ -6,6 +6,7 @@
 import { ChevronRight } from "lucide-react";
 
 import { CloneStatusDot } from "~/components/mobile/CloneStatus";
+import { cloneTitle } from "~/lib/cloneTitle";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
@@ -37,7 +38,7 @@ export function MobileCloneRow({
         <CloneStatusDot clone={clone} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium text-slate-800 dark:text-slate-100">
-            {ticket?.title ?? clone.displayName ?? clone.id}
+            {cloneTitle(clone, ticket)}
           </span>
           <span className="block truncate text-xs text-slate-500 dark:text-slate-400">
             {subtitle(clone) || clone.id}

@@ -93,6 +93,7 @@ pub fn router(app: App) -> Router {
             "/api/chat/:id/schedule/:sid",
             axum::routing::delete(chat_schedule_cancel),
         )
+        .route("/api/hosts/:id/name", put(rename_clone))
         .route("/api/hosts/:id/archive", post(archive))
         .route("/api/hosts/:id/unarchive", post(unarchive))
         .route("/api/hosts/:id/mcp", post(clone_mcp))
@@ -508,6 +509,49 @@ async fn muted_put(State(app): State<App>, Json(req): Json<MutedPutReq>) -> Json
     ids.sort_unstable();
     ids.dedup();
     Json(app.store.mutate(|s| s.muted_clones = ids))
+}
+
+#[derive(Deserialize)]
+struct RenameReq {
+    /// The new name; empty takes the operator's name away.
+    name: String,
+}
+
+/// The longest name a clone takes, in characters.
+const CLONE_NAME_MAX: usize = 200;
+
+/// Give `h` the operator's `name` (trimmed), or, empty, take it away: the clone is then named
+/// as before, by its ticket's title or its id. The hostname (`id`) never changes.
+fn apply_clone_name(h: &mut wire::RmngClone, name: &str) {
+    let name = name.trim();
+    if name.is_empty() {
+        h.display_name = None;
+        h.named = false;
+    } else {
+        h.display_name = Some(name.to_string());
+        h.named = true;
+    }
+}
+
+/// `PUT /api/hosts/:id/name` — the clone's display name, the operator's own. Unknown clone →
+/// 404; a name over [`CLONE_NAME_MAX`] characters → 400.
+async fn rename_clone(
+    State(app): State<App>,
+    AxPath(id): AxPath<String>,
+    Json(req): Json<RenameReq>,
+) -> Result<Json<ControlState>, (StatusCode, String)> {
+    if req.name.trim().chars().count() > CLONE_NAME_MAX {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("a clone's name is at most {CLONE_NAME_MAX} characters"),
+        ));
+    }
+    clone_by_id(&app, &id).ok_or((StatusCode::NOT_FOUND, format!("no clone '{id}'")))?;
+    Ok(Json(app.store.mutate(|s| {
+        if let Some(h) = s.hosts.iter_mut().find(|h| h.id == id) {
+            apply_clone_name(h, &req.name);
+        }
+    })))
 }
 
 // --- desktop proxy + exec (the `rmng desktop` / `rmng exec` backends) -------
@@ -2289,6 +2333,21 @@ async fn codex_rotate(State(app): State<App>) -> Json<serde_json::Value> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A name is trimmed and marks the clone named; an empty one takes the name away. The
+    /// hostname is never touched.
+    #[test]
+    fn renaming_a_clone_sets_or_clears_its_own_name_only() {
+        let mut h = wire::RmngClone {
+            id: "pega-we-142".into(),
+            display_name: Some("Encoder drops frames".into()),
+            ..Default::default()
+        };
+        apply_clone_name(&mut h, "  Encoder work  ");
+        assert_eq!((h.id.as_str(), h.display_name.as_deref(), h.named), ("pega-we-142", Some("Encoder work"), true));
+        apply_clone_name(&mut h, "   ");
+        assert_eq!((h.id.as_str(), h.display_name.as_deref(), h.named), ("pega-we-142", None, false));
+    }
 
     /// An accepted socket takes the listener's `TCP_NOTSENT_LOWAT`, so setting it once on the
     /// listener covers every viewer.

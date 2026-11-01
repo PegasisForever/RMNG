@@ -34,6 +34,7 @@ import {
   putMutedClones,
   putTicketOrder,
   rebaseClone,
+  renameClone,
   refreshClaudeUsage,
   refreshCodexUsage,
   restartServer,
@@ -601,6 +602,7 @@ export function NgPagesContainer({
             selectedId={state.selected ?? null}
             notesId={notesId}
             onSelect={selectClone}
+            onRename={(clone, name) => run(renameClone(clone.id, name))}
             onOpen={(clone) => {
               selectClone(clone);
               // An archived one has no screen: its notes stay open

@@ -28,6 +28,7 @@ const meta = {
     notesId: null,
     onSelect: fn(),
     onOpen: fn(),
+    onRename: fn(),
     onNewClone: fn(),
     onMoveToColumn: fn(),
     onMove: fn(),

@@ -62,6 +62,7 @@ import {
   rebaseClone,
   refreshClaudeUsage,
   refreshCodexUsage,
+  renameClone,
   restartServer,
   startClone,
   swapClaudeAccount,
@@ -830,6 +831,7 @@ export function DashboardContainer({
               : `Remove ${clone.id}? This unregisters the clone.`;
             if (confirm(msg)) run(deleteClone(clone.id));
           },
+          onRenameClone: (clone, name) => run(renameClone(clone.id, name)),
           onChangeAccountClone: (clone) => setChangeClone(clone),
           onRebaseClone: (clone) => setRebaseCloneTarget(clone),
           onPortForwardClone: (clone) => setForwardClone(clone),

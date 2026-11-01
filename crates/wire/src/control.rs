@@ -232,6 +232,11 @@ pub struct RmngClone {
     pub preset_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// The operator renamed the clone (`PUT /api/hosts/:id/name`): `display_name` is their
+    /// name, and the UI shows it over the live title of the clone's ticket. False: the
+    /// ticket's title shows when there is one, `display_name` (set at create) otherwise.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub named: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linear_label: Option<String>,
     /// Current server-owned lifecycle state. Derived from Docker liveness plus the clone's own

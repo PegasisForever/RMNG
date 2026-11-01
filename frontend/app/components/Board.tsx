@@ -93,6 +93,8 @@ export interface BoardProps {
 
   onSelectClone: (clone: Clone) => void;
   onDeleteClone: (clone: Clone) => void;
+  /** The clone's display name, the operator's own (empty: none). Absent ⇒ no Rename item. */
+  onRenameClone?: (clone: Clone, name: string) => void;
   onChangeAccountClone: (clone: Clone) => void;
   onRebaseClone: (clone: Clone) => void;
   onPortForwardClone: (clone: Clone) => void;
@@ -238,6 +240,7 @@ export function Board({
   gutterRight = false,
   onSelectClone,
   onDeleteClone,
+  onRenameClone,
   onChangeAccountClone,
   onRebaseClone,
   onPortForwardClone,
@@ -334,6 +337,7 @@ export function Board({
     // rather than offering a toggle that would leave it silent either way.
     mutedByParent: isMutedByParent(clone, muteIndex, silenced),
     onToggleMute: onToggleMuteClone ? () => onToggleMuteClone(clone) : undefined,
+    onRename: onRenameClone ? (name: string) => onRenameClone(clone, name) : undefined,
   });
 
   /** A clone's sub-clone rows, or null when they are collapsed or it has none.

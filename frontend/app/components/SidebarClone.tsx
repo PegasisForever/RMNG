@@ -9,11 +9,12 @@ import {
   ExternalLink,
   Layers,
   Network,
+  Pencil,
   Terminal,
   Trash2,
   UserCog,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import {
   MenuDivider,
@@ -24,6 +25,7 @@ import {
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
+import { cloneTitle } from "~/lib/cloneTitle";
 import { formatTokenCount } from "~/lib/format";
 import { BASTION_PORT, buildSshCommand } from "~/lib/ssh";
 import type { CloneTicket } from "~/lib/tickets";
@@ -251,6 +253,15 @@ export interface SidebarCloneProps {
   /** Flip this clone's own mute. Absent ⇒ no menu item, which is what a story that does not
    *  care about muting gets. */
   onToggleMute?: () => void;
+  /** Give the clone a display name of the operator's own (its hostname stays); empty takes it
+   *  away. Absent ⇒ no Rename item. */
+  onRename?: (name: string) => void;
+  /** The title is a field for a new name, held by the caller (a Rename from elsewhere, as the
+   *  phone's sheet); absent ⇒ the card holds it, and only its menu opens it. */
+  renaming?: boolean;
+  onRenamingChange?: (renaming: boolean) => void;
+  /** The rename field's classes, where the card is not on the dashboard's white (/ng's glass). */
+  renameField?: string;
   /** The `-J` jump target for the copied command, already resolved: this page's own
    *  address (no override exists anymore). The container reads the page's address, so a
    *  card never has to. */
@@ -278,6 +289,58 @@ export interface SidebarCloneProps {
   touchScroll?: boolean;
   /** A tap with a finger on the ⋮ calls this in place of the dropdown (`OverflowMenu`). */
   onMenuTouch?: () => void;
+}
+
+/** The field a rename takes place in, in place of the clone's title: it opens on the current
+ *  title, selected. Enter or a click away keeps what is typed, Escape keeps the old name
+ *  (`onDone(null)`). Its keys, clicks and presses are its own: they neither select nor drag
+ *  the card. */
+export function RenameField({
+  initial,
+  onDone,
+  className,
+}: {
+  initial: string;
+  onDone: (name: string | null) => void;
+  className: string;
+}) {
+  const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const finish = (name: string | null) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(name);
+  };
+  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
+  return (
+    <input
+      autoFocus
+      value={value}
+      maxLength={200}
+      aria-label="Clone name"
+      placeholder="Name (empty: the ticket's title or the hostname)"
+      onChange={(e) => setValue(e.target.value)}
+      onFocus={(e) => e.currentTarget.select()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          finish(value);
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          finish(null);
+        }
+      }}
+      onBlur={() => finish(value)}
+      onPointerDown={stop}
+      onMouseDown={stop}
+      onTouchStart={stop}
+      onClick={stop}
+      onDoubleClick={stop}
+      className={className}
+    />
+  );
 }
 
 /** A single overflow-menu item that copies `command` to the clipboard and shows a
@@ -342,6 +405,7 @@ function CloneMenu({
   muted,
   mutedByParent,
   onToggleMute,
+  onRename,
   onTouch,
 }: {
   cloneId: string;
@@ -365,10 +429,17 @@ function CloneMenu({
   muted: boolean;
   mutedByParent: boolean;
   onToggleMute?: () => void;
+  onRename?: () => void;
   onTouch?: () => void;
 }) {
   return (
     <OverflowMenu label={`actions for ${cloneId}`} disabled={busy} onTouch={onTouch}>
+      {onRename ? (
+        <>
+          <MenuItem icon={Pencil} label="Rename…" onClick={onRename} />
+          <MenuDivider />
+        </>
+      ) : null}
       {linearUrl ? (
         <>
           <MenuItem
@@ -440,6 +511,10 @@ export function SidebarClone({
   muted = false,
   mutedByParent = false,
   onToggleMute,
+  onRename,
+  renaming: renamingProp,
+  onRenamingChange,
+  renameField,
   sshPublicHost,
   isChild = false,
   childCount = 0,
@@ -454,7 +529,18 @@ export function SidebarClone({
   // Linear's own title and link when the browser resolved the ticket, and what the clone
   // stored at creation when it did not. Both are read in two places each, so they are named
   // once here rather than repeating the fallback down the card.
-  const title = ticket?.title ?? clone.displayName ?? clone.id;
+  const title = cloneTitle(clone, ticket);
+  /** The title is a field for a new name (the menu's Rename…). */
+  const [renamingOwn, setRenamingOwn] = useState(false);
+  const renaming = renamingProp ?? renamingOwn;
+  const setRenaming = (on: boolean) => (onRenamingChange ? onRenamingChange(on) : setRenamingOwn(on));
+  const rename = (name: string | null) => {
+    setRenaming(false);
+    if (name === null || !onRename) return;
+    const next = name.trim();
+    // Unchanged, it stays as it is: not made the operator's own name by an Enter
+    if (next !== title) onRename(next);
+  };
   const linearUrl = ticket?.url ?? clone.linearTicketUrl ?? undefined;
   // Managed clones (backed by a container named after the clone id) get the full menu;
   // plain unmanaged rows only get remove.
@@ -520,7 +606,7 @@ export function SidebarClone({
       aria-pressed={selected}
       onClick={onSelect}
       onDoubleClick={(e) => {
-        if (!(e.target as Element).closest("button")) onOpen?.();
+        if (!(e.target as Element).closest("button, input")) onOpen?.();
       }}
       title={clone.id}
       className={`group flex ${touchScroll ? "" : "touch-none"} items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
@@ -623,6 +709,7 @@ export function SidebarClone({
             muted={muted}
             mutedByParent={mutedByParent}
             onToggleMute={onToggleMute}
+            onRename={onRename ? () => setRenaming(true) : undefined}
             onTouch={onMenuTouch}
           />
         </div>
@@ -633,7 +720,16 @@ export function SidebarClone({
 
             The top margin lives here rather than on the block above, because that block also
             holds the busy-state title — a bottom margin there would leave dead space under it. */}
-        {!busy ? (
+        {!busy && renaming ? (
+          <RenameField
+            initial={title}
+            onDone={rename}
+            className={
+              renameField ??
+              "mt-1.5 w-full rounded border border-slate-300 bg-white px-1.5 py-0.5 text-sm font-medium text-slate-800 outline-none focus:border-emerald-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100"
+            }
+          />
+        ) : !busy ? (
           <p className="mt-1.5 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
             {clone.unread && !selected ? (
               <span

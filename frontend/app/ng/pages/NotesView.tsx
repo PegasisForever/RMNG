@@ -15,6 +15,7 @@
 import type { ReactNode } from "react";
 
 import { CloneStatusDot, statusLabel } from "~/components/mobile/CloneStatus";
+import { cloneTitle } from "~/lib/cloneTitle";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
@@ -91,7 +92,7 @@ export function NotesView({
             title={
               <span className="flex items-center gap-1.5">
                 <CloneStatusDot clone={clone} />
-                <span className="truncate">{ticket?.title ?? clone.displayName ?? clone.id}</span>
+                <span className="truncate">{cloneTitle(clone, ticket)}</span>
               </span>
             }
             sub={`${clone.id} · ${statusLabel(clone)}`}

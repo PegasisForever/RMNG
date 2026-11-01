@@ -108,6 +108,9 @@ export const putTicketOrder = (ticketIds: string[]) =>
  *  notifications itself; it holds the set so every tab and the phone agree on it. */
 export const putMutedClones = (cloneIds: string[]) =>
  putJson("/api/clones/muted", { cloneIds });
+/** The clone's display name, the operator's own; empty takes it away. The hostname stays. */
+export const renameClone = (id: string, name: string) =>
+ putJson(`/api/hosts/${encodeURIComponent(id)}/name`, { name });
 
 // --- uploads ---------------------------------------------------------------
 
