@@ -40,10 +40,9 @@ no sheen, no shadow, no glow.
 
 Join them: `ng-glass ng-glass-control ng-glass-lit` is an "on" button.
 
-The pages' panel (`./pages/ui.tsx`, `PAGES_GLASS`, narrow) is glass with a denser tint too: light
-grey at 80 %, dark grey at 78 %, as it is full of small text. Wide, the pages have no panel: each
-column is flat glass (`ng-glass-flat`), and each side panel over the columns is the usual thick
-glass. While the pages are open, a backdrop over the whole screen (under the pages and the
+The pages are flat glass (`ng-glass-flat`) on a shared backdrop: narrow, their one panel
+(`./pages/ui.tsx`, `PAGES_GLASS`); wide, each column, with no panel round them. Each side panel
+over the columns is the usual thick glass, as it floats over them. While the pages are open, a backdrop over the whole screen (under the pages and the
 floating buttons) blurs and darkens it (`PAGES_BACKDROP`, `bg-black/25` / `bg-black/40`, blur
 12 px); it fades in and out with the pages (200 ms), and takes no touch or click. In the pages' own window there is no clone's
 screen under them: the same flat content sits on a solid ground (`bg-neutral-100` /

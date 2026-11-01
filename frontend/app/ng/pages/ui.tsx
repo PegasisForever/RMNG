@@ -19,10 +19,10 @@ import {
 
 import { type Box, MenuDivider, MenuItem, MenuPanel } from "~/components/OverflowMenu";
 
-/** The pages' panel over the clone's screen: glass with a denser tint than the buttons' (as the
- *  keyboard's), as it is full of small text that must read over a black window or a white one. */
-export const PAGES_GLASS =
-  "ng-glass ng-glass-thick rounded-2xl [--glass-tint:rgb(245_245_245/0.8)] dark:[--glass-tint:rgb(23_23_23/0.78)]";
+/** The pages' panel over the clone's screen (narrow): glass with no blur or shadow of its own,
+ *  as the wide pages' columns are (`ng-glass-flat`): the backdrop under the pages
+ *  (`PAGES_BACKDROP`) blurs and darkens the screen for them. */
+export const PAGES_GLASS = "ng-glass ng-glass-thick ng-glass-flat rounded-2xl";
 
 /** A column of the wide pages (`./WideLayout.tsx`) on its own: over the clone's screen, glass
  *  with no blur or shadow of its own (`ng-glass-flat`: the backdrop under the pages blurs and
