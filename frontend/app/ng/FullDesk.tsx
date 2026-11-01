@@ -443,14 +443,11 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   const x = mouse ? fit.left : followAxis(prev.x, cx, w, width - safe.right, width, CURSOR_MARGIN, safe.left);
   // The buttons are always there: the cursor stays below their row too, and the screen moves
   // down for it, its start no lower than the row's end (black above it). Docked, the screen
-  // rests in the middle of its area above the keys, and moves only to keep the cursor out of the
-  // clock bar (a finger there would touch the buttons, or nothing)
+  // rests in the middle of its area above the keys, and moves the same way
   const buttonsEnd = top + FLOAT_GAP * 2 + FLOAT_BUTTON;
   const y = mouse
     ? fit.top
-    : dockedNow
-      ? followAxis(prev.y, cy, h, areaH, areaH, CURSOR_MARGIN, top)
-      : followAxis(prev.y, cy, h, visible, height, CURSOR_MARGIN, buttonsEnd);
+    : followAxis(prev.y, cy, h, dockedNow ? areaH : visible, dockedNow ? areaH : height, CURSOR_MARGIN, buttonsEnd);
   at.current = { x, y, shown };
 
   // The phone's keyboard lifts the control panel so all of the open one is above it
