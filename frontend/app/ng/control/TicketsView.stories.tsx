@@ -72,7 +72,7 @@ export const Empty: Story = { args: { tickets: [] } };
 export const LinearError: Story = { args: { error: "Linear answered 401: the API key is not valid" } };
 
 /** The tickets' column (wide), one ticket open beside the board: selected as the clone on the
- *  screen is in its column, a green tint and a green bar at its left. */
+ *  screen is in its column, a green tint. */
 export const ColumnSelected: Story = {
   args: { column: true, open: ticketDetailed },
   parameters: { frameWidth: 300 },

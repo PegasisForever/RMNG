@@ -353,8 +353,8 @@ export function TicketCardBody({
   /** A tap with a finger on the ⋮ calls this in place of the dropdown (`OverflowMenu`). */
   onMenuTouch?: () => void;
   /** The fills of a card on glass (/ng), idle and selected, as a clone's card has them
-   *  (`SidebarClone`'s `fill`); selected also takes the clone card's left accent, so the two
-   *  read as one kind of selection. Absent: the dashboard's tint. */
+   *  (`SidebarClone`'s `fill`), so the two read as one kind of selection: the tint alone.
+   *  Absent: the dashboard's tint. */
   fill?: { idle: string; selected: string };
 }) {
   const labels = ticket.labels ?? [];
@@ -362,7 +362,7 @@ export function TicketCardBody({
     <article
       className={
         fill
-          ? `border-l-2 py-2 pl-2 pr-2.5 ${selected ? `border-l-emerald-400 ${fill.selected}` : `border-l-transparent ${fill.idle}`}`
+          ? `px-2.5 py-2 ${selected ? fill.selected : fill.idle}`
           : `px-2.5 py-2 ${selected ? "bg-emerald-50 dark:bg-emerald-950" : ""}`
       }
     >
