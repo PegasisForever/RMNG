@@ -145,8 +145,9 @@
   /* Green glass: the operator's own message in the assistant's chat, the send button's green
      with the screen showing through, white text. The same in both looks. */
   .ng-glass-green {
-    --glass-tint: rgb(5 150 105 / 0.72);
-    --glass-sheen: rgb(255 255 255 / 0.18);
+    /* Dense: over the light panel a thinner green reads washed out */
+    --glass-tint: rgb(5 150 105 / 0.92);
+    --glass-sheen: rgb(255 255 255 / 0.1);
     --glass-rim-top: rgb(255 255 255 / 0.5);
     --glass-rim-side: rgb(255 255 255 / 0.15);
     --glass-rim-bottom: rgb(255 255 255 / 0.2);

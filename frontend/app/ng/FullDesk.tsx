@@ -57,6 +57,7 @@ import { useOpenMonitors, useViewerChannel } from "~/lib/useViewerChannel";
 import { openViewerWindows } from "~/viewer/open";
 import { toggleFullscreen } from "~/viewer/input";
 
+import { attachEditKeys } from "./editKeys";
 import { firstLayout, startScale } from "./firstLayout";
 import { FLOAT_BUTTON, FLOAT_GAP } from "./FloatingButtons";
 import { followAxis, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
@@ -219,6 +220,17 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // A Mac's edit shortcuts (Cmd+C, Cmd+V…) while the keyboard is locked and the page has the
+  // keys: the page runs them itself (`./editKeys.ts`)
+  useEffect(
+    () =>
+      attachEditKeys({
+        active: () => !mouseInputRef.current,
+        locked: () => hostWindow().document.fullscreenElement !== null,
+      }),
+    [],
+  );
 
   // Escape: a dialog or a menu closes itself first (each has its own Escape); with none open,
   // the control panel closes. In a text box the first Escape only leaves the box, so a key
