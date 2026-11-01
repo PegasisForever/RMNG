@@ -264,3 +264,20 @@
 .dark .ng-on-glass .bn-block-content:has(.ProseMirror-trailingBreak:only-child)::after {
   color: rgb(255 255 255 / 0.4);
 }
+
+/* A dropdown's list over the fields (`DropdownSelect`, `PrioritySelect`): what is under it is
+   blurred, as under any glass piece, so its rows read over the fields it covers. `[role]` twice:
+   it outweighs the light look's white fill (`.bg-white:not(.dark *)` above). */
+.ng-on-glass [role="listbox"][role] {
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  backdrop-filter: blur(20px) saturate(1.8);
+  background-color: rgb(255 255 255 / 0.78);
+}
+@media (prefers-color-scheme: dark) {
+  .ng-on-glass [role="listbox"][role] {
+    background-color: rgb(38 38 38 / 0.82);
+  }
+}
+.dark .ng-on-glass [role="listbox"][role] {
+  background-color: rgb(38 38 38 / 0.82);
+}
