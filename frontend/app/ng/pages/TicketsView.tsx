@@ -138,7 +138,7 @@ export function TicketsView(p: TicketsViewProps) {
         {p.tickets.length === 0 ? (
           empty
         ) : (
-          <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain px-1.5 pb-1.5">
+          <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5">
             {p.tickets.map((t) => (
               <TicketRow
                 key={t.id}

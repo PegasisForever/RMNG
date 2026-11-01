@@ -83,14 +83,14 @@ export function NotesView({
       {/* The notes are one long scroll; the chat is a column with its composer at the bottom */}
       {stacked ? (
         <>
-          <div className="min-h-0 flex-[3] overflow-y-auto overscroll-contain py-2">{notes}</div>
+          <div className="min-h-0 flex-[3] overflow-y-auto overscroll-y-contain py-2">{notes}</div>
           <div className={`flex min-h-0 flex-[2] flex-col border-t ${LINE}`}>
             <h3 className={`shrink-0 px-3 pt-2 text-[11px] font-semibold uppercase tracking-wide ${TEXT_3}`}>Assistant</h3>
             {chat}
           </div>
         </>
       ) : pane === "notes" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-2">{notes}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain py-2">{notes}</div>
       ) : (
         chat
       )}

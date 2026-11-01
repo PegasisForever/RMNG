@@ -49,7 +49,7 @@ export function SettingsView(p: SettingsViewProps) {
       </nav>
       <div className="flex min-w-0 flex-1 flex-col">
         {p.error ? <ErrorLine message={p.error} /> : null}
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-3 [&>section:first-child]:border-t-0 [&>section:first-child]:pt-0">
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-y-contain p-3 [&>section:first-child]:border-t-0 [&>section:first-child]:pt-0">
           {p.draft ? <SettingsPane {...p} draft={p.draft} category={active.id} /> : <EmptyLine>Loading…</EmptyLine>}
         </div>
       </div>

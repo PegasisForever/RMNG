@@ -52,7 +52,7 @@ export function Page({
       {header}
       {error ? <ErrorLine message={error} onDismiss={onDismissError} /> : null}
       <div
-        className={`min-h-0 flex-1 ${fill ? "flex flex-col overflow-hidden" : "overflow-y-auto overscroll-contain"}`}
+        className={`min-h-0 flex-1 ${fill ? "flex flex-col overflow-hidden" : "overflow-y-auto overscroll-y-contain"}`}
       >
         {children}
       </div>
@@ -226,7 +226,7 @@ export function ActionSheet({
       <div
         role="menu"
         aria-label={typeof title === "string" ? title : undefined}
-        className="max-h-full w-full max-w-xl overflow-y-auto overscroll-contain rounded-t-2xl bg-neutral-100 px-2 pb-2 shadow-[0_-8px_32px_rgb(0_0_0/0.25)] dark:bg-neutral-900"
+        className="max-h-full w-full max-w-xl overflow-y-auto overscroll-y-contain rounded-t-2xl bg-neutral-100 px-2 pb-2 shadow-[0_-8px_32px_rgb(0_0_0/0.25)] dark:bg-neutral-900"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 flex h-10 items-center gap-2 bg-neutral-100 pl-1 dark:bg-neutral-900">

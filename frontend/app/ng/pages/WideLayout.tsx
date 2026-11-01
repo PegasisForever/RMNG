@@ -69,7 +69,10 @@ export function WideLayout({
         <div className={`min-w-0 flex-1 ${PART}`}>{settings}</div>
       ) : (
         <>
-          <div aria-label="Board" className="min-w-0 flex-1 overflow-x-auto overscroll-contain">
+          {/* Its columns keep only their up-and-down scrolls to themselves (`overscroll-y-`), so a
+              sideways swipe over one scrolls the board; the board keeps its own, so the swipe
+              does not go back in the browser's history */}
+          <div aria-label="Board" className="min-w-0 flex-1 overflow-x-auto overscroll-x-contain">
             <div className="flex h-full gap-2">{board}</div>
           </div>
           <aside aria-label="Notes" className={`relative flex w-96 shrink-0 flex-col ${PART}`}>

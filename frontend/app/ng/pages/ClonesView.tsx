@@ -240,7 +240,7 @@ export function ClonesView(p: ClonesViewProps) {
             className={`flex h-full w-72 shrink-0 flex-col rounded-xl border ${LINE} bg-black/[0.03] dark:bg-white/[0.03]`}
           >
             <h3 className={`flex h-10 shrink-0 items-center gap-2 pl-3 pr-1 text-sm font-semibold ${TEXT}`}>{heading(column)}</h3>
-            <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain px-1.5 pb-1.5">{rows(column)}</ul>
+            <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-y-contain px-1.5 pb-1.5">{rows(column)}</ul>
           </section>
         ))}
         {sheetView}
