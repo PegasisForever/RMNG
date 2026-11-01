@@ -153,13 +153,14 @@ const desktop = {
 /** Only the clone's screen: the buttons slid up out of the window. */
 export const Desktop: Story = { args: { ...desktop } };
 
-/** The mode just started, or the mouse is at the window's top edge: the buttons are in (no
- *  keyboard button); at the start, the note says how to reach them and the pages. */
+/** The mode just started, or the mouse is at the window's right edge by the buttons' row: the
+ *  buttons are in (no keyboard button); at the start, the note says how to reach them and the
+ *  pages. */
 export const DesktopButtonsIn: Story = {
   args: {
     ...desktop,
     buttons: buttons({ keyboard: false }),
-    notes: { ...notes, hint: "The top edge shows the buttons, Ctrl Alt Space the pages" },
+    notes: { ...notes, hint: "The right edge at the top shows the buttons, Ctrl Alt Space the pages" },
   },
 };
 
@@ -246,7 +247,8 @@ export const PhoneInteractive: Story = {
   },
 };
 
-/** The mouse at the display's top edge brings the buttons in; below them it sends them away.
+/** The mouse at the display's right edge, as high as the buttons, brings them in; away from
+ *  them it sends them away.
  *  The button at the bottom left stands for Ctrl+Alt+Space: it shows or hides the pages. */
 export const DesktopInteractive: Story = {
   args: { ...desktop },
@@ -258,9 +260,10 @@ export const DesktopInteractive: Story = {
       <>
         <div
           onPointerMove={(e) => {
-            const top = e.clientY - e.currentTarget.getBoundingClientRect().top;
-            if (top <= 2) setPeek(true);
-            else if (top > 84) setPeek(false);
+            const r = e.currentTarget.getBoundingClientRect();
+            const [x, y] = [e.clientX - r.left, e.clientY - r.top];
+            if (x >= r.width - 2 && y <= 60) setPeek(true);
+            else if (y > 84 || x < r.width - 260) setPeek(false);
           }}
         >
           <NgScreenView

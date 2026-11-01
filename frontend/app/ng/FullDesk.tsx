@@ -22,7 +22,8 @@
 //   area is a touch screen: each finger goes to the clone as a touch.
 // - Mouse and keyboard: the mouse, the keys and the clipboard go to the clone as in the viewer
 //   (`~/viewer/input.ts`). The same buttons, less the keyboard's, show when the mode starts,
-//   then slide up out of the window; the mouse at the window's top edge brings them back. A
+//   then slide out of the window to the right; the mouse at the window's right edge, by their
+//   row, brings them back. A
 //   chord (`./shortcut.ts`) shows the pages, with the buttons above them, and hides them again;
 //   so does a click beside them.
 //
@@ -77,10 +78,10 @@ const MAX_KEYS_PART = 0.8;
 const TOUCH_SLOTS = 10;
 /** How long the buttons and the hint show when mouse and keyboard mode starts, ms. */
 const HINT_MS = 4000;
-/** Mouse mode: the mouse this close to the window's top (CSS px) brings the buttons in; below
- *  their row, and this much more, it sends them away again. */
-const TOP_EDGE_PX = 2;
-const BUTTONS_ZONE_PX = FLOAT_GAP * 2 + FLOAT_BUTTON + 24;
+/** Mouse mode: the mouse this close to the window's right edge (CSS px), by the buttons' row,
+ *  brings the buttons in; this much (CSS px) away from their row, it sends them away again. */
+const RIGHT_EDGE_PX = 2;
+const BUTTONS_MARGIN_PX = 24;
 /** The pages' own window: its name, and its size when it opens. */
 const PAGES_WINDOW = "rmng-pages";
 const PAGES_WINDOW_FEATURES = "popup,width=560,height=900";
@@ -197,25 +198,33 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  /** Where the pointer was last, CSS px from the top. */
-  const pointerY = useRef(Infinity);
+  /** Where the pointer was last, CSS px. */
+  const pointer = useRef({ x: -Infinity, y: Infinity });
   useEffect(() => {
-    const onMove = (e: globalThis.PointerEvent) => (pointerY.current = e.clientY);
+    const onMove = (e: globalThis.PointerEvent) => (pointer.current = { x: e.clientX, y: e.clientY });
     window.addEventListener("pointermove", onMove, { capture: true, passive: true });
     return () => window.removeEventListener("pointermove", onMove, { capture: true });
   }, []);
+  /** The buttons' row ends this far down (CSS px): under the clock bar, a gap, the buttons, a gap. */
+  const rowEnd = useRef(0);
+  rowEnd.current = top + FLOAT_GAP * 2 + FLOAT_BUTTON;
   // Mouse and keyboard mode starts: the buttons and the hint show for a while, then the buttons
-  // slide up out of the window. The mouse at the window's top edge brings them back; below
-  // their row it sends them away again.
+  // slide out of the window to the right. The mouse at the window's right edge, as high as
+  // their row, brings them back; away from their row it sends them away again.
   useEffect(() => {
     if (!mouse) return;
     setZoom(1);
     setHint(true);
     setPeek(true);
     let intro = true;
-    /** The mouse is by the buttons' row (the start's time ends without sending them away). The
-     *  move that started the mode came before this listener: it is in `pointerY`. */
-    let near = pointerY.current <= BUTTONS_ZONE_PX;
+    /** The mouse is at the buttons' row, or by it. Their row's width is the page's to say. */
+    const isNear = ({ x, y }: { x: number; y: number }) => {
+      const row = document.querySelector<HTMLElement>("[data-ng-buttons]")?.offsetWidth ?? 0;
+      return y <= rowEnd.current + BUTTONS_MARGIN_PX && x >= window.innerWidth - FLOAT_GAP - row - BUTTONS_MARGIN_PX;
+    };
+    /** The start's time ends without sending them away while the mouse is by them. The move
+     *  that started the mode came before this listener: it is in `pointer`. */
+    let near = isNear(pointer.current);
     const t = setTimeout(() => {
       intro = false;
       setHint(false);
@@ -223,8 +232,9 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     }, HINT_MS);
     const onMove = (e: globalThis.PointerEvent) => {
       if (e.pointerType !== "mouse") return;
-      near = e.clientY <= BUTTONS_ZONE_PX;
-      if (e.clientY <= TOP_EDGE_PX) setPeek(true);
+      const at = { x: e.clientX, y: e.clientY };
+      near = isNear(at);
+      if (at.x >= window.innerWidth - RIGHT_EDGE_PX && at.y <= rowEnd.current) setPeek(true);
       else if (!near && !intro) setPeek(false);
     };
     window.addEventListener("pointermove", onMove, { capture: true, passive: true });
@@ -420,7 +430,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         dictation: r.dictation,
         heard: r.heard,
         note: r.note,
-        hint: hint && !pages ? `The top edge shows the buttons, ${pagesChordLabel()} the pages` : null,
+        hint: hint && !pages ? `The right edge at the top shows the buttons, ${pagesChordLabel()} the pages` : null,
       }}
       pages={{
         open: pages,

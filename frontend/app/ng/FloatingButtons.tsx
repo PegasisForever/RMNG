@@ -4,8 +4,8 @@
 // keyboard; a long press docks it (always shown) or undocks it. A long press on the fit opens the
 // Edit layout dialog. A button whose thing is open is lit; the docked keyboard's has a bar under
 // its icon; the fit is dim when the monitor fits already. A right click is a long press, for a
-// mouse. In mouse and keyboard mode they have no keyboard button, and they slide up out of the
-// window when they are not in use (`away`; `./FullDesk.tsx` says when).
+// mouse. In mouse and keyboard mode they have no keyboard button, and they slide out of the
+// window to the right when they are not in use (`away`; `./FullDesk.tsx` says when).
 // Where the browser has fullscreen, a fourth button turns it on and off (the page's own
 // fullscreen: only that one hands the system's chords, such as Super+Space, to the page). On a
 // desktop whose layout has monitors with no window open, a button at the left opens their
@@ -55,7 +55,7 @@ export function FloatingButtons({
   /** The layout's monitors with no window open (their numbers), and the opening of their
    *  windows; absent when there are none, or the browser opens no windows. */
   monitors?: { missing: number[]; onOpen: () => void };
-  /** Slid up out of the window, and out of reach. */
+  /** Slid out of the window to the right, and out of reach. */
   away?: boolean;
 }) {
   return (
@@ -67,8 +67,8 @@ export function FloatingButtons({
         gap: FLOAT_GAP,
         top: `calc(env(safe-area-inset-top) + ${FLOAT_GAP}px)`,
         right: `calc(env(safe-area-inset-right) + ${FLOAT_GAP}px)`,
-        // Up by their height, the room above them, and their shadow
-        transform: away ? `translateY(calc(-100% - env(safe-area-inset-top) - ${FLOAT_GAP * 3}px))` : undefined,
+        // Right by their width, the room beside them, and their shadow
+        transform: away ? `translateX(calc(100% + env(safe-area-inset-right) + ${FLOAT_GAP * 3}px))` : undefined,
       }}
     >
       {monitors?.missing.length ? (
