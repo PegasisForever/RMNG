@@ -82,6 +82,9 @@ export function WideLayout({
   settings: ReactNode;
 }) {
   const frame = glass ? COLUMN_GLASS : COLUMN_SOLID;
+  /** The rail in the control panel's own window: on the window's ground, with no frame (its cards
+   *  and the server's numbers have their own) */
+  const railFrame = glass ? COLUMN_GLASS : "overflow-hidden";
   // The side panels' width: the container's (stored) to start, then this one's while it is set
   const [pct, setPct] = useState(side.widthPct);
   const pctRef = useRef(side.widthPct);
@@ -111,7 +114,7 @@ export function WideLayout({
   );
 
   const railColumn = (
-    <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${frame}`}>
+    <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${railFrame}`}>
       <div className="flex h-12 shrink-0 items-center gap-1.5 pl-3 pr-1.5">
         <h2 className={`min-w-0 flex-1 truncate text-sm font-semibold ${TEXT}`}>RMNG Control</h2>
         {onLayout ? (
