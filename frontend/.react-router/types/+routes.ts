@@ -20,12 +20,15 @@ type Pages = {
   "/ng/app": {
     params: {};
   };
+  "/ng/screen-area": {
+    params: {};
+  };
 };
 
 type RouteFiles = {
   "root.tsx": {
     id: "root";
-    page: "/" | "/viewer" | "/ng/app";
+    page: "/" | "/viewer" | "/ng/app" | "/ng/screen-area";
   };
   "routes/_index.tsx": {
     id: "routes/_index";
@@ -39,6 +42,10 @@ type RouteFiles = {
     id: "routes/ng";
     page: "/ng/app";
   };
+  "routes/ngScreenArea.tsx": {
+    id: "routes/ngScreenArea";
+    page: "/ng/screen-area";
+  };
 };
 
 type RouteModules = {
@@ -46,4 +53,5 @@ type RouteModules = {
   "routes/_index": typeof import("./app/routes/_index.tsx");
   "routes/viewer": typeof import("./app/routes/viewer.tsx");
   "routes/ng": typeof import("./app/routes/ng.tsx");
+  "routes/ngScreenArea": typeof import("./app/routes/ngScreenArea.tsx");
 };

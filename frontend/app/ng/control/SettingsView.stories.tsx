@@ -27,6 +27,7 @@ const meta = {
     saving: false,
     saved: false,
     onSave: fn(),
+    onScreenArea: fn(),
     serverStatus: makeUpdateStatus(),
     serverMessage: null,
     updateOperation: null,

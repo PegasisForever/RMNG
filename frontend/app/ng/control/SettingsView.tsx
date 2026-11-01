@@ -4,13 +4,16 @@
 // icons only, so the pane keeps the width. The panes are the dashboard's (`SettingsPane`).
 //
 // Pure: the form and what it can do come from `useSettingsPanel`, as on the desktop.
-import { Save } from "lucide-react";
+import { Frame, Save } from "lucide-react";
 
 import { SettingsPane, settingsCategories, type SettingsPanelViewProps } from "~/components/SettingsPanelView";
 
 import { EmptyLine, ErrorLine, LINE, LIT, PRESS, R_PIECE, TEXT_2 } from "./ui";
 
-export type SettingsViewProps = Omit<SettingsPanelViewProps, "onClose">;
+export type SettingsViewProps = Omit<SettingsPanelViewProps, "onClose"> & {
+  /** Open the screen area test page (`routes/ngScreenArea.tsx`); absent: no button. */
+  onScreenArea?: () => void;
+};
 
 export function SettingsView(p: SettingsViewProps) {
   const categories = settingsCategories(p.boardColumns);
@@ -36,6 +39,18 @@ export function SettingsView(p: SettingsViewProps) {
           </button>
         ))}
         <span className="flex-1" />
+        {p.onScreenArea ? (
+          <button
+            type="button"
+            onClick={p.onScreenArea}
+            aria-label="Screen area test"
+            title="Screen area test: the page's area and the safe area"
+            className={`flex h-9 items-center justify-center gap-2 ${R_PIECE} px-2 text-left text-sm @lg:justify-start ${TEXT_2} ${PRESS}`}
+          >
+            <Frame aria-hidden className="size-4 shrink-0" />
+            <span className="hidden truncate @lg:inline">Screen area</span>
+          </button>
+        ) : null}
         {p.saved ? <span className="text-center text-xs font-medium text-emerald-700 dark:text-emerald-300">Saved</span> : null}
         <button
           type="button"

@@ -693,7 +693,8 @@ export function ControlPanelContainer({
       case "assistant":
         return notesView("chat");
       case "settings":
-        return <SettingsView {...settings} />;
+        // The test page in the browser's own window: /ng's frame has no safe area of its own
+        return <SettingsView {...settings} onScreenArea={() => hostWindow().location.assign("/ng/screen-area")} />;
     }
   };
 
