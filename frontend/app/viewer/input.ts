@@ -337,6 +337,25 @@ export interface Input {
   detach(): void;
 }
 
+/** The event flag that says whether a modifier key (by its DOM code) is down. */
+export type ModFlag = "ctrlKey" | "shiftKey" | "altKey" | "metaKey";
+
+export function modFlagOf(code: string): ModFlag | undefined {
+  if (code === "ControlLeft" || code === "ControlRight") return "ctrlKey";
+  if (code === "ShiftLeft" || code === "ShiftRight") return "shiftKey";
+  if (code === "AltLeft" || code === "AltRight") return "altKey";
+  if (code === "MetaLeft" || code === "MetaRight") return "metaKey";
+  return undefined;
+}
+
+/** The held modifiers (evdev code → its flag) that `e` says are up: their release never came.
+ *  macOS takes Ctrl+Space for itself (the next input source) and Chrome gets no keyup for the
+ *  Ctrl, so the clone would hold Ctrl until the page reloads. Every key, button, wheel and move
+ *  event says which modifiers are down, so the next one lets go of the rest. */
+export function staleMods(held: ReadonlyMap<number, ModFlag>, e: Pick<KeyboardEvent, ModFlag>): number[] {
+  return [...held].filter(([, flag]) => !e[flag]).map(([k]) => k);
+}
+
 export function attachInput(o: InputOptions): Input {
   const { canvas, overlay, monitor, send } = o;
   const isMac = /Mac/.test(navigator.platform);
@@ -347,6 +366,8 @@ export function attachInput(o: InputOptions): Input {
   /** The canvas in device pixels. */
   let box: { w: number; h: number } | null = null;
   const keys = new Set<number>();
+  /** The modifiers among `keys`, with the flag an event says them down by (`staleMods`). */
+  const mods = new Map<number, ModFlag>();
   const buttons = new Set<number>();
   const auto = new AutoLock(performance.now());
   /** Chrome refused the lock (the user left it with Esc): wait for a click before asking again. */
@@ -397,6 +418,7 @@ export function attachInput(o: InputOptions): Input {
     for (const k of keys) send({ kind: "key_code", keycode: k, pressed: false });
     for (const b of buttons) send({ kind: "button", button: b, pressed: false });
     keys.clear();
+    mods.clear();
     buttons.clear();
   }
 
@@ -477,6 +499,16 @@ export function attachInput(o: InputOptions): Input {
   /** A key typed into the page's own terminal (xterm.js reads keys from a textarea). */
   const forPage = (e: KeyboardEvent) => e.target instanceof HTMLTextAreaElement;
 
+  /** Let go of the held modifiers `e` says are up (`staleMods`). */
+  function syncMods(e: KeyboardEvent | MouseEvent) {
+    // AltGr (right Alt) can come as "AltGraph" with `altKey` off: it is down all the same
+    const down = { ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, metaKey: e.metaKey, altKey: e.altKey || e.getModifierState("AltGraph") };
+    for (const k of staleMods(mods, down)) {
+      mods.delete(k);
+      if (keys.delete(k)) send({ kind: "key_code", keycode: k, pressed: false });
+    }
+  }
+
   /** Send the modifier's held press: another key or a click came, so it is no chord's. */
   function flushMod() {
     if (heldMod === null) return;
@@ -487,6 +519,7 @@ export function attachInput(o: InputOptions): Input {
 
   function onKeyDown(e: KeyboardEvent) {
     if (forPage(e)) return;
+    syncMods(e);
     if (o.chord?.is(e)) {
       e.preventDefault();
       if (e.repeat) return;
@@ -534,6 +567,8 @@ export function attachInput(o: InputOptions): Input {
     // second Cmd+C is a second press of a C the clone still holds. Release it first.
     if (keys.has(k)) send({ kind: "key_code", keycode: k, pressed: false });
     keys.add(k);
+    const flag = modFlagOf(e.code);
+    if (flag) mods.set(k, flag);
     if (paste) {
       pasteSink.focus({ preventScroll: true });
       holdPaste(k);
@@ -573,6 +608,7 @@ export function attachInput(o: InputOptions): Input {
       return;
     }
     if (heldPaste?.keycode === k) flushPaste();
+    mods.delete(k);
     if (!keys.delete(k)) return;
     send({ kind: "key_code", keycode: k, pressed: false });
     // Chrome on macOS fires no keyup for a key released while Command is down (Cmd+C sends
@@ -589,6 +625,7 @@ export function attachInput(o: InputOptions): Input {
   }
 
   function onPointerMove(e: PointerEvent) {
+    syncMods(e);
     // Chrome already sends at most one pointermove per frame, so moves need no other merging.
     if (now() < warpUntil) return;
     if (locked()) {
@@ -614,6 +651,7 @@ export function attachInput(o: InputOptions): Input {
   // one as a move, not as a press.
   function onMouseDown(e: MouseEvent) {
     e.preventDefault(); // no middle-button autoscroll, no text selection
+    syncMods(e);
     o.onGesture();
     flushMod();
     const b = BUTTONS[e.button];
@@ -636,6 +674,7 @@ export function attachInput(o: InputOptions): Input {
 
   function onWheel(e: WheelEvent) {
     e.preventDefault(); // no page scroll, no Ctrl+wheel zoom
+    syncMods(e);
     flushMod();
     const w = e as WheelEvent & { wheelDeltaX: number; wheelDeltaY: number };
     const msgs = wheelMessages(w, rem, {
