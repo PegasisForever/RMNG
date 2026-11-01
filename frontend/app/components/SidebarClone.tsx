@@ -173,7 +173,7 @@ function AccountTag({
       <img
         src={logo}
         alt=""
-        className={`h-3 w-3 shrink-0 opacity-70 ${logo === chatgptLogo ? "dark:invert" : ""}`}
+        className={`h-3 w-3 shrink-0 opacity-70 dark:opacity-90 ${logo === chatgptLogo ? "dark:invert" : ""}`}
       />
       {badge ? (
         <span className="shrink-0 rounded bg-slate-200 px-1 text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">

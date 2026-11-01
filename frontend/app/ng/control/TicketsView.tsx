@@ -50,6 +50,7 @@ import {
   HeaderButton,
   isMouseClick,
   NO_DRAG,
+  ON_GLASS,
   NO_SCROLLBARS,
   Page,
   PageHeader,
@@ -202,7 +203,7 @@ export function TicketsView(p: TicketsViewProps) {
     return (
       <section
         aria-label="Tickets"
-        className={`flex h-full w-72 shrink-0 flex-col ${frame}`}
+        className={`flex h-full w-72 shrink-0 flex-col ${frame} ${ON_GLASS}`}
       >
         <h3 className={`flex h-10 shrink-0 items-center gap-1.5 pl-3 pr-1.5 text-sm font-semibold ${TEXT}`}>
           Tickets

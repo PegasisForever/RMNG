@@ -73,6 +73,7 @@ import {
   HERE,
   isMouseClick,
   NO_DRAG,
+  ON_GLASS,
   Page,
   PageHeader,
   PRESS,
@@ -412,7 +413,7 @@ export function ClonesView(p: ClonesViewProps) {
           <section
             key={column.id}
             aria-label={column.title}
-            className={`flex h-full w-72 shrink-0 flex-col ${frame}`}
+            className={`flex h-full w-72 shrink-0 flex-col ${frame} ${ON_GLASS}`}
           >
             <h3 className={`flex h-10 shrink-0 items-center gap-2 pl-3 pr-1.5 text-sm font-semibold ${TEXT}`}>{heading(column)}</h3>
             <DropColumn

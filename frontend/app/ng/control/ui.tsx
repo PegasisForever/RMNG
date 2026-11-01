@@ -52,8 +52,12 @@ export const INSET = "p-1.5";
  *  a dark one) when nothing else fills it. Set INSET into the column, so R_PIECE. */
 export const CARD = `${R_PIECE} border border-black/10 dark:border-white/10`;
 export const CARD_FILL = "bg-white dark:bg-white/[0.06]";
-/** A card on a column (an account, a ticket, a clone): one edge, one fill, for all three. */
-export const CARD_BOX = `${CARD} bg-white/80 dark:bg-white/[0.07]`;
+/** A card on a column (an account, a ticket, a clone): one edge, one fill, for all three. Light:
+ *  white at 60 %, so the column's glass shows through a little. */
+export const CARD_BOX = `${CARD} bg-white/60 dark:bg-white/[0.07]`;
+/** Where the dashboard's own parts (a clone's card, a ticket's card, the ticket panel) sit on
+ *  the glass: their slate greys become readable ones on it (`../glass.css`, `.ng-on-glass`). */
+export const ON_GLASS = "ng-on-glass";
 /** A column's list of cards: its inset and the gap between them, for all three columns. */
 export const CARD_LIST = "space-y-1.5 px-1.5 pb-1.5";
 
