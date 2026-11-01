@@ -1014,6 +1014,7 @@ export function DashboardContainer({
 
       {importOpen ? (
         <ImportAccountModalContainer
+          accounts={accounts}
           groupNames={groups.map((g) => g.name)}
           initialProvider={importSeed.provider}
           initialGroup={importSeed.group}

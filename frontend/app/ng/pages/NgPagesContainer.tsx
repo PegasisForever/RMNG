@@ -449,6 +449,7 @@ export function NgPagesContainer({
       case "import":
         return (
           <ImportAccountModalContainer
+            accounts={accounts}
             groupNames={state.groups.map((g) => g.name)}
             initialProvider={d.provider}
             initialGroup={d.group}

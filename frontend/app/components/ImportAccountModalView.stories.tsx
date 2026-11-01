@@ -64,10 +64,9 @@ export const Codex: Story = {
  *  an account added here does not silently become one no clone can be handed. */
 export const NoPools: Story = { args: { groups: [] } };
 
-/** Standing in for a dead account, which is where the "sign in again" badge lands. Both
- *  choices the plain dialog offers are already made here — the provider is the dead
- *  account's, and the pools are the ones it sits in — so neither control is drawn, and the
- *  button names what it is about to do. */
+/** Where the "sign in again" button lands: the account's sign-in no longer works. Signing in
+ *  as it repairs it; signing in as another account puts that one in its place. The provider is
+ *  the dead account's and the pools are the ones it sits in, so neither control is drawn. */
 export const Replacing: Story = {
   args: { replacing: "test@talktomedi.com" },
 };
@@ -78,5 +77,47 @@ export const Refused: Story = {
   args: {
     pasted: "http://localhost:54545/callback?code=ac_01H8x9Qw",
     error: 'the provider refused the code: 400: {"error":"invalid_grant"}',
+  },
+};
+
+/** Signed in, as the same account: the dialog waits for the account list on this page to show
+ *  it working before it closes. */
+export const Checking: Story = {
+  args: {
+    replacing: "test@talktomedi.com",
+    progress: { email: "test@talktomedi.com", replaced: null, works: false, oldGone: true, slow: false, problem: null },
+  },
+};
+
+/** Signed in as another account: its pools and clones are moved, it works, and the old one is
+ *  on its way out of the list. */
+export const Replaced: Story = {
+  args: {
+    replacing: "test@talktomedi.com",
+    progress: { email: "new@talktomedi.com", replaced: "test@talktomedi.com", works: true, oldGone: false, slow: false, problem: null },
+  },
+};
+
+/** Every step done: the dialog closes by itself a moment later. */
+export const Done: Story = {
+  args: {
+    replacing: "test@talktomedi.com",
+    progress: { email: "new@talktomedi.com", replaced: "test@talktomedi.com", works: true, oldGone: true, slow: false, problem: null },
+  },
+};
+
+/** Half a minute on, the account does not work yet: the dialog says so, with the server's
+ *  words, and can be closed. */
+export const Slow: Story = {
+  args: {
+    replacing: "test@talktomedi.com",
+    progress: {
+      email: "test@talktomedi.com",
+      replaced: null,
+      works: false,
+      oldGone: true,
+      slow: true,
+      problem: "usage poll failed: 429 Too Many Requests",
+    },
   },
 };

@@ -289,6 +289,7 @@ export function MobileDashboardContainer({
       />
       {importOpen ? (
         <ImportAccountModalContainer
+          accounts={state.claudeAccounts ?? []}
           groupNames={groups.map((g) => g.name)}
           replacing={
             replacing
