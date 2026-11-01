@@ -27,8 +27,10 @@
 //   chord (`./shortcut.ts`) shows the pages, with the buttons above them, and hides them again;
 //   so does a click beside them.
 //
-// Where the browser can open windows, the pages can move to a window of their own (`?pages`),
-// and a button opens the windows of the layout's other monitors while any is not open.
+// Where the browser can open windows, the pages can move to a window of their own (`?pages`);
+// while the page is fullscreen, on another screen where there is one (`./otherScreen.ts`), as
+// one on this screen takes the page out of its fullscreen. A button opens the windows of the
+// layout's other monitors while any is not open.
 //
 // It runs in the frame of the /ng shell (`public/ng-shell.html`) where the browser has
 // fullscreen: the fullscreen, the key lock, the window's name and address are the shell's
@@ -57,6 +59,7 @@ import { HANDLE_H } from "./KeyboardHandle";
 import { type TouchKind } from "./KeyboardView";
 import { readKeyboardDocked, readKeyboardHeight, saveKeyboardDocked, saveKeyboardHeight } from "./keyboardDock";
 import { NgScreenView, pagesBox } from "./NgScreenView";
+import { boxOnOtherScreen } from "./otherScreen";
 import { NgPagesContainer } from "./pages/NgPagesContainer";
 import { clampTo } from "./pointer";
 import { useRemote } from "./remote";
@@ -84,7 +87,8 @@ const RIGHT_EDGE_PX = 2;
 const BUTTONS_MARGIN_PX = 24;
 /** The pages' own window: its name, and its size when it opens. */
 const PAGES_WINDOW = "rmng-pages";
-const PAGES_WINDOW_FEATURES = "popup,width=560,height=900";
+const PAGES_WINDOW_W = 560;
+const PAGES_WINDOW_H = 900;
 
 type Props = {
   /** The display, CSS px, and the clock bar's and the home bar's safe-area insets. */
@@ -384,11 +388,16 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     setKeyboard(false);
     setZoom(1);
   };
-  /** Move the pages to a window of their own (an open one is only brought to the front). */
-  const popOut = () => {
-    const win = window.open("", PAGES_WINDOW, PAGES_WINDOW_FEATURES);
+  /** Move the pages to a window of their own (an open one is only brought to the front). While
+   *  the page is fullscreen, on another screen where there is one (an open one is moved there). */
+  const popOut = async () => {
+    const box = fullscreen ? await boxOnOtherScreen(PAGES_WINDOW_W, PAGES_WINDOW_H) : null;
+    const place = box ? `,left=${box.left},top=${box.top},width=${box.width},height=${box.height}` : "";
+    const win = window.open("", PAGES_WINDOW, `popup,width=${PAGES_WINDOW_W},height=${PAGES_WINDOW_H}${place}`);
+    // Blocked: the permission's question took the click's time; the next click opens it
     if (!win) return;
     if (win.location.href === "about:blank") win.location.replace("/ng/app?pages");
+    else if (box) win.moveTo(box.left, box.top);
     win.focus();
     popout.current = win;
     setPages(false);
@@ -433,7 +442,7 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
         onTab: setTab,
         usage: r.usage,
         badges: r.unread ? { clones: r.unread } : undefined,
-        onPopOut: windows ? popOut : undefined,
+        onPopOut: windows ? () => void popOut() : undefined,
         lift,
         panelRef,
         content: (
