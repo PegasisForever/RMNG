@@ -250,3 +250,17 @@
 .dark .ng-on-glass .dark\:text-slate-900 {
   color: oklch(20.5% 0 0);
 }
+
+/* BlockNote's hint in an empty field (the ticket's description, the notes) is its own light grey,
+   which the glass washes out: on the glass it is the least text's grey (`./GLASS.md`). */
+.ng-on-glass .bn-block-content:has(.ProseMirror-trailingBreak:only-child)::after {
+  color: rgb(0 0 0 / 0.4);
+}
+@media (prefers-color-scheme: dark) {
+  .ng-on-glass .bn-block-content:has(.ProseMirror-trailingBreak:only-child)::after {
+    color: rgb(255 255 255 / 0.4);
+  }
+}
+.dark .ng-on-glass .bn-block-content:has(.ProseMirror-trailingBreak:only-child)::after {
+  color: rgb(255 255 255 / 0.4);
+}

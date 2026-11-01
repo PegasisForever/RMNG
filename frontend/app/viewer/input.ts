@@ -830,14 +830,9 @@ export function attachInput(o: InputOptions): Input {
       fullscreenDoc().removeEventListener("fullscreenchange", onFullscreen);
       window.removeEventListener("paste", onPaste);
       if (locked()) document.exitPointerLock();
-      // The keys are the page's again (its control panel, a text box): every key locked would
-      // keep the browser's own (Cmd+C, Cmd+V on a Mac) from it. Only the chord's stay locked,
-      // so the system still gives the chord to the page in fullscreen.
-      const kb = keyboard();
-      if (kb && fullscreenDoc().fullscreenElement) {
-        kb.unlock();
-        if (o.chord) void kb.lock([...o.chord.holds, "Space"]).catch(() => {});
-      }
+      // The keyboard stays locked (every key) while the page is fullscreen, also when the keys
+      // are the page's (its control panel, a dialog): Escape and the chord then reach the page
+      // instead of leaving fullscreen or going to the system.
     },
   };
 }

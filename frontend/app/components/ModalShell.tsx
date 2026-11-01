@@ -16,6 +16,8 @@
 // because anybody clicked.
 import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 
+import { createPortal } from "react-dom";
+
 import { useModalEscape } from "~/lib/useModalEscape";
 import { useModalExit } from "~/lib/useModalExit";
 
@@ -196,11 +198,15 @@ export function ModalShell({
     );
   }
 
-  return (
-    <div className={backdropClass(layer, closing, glass)}>
+  const dialog = (
+    <div data-modal className={backdropClass(layer, closing, glass)}>
       {/* Backdrop is inert — clicking it must not close the dialog, because a stray click
           outside must never discard a half-filled form. Cancel and Escape are the ways out. */}
       <div className={panelClass(size, closing, glass)}>{children(close)}</div>
     </div>
   );
+  // Over the whole page, on the body: opened from inside a box that is a layer of its own (the
+  // /ng control panel, which also moves), it would be drawn in that layer, under whatever is
+  // over the box (/ng's side panels), and its `fixed` would be the box's
+  return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
 }

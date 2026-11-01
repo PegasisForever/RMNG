@@ -28,7 +28,7 @@
 //   the window to the right; the mouse at the window's right edge brings it back, and a move
 //   away from it sends it out. While the mouse is over it, the mouse and the keys are its. A
 //   chord (`./shortcut.ts`) shows the control panel, with the buttons above it, and hides it again;
-//   so does a click beside them.
+//   so does a click beside them, and Escape when no dialog or menu is open.
 //
 // Where the browser can open windows, the control panel can move to a window of its own (`?control panel`);
 // while the page is fullscreen, on another screen where there is one (`./otherScreen.ts`), as
@@ -220,6 +220,27 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Escape: a dialog or a menu closes itself first (each has its own Escape); with none open,
+  // the control panel closes. In a text box the first Escape only leaves the box, so a key
+  // meant for the field (a rename's cancel) does not also close the panel.
+  const controlPanelRef = useRef(controlPanel);
+  controlPanelRef.current = controlPanel;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || !controlPanelRef.current) return;
+      if (document.querySelector("[data-modal], [role=dialog], [role=menu]")) return;
+      const t = e.target;
+      if (t instanceof HTMLElement && (t.isContentEditable || t.matches("input, textarea, select"))) {
+        t.blur();
+        return;
+      }
+      e.preventDefault();
+      setControlPanel(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   /** Where the pointer was last, CSS px. */
   const pointer = useRef({ x: -Infinity, y: Infinity });
   useEffect(() => {
@@ -395,13 +416,14 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
       (document.activeElement as HTMLElement).blur();
     }
     // With a mouse, a click beside the control panel and the buttons puts the control panel away. A menu of
-    // theirs (a card's ⋯) is drawn on the body, out of their box, and is theirs all the same.
+    // theirs (a card's ⋯) and a dialog of theirs are drawn on the body, out of their box, and
+    // are theirs all the same.
     if (
       mouse &&
       controlPanel &&
       !layoutOpen &&
       !panelRef.current?.contains(target) &&
-      !target.closest("[data-ng-buttons], [data-ng-side], [role=menu]")
+      !target.closest("[data-ng-buttons], [data-ng-side], [role=menu], [data-modal]")
     ) {
       setControlPanel(false);
     }
