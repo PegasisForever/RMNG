@@ -237,7 +237,11 @@ export function NgScreenView({
       <div
         data-ng-right
         inert={away}
-        className="pointer-events-none absolute inset-y-0 right-0 z-40 flex flex-col items-end transition-transform duration-300 ease-out"
+        className={`pointer-events-none absolute inset-y-0 right-0 z-40 flex flex-col items-end transition-transform duration-300 ${
+          // Out: a slow start, so the buttons (at the very edge) are seen going with the panels
+          // rather than gone in the first frames; in: a fast start that slows at the end
+          away ? "ease-in" : "ease-out"
+        }`}
         style={{
           gap: FLOAT_GAP,
           paddingTop: `calc(env(safe-area-inset-top) + ${FLOAT_GAP}px)`,
