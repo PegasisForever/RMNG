@@ -1,5 +1,5 @@
 // The installed /ng app's update rules. No offline copy; the newest build on each open:
-// - The page always comes from the network (`public/ng-sw.js` does not handle control panel, and the
+// - The page always comes from the network (`public/ng-sw.js` does not handle HTML documents, and the
 //   server sends HTML with `Cache-Control: no-cache`).
 // - The worker keeps each code file as it loads and answers with that copy when a later deploy
 //   removed the file, so a page that iOS kept open from an older build does not go white.

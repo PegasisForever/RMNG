@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 /** A phone-sized box for the mobile stories: 390x844, the logical size of a recent iPhone.
  *
- *  The mobile control panel size to their container rather than to the viewport, which is what lets
+ *  The mobile screens size to their container rather than to the viewport, which is what lets
  *  this frame work at all — the real route wraps them in `100dvh` instead. The rounded
  *  bezel is only there so a story reads as a phone at a glance in the Storybook canvas. */
 export function PhoneFrame({ children }: { children: ReactNode }) {
