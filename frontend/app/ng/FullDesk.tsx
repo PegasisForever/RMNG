@@ -479,8 +479,9 @@ export function FullDesk({ width, height, top, bottom, monitor, onMonitor }: Pro
           />
         ) : null
       }
-      // Not over the dialog: there its box says "here"
-      identify={identify && !layoutOpen ? monitor : null}
+      // In every monitor window of a desktop while the dialog is open, this one too (the number
+      // is in a corner, clear of the dialog); a phone has one monitor, nothing to match
+      identify={windows && (identify || layoutOpen) ? monitor : null}
       onPointerDownCapture={onDownCapture}
     />
   );

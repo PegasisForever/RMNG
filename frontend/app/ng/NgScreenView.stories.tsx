@@ -201,7 +201,8 @@ export const DesktopIdentify: Story = {
   args: { ...desktop, identify: 1 },
 };
 
-/** A long press (or a right click) on Fit: the Edit layout dialog over the pages. */
+/** A right click on Fullscreen: the Edit layout dialog over the pages, and this window's
+ *  monitor's number in its corner. */
 export const DesktopLayoutDialog: Story = {
   args: {
     ...desktop,
@@ -220,6 +221,7 @@ export const DesktopLayoutDialog: Story = {
         glass
       />
     ),
+    identify: 0,
   },
 };
 
