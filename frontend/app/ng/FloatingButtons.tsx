@@ -14,9 +14,10 @@
 // - Monitors (a desktop whose layout has monitors with no window open): opens their windows,
 //   with how many there are on it.
 //
-// They are glass (`./GLASS.md`); a button whose thing is open is lit. A right click is a long press, for a mouse. With a mouse
-// each button says what it does, and what its long press does, in a tooltip under it. In mouse
-// and keyboard mode they slide out of the window to the right when they are not in use (`away`;
+// They are glass (`./GLASS.md`). A button whose thing is open is lit, but not Fullscreen: its
+// icon says which way it goes. A right click is a long press, for a mouse. With a mouse each
+// button says what it does, and what its long press does, in a tooltip under it. In mouse and
+// keyboard mode they slide out of the window to the right when they are not in use (`away`;
 // `./FullDesk.tsx` says when).
 import { Expand, Keyboard, LayoutGrid, Maximize, Minimize, Monitor } from "lucide-react";
 import { type ReactNode, useRef } from "react";
@@ -109,7 +110,6 @@ export function FloatingButtons({
         <Round
           label={fullscreen.on ? "Leave fullscreen" : "Fullscreen"}
           hold="edit the layout"
-          on={fullscreen.on}
           onClick={fullscreen.toggle}
           onLongPress={onLayout}
         >
