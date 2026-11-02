@@ -53,6 +53,7 @@ function handClock() {
 /** A session that writes down what it is sent, as short words. */
 function recordingSession(log: string[]) {
   return {
+    locks: (caps: boolean) => log.push(`caps ${caps ? "on" : "off"}`),
     send(m: InputMsg) {
       if (m.kind === "key_code") log.push(`${NAMES.get(m.keycode)}${ud(m.pressed)}`);
       else if (m.kind === "button") log.push(`${BUTTONS.get(m.button)}${ud(m.pressed)}`);
@@ -168,17 +169,17 @@ const settle = () => new Promise((r) => setTimeout(r, 0));
 describe("TouchInput on the desktop", () => {
   beforeEach(desktop);
 
-  test("a key tapped goes down and up", () => {
+  test("a key tapped goes down and up; a letter after this keyboard's lock", () => {
     tap(A);
-    expect(log).toEqual(["KeyA↓", "KeyA↑"]);
+    expect(log).toEqual(["caps off", "KeyA↓", "KeyA↑"]);
   });
 
   test("a key held goes down, and up when the finger lifts", () => {
     input.keyTouch("down", 1, A, 100, 100);
     clock.advance(HOLD_MS);
-    expect(log).toEqual(["KeyA↓"]);
+    expect(log).toEqual(["caps off", "KeyA↓"]);
     input.keyTouch("up", 1, A, 100, 100);
-    expect(log).toEqual(["KeyA↓", "KeyA↑"]);
+    expect(log).toEqual(["caps off", "KeyA↓", "KeyA↑"]);
   });
 
   test("Ctrl tapped is down for the next key only, and the keys show it", () => {
@@ -186,7 +187,14 @@ describe("TouchInput on the desktop", () => {
     expect(input.state().mods.get(CTRL.code)).toBe("latched");
     tap(C);
     tap(A);
-    expect(log).toEqual(["ControlLeft↓", "KeyC↓", "KeyC↑", "ControlLeft↑", "KeyA↓", "KeyA↑"]);
+    expect(log.filter((l) => !l.startsWith("caps"))).toEqual([
+      "ControlLeft↓",
+      "KeyC↓",
+      "KeyC↑",
+      "ControlLeft↑",
+      "KeyA↓",
+      "KeyA↑",
+    ]);
     expect(input.state().mods.size).toBe(0);
   });
 
@@ -202,15 +210,25 @@ describe("TouchInput on the desktop", () => {
     tap(A);
     tap(A);
     expect(input.state().mods.get(SHIFT.code)).toBe("locked");
-    expect(log).toEqual(["ShiftLeft↓", "KeyA↓", "KeyA↑", "KeyA↓", "KeyA↑"]);
+    expect(log).toEqual(["ShiftLeft↓", "caps off", "KeyA↓", "KeyA↑", "caps off", "KeyA↓", "KeyA↑"]);
   });
 
-  test("Caps Lock: the keys show it, and the clone gets its key", () => {
+  test("Caps Lock: the keys show it, and the clone gets this keyboard's lock, not the key", () => {
     tap(CAPS);
     expect(input.state().caps).toBe(true);
     tap(CAPS);
     expect(input.state().caps).toBe(false);
-    expect(log).toEqual(["CapsLock↓", "CapsLock↑", "CapsLock↓", "CapsLock↑"]);
+    expect(log).toEqual(["caps on", "caps off"]);
+  });
+
+  test("each letter sends the lock first, so a clone's lock that differs is mended", () => {
+    tap(CAPS);
+    tap(A);
+    tap(find("Digit1"));
+    input.keyTouch("down", 99, C, 100, 100);
+    clock.advance(HOLD_MS);
+    input.keyTouch("up", 99, C, 100, 100);
+    expect(log).toEqual(["caps on", "caps on", "KeyA↓", "KeyA↑", "Digit1↓", "Digit1↑", "caps on", "KeyC↓", "KeyC↑"]);
   });
 
   test("Fn switches the keys and sends nothing", () => {

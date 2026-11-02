@@ -1,8 +1,8 @@
 // The two places the touch input (`./touchInput.ts`) goes: the clone's desktop, through the
 // session (`./session.ts`), and a headless clone's terminal (`~/viewer/terminal.tsx`'s `TermApi`).
 //
-// The desktop gets the keys and buttons as they are, the text as X keysyms, and the pointer
-// as the cursor's new place. The terminal gets the bytes the keys make (`./termKeys.ts`), and a
+// The desktop gets the keys and buttons as they are, the Caps Lock state for the clone's to
+// follow, the text as X keysyms, and the pointer as the cursor's new place. The terminal gets the bytes the keys make (`./termKeys.ts`), and a
 // pointer the page draws over it, whose clicks, drags and scrolls go to the terminal as a
 // mouse's events, with the modifiers down: it selects, or the app that asked for the mouse gets
 // them.
@@ -22,6 +22,8 @@ const AXIS_FINISH = 1;
 /** The part of the session the desktop's input uses. */
 export interface DeskSession {
   send(msg: InputMsg): void;
+  /** This keyboard's Caps Lock: the clone-daemon taps the clone's when the two differ. */
+  locks(caps: boolean): void;
 }
 
 /** The desktop's screen now, as the page shows it. */
@@ -47,6 +49,7 @@ export function desktopSink(session: () => DeskSession | null, view: () => DeskV
     desktop: true,
     key: (keycode, pressed) => send({ kind: "key_code", keycode, pressed }),
     button: (button, pressed) => send({ kind: "button", button, pressed }),
+    locks: (caps) => session()?.locks(caps),
     text(text) {
       // Keysyms, so the clone's keyboard layout does not matter
       for (const keysym of textToKeysyms(text)) {
@@ -94,6 +97,7 @@ export function terminalSink(api: () => TermApi | null, pointer: (p: { x: number
       const bytes = keys.key(code, pressed, t?.appCursor() ?? false);
       if (bytes) t?.input(bytes);
     },
+    locks: (caps) => keys.locks(caps),
     button(code, pressed) {
       const button = code === BTN_RIGHT ? 2 : code === BTN_MIDDLE ? 1 : 0;
       const bit = [1, 4, 2][button];

@@ -20,6 +20,8 @@ export interface CloneSink {
   key(code: number, pressed: boolean): void;
   /** A mouse button (evdev `BTN_*`) goes down or up, where the pointer is. */
   button(code: number, pressed: boolean): void;
+  /** This keyboard's Caps Lock (on or off): the clone's follows it. */
+  locks(caps: boolean): void;
   /** Type `text` as it is, whatever the clone's keyboard layout. */
   text(text: string): void;
   /** One finger moved the pointer: CSS px of finger motion, and the time it took, ms. */
@@ -159,13 +161,20 @@ export class TouchInput {
     this.set({ mods: this.mods.states() });
   }
 
-  /** A key that is no modifier goes down or up; a tapped modifier has done its key after it. */
-  private keyCode(code: number, pressed: boolean) {
+  /** A key that is no modifier goes down or up; a tapped modifier has done its key after it.
+   *  Caps Lock is not sent as a key, as with the page's own keyboard (`~/viewer/input.ts`): it
+   *  flips this keyboard's lock, and the lock is sent, on Caps Lock and before each letter, for
+   *  the clone's to follow. */
+  private keyCode(key: Key, pressed: boolean) {
+    const caps = key.code === CAPS_LOCK;
     if (pressed) {
-      if (code === CAPS_LOCK) this.set({ caps: !this.snap.caps });
+      if (caps) {
+        this.set({ caps: !this.snap.caps });
+        this.sink.locks(this.snap.caps);
+      } else if (key.letter) this.sink.locks(this.snap.caps);
       this.mods.keyDown();
     }
-    this.sink.key(code, pressed);
+    if (!caps) this.sink.key(key.code, pressed);
     if (!pressed) this.withMods((m) => m.keyDone());
   }
 
@@ -230,8 +239,8 @@ export class TouchInput {
         else if (o.key.dictate) this.dictate.toggle();
         else if (o.key.clip) this.clipKey(o.key.clip);
         else {
-          this.keyCode(o.key.code, true);
-          this.keyCode(o.key.code, false);
+          this.keyCode(o.key, true);
+          this.keyCode(o.key, false);
         }
         break;
       case "click": {
@@ -252,7 +261,7 @@ export class TouchInput {
         break;
       }
       case "hold":
-        this.keyCode(o.key.code, o.pressed);
+        this.keyCode(o.key, o.pressed);
         break;
       case "move":
         this.sink.move(o.dx, o.dy, o.ms);
