@@ -1,10 +1,12 @@
 // MONITOR_CHANNEL (`./clientLayout.ts`). A monitor window's side: the monitor windows answer
 // the Edit layout dialog with their size, follow their monitor when the monitors are
-// renumbered, and show their monitor's number while the dialog is open. The asking side: the
-// windows' sizes, and which monitors have a window open.
+// renumbered, show their monitor's number while the dialog is open, and say when they have the
+// focus. The asking side: the windows' sizes, which monitors have a window open, and whether one
+// of them has the focus.
 import { useEffect, useRef, useState } from "react";
 
 import { IDENTIFY_EVERY_MS, MONITOR_CHANNEL, type MonitorChannelMsg } from "./clientLayout";
+import { hostWindow } from "./host";
 
 /** How long the monitor windows get to say their sizes. */
 const ANSWER_MS = 400;
@@ -25,6 +27,35 @@ export function askWindowSizes(): Promise<Map<number, { width: number; height: n
       ch.close();
       resolve(sizes);
     }, ANSWER_MS);
+  });
+}
+
+/** How long the monitor windows get to say they have the focus. */
+const FOCUS_ANSWER_MS = 250;
+
+/** The browser window of this page has the focus (the shell's, when the page is in its frame). */
+export function hasFocus(): boolean {
+  return typeof document !== "undefined" && hostWindow().document.hasFocus();
+}
+
+/** Whether a monitor window of this browser has the focus: this one, or another that says so
+ *  within FOCUS_ANSWER_MS. */
+export function anyMonitorFocused(): Promise<boolean> {
+  if (hasFocus()) return Promise.resolve(true);
+  if (typeof BroadcastChannel === "undefined") return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const ch = new BroadcastChannel(MONITOR_CHANNEL);
+    const done = (focused: boolean) => {
+      clearTimeout(timer);
+      ch.close();
+      resolve(focused);
+    };
+    ch.onmessage = (e: MessageEvent<MonitorChannelMsg>) => {
+      if (e.data.t === "focus") done(true);
+    };
+    const timer = setTimeout(() => done(false), FOCUS_ANSWER_MS);
+    const ask: MonitorChannelMsg = { t: "ask-focus" };
+    ch.postMessage(ask);
   });
 }
 
@@ -90,6 +121,12 @@ export function useMonitorChannel(
         case "identify-off":
           clearTimeout(identifyTimer);
           setIdentify(false);
+          break;
+        case "ask-focus":
+          if (hasFocus()) {
+            const reply: MonitorChannelMsg = { t: "focus", monitor };
+            ch.postMessage(reply);
+          }
           break;
         case "ask-size": {
           const reply: MonitorChannelMsg = { t: "size", monitor, ...sizeRef.current() };

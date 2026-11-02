@@ -157,6 +157,8 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   /** Touch mode, wide: a swipe from the right edge brought the side panels in. Their box. */
   const [swiped, setSwiped] = useState(false);
   const [sideAt, setSideAt] = useState<HTMLDivElement | null>(null);
+  /** The box for the alerts of clones that stopped working (monitor 0's window only). */
+  const [alertsAt, setAlertsAt] = useState<HTMLDivElement | null>(null);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
   const [fullscreen, setFullscreen] = useState<boolean | null>(null);
   useEffect(() => {
@@ -449,7 +451,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     // Touch mode, wide: a finger at the right edge may be a swipe for the side panels (only when
     // there are panels to bring: none while no clone is selected), and a touch beside them while
     // they are in sends them out. Neither reaches the clone.
-    if (!mouse && wide && e.pointerType === "touch" && !controlPanel) {
+    if (!mouse && wide && e.pointerType === "touch" && !controlPanel && !target.closest("[data-clone-alerts]")) {
       if (swiped && !target.closest("[data-side-panels], [data-float-buttons]")) {
         setSwiped(false);
         e.stopPropagation();
@@ -626,11 +628,13 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
             sideAt={wide ? sideAt : undefined}
             onLayout={() => setLayoutOpen(true)}
             notify={monitor === 0}
+            alertsAt={monitor === 0 ? alertsAt : null}
           />
         ),
       }}
       // In mouse mode the panels go with the group (`away`), so they do not slide on their own
       side={wide ? { shown: mouse || sideShown, ref: setSideAt } : null}
+      alerts={monitor === 0 ? { ref: setAlertsAt } : null}
       buttons={{
         controlPanelOpen: controlPanel,
         keyboard: !mouse,

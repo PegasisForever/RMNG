@@ -21,6 +21,7 @@ import {
   sideFor,
 } from "./__fixtures__/screen";
 import { type Insets, NO_INSETS } from "./geometry";
+import { CloneAlerts } from "./CloneAlerts";
 import { ScreenView, type ScreenViewProps, controlPanelBox } from "./ScreenView";
 import type { PanelTab } from "./ToolRow";
 
@@ -123,6 +124,24 @@ export const PhoneControlPanel: Story = {
   args: {
     controlPanel: controlPanel({ open: true, badges: { clones: 2 } }),
     buttons: buttons({ controlPanelOpen: true, badge: 2 }),
+  },
+};
+
+/** A clone stopped working: its alert in the bottom-right corner, above the keyboard. */
+export const PhoneKeyboardAlert: Story = {
+  args: {
+    keyboard: keyboard(PHONE),
+    screen: { x: 0, y: -120, width: PHONE.width, height: PHONE.height },
+    buttons: buttons({ keyboardOpen: true }),
+    alerts: {
+      content: (
+        <CloneAlerts
+          alerts={[{ id: "pega-we-142", name: "Fix the sign-in redirect", offline: false, at: 1 }]}
+          onOpen={fn()}
+          onClose={fn()}
+        />
+      ),
+    },
   },
 };
 
@@ -237,6 +256,26 @@ export const DesktopControlPanel: Story = {
  *  notes and its assistant) over the screen, without the control panel and its backdrop. */
 export const DesktopSidePanels: Story = {
   args: { ...desktop, away: false, side: { shown: true, content: sideFor() } },
+};
+
+/** Two clones stopped working while the operator looks at RMNG: their alerts in the bottom-right
+ *  corner of monitor 0's window, over the clone's screen. */
+export const DesktopAlerts: Story = {
+  args: {
+    ...desktop,
+    alerts: {
+      content: (
+        <CloneAlerts
+          alerts={[
+            { id: "pega-dev-9", name: "pega-dev-9", offline: true, at: 1 },
+            { id: "pega-we-142", name: "Fix the sign-in redirect", offline: false, at: 2 },
+          ]}
+          onOpen={fn()}
+          onClose={fn()}
+        />
+      ),
+    },
+  },
 };
 
 /** A headless clone: its terminal, with the page's keys and mouse (xterm.js's own). */

@@ -12,6 +12,7 @@
 // Wide (`WIDE_MIN`), they are columns (`./WideLayout.tsx`): the usage rail, the
 // board's columns, the side panel; a dialog opens over them, in the middle.
 import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router";
 
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
@@ -50,6 +51,7 @@ import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { SoundReport } from "~/viewer/protocol";
 
+import { CloneAlerts } from "../CloneAlerts";
 import { type PanelTab, ROW_STATS_MIN, type ServerUsage, TABS as TAB_INFO } from "../ToolRow";
 import { ClonesView } from "./ClonesView";
 import { NotesView, type NotesPane } from "./NotesView";
@@ -97,6 +99,7 @@ export function ControlPanelContainer({
   sideAt,
   onLayout,
   notify = false,
+  alertsAt,
 }: {
   /** The control panel's width, CSS px: narrow (tabs) or wide (columns). */
   width: number;
@@ -125,6 +128,9 @@ export function ControlPanelContainer({
   /** This window raises the notifications of clones that stop working (one window of the
    *  browser does: monitor 0's). */
   notify?: boolean;
+  /** Over the clone's screen, in the window that notifies: the screen's box for the alerts of
+   *  clones that stopped working (`../CloneAlerts.tsx`); null until it is there. */
+  alertsAt?: HTMLElement | null;
 }) {
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => p.then(() => setError(null)).catch((e: Error) => setError(e.message));
@@ -237,8 +243,9 @@ export function ControlPanelContainer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.selected]);
 
-  // A clone that stops working raises a notification; a press on it shows that clone
-  useCloneNotifications(
+  // A clone that stops working raises a notification (in the page, or the system's); a press on
+  // it shows that clone
+  const alerts = useCloneNotifications(
     state.hosts,
     board.mutedClones,
     (id) => {
@@ -511,6 +518,11 @@ export function ControlPanelContainer({
     }
   };
 
+  // On the clone's screen, not in the control panel: they show while it is closed too
+  const alertsView = alertsAt
+    ? createPortal(<CloneAlerts alerts={alerts.alerts} onOpen={alerts.open} onClose={alerts.close} />, alertsAt)
+    : null;
+
   if (width >= WIDE_MIN) {
     return (
       // Fixed things in it (a sheet, a dialog) take its whole space: the control panel's box over the
@@ -563,6 +575,7 @@ export function ControlPanelContainer({
             />
           </div>
           {dialog ? dialogView(dialog.d) : null}
+          {alertsView}
         </div>
       </ModalPlacementProvider>
     );
@@ -587,6 +600,7 @@ export function ControlPanelContainer({
             </div>
           ))}
       </NarrowLayout>
+      {alertsView}
     </ModalPlacementProvider>
   );
 }

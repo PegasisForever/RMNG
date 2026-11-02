@@ -2,7 +2,7 @@
 //
 // Muting is a notification filter and nothing else. A muted clone runs, reports, and flags
 // itself unread exactly as it did before; the only thing that changes is that the browser stops
-// raising a desktop notification when it stops working.
+// raising a notification (the system's, or the alert in the page) when it stops working.
 //
 // A parent's mute covers its sub clones. That rule is applied here rather than written into the
 // stored set, so unmuting a parent restores its children with no second write and no way for the

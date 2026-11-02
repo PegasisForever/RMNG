@@ -19,6 +19,9 @@
 //   shadow, and no backdrop. In mouse mode the group slides out to the right and back as one
 //   (`away`), the buttons and the panels by the same distance; in touch mode the buttons stay,
 //   and the panels slide alone (`side.shown`).
+// - The alerts of clones that stopped working (`alertsRef`, where the control panel puts them),
+//   in the bottom-right corner of the safe area, above the keyboard: over the control panel and
+//   its dialogs.
 // - A dialog, and the monitor's number while the Edit layout dialog is open in another window.
 //
 // The clone's screen may fill the whole display; everything else stays in the safe area (`safe`:
@@ -113,6 +116,9 @@ export type ScreenViewProps = {
   /** The right group (the buttons and the side panels) slid out of the window to the right,
    *  and out of reach (mouse mode). */
   away?: boolean;
+  /** The box for the alerts of clones that stopped working (`./CloneAlerts.tsx`, which the
+   *  control panel puts there), or a story's `content`; null: none. */
+  alerts?: { ref?: Ref<HTMLDivElement>; content?: ReactNode } | null;
   /** A dialog over everything (the Edit layout dialog). */
   dialog?: ReactNode;
   /** The monitor's number, large in the middle; null: not shown. */
@@ -139,6 +145,7 @@ export function ScreenView({
   side,
   buttons,
   away = false,
+  alerts,
   dialog,
   identify,
   onPointerDownCapture,
@@ -277,6 +284,22 @@ export function ScreenView({
           </div>
         ) : null}
       </div>
+      {alerts ? (
+        // Above the keyboard, or the home bar; touches beside the alerts go through
+        <div
+          ref={alerts.ref}
+          data-clone-alerts
+          className="pointer-events-none absolute z-[55] flex flex-col items-end justify-end"
+          style={{
+            top: safe.top + FLOAT_GAP,
+            left: safe.left + FLOAT_GAP,
+            right: safe.right + FLOAT_GAP,
+            bottom: (keyboard ? keysH : bottom) + FLOAT_GAP,
+          }}
+        >
+          {alerts.content}
+        </div>
+      ) : null}
       {dialog}
       <MonitorNumber monitor={identify} />
     </div>

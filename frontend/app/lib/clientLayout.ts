@@ -156,9 +156,13 @@ export const IDENTIFY_EVERY_MS = 1000;
  *  its content's size in screen (device) pixels; the monitors were renumbered (`map[old]` is
  *  the new number; null: removed), so each window follows its monitor, or closes; and the Edit
  *  layout dialog is open (`identify`, said every IDENTIFY_EVERY_MS while it is), so each window
- *  shows its monitor's number, until `identify-off` or until the word stops coming. */
+ *  shows its monitor's number, until `identify-off` or until the word stops coming. A window
+ *  asks which monitor windows have the focus (`ask-focus`), and each one that has it answers
+ *  (`focus`). */
 export type MonitorChannelMsg =
   | { t: "ask-size" }
+  | { t: "ask-focus" }
+  | { t: "focus"; monitor: number }
   | { t: "identify" }
   | { t: "identify-off" }
   | { t: "size"; monitor: number; width: number; height: number }
