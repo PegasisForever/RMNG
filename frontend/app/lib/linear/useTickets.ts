@@ -8,7 +8,8 @@
 // is put back if Linear refuses it, and asks Linear again once it lands. Linear is a port
 // (`./port.ts`), so a test drives all of it with the in-memory one.
 //
-// The presets come from `GET /api/config` at mount.
+// The presets come from `GET /api/config` at mount, and again from Settings each time it
+// saves (`setPresets`): a key typed there is asked with at once, without a reload.
 //
 // The list itself: each configured key's own open issues, plus the ticket behind each clone
 // that has one, merged and kept current by a poll the browser runs itself.

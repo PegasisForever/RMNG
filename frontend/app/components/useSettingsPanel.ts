@@ -41,6 +41,9 @@ interface SettingsPanelOptions {
   onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
   /** Forkable clone ids, newest first, for the preset default-source picker. */
   forkSources: string[];
+  /** A save landed: the config as the server now has it. The ticket module takes its presets
+   *  from here, so a Linear key typed in Settings is used without a reload. */
+  onSaved?: (config: AppConfigRedacted) => void;
 }
 
 /** Everything the settings form needs but cannot do itself. The Board category's columns
@@ -50,6 +53,7 @@ export function useSettingsPanel({
   operations,
   onImportAccount,
   forkSources,
+  onSaved,
 }: SettingsPanelOptions): SettingsFormProps {
   // Which category the rail is on. Starts at the top.
   const [category, setCategory] = useState<SettingsCategory>("board");
@@ -166,6 +170,7 @@ export function useSettingsPanel({
     try {
       const res = await putConfig(settingsPatch(draft));
       load(res.config); // re-seed from the server's redacted view; clears write-only inputs
+      onSaved?.(res.config);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {

@@ -309,6 +309,8 @@ export function ControlPanelContainer({
     operations: state.operations,
     onImportAccount: (provider, group) => open({ kind: "import", replacing: null, provider, group }),
     forkSources: state.hosts.filter((h) => h.managed).map((h) => h.id),
+    // A Linear key typed into Settings is asked with at once
+    onSaved: (config) => tickets.setPresets(config.presets),
   });
 
   const refreshUsage = () => Promise.all([refreshClaudeUsage(), refreshCodexUsage()]).then(() => undefined);
