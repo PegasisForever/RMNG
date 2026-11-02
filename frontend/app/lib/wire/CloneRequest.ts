@@ -35,8 +35,8 @@ preset?: string,
  */
 linear?: LinearMeta, 
 /**
- * This side's account: an email pins it, `auto` rotates inside the pool, `none` leaves
- * the clone tokenless, and a legacy `group:<pool>` binds that pool. Omitted, the side
+ * This side's account: an email pins it, `auto` rotates inside the pool, a legacy `none`
+ * reads as `auto`, and a legacy `group:<pool>` binds that pool. Omitted, the side
  * follows the plan's pool with a fresh pick.
  */
 claudeAccount?: string, codexAccount?: string, 

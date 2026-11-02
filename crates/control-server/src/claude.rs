@@ -775,8 +775,9 @@ pub async fn apply_clone_token(
 }
 
 /// Remove clone `host_id`'s `~/.claude/.credentials.json`, leaving it
-/// with no Claude token. Used when a clone's account is set to "none" (unassigned) —
-/// callers should also [`Store::forget_pushed`] the host.
+/// with no Claude token. Used when no Claude account can take the clone yet (pending
+/// auto), so it does not run on credentials its image carried — callers should also
+/// [`Store::forget_pushed`] the host.
 pub async fn clear_clone_token(_app: &App, host_id: &str) -> Result<()> {
     crate::home_overlay::remove_clone_home(host_id, ".claude/.credentials.json")
 }
