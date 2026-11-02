@@ -41,7 +41,7 @@ import {
 import { copyText } from "~/lib/clipboard";
 import { useTickets } from "~/lib/linear/useTickets";
 import { workspaceHomeUrl } from "~/lib/linear/workspaces";
-import { hostWindow } from "~/lib/host";
+import { focusPage, hostWindow } from "~/lib/host";
 import { readSelection, sameSelection, type Selection, withSelection } from "~/lib/selection";
 import { BASTION_PORT, buildSshCommand } from "~/lib/ssh";
 import { findTicket, type LinearTicket } from "~/lib/tickets";
@@ -249,7 +249,7 @@ export function ControlPanelContainer({
     state.hosts,
     board.mutedClones,
     (id) => {
-      hostWindow().focus();
+      focusPage();
       const clone = clonesById.get(id);
       if (clone) selectClone(clone);
     },

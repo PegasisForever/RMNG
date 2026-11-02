@@ -24,3 +24,14 @@ export function shellWindow(): (Window & { rmngShell: Shell }) | null {
 export function hostWindow(): Window {
   return shellWindow() ?? window;
 }
+
+/** Bring the browser window to the front with the keys in this page. The shell's window first,
+ *  as only it can come to the front; then this page's own: a focus on the shell's window alone
+ *  takes the keys out of the frame, to the shell, which reads none (`~/desk/keys.ts` reads this
+ *  page's). */
+export function focusPage(): void {
+  if (typeof window === "undefined") return;
+  const host = hostWindow();
+  host.focus();
+  if (host !== window) window.focus();
+}

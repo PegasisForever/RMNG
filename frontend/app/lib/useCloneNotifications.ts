@@ -167,9 +167,9 @@ function notifySystem(alert: CloneAlert, onActivate: (id: string) => void): bool
       // One notification per clone: a repeat edge replaces the prior card rather than stacking.
       tag: `clone-stopped-${alert.id}`,
     });
-    // Click → focus this tab and select the clone that stopped.
+    // Click → select the clone that stopped (`onActivate` brings this window to the front, with
+    // the keys in the page).
     n.onclick = () => {
-      window.focus();
       onActivate(alert.id);
       n.close();
     };
