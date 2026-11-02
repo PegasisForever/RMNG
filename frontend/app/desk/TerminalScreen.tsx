@@ -2,7 +2,7 @@
 // tab bar (`./TermBar.tsx`) and one xterm.js terminal per tmux session (`~/viewer/terminal.tsx`).
 //
 // - Mouse and keyboard mode: the terminal has the page's keys, mouse and selection. The control panel's chord is the page's.
-// - Touch mode: the on-screen keyboard types into it (`./remote.ts`, `./termKeys.ts`); the terminal never
+// - Touch mode: the on-screen keyboard types into it (`./touchInput.ts`, `./cloneSink.ts`); the terminal never
 //   brings up the system keyboard. Its area is a trackpad, as the keys are: they move a pointer
 //   drawn here (`cursor`), and its clicks, drags and scrolls go to the terminal as a mouse's.
 //
