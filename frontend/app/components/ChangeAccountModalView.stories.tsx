@@ -42,6 +42,7 @@ const meta = {
     claudeValue: "alex@example.com",
     codexValue: "auto",
     busy: false,
+    error: null,
     onGroupChange: fn(),
     onClaudeValueChange: fn(),
     onCodexValueChange: fn(),
@@ -81,14 +82,28 @@ export const DualProvider: Story = {
   },
 };
 
-/** The swap is in flight. Apply holds its label and takes no second click; Cancel stays live,
- *  because the page owns the call and closing does not cancel it. */
+/** The swap is in flight. Apply holds its label and takes no second click; Cancel and Escape
+ *  wait for it too, because the dialog owns the call and shows how it ends. */
 export const Applying: Story = {
   args: { ...makeAccountLists(), busy: true },
 };
 
+/** The swap was refused: "auto" in a pool whose accounts all have expired tokens. The
+ *  dialog stays open and in view with the server's words in it, so the operator can pick
+ *  again or cancel; nothing under it is left blocked by a dialog that faded out. */
+export const Refused: Story = {
+  args: {
+    ...makeAccountLists(),
+    groupValue: "team",
+    claudeValue: "auto",
+    codexValue: "auto",
+    error: "no Claude account can take this clone: none is imported, or every one that could has a token that expired and cannot be refreshed",
+  },
+};
+
 /** The dialog wired to local state: both pickers really change, and Apply locks for a beat
- *  the way the page's swap call does. */
+ *  the way the swap call does, then is refused, so the error shows in the dialog. Apply
+ *  again to see it clear and come back. */
 export const Interactive: Story = {
   args: { ...makeAccountLists() },
   render: function Render(args) {
@@ -96,6 +111,7 @@ export const Interactive: Story = {
     const [codexValue, setCodexValue] = useState(args.codexValue);
     const [groupValue, setGroupValue] = useState(args.groupValue);
     const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     return (
       <ChangeAccountModalView
         {...args}
@@ -103,6 +119,7 @@ export const Interactive: Story = {
         claudeValue={claudeValue}
         codexValue={codexValue}
         busy={busy}
+        error={error}
         onGroupChange={(next) => {
           setGroupValue(next);
           args.onGroupChange(next);
@@ -117,8 +134,14 @@ export const Interactive: Story = {
         }}
         onSubmit={() => {
           setBusy(true);
+          setError(null);
           args.onSubmit();
-          window.setTimeout(() => setBusy(false), 1200);
+          window.setTimeout(() => {
+            setBusy(false);
+            setError(
+              "no Claude account can take this clone: none is imported, or every one that could has a token that expired and cannot be refreshed",
+            );
+          }, 1200);
         }}
       />
     );

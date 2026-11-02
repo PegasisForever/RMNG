@@ -9,9 +9,12 @@
 // it is, whether Escape may close it — and puts its own markup inside.
 //
 // The markup goes in as a function of `close`, the shell's own door out. `close()` plays the
-// exit frames and then runs `onExited`; `close(then)` runs `then` instead, which is what a
-// button that both acts and closes (Apply, Save) needs to keep the frames. `open` is the same
-// door from outside, for the dialogs that close because an operation settled rather than
+// exit frames and then runs `onExited`; `close(then)` runs `then` instead, for a button whose
+// answer cannot fail (the confirm layer's OK). `then` takes the place of the unmount, so it
+// must unmount too: the exit frames hold their faded end, and a dialog still mounted after
+// them is invisible but still takes every click. A write that can be refused is not such a
+// button; its dialog stays open on the write and closes through `open`, the same door from
+// outside, for the dialogs that close because a write or an operation finished rather than
 // because anybody clicked.
 import { createContext, useCallback, useContext, useEffect, useRef, type ReactNode } from "react";
 
@@ -30,7 +33,8 @@ export type ModalSize = "sm" | "md" | "lg" | "panel";
 
 /** The shell's door out, as the markup inside it receives it. `close()` plays the exit frames
  *  and then runs `onExited`; `close(then)` runs `then` instead, for a button that both acts
- *  and closes. */
+ *  and closes. `then` must unmount the dialog, as `onExited` does, so never pass a write that
+ *  can be refused (see the top of this file). */
 export type ModalClose = (then?: () => void) => void;
 
 /**

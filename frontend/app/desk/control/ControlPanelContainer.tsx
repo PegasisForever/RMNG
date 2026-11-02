@@ -35,8 +35,6 @@ import {
   refreshClaudeUsage,
   refreshCodexUsage,
   startClone,
-  swapClaudeAccount,
-  swapCodexAccount,
   unarchiveClone,
 } from "~/lib/api";
 import { copyText } from "~/lib/clipboard";
@@ -148,8 +146,6 @@ export function ControlPanelContainer({
   }, [tab, visited]);
 
   const [dialog, setDialog] = useState<{ on: PanelTab; d: Dialog } | null>(null);
-  /** The change-account dialog's call is in flight. */
-  const [changing, setChanging] = useState(false);
   const open = (d: Dialog) => tab && setDialog({ on: tab, d });
   const closeDialog = () => setDialog(null);
 
@@ -368,18 +364,8 @@ export function ControlPanelContainer({
             clone={d.clone}
             accounts={accounts.filter((a) => a.provider !== "codex")}
             codexAccounts={accounts.filter((a) => a.provider === "codex")}
-            busy={changing}
+            groups={state.groups}
             onClose={closeDialog}
-            onSubmit={(claude, codex, group) => {
-              setChanging(true);
-              Promise.all([swapClaudeAccount(d.clone.id, claude, group), swapCodexAccount(d.clone.id, codex, group)])
-                .then(() => {
-                  setError(null);
-                  closeDialog();
-                })
-                .catch((e: Error) => setError(e.message))
-                .finally(() => setChanging(false));
-            }}
           />
         );
       case "rebase":
