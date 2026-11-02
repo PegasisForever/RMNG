@@ -1,7 +1,19 @@
-// Every Linear ticket the page draws: each configured key's own open issues, plus the ticket
-// behind each clone that has one, merged and kept current by a poll the browser runs itself.
+// The ticket module: every Linear ticket the control panel draws, what it can do to them, and
+// the keys it does it with.
 //
-// The clone-linked half is a second phase of the same round rather than a second hook, because
+// It takes the presets (their Linear keys) and the clones; it gives the queue the Tickets tab
+// draws, the ticket open in it, each clone's live ticket, the team's states and labels for a
+// panel, where a parent or sub-issue link goes, and the writes: edit, move to another state,
+// label, create. Each write shows at once, goes to Linear with the keys for the ticket's team,
+// is put back if Linear refuses it, and asks Linear again once it lands. Linear is a port
+// (`./port.ts`), so a test drives all of it with the in-memory one.
+//
+// The presets come from `GET /api/config` at mount.
+//
+// The list itself: each configured key's own open issues, plus the ticket behind each clone
+// that has one, merged and kept current by a poll the browser runs itself.
+//
+// The clone-linked half is a second phase of the same round rather than a second poll, because
 // the two lists overlap: a clone usually sits on a ticket that is In Progress and assigned to
 // the operator, which the open query already returned. Only what that query did not carry is
 // asked for by identifier, so the usual fleet costs no extra requests at all.
@@ -24,20 +36,40 @@
 // hour, and a minute apart across a handful of tabs is nowhere near that, but a laptop asleep
 // in a bag has no reason to spend any of it. The catch-up happens on re-focus.
 //
-// Two things keep the list honest between polls. `refetch` is called after every write, so an
-// edit or a new ticket is on screen in one round trip rather than at the end of the interval.
-// A watchdog interval runs regardless of what the fetch in flight claims about itself, the
-// same discipline `useLiveState` uses on the SSE socket: a request that never settles is the
-// one failure that would otherwise freeze the column for as long as the tab stayed open.
+// Two things keep the list honest between polls. A refetch follows every write, so an edit or
+// a new ticket is on screen in one round trip rather than at the end of the interval. A
+// watchdog interval runs regardless of what the fetch in flight claims about itself, the same
+// discipline `useLiveState` uses on the SSE socket: a request that never settles is the one
+// failure that would otherwise freeze the column for as long as the tab stayed open.
+//
+// The team's states and labels and the keys' workspaces are asked once per key list, with no
+// poll: they change when somebody sits down and edits them. A lookup that fails answers empty
+// lists and says nothing; a new key list asks again.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
-import { fetchTicketAny, issueRefOf } from "~/lib/linear/issues";
-import { keysForTeam } from "~/lib/linear/mutations";
-import { fetchOpenTickets } from "~/lib/linear/queries";
-import type { LinearTicket } from "~/lib/linear/types";
+import { getConfig } from "~/lib/api";
+import { openTicket } from "~/lib/linear/intake";
+import { issueRefOf } from "~/lib/linear/issues";
+import { type IssuePatch, type IssueRef, keysForTeam, type NewIssue, teamKeyOf } from "~/lib/linear/mutations";
+import { linear, type LinearPort } from "~/lib/linear/port";
+import type { TeamMeta } from "~/lib/linear/team";
+import type { LinearTicket, LinearWorkspace, TicketLabel, TicketState, TicketWorkflowState } from "~/lib/linear/types";
+import { mergeWorkspaces } from "~/lib/linear/workspaces";
+import {
+  cloneForTicket,
+  type CloneTicket,
+  cloneTickets,
+  findTicket,
+  openTickets,
+  orderTickets,
+  queued,
+  ticketAfter,
+} from "~/lib/tickets";
+import type { Clone } from "~/lib/types";
+import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
-/** A preset as this hook reads one: the key to ask with, and the team keys that key claims.
+/** A preset as the poll reads one: the key to ask with, and the team keys that key claims.
  *  The labels are what put a ticket's own workspace first, so a lookup spends one request
  *  rather than one per configured account. */
 export interface LinearPreset {
@@ -74,7 +106,25 @@ const ROUND_BUDGET_MS = 30_000;
 /** How often the watchdog looks. Same cadence the SSE watchdog uses. */
 const WATCHDOG_MS = 5_000;
 
-export interface Tickets {
+/** Someone is looking at this tab. Always, where there is no page (a test). */
+const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
+
+/** What a ticket's team offers it: the panel's two menus. */
+export interface TeamMetaState {
+  /** Every label the ticket's team can carry, sorted by name. */
+  labels: TicketLabel[];
+  /** The team's workflow, in its own order. */
+  states: TicketWorkflowState[];
+  /** The lookup is in flight. A menu says so rather than claiming the team offers nothing. */
+  loading: boolean;
+}
+
+const NO_META: TeamMetaState = { labels: [], states: [], loading: false };
+
+/** What the store holds. A new object on every change. */
+export interface TicketSnapshot {
+  /** The presets the keys come off (`config.presets`). */
+  presets: PresetRedacted[];
   /** Every open issue across the configured keys plus every clone-linked one asked for by
    *  identifier, deduplicated. Empty until the first answer lands, and unchanged by a poll in
    *  which every key failed. */
@@ -85,79 +135,114 @@ export interface Tickets {
   /** True until the first answer, success or failure, has landed. The column reads it to tell
    *  "still asking" apart from "nothing to show". */
   loading: boolean;
-  /** Ask Linear now, superseding whatever round is in flight. Every write calls it: without
-   *  it a ticket just created or just edited is invisible until the interval elapses. */
-  refetch: () => void;
-  /** Write one ticket into the list without asking Linear, matched by identifier.
-   *
-   *  The optimistic half of a write. `refetch` is what makes the change real. This is what
-   *  puts it on screen in the same frame as the click, and Linear's own answer replaces it a
-   *  round trip later. */
-  upsert: (ticket: LinearTicket) => void;
+  /** Every distinct workspace the keys belong to, in config order. */
+  workspaces: LinearWorkspace[];
 }
 
-/** Every ticket the page draws, live.
- *
- *  Pass the presets from `GET /api/config`; the keys are read off them and nothing else is.
- *  A preset with no key is skipped, and two presets sharing one key are asked once.
- *
- *  Pass `linked` the identifier of every clone that has one. Each is resolved in whatever state
- *  Linear holds it, which is what puts a clone whose ticket is Done or Cancelled in the list:
- *  the open query answers for neither, and the clone still draws its title. */
-export function useTickets(
-  presets: LinearPreset[],
-  linked: string[] = [],
-): Tickets {
-  const [tickets, setTickets] = useState<LinearTicket[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+/** The tickets and the poll that keeps them, with no React in it. */
+export interface TicketStore {
+  /** The Linear the store asks. */
+  port: LinearPort;
+  get: () => TicketSnapshot;
+  subscribe: (listener: () => void) => () => void;
+  /** New presets: a change of keys starts a new poll and asks for the workspaces again. */
+  setPresets: (presets: PresetRedacted[]) => void;
+  /** The identifier of every clone that has one. Each is resolved in whatever state Linear
+   *  holds it, which is what puts a clone whose ticket is Done or Cancelled in the list: the
+   *  open query answers for neither, and the clone still draws its title. A new one is asked
+   *  for a round trip later rather than at the end of the interval. */
+  setLinked: (ids: string[]) => void;
+  /** Ask Linear now, superseding whatever round is in flight. */
+  refetch: () => void;
+  /** Write one ticket into the list without asking Linear, matched by identifier: a write's
+   *  change on screen in the same frame as the click. Linear's own answer replaces it a round
+   *  trip later. */
+  upsert: (ticket: LinearTicket) => void;
+  /** Show `next` now, run `call` with the keys for the ticket's team, put `ticket` back if it
+   *  is refused (and reject), ask Linear again once it lands. */
+  write: (ticket: LinearTicket, next: LinearTicket, call: (keys: string[]) => Promise<unknown>) => Promise<void>;
+  /** What `ticket`'s team offers it; the first ask starts the lookup. Null asks nothing. */
+  meta: (ticket: IssueRef | null) => TeamMetaState;
+  /** Begin polling (the page is mounted). */
+  start: () => void;
+  /** Stop every timer, and drop every answer still on its way. */
+  stop: () => void;
+}
 
-  // What each clone-linked identifier last resolved to, and when. Held in a ref because it is
-  // a spend record rather than something drawn: the tickets themselves are in `tickets`, and
-  // an entry changing must not re-render anything on its own.
-  const linkedSeen = useRef(new Map<string, LinkedHit>());
+export function ticketStore(port: LinearPort = linear): TicketStore {
+  let snap: TicketSnapshot = { presets: [], tickets: [], error: null, loading: true, workspaces: [] };
+  const listeners = new Set<() => void>();
+  const set = (patch: Partial<TicketSnapshot>) => {
+    snap = { ...snap, ...patch };
+    for (const l of listeners) l();
+  };
 
-  // The effect owns the fetching, and `refetch` is called from render callbacks that outlive
-  // any one of its runs. The ref is the handoff: the effect publishes its own `tick` here and
-  // takes it back down on unmount, so a callback fired after that asks nothing.
-  const forceTick = useRef<() => void>(() => {});
+  // What each clone-linked identifier last resolved to, and when: a spend record rather than
+  // something drawn. The tickets themselves are in `snap.tickets`.
+  const linkedSeen = new Map<string, LinkedHit>();
+  let linked: string[] = [];
+  let running = false;
+  // What the running poll and workspace lookup were started for, as JSON; null: none runs
+  let pollFor: string | null = null;
+  let workspacesFor: string | null = null;
+  let stopPoll = () => {};
+  let stopWorkspaces = () => {};
+  // The running poll's own "ask now"; nothing while none runs
+  let forceTick = () => {};
 
-  // The effect restarts when the set of keys changes, which is what picks up a key the
-  // operator just typed into Settings. Keyed on the serialized list rather than the array,
-  // because `presets` is a fresh array on every render that reaches this hook.
-  const presetsKey = JSON.stringify(askablePresets(presets));
-  // Same deal for the clone-linked identifiers, so a clone that has just been made has its
-  // ticket a round trip later rather than at the end of the interval.
-  const linkedKey = JSON.stringify(linkedIds(linked));
+  // The team lookups, by team and key list. A failed one is kept (as empty menus) so a render
+  // does not ask again; a new key list is a new entry, and so a fresh attempt.
+  const metas = new Map<string, TeamMetaState>();
 
-  useEffect(() => {
-    const asking = JSON.parse(presetsKey) as LinearPreset[];
+  /** The keys the presets give, each with the team keys it claims. */
+  const withLabels = () => snap.presets.map((p) => ({ labels: p.labels ?? [], linearKey: p.linearKey ?? "" }));
+
+  /** Start what the presets and the linked ids now call for, and stop what they no longer do. */
+  const follow = () => {
+    if (!running) return;
+    const asking = askablePresets(snap.presets);
+    const wanted = linkedIds(linked);
+    const forPoll = JSON.stringify([asking, wanted]);
+    if (forPoll !== pollFor) {
+      stopPoll();
+      pollFor = forPoll;
+      stopPoll = poll(asking, wanted);
+    }
+    const keys = linearKeys(snap.presets);
+    const forWorkspaces = JSON.stringify(keys);
+    if (forWorkspaces !== workspacesFor) {
+      stopWorkspaces();
+      workspacesFor = forWorkspaces;
+      stopWorkspaces = askWorkspaces(keys);
+    }
+  };
+
+  /** The poll for these keys and ids, until the function it returns is called. */
+  const poll = (asking: LinearPreset[], wanted: string[]): (() => void) => {
     const keys = linearKeys(asking);
-    const wanted = JSON.parse(linkedKey) as string[];
-    // Set on unmount, so a fetch still in flight cannot write state into a gone component or
-    // arm another timer behind it. Same discipline as the SSE socket's own effect.
+    // Set by the stop, so a fetch still in flight cannot write into the list or arm another
+    // timer behind it
     let disposed = false;
-    // Which round owns the state. A round that is superseded, by the watchdog or by a
-    // refetch, loses the right to write even if its own fetches answer later.
+    // Which round owns the list. A round that is superseded, by the watchdog or by a refetch,
+    // loses the right to write even if its own fetches answer later.
     let round = 0;
     // When the current round started, or null when none is in flight.
     let startedAt: number | null = null;
     // When the next poll is expected. The watchdog uses it to notice a timer that never fired,
     // which is what a throttled background tab does to `setTimeout`.
     let dueAt = 0;
-    let timer: number | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
     if (keys.length === 0) {
-      setTickets([]);
-      setError(null);
-      setLoading(false);
-      return;
+      set({ tickets: [], error: null, loading: false });
+      forceTick = () => {};
+      return () => {};
     }
 
     const arm = (ms: number) => {
-      window.clearTimeout(timer);
+      clearTimeout(timer);
       dueAt = Date.now() + ms;
-      timer = window.setTimeout(() => tick(), ms);
+      timer = setTimeout(() => tick(), ms);
     };
 
     /** Start a round, unless one is genuinely still running. `force` skips both guards: it
@@ -166,21 +251,21 @@ export function useTickets(
       if (disposed) return;
       if (!force) {
         if (startedAt !== null && Date.now() - startedAt < ROUND_BUDGET_MS) return;
-        if (document.visibilityState !== "visible") {
+        if (!visible()) {
           arm(POLL_MS);
           return;
         }
       }
-      void poll();
+      void ask();
     };
 
-    const poll = async () => {
+    const ask = async () => {
       const mine = ++round;
       startedAt = Date.now();
       // Each key's open issues
       const answers = await Promise.all(
         keys.map((key) =>
-          fetchOpenTickets(key).then(
+          port.openTickets(key).then(
             (found) => ({ found, error: null as string | null }),
             (e: Error) => ({ found: null, error: e.message }),
           ),
@@ -201,42 +286,44 @@ export function useTickets(
       // about it would say nothing the operator can act on.
       const carried = new Set(open.map((t) => t.id.toLowerCase()));
       const missing = wanted.filter((id) => !carried.has(id));
-      const due = dueForLookup(missing, linkedSeen.current, Date.now(), LINKED_MS);
-      const fresh = await Promise.all(due.map((id) => fetchLinked(asking, id)));
+      const due = dueForLookup(missing, linkedSeen, Date.now(), LINKED_MS);
+      const fresh = await Promise.all(due.map((id) => fetchLinked(port, asking, id)));
       if (disposed || mine !== round) return;
       startedAt = null;
 
       const at = Date.now();
-      due.forEach((id, i) => linkedSeen.current.set(id, { ticket: fresh[i], at }));
+      due.forEach((id, i) => linkedSeen.set(id, { ticket: fresh[i], at }));
       // A clone that is gone stops being asked about, and stops being remembered with it.
-      for (const id of [...linkedSeen.current.keys()]) {
-        if (!wanted.includes(id)) linkedSeen.current.delete(id);
+      for (const id of [...linkedSeen.keys()]) {
+        if (!wanted.includes(id)) linkedSeen.delete(id);
       }
-      const extra = missing.map((id) => linkedSeen.current.get(id)?.ticket ?? null);
+      const extra = missing.map((id) => linkedSeen.get(id)?.ticket ?? null);
 
       // Every key failed and nothing came back: keep whatever the column already has rather
       // than blanking it, and say why. A partial answer still replaces the list, because the
       // keys that did answer are authoritative for their own owners.
-      if (open.length > 0 || errors.length === 0) {
-        const found = extra.filter((t): t is LinearTicket => t !== null);
-        // The linked tickets already on screen come last, so one whose own lookup failed this
-        // round keeps the copy from the round before instead of blinking back to the stored
-        // title. A clone that is gone takes its ticket with it: `wanted` no longer names it.
-        setTickets((current) => mergeTickets([open, found, linkedOnly(current, wanted)]));
-      }
-      setError(errors.length > 0 ? errors.join("; ") : null);
-      setLoading(false);
+      const found = extra.filter((t): t is LinearTicket => t !== null);
+      // The linked tickets already on screen come last, so one whose own lookup failed this
+      // round keeps the copy from the round before instead of blinking back to the stored
+      // title. A clone that is gone takes its ticket with it: `wanted` no longer names it.
+      set({
+        ...(open.length > 0 || errors.length === 0
+          ? { tickets: mergeTickets([open, found, linkedOnly(snap.tickets, wanted)]) }
+          : {}),
+        error: errors.length > 0 ? errors.join("; ") : null,
+        loading: false,
+      });
       arm(errors.length > 0 ? ERROR_MS : POLL_MS);
     };
 
     tick();
-    forceTick.current = () => tick(true);
+    forceTick = () => tick(true);
 
     // The watchdog. It runs on its own interval and trusts nothing the transport reports
     // about itself, which is the whole point: a `fetch` that never settles leaves the round
     // in flight forever, and every path that re-armed the timer runs after that fetch.
-    const watchdog = window.setInterval(() => {
-      if (disposed || document.visibilityState !== "visible") return;
+    const watchdog = setInterval(() => {
+      if (disposed || !visible()) return;
       if (startedAt !== null) {
         // Past its budget, so treat it as gone and start a fresh round over it.
         if (Date.now() - startedAt > ROUND_BUDGET_MS) tick(true);
@@ -251,36 +338,271 @@ export function useTickets(
     // Forced, because the round in flight when the network dropped is the one to give up on.
     // Still only for a tab someone is looking at: a hidden tab asks nothing either way.
     const catchUp = () => {
-      if (document.visibilityState === "visible") tick(true);
+      if (visible()) tick(true);
     };
-    const onOnline = () => catchUp();
-    const onVisible = () => catchUp();
-    window.addEventListener("online", onOnline);
-    document.addEventListener("visibilitychange", onVisible);
+    const page = typeof window === "undefined" ? null : window;
+    page?.addEventListener("online", catchUp);
+    page?.document.addEventListener("visibilitychange", catchUp);
 
     return () => {
       disposed = true;
-      forceTick.current = () => {};
-      window.clearTimeout(timer);
-      window.clearInterval(watchdog);
-      window.removeEventListener("online", onOnline);
-      document.removeEventListener("visibilitychange", onVisible);
+      forceTick = () => {};
+      clearTimeout(timer);
+      clearInterval(watchdog);
+      page?.removeEventListener("online", catchUp);
+      page?.document.removeEventListener("visibilitychange", catchUp);
     };
-  }, [presetsKey, linkedKey]);
+  };
 
-  const refetch = useCallback(() => forceTick.current(), []);
-  const upsert = useCallback((ticket: LinearTicket) => {
-    setTickets((current) => upsertTicket(current, ticket));
+  /** The keys' workspaces, asked once. A key that cannot answer contributes nothing and says
+   *  nothing: the menu this feeds is a convenience link. */
+  const askWorkspaces = (keys: string[]): (() => void) => {
+    if (keys.length === 0) {
+      set({ workspaces: [] });
+      return () => {};
+    }
+    let disposed = false;
+    void Promise.all(keys.map((key) => port.workspace(key).catch(() => null))).then((found) => {
+      if (!disposed) set({ workspaces: mergeWorkspaces(found) });
+    });
+    return () => {
+      disposed = true;
+    };
+  };
+
+  const upsert = (ticket: LinearTicket) => {
     // And into the linked record, or the next poll would draw the copy from before the write
     // and hold it for the rest of the window. This copy came from a write that succeeded, so
     // it is the truest one anybody has until the window is up.
-    linkedSeen.current.set(ticket.id.toLowerCase(), { ticket, at: Date.now() });
+    linkedSeen.set(ticket.id.toLowerCase(), { ticket, at: Date.now() });
     // The ticket came from Linear, so the column has an answer to draw whether or not the
     // first poll has landed yet.
-    setLoading(false);
-  }, []);
+    set({ tickets: upsertTicket(snap.tickets, ticket), loading: false });
+  };
 
-  return { tickets, error, loading, refetch, upsert };
+  return {
+    port,
+    get: () => snap,
+    subscribe: (l) => {
+      listeners.add(l);
+      return () => listeners.delete(l);
+    },
+    setPresets: (presets) => {
+      set({ presets });
+      follow();
+    },
+    setLinked: (ids) => {
+      linked = ids;
+      follow();
+    },
+    refetch: () => forceTick(),
+    upsert,
+    write: (ticket, next, call) => {
+      upsert(next);
+      return call(keysForTeam(withLabels(), ticket.team ?? "")).then(
+        () => forceTick(),
+        (e: Error) => {
+          upsert(ticket);
+          throw e;
+        },
+      );
+    },
+    meta: (ticket) => {
+      // The team key comes off the ticket the same way every write derives it, so what the
+      // menus offer and the key that would write it are chosen by one rule
+      const team = ticket ? teamKeyOf(ticket) : "";
+      const keys = team === "" ? [] : keysForTeam(withLabels(), team);
+      if (keys.length === 0) return NO_META;
+      const at = JSON.stringify([team, keys]);
+      const hit = metas.get(at);
+      if (hit) return hit;
+      const asking = { ...NO_META, loading: true };
+      metas.set(at, asking);
+      const settle = (found: TeamMeta) => {
+        metas.set(at, { ...found, loading: false });
+        set({});
+      };
+      void port.teamMeta(keys, team).then(settle, () => settle(NO_META));
+      return asking;
+    },
+    start: () => {
+      running = true;
+      follow();
+    },
+    stop: () => {
+      running = false;
+      stopPoll();
+      stopWorkspaces();
+      stopPoll = stopWorkspaces = () => {};
+      pollFor = workspacesFor = null;
+    },
+  };
+}
+
+/** What a ticket panel is handed for one ticket (`~/components/TicketPanel`): the ticket, its
+ *  team's menus, the writes, and where its links go. */
+export interface TicketPanelBinding {
+  ticket: LinearTicket;
+  onTitleChange: (title: string) => void;
+  onStateChange: (state: TicketWorkflowState) => void;
+  stateOptions: TicketWorkflowState[];
+  statesLoading: boolean;
+  labelOptions: TicketLabel[];
+  labelsLoading: boolean;
+  onAddLabel: (label: TicketLabel) => void;
+  onRemoveLabel: (label: TicketLabel) => void;
+  resolveLink: (ticketId: string) => { title: string; open: () => void } | null;
+}
+
+/** What the ticket module needs from the control panel. */
+export interface TicketInputs {
+  /** Every clone, archived ones too. */
+  clones: Clone[];
+  /** The operator's own order of the queue (the board's ticket order). */
+  order: string[];
+  /** The ticket open in the panel (`?ticket=`), or null. */
+  openId: string | null;
+  /** Open a ticket in the panel, or close it (null). `replace`: in place of the current
+   *  history entry, for a move the operator did not ask for by name. */
+  onOpen: (ticketId: string | null, replace?: boolean) => void;
+  /** Show the clone made for a ticket. */
+  onShowClone: (clone: Clone) => void;
+  /** A write settled: null when it went through, the reason when it was refused. */
+  onError: (message: string | null) => void;
+}
+
+/** The ticket module, as the control panel uses it. */
+export interface Tickets {
+  /** The presets the keys come off: the new-ticket dialog's teams. */
+  presets: PresetRedacted[];
+  /** Settings saved: ask with these presets' keys from now on. */
+  setPresets: (presets: PresetRedacted[]) => void;
+  /** The queue the Tickets tab draws: open tickets with no clone, in the operator's order. */
+  visible: LinearTicket[];
+  /** The ticket open in the panel, if it is in the queue. */
+  open: LinearTicket | null;
+  /** Each clone's ticket as Linear has it now, by clone id. */
+  forClones: Record<string, CloneTicket>;
+  error: string | null;
+  loading: boolean;
+  workspaces: LinearWorkspace[];
+  /** Any ticket the module has (a clone's too), by identifier. */
+  find: (ticketId: string) => LinearTicket | null;
+  edit: (ticket: LinearTicket, patch: IssuePatch) => void;
+  /** Into the first state of a kind (Backlog, Canceled). */
+  moveTo: (ticket: LinearTicket, state: TicketState) => void;
+  /** Into one state of the team's workflow. */
+  setState: (ticket: LinearTicket, state: TicketWorkflowState) => void;
+  setLabel: (ticket: LinearTicket, label: TicketLabel, on: boolean) => void;
+  /** Open a new issue; once Linear has it, it is in the list and open in the panel. Rejects
+   *  with Linear's refusal. */
+  create: (issue: NewIssue) => Promise<LinearTicket>;
+  /** What `ticket`'s team offers it. */
+  meta: (ticket: LinearTicket | null) => TeamMetaState;
+  /** Where a parent or sub-issue goes: the ticket in the queue (`inQueue`), or the clone made
+   *  for it; null: Linear. */
+  resolveLink: (ticketId: string, inQueue: boolean) => { title: string; open: () => void } | null;
+  /** A ticket panel's data and writes for `ticket`; `own`: a clone's own ticket, whose links
+   *  never open the queue. */
+  panel: (ticket: LinearTicket, own: boolean) => TicketPanelBinding;
+}
+
+/** The module over `store` as it stands (`snap`), for these inputs. */
+export function ticketsOf(store: TicketStore, snap: TicketSnapshot, inputs: TicketInputs): Tickets {
+  const { clones, openId, onOpen, onError } = inputs;
+  const visibleList = orderTickets(openTickets(snap.tickets, clones), inputs.order);
+  const open = openId ? findTicket(openId, visibleList) : null;
+  const run = (p: Promise<unknown>) => void p.then(() => onError(null), (e: Error) => onError(e.message));
+  const write = (t: LinearTicket, next: LinearTicket, call: (keys: string[]) => Promise<unknown>) =>
+    run(store.write(t, next, call));
+  /** The open ticket leaves the queue: the panel goes to the one after it. */
+  const advancePast = (t: LinearTicket) => {
+    if (open?.id !== t.id) return;
+    onOpen(ticketAfter(visibleList, t.id)?.id ?? null, true);
+  };
+
+  const edit = (t: LinearTicket, patch: IssuePatch) =>
+    write(t, { ...t, ...patch }, (keys) => store.port.update(keys, t, patch));
+  const setState = (t: LinearTicket, s: TicketWorkflowState) => {
+    if (!queued(s.type)) advancePast(t);
+    write(t, { ...t, state: s.type, stateId: s.id, stateName: s.name }, (keys) => store.port.setStateId(keys, t, s.id));
+  };
+  const setLabel = (t: LinearTicket, label: TicketLabel, on: boolean) =>
+    write(t, { ...t, labels: on ? [...t.labels, label] : t.labels.filter((l) => l.id !== label.id) }, (keys) =>
+      store.port.setLabel(keys, t, label.id, on),
+    );
+  const resolveLink = (id: string, inQueue: boolean) => {
+    const t = inQueue ? findTicket(id, visibleList) : null;
+    if (t) return { title: `Show ${t.id}`, open: () => onOpen(t.id) };
+    const clone = cloneForTicket(id, clones);
+    return clone ? { title: `Show the clone for ${id}: ${clone.id}`, open: () => inputs.onShowClone(clone) } : null;
+  };
+
+  return {
+    presets: snap.presets,
+    setPresets: store.setPresets,
+    visible: visibleList,
+    open,
+    forClones: cloneTickets(clones, snap.tickets),
+    error: snap.error,
+    loading: snap.loading,
+    workspaces: snap.workspaces,
+    find: (id) => findTicket(id, snap.tickets),
+    edit,
+    moveTo: (t, next) => {
+      if (!queued(next)) advancePast(t);
+      write(t, { ...t, state: next }, (keys) => store.port.setState(keys, t, next));
+    },
+    setState,
+    setLabel,
+    create: (issue) =>
+      openTicket(snap.presets, issue, store.port).then((created) => {
+        store.upsert(created);
+        onOpen(created.id);
+        store.refetch();
+        return created;
+      }),
+    meta: (t) => store.meta(t),
+    resolveLink,
+    panel: (t, own) => {
+      const meta = store.meta(t);
+      return {
+        ticket: t,
+        onTitleChange: (title) => edit(t, { title }),
+        onStateChange: (s) => setState(t, s),
+        stateOptions: meta.states,
+        statesLoading: meta.loading,
+        labelOptions: meta.labels,
+        labelsLoading: meta.loading,
+        onAddLabel: (l) => setLabel(t, l, true),
+        onRemoveLabel: (l) => setLabel(t, l, false),
+        resolveLink: (id) => resolveLink(id, !own),
+      };
+    },
+  };
+}
+
+/** The ticket module, live: the presets from `GET /api/config` at mount, the poll while the
+ *  control panel is mounted. `port`: Linear, unless a test passes another. */
+export function useTickets(inputs: TicketInputs, port: LinearPort = linear): Tickets {
+  const [store] = useState(() => ticketStore(port));
+  const snap = useSyncExternalStore(store.subscribe, store.get, store.get);
+  const onError = useRef(inputs.onError);
+  onError.current = inputs.onError;
+
+  useEffect(() => {
+    store.start();
+    getConfig()
+      .then((c) => store.setPresets(c.presets))
+      .catch((e: Error) => onError.current(e.message));
+    return store.stop;
+  }, [store]);
+
+  // Keyed on the serialized list: the clones are a fresh array on every frame
+  const linkedKey = JSON.stringify(linkedIds(inputs.clones.flatMap((c) => (c.linearTicket ? [c.linearTicket] : []))));
+  useEffect(() => store.setLinked(JSON.parse(linkedKey) as string[]), [store, linkedKey]);
+
+  return ticketsOf(store, snap, inputs);
 }
 
 /** Every distinct Linear key on the presets, in config order.
@@ -334,14 +656,14 @@ export function linkedOnly(current: LinearTicket[], wanted: string[]): LinearTic
  *
  *  Null rather than a throw, because the caller is a poll that has to finish either way. An
  *  identifier that parses into nothing takes no request at all. */
-async function fetchLinked(presets: LinearPreset[], id: string): Promise<LinearTicket | null> {
+async function fetchLinked(port: LinearPort, presets: LinearPreset[], id: string): Promise<LinearTicket | null> {
   const ref = issueRefOf(id);
   if (!ref) return null;
   const keys = keysForTeam(
     presets.map((p) => ({ labels: p.labels ?? [], linearKey: p.linearKey })),
     ref.prefix,
   );
-  return fetchTicketAny(keys, ref).catch(() => null);
+  return port.ticket(keys, ref).catch(() => null);
 }
 
 /** The identifiers worth a request this round: the ones nothing has answered for yet, and the

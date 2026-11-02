@@ -1,46 +1,29 @@
 // The ticket a dialog is about: the team it starts on, who holds it, and finding or opening
 // the issue itself. Both dialogs come here — the board's ticket dialog to open one, the clone
 // dialog to open or find the one a clone is named after — so a default set in one is the
-// default in the other. Linear is a port, so a test drives the whole flow with a fake.
+// default in the other. Linear is a port (`./port.ts`), so a test drives the whole flow with
+// the in-memory one.
 import { useEffect, useState } from "react";
 
 import { toLinearMarkdown } from "~/lib/linear/assets";
 import {
   cloneLinearMeta,
-  ensureInProgress,
-  fetchIssueAny,
   issueRefOf,
   resolvedFromTicket,
   type ResolvedIssue,
 } from "~/lib/linear/issues";
 import {
-  issueCreate,
   keysForTeam,
   type NewIssue,
 } from "~/lib/linear/mutations";
 import {
   defaultAssignee,
-  fetchTeamPeople,
   type TicketPerson,
 } from "~/lib/linear/people";
+import { linear, type LinearPort } from "~/lib/linear/port";
 import type { LinearTicket } from "~/lib/linear/types";
 import type { LinearMeta } from "~/lib/wire/LinearMeta";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
-
-/** Every Linear call the intake makes. A test passes its own. */
-export interface LinearPort {
-  create: typeof issueCreate;
-  find: typeof fetchIssueAny;
-  start: typeof ensureInProgress;
-  people: typeof fetchTeamPeople;
-}
-
-export const linear: LinearPort = {
-  create: issueCreate,
-  find: fetchIssueAny,
-  start: ensureInProgress,
-  people: fetchTeamPeople,
-};
 
 const LAST_TEAM_KEY = "rmng.lastTicketTeam";
 
