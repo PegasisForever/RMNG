@@ -7,10 +7,8 @@ import {
   freshInput,
   holdInput,
   letterbox,
-  modFlagOf,
   routeDrag,
   shapeToRgba,
-  staleMods,
   toMonitor,
   wheelMessages,
 } from "./input";
@@ -212,22 +210,4 @@ test("input held during a reconnect: moves merge, old input goes but releases st
   expect(freshInput(held, 2055).map((h) => h.msg)).toEqual([
     { kind: "button", button: 0x110, pressed: false },
   ]);
-});
-
-describe("staleMods", () => {
-  const up = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false };
-  test("a held Ctrl whose release never came (macOS Ctrl+Space) is let go by the next event", () => {
-    const held = new Map([[29, modFlagOf("ControlLeft")!]]);
-    expect(staleMods(held, up)).toEqual([29]);
-    expect(staleMods(held, { ...up, ctrlKey: true })).toEqual([]);
-  });
-  test("each modifier by its own flag", () => {
-    const held = new Map([
-      [42, modFlagOf("ShiftLeft")!],
-      [56, modFlagOf("AltLeft")!],
-      [125, modFlagOf("MetaLeft")!],
-    ]);
-    expect(staleMods(held, { ...up, shiftKey: true, metaKey: true })).toEqual([56]);
-    expect(modFlagOf("KeyA")).toBeUndefined();
-  });
 });

@@ -65,7 +65,7 @@ export function FloatingButtons({
   /** The layout's monitors with no window open (their numbers), and the opening of their
    *  windows; absent when there are none, or the browser opens no windows. */
   monitors?: { missing: number[]; onOpen: () => void };
-  /** The key chord that shows and hides the control panel (`./shortcut.ts`), for the Control panel button's
+  /** The key chord that shows and hides the control panel (`./keys.ts`), for the Control panel button's
    *  tooltip; absent: none said. */
   controlPanelKeys?: string;
 }) {
