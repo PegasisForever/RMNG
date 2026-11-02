@@ -2,7 +2,7 @@
 // clone (`./session.ts`), the live server state, and the input. In touch mode: the keys'
 // touches, which type or move the pointer (`./keypad.ts`), a trackpad with no keys (the screen),
 // the modifiers, Fn, Caps Lock, the key clicks, the clipboard keys and dictation. In mouse and
-// keyboard mode (`./inputMode.ts`): the page's mouse and keys (`~/viewer/input.ts`). In both
+// keyboard mode (`./inputMode.ts`): the page's mouse and keys (`~/viewer/input.ts`, `./keys.ts`). In both
 // the clipboard (`~/viewer/clipboard.ts`). And the layout claim. The screen only lays things
 // out.
 //
@@ -33,11 +33,11 @@ import { Dictation, type DictationState, textToKeysyms } from "./dictation";
 import { BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, type TouchKind } from "./KeyboardView";
 import { CAPS_LOCK, type Key, isShift } from "./keyboard";
 import { Keypad, type KeypadOut } from "./keypad";
+import { type Keys, type PageKeys, attachKeys } from "./keys";
 import { KeySounds } from "./keySound";
 import { type ModState, Modifiers } from "./modifiers";
 import { PHONE_SCROLL_SPEED, clampTo, pointerGain, scrollGain } from "./pointer";
 import { type Session, openSession } from "./session";
-import { isControlPanelChord, controlPanelChordHolds } from "./shortcut";
 import { TermKeys } from "./termKeys";
 
 /** The monitor size assumed until the server says the monitor's size. */
@@ -64,7 +64,7 @@ export function useRemote({
   kind,
   mouse,
   onZoom,
-  onChord,
+  page,
 }: {
   /** Where the picture goes. */
   box: RefObject<HTMLDivElement | null>;
@@ -79,8 +79,8 @@ export function useRemote({
   mouse: boolean;
   /** A pinch on the trackpad (the screen's): the view's zoom changes by `factor`. */
   onZoom?: (factor: number) => void;
-  /** The control panel's chord was pressed (`./shortcut.ts`), in mouse mode. */
-  onChord: () => void;
+  /** What the page does with the keys it has (`./keys.ts`): the control panel's chord, Escape. */
+  page: PageKeys;
 }) {
   const session = useRef<Session | null>(null);
   const [spec, setSpec] = useState<ViewSpec | null>(null);
@@ -221,29 +221,41 @@ export function useRemote({
     };
   }, [sessionNo]);
 
+  // The keys, in both modes (`./keys.ts`): the clone's while the mouse is, else the page's
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const keys = useRef<Keys | null>(null);
+  useEffect(() => {
+    const k = attachKeys({ chord: () => pageRef.current.chord(), escape: () => pageRef.current.escape() });
+    keys.current = k;
+    return () => {
+      keys.current = null;
+      k.detach();
+    };
+  }, []);
+
   // Mouse mode: the page's mouse and keys go to the clone
-  const chordRef = useRef(onChord);
-  chordRef.current = onChord;
   useEffect(() => {
     const s = session.current;
     const clip = clipboard.current;
-    if (!mouse || !s || !clip || !overlay.current) return;
+    const k = keys.current;
+    if (!mouse || !s || !clip || !k || !overlay.current) return;
     const input = attachInput({
       canvas: s.canvas,
       overlay: overlay.current,
       monitor,
       send: s.send,
-      sendLocks: s.locks,
       onGesture: () => clip.onGesture(),
-      pasteByEvent: () => clip.pasteByEvent(),
-      chord: { is: (e) => isControlPanelChord(e), holds: controlPanelChordHolds(), run: () => chordRef.current() },
     });
     const { spec: sp, cursor: c } = last.current;
     if (sp) input.setLayout(sp.content.mode === "desktop" ? sp.monitors : []);
     if (c) input.onCursor(c);
     input.setScroll(scroll.current.mode, scroll.current.speed);
     pageInput.current = { input };
+    k.give({ send: s.send, sendLocks: s.locks, clipboard: clip, mouse: input });
     return () => {
+      // The keys and the mouse are the page's again: what the clone holds is let go
+      k.give(null);
       pageInput.current = null;
       input.detach();
     };

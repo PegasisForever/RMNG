@@ -27,7 +27,7 @@
 //   assistant), are one group at the right: it shows when the mode starts, then slides out of
 //   the window to the right; the mouse at the window's right edge brings it back, and a move
 //   away from it sends it out. While the mouse is over it, the mouse and the keys are its. A
-//   chord (`./shortcut.ts`) shows the control panel, with the buttons above it, and hides it again;
+//   chord (`./keys.ts`) shows the control panel, with the buttons above it, and hides it again;
 //   so does a click beside them, and Escape when no dialog or menu is open.
 //
 // Where the browser can open windows, the control panel can move to a window of its own (`?control-panel`);
@@ -55,14 +55,13 @@ import { resize } from "~/lib/monitorLayout";
 import { hostWindow } from "~/lib/host";
 import { useMonitorChannel, useOpenMonitors } from "~/lib/useMonitorChannel";
 import { monitorWindowName, openMonitorWindows } from "~/viewer/open";
-import { toggleFullscreen } from "~/viewer/input";
 import { uploadToClone } from "~/viewer/upload";
 
-import { attachEditKeys } from "./editKeys";
 import { firstLayout, startScale } from "./firstLayout";
 import { FLOAT_BUTTON, FLOAT_GAP } from "./FloatingButtons";
 import { followAxis, type Insets, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
 import { useInputMode } from "./inputMode";
+import { controlPanelChordLabel, toggleFullscreen } from "./keys";
 import { HANDLE_H } from "./KeyboardHandle";
 import { type TouchKind } from "./KeyboardView";
 import { readKeyboardDocked, readKeyboardHeight, saveKeyboardDocked, saveKeyboardHeight } from "./keyboardDock";
@@ -73,7 +72,6 @@ import { ControlPanelContainer } from "./control/ControlPanelContainer";
 import { WIDE_MIN } from "./control/WideLayout";
 import { clampTo } from "./pointer";
 import { useRemote } from "./remote";
-import { isControlPanelChord, controlPanelChordLabel } from "./shortcut";
 import { isTyping, useLift } from "./systemKeyboard";
 import type { PanelTab } from "./ToolRow";
 
@@ -204,57 +202,23 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     if (w && !w.closed) w.focus();
     else setControlPanel((p) => !p);
   };
-  /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. */
+  /** Escape that the page has, with no dialog or menu open (`./keys.ts`): the control panel
+   *  closes. In a text box the first Escape only leaves the box, so a key meant for the field (a
+   *  rename's cancel) does not also close the panel. */
+  const escape = () => {
+    if (!controlPanel) return false;
+    const t = document.activeElement;
+    if (t instanceof HTMLElement && (t.isContentEditable || t.matches("input, textarea, select"))) {
+      t.blur();
+      return false;
+    }
+    setControlPanel(false);
+    return true;
+  };
+  /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. Else the keys
+   *  are the page's (`./keys.ts`), and so are a Mac's edit keys while the keyboard is locked. */
   const mouseInput = mouse && !controlPanel && !layoutOpen && !(peek && overGroup);
-  const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, onChord: toggleControlPanel });
-
-  // The chord while the clone does not get the keys (`~/viewer/input.ts` takes it otherwise)
-  const chordRef = useRef(toggleControlPanel);
-  chordRef.current = toggleControlPanel;
-  const mouseInputRef = useRef(mouseInput);
-  mouseInputRef.current = mouseInput;
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      // The terminal took it already (`./TerminalScreen.tsx`)
-      if (mouseInputRef.current || e.defaultPrevented || !isControlPanelChord(e)) return;
-      e.preventDefault();
-      if (!e.repeat) chordRef.current();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
-  // A Mac's edit shortcuts (Cmd+C, Cmd+V…) while the keyboard is locked and the page has the
-  // keys: the page runs them itself (`./editKeys.ts`)
-  useEffect(
-    () =>
-      attachEditKeys({
-        active: () => !mouseInputRef.current,
-        locked: () => hostWindow().document.fullscreenElement !== null,
-      }),
-    [],
-  );
-
-  // Escape: a dialog or a menu closes itself first (each has its own Escape); with none open,
-  // the control panel closes. In a text box the first Escape only leaves the box, so a key
-  // meant for the field (a rename's cancel) does not also close the panel.
-  const controlPanelRef = useRef(controlPanel);
-  controlPanelRef.current = controlPanel;
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.defaultPrevented || !controlPanelRef.current) return;
-      if (document.querySelector("[data-modal], [role=dialog], [role=menu], [role=listbox]")) return;
-      const t = e.target;
-      if (t instanceof HTMLElement && (t.isContentEditable || t.matches("input, textarea, select"))) {
-        t.blur();
-        return;
-      }
-      e.preventDefault();
-      setControlPanel(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, page: { chord: toggleControlPanel, escape } });
 
   // Files dropped on the clone's screen go to the selected clone's home, one after another
   // (`~/viewer/upload.ts`). A drop on the control panel, the right group or a dialog is theirs.
@@ -585,7 +549,6 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
               top={top}
               cursor={mouse ? null : r.termPos}
               onPad={pad}
-              onChord={toggleControlPanel}
             />
           ) : (
             <div className="absolute inset-0 bg-black" />

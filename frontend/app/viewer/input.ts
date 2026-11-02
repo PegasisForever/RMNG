@@ -1,18 +1,17 @@
-// Mouse and keyboard mode's input and cursor (`~/desk/remote.ts`), on the page thread. Events come from the page's
-// placeholder <canvas> (it stays in the DOM after `transferControlToOffscreen`, so pointer
-// events and pointer lock work on it) and keys from `window`. Each event becomes an `InputMsg`
-// that the page hands to the worker, which sends it on the socket.
+// Mouse and keyboard mode's mouse and cursor (`~/desk/remote.ts`), on the page thread. Events
+// come from the page's placeholder <canvas> (it stays in the DOM after
+// `transferControlToOffscreen`, so pointer events and pointer lock work on it). Each event
+// becomes an `InputMsg` that the page hands to the worker, which sends it on the socket. The
+// keys are `~/desk/keys.ts`'s.
 //
-// What it sends: Linux evdev keycodes, evdev buttons, wheel notches
-// or smooth finger scroll, pointer lock with relative motion that engages by itself while the
-// clone hides its cursor, the Ctrl+Alt+G / Ctrl+Alt+P chords, and the agent-warp rules.
+// What it sends: evdev buttons, wheel notches or smooth finger scroll, pointer lock with
+// relative motion that engages by itself while the clone hides its cursor (the keys' Ctrl+Alt+G
+// and Ctrl+Alt+P chords override it), and the agent-warp rules.
 import type { ScrollMode } from "../lib/wire/ScrollMode";
 import type { CursorMeta } from "../lib/wire/CursorMeta";
 import type { CursorShape } from "../lib/wire/CursorShape";
 import type { InputMsg } from "../lib/wire/InputMsg";
 import type { ViewMonitor } from "../lib/wire/ViewMonitor";
-import { hostWindow } from "../lib/host";
-import { evdevFor } from "./keycodes";
 
 /** Engage the automatic pointer lock after the remote cursor stays hidden this long. */
 export const ENGAGE_MS = 180;
@@ -33,9 +32,6 @@ const MAC_WHEEL_LINE_PX = 40;
 /** Input made while the socket is down is sent when it is back, unless it is older than this
  *  (a release is always sent). */
 const HOLD_MAX_MS = 2000;
-/** A paste chord's key goes to the clone at most this long after its key press, also when no
- *  paste event comes (`InputOptions.pasteByEvent`). */
-const PASTE_WAIT_MS = 100;
 
 /** Evdev buttons by `MouseEvent.button`: left, middle, right, back, forward. */
 const BUTTONS = [0x110, 0x112, 0x111, 0x113, 0x114];
@@ -274,39 +270,6 @@ export function holdInput(held: HeldInput, msg: InputMsg, now: number): HeldInpu
   return out;
 }
 
-/** Chrome's Keyboard Lock API, the browser window's (`~/lib/host.ts`); not in TypeScript's DOM
- *  types. */
-const keyboard = () =>
-  (hostWindow().navigator as Navigator & { keyboard?: { lock(keys?: string[]): Promise<void>; unlock(): void } })
-    .keyboard;
-
-/** The document whose fullscreen this page uses: the shell's around it, or its own. */
-const fullscreenDoc = () => hostWindow().document;
-
-/** Fullscreen on or off, on the screen the window is on. The page's own fullscreen hides
- *  the browser's address bar, which macOS fullscreen (the green button) keeps. A browser
- *  without Keyboard Lock is asked for `keyboardLock: "browser"` (Safari 26.4, Firefox 156): for
- *  as long as the fullscreen lasts, Esc and the browser's own shortcuts go to the clone, and a
- *  held Esc leaves, as with Chrome's Keyboard Lock. A browser that does not know the option
- *  ignores it. In the shell's frame, the shell's page goes fullscreen, so a reload of the
- *  frame keeps it. */
-export function toggleFullscreen() {
-  const document = fullscreenDoc();
-  if (document.fullscreenElement) void document.exitFullscreen();
-  else {
-    const options = keyboard() ? undefined : { keyboardLock: "browser" };
-    // Locked here too, not only when an input sees the change: a page that takes no keys
-    // now (the app with its control panel open) still gets them once it does
-    void document.documentElement
-      .requestFullscreen(options as FullscreenOptions | undefined)
-      .then(() => keyboard()?.lock())
-      .catch(() => {});
-  }
-}
-
-/** The keys Caps Lock changes: before one goes to the clone, its Caps Lock is brought in step. */
-const LETTER = /^Key[A-Z]$/;
-
 interface InputOptions {
   /** The placeholder canvas: the event target, the CSS cursor host and the pointer lock target. */
   canvas: HTMLCanvasElement;
@@ -315,21 +278,9 @@ interface InputOptions {
   monitor: number;
   /** Send one event. While the socket is down the worker holds it (`holdInput`). */
   send(msg: InputMsg): void;
-  /** Send this keyboard's Caps Lock (on or off), for the clone's to follow: the clone-daemon
-   *  reads the clone's own and taps it when the two differ (`wire::socket::LockState`). */
-  sendLocks(caps: boolean): void;
-  /** A key press or click: the user activation the browser wants for some calls (a clipboard
-   *  write it refused before). */
+  /** A click: the user activation the browser wants for some calls (a clipboard write it
+   *  refused before). */
   onGesture(): void;
-  /** Whether the local clipboard reaches the page only in the paste event of a paste chord
-   *  (Safari, Firefox: `./clipboard.ts`). Then the chord's key keeps its default action, which
-   *  fires that event, and goes to the clone after it, behind the offer the event makes. */
-  pasteByEvent(): boolean;
-  /** A chord of the page's own (`~/desk/shortcut.ts`), which does not go to the clone. The press
-   *  of its modifier (`holds`: Super, or Alt on a Mac) is held back until the next key or click:
-   *  a Super or an Alt pressed and let go alone does something in the clone (GNOME's overview,
-   *  an app's menu bar), so the chord's must never reach it. */
-  chord: { is(e: KeyboardEvent): boolean; holds: readonly string[]; run(): void };
 }
 
 export interface Input {
@@ -339,40 +290,23 @@ export interface Input {
   onCursor(c: CursorMeta): void;
   /** The active layout's scroll mode and speed (percent). */
   setScroll(mode: ScrollMode, speed: number): void;
+  /** This window shows a monitor of the clone's desktop (not a terminal). */
+  desktop(): boolean;
+  /** The keys' Ctrl+Alt+G (`toggle`) and Ctrl+Alt+P (`off`): the pointer lock on or off, over
+   *  the automatic policy. What the mouse holds is let go first. */
+  pointerLock(chord: "toggle" | "off"): void;
+  /** Lets go of the buttons the clone holds. */
   detach(): void;
-}
-
-/** The event flag that says whether a modifier key (by its DOM code) is down. */
-export type ModFlag = "ctrlKey" | "shiftKey" | "altKey" | "metaKey";
-
-export function modFlagOf(code: string): ModFlag | undefined {
-  if (code === "ControlLeft" || code === "ControlRight") return "ctrlKey";
-  if (code === "ShiftLeft" || code === "ShiftRight") return "shiftKey";
-  if (code === "AltLeft" || code === "AltRight") return "altKey";
-  if (code === "MetaLeft" || code === "MetaRight") return "metaKey";
-  return undefined;
-}
-
-/** The held modifiers (evdev code → its flag) that `e` says are up: their release never came.
- *  macOS takes Ctrl+Space for itself (the next input source) and Chrome gets no keyup for the
- *  Ctrl, so the clone would hold Ctrl until the page reloads. Every key, button, wheel and move
- *  event says which modifiers are down, so the next one lets go of the rest. */
-export function staleMods(held: ReadonlyMap<number, ModFlag>, e: Pick<KeyboardEvent, ModFlag>): number[] {
-  return [...held].filter(([, flag]) => !e[flag]).map(([k]) => k);
 }
 
 export function attachInput(o: InputOptions): Input {
   const { canvas, overlay, monitor, send } = o;
-  const isMac = /Mac/.test(navigator.platform);
-  const os = isMac ? "mac" : /Linux/.test(navigator.platform) ? "linux" : "other";
+  const os = /Mac/.test(navigator.platform) ? "mac" : /Linux/.test(navigator.platform) ? "linux" : "other";
   let layout: ViewMonitor[] = [];
   /** This window's monitor in the layout. */
   let size: { w: number; h: number } | null = null;
   /** The canvas in device pixels. */
   let box: { w: number; h: number } | null = null;
-  const keys = new Set<number>();
-  /** The modifiers among `keys`, with the flag an event says them down by (`staleMods`). */
-  const mods = new Map<number, ModFlag>();
   const buttons = new Set<number>();
   const auto = new AutoLock(performance.now());
   /** Chrome refused the lock (the user left it with Esc): wait for a click before asking again. */
@@ -384,20 +318,6 @@ export function attachInput(o: InputOptions): Input {
   let scrollMode: ScrollMode = "auto";
   let scrollScale = 1;
   let scrollEnd: ReturnType<typeof setTimeout> | undefined;
-  /** The chord's modifier's press, held back while the chord may follow (`InputOptions.chord`). */
-  let heldMod: number | null = null;
-  /** A paste chord's key press, held until the paste event it fires has made its offer. */
-  let heldPaste: { keycode: number; tap: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
-  /** Where a paste chord's paste goes. Safari pastes only into something editable, and fires
-   *  no paste event otherwise, so the chord's key press moves the focus here, and the paste
-   *  moves it back. Only for the chord: an editable focus would start an input method (IME)
-   *  on every other key. */
-  const pasteSink = document.createElement("div");
-  pasteSink.contentEditable = "true";
-  pasteSink.tabIndex = -1;
-  pasteSink.ariaHidden = "true";
-  pasteSink.style.cssText = "position:fixed;left:-100px;top:0;width:1px;height:1px;opacity:0";
-  document.body.append(pasteSink);
   /** The cursor's `image-set` function: older Safari knows only the prefixed one. */
   const imageSet = CSS.supports("cursor", `image-set(url("data:,") 1x) 0 0, default`)
     ? "image-set"
@@ -413,17 +333,9 @@ export function attachInput(o: InputOptions): Input {
   const locked = () => document.pointerLockElement === canvas;
   const now = () => performance.now();
 
-  /** Release every key and button the clone holds from this window. */
-  function releaseAll() {
-    // A held paste key was never pressed in the clone.
-    if (heldPaste) clearTimeout(heldPaste.timer);
-    heldPaste = null;
-    heldMod = null;
-    pasteSink.blur();
-    for (const k of keys) send({ kind: "key_code", keycode: k, pressed: false });
+  /** Release every button the clone holds from this window. */
+  function releaseButtons() {
     for (const b of buttons) send({ kind: "button", button: b, pressed: false });
-    keys.clear();
-    mods.clear();
     buttons.clear();
   }
 
@@ -501,155 +413,7 @@ export function attachInput(o: InputOptions): Input {
     return { key, tooBig };
   }
 
-  /** A key typed into the page's own terminal (xterm.js reads keys from a textarea). */
-  const forPage = (e: KeyboardEvent) => e.target instanceof HTMLTextAreaElement;
-
-  /** Let go of the held modifiers `e` says are up (`staleMods`). */
-  function syncMods(e: KeyboardEvent | MouseEvent) {
-    // AltGr (right Alt) can come as "AltGraph" with `altKey` off: it is down all the same
-    const down = { ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, metaKey: e.metaKey, altKey: e.altKey || e.getModifierState("AltGraph") };
-    for (const k of staleMods(mods, down)) {
-      mods.delete(k);
-      if (keys.delete(k)) send({ kind: "key_code", keycode: k, pressed: false });
-    }
-  }
-
-  /** Send the modifier's held press: another key or a click came, so it is no chord's. */
-  function flushMod() {
-    if (heldMod === null) return;
-    keys.add(heldMod);
-    send({ kind: "key_code", keycode: heldMod, pressed: true });
-    heldMod = null;
-  }
-
-  function onKeyDown(e: KeyboardEvent) {
-    if (forPage(e)) return;
-    syncMods(e);
-    if (o.chord.is(e)) {
-      e.preventDefault();
-      if (e.repeat) return;
-      // Its keys never reach the clone; what else is held is let go there
-      releaseAll();
-      o.chord.run();
-      return;
-    }
-    // No monitor (terminal mode): a key outside xterm must not reach the clone's desktop.
-    if (!size) return;
-    o.onGesture();
-    // Local chords, not forwarded. Their Ctrl and Alt already went to the clone, so release
-    // them (and everything else held) first.
-    if (e.ctrlKey && e.altKey && (e.code === "KeyG" || e.code === "KeyP")) {
-      e.preventDefault();
-      if (e.repeat) return;
-      releaseAll();
-      if (e.code === "KeyG") {
-        toggleLock();
-      } else {
-        auto.forceRelease();
-        if (locked()) document.exitPointerLock();
-      }
-      return;
-    }
-    if (e.code === "F11") {
-      e.preventDefault();
-      toggleFullscreen();
-      return;
-    }
-    if (e.code === "CapsLock") return capsSync(e);
-    const k = evdevFor(e.code, isMac);
-    if (k === undefined) return;
-    // A letter: the clone's Caps Lock is this keyboard's before it lands
-    if (!e.repeat && LETTER.test(e.code)) o.sendLocks(e.getModifierState("CapsLock"));
-    const paste =
-      e.code === "KeyV" && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey && o.pasteByEvent();
-    if (!paste) e.preventDefault();
-    const flag = modFlagOf(e.code);
-    // macOS sends no keyup for a key released while Command is down, so the clone would hold
-    // it (Cmd+V, sent as Ctrl+V, pasted again and again in the clone's key repeat). Such a key
-    // goes as a tap: pressed and released at once, and again on each of the browser's repeats,
-    // which stop when the key goes up.
-    const tap = isMac && e.metaKey && !flag;
-    if (tap && e.repeat) {
-      if (!paste) {
-        send({ kind: "key_code", keycode: k, pressed: true });
-        send({ kind: "key_code", keycode: k, pressed: false });
-      }
-      return;
-    }
-    // The clone runs its own key repeat, so the browser's repeats are not sent.
-    if (e.repeat) return;
-    if (o.chord.holds.includes(e.code) && !keys.has(k)) {
-      heldMod = k;
-      return;
-    }
-    flushMod();
-    // Held already (pressed before Command went down, and let go with it down): press it again
-    if (keys.has(k)) send({ kind: "key_code", keycode: k, pressed: false });
-    if (!tap) keys.add(k);
-    if (flag) mods.set(k, flag);
-    if (paste) {
-      pasteSink.focus({ preventScroll: true });
-      holdPaste(k, tap);
-    } else {
-      send({ kind: "key_code", keycode: k, pressed: true });
-      if (tap) send({ kind: "key_code", keycode: k, pressed: false });
-    }
-  }
-
-  function holdPaste(keycode: number, tap: boolean) {
-    flushPaste();
-    heldPaste = { keycode, tap, timer: setTimeout(flushPaste, PASTE_WAIT_MS) };
-  }
-
-  /** Send the held paste key's press (and, for a tap, its release). */
-  function flushPaste() {
-    if (!heldPaste) return;
-    pasteSink.blur();
-    clearTimeout(heldPaste.timer);
-    send({ kind: "key_code", keycode: heldPaste.keycode, pressed: true });
-    if (heldPaste.tap) send({ kind: "key_code", keycode: heldPaste.keycode, pressed: false });
-    heldPaste = null;
-  }
-
-  // One task later, so every paste listener has run: the clipboard's sends the offer.
-  const onPaste = () => {
-    if (heldPaste) setTimeout(flushPaste, 0);
-  };
-
-  function onKeyUp(e: KeyboardEvent) {
-    if (forPage(e) || !size) return;
-    if (e.code === "CapsLock") return capsSync(e);
-    const k = evdevFor(e.code, isMac);
-    if (k === undefined) return;
-    e.preventDefault();
-    if (heldMod === k) {
-      // The modifier alone: its tap goes to the clone now
-      heldMod = null;
-      send({ kind: "key_code", keycode: k, pressed: true });
-      send({ kind: "key_code", keycode: k, pressed: false });
-      return;
-    }
-    if (heldPaste?.keycode === k) flushPaste();
-    mods.delete(k);
-    if (!keys.delete(k)) return;
-    send({ kind: "key_code", keycode: k, pressed: false });
-    // Chrome on macOS fires no keyup for a key released while Command is down (Cmd+C sends
-    // only C's keydown), so Command's own release ends every key pressed with it.
-    if (isMac && (e.code === "MetaLeft" || e.code === "MetaRight")) releaseAll();
-  }
-
-  /** Caps Lock is not sent as a key: a press only flips the clone's lock, and once the two
-   *  disagree every press keeps them apart. Its state is sent instead, on its down and on its
-   *  up (one of them may still say the old state: X11 reports the new one only on the up, and
-   *  Chrome on macOS sends a down when the lock goes on and an up when it goes off), and the
-   *  clone's follows it. */
-  function capsSync(e: KeyboardEvent) {
-    e.preventDefault();
-    o.sendLocks(e.getModifierState("CapsLock"));
-  }
-
   function onPointerMove(e: PointerEvent) {
-    syncMods(e);
     // Chrome already sends at most one pointermove per frame, so moves need no other merging.
     if (now() < warpUntil) return;
     if (locked()) {
@@ -675,9 +439,7 @@ export function attachInput(o: InputOptions): Input {
   // one as a move, not as a press.
   function onMouseDown(e: MouseEvent) {
     e.preventDefault(); // no middle-button autoscroll, no text selection
-    syncMods(e);
     o.onGesture();
-    flushMod();
     const b = BUTTONS[e.button];
     // A click is the gesture Chrome wants after the user left the lock with Esc.
     if (needGesture) {
@@ -698,8 +460,6 @@ export function attachInput(o: InputOptions): Input {
 
   function onWheel(e: WheelEvent) {
     e.preventDefault(); // no page scroll, no Ctrl+wheel zoom
-    syncMods(e);
-    flushMod();
     const w = e as WheelEvent & { wheelDeltaX: number; wheelDeltaY: number };
     const msgs = wheelMessages(w, rem, {
       fingers: scrollEnd !== undefined,
@@ -720,9 +480,9 @@ export function attachInput(o: InputOptions): Input {
   }
 
   const noMenu = (e: Event) => e.preventDefault();
-  const onBlur = () => releaseAll();
+  const onBlur = () => releaseButtons();
   const onVisibility = () => {
-    if (document.visibilityState === "hidden") releaseAll();
+    if (document.visibilityState === "hidden") releaseButtons();
   };
   const onLockError = () => {
     needGesture = true;
@@ -732,11 +492,6 @@ export function attachInput(o: InputOptions): Input {
     // Esc. Treat it as Ctrl+Alt+P, or the next click would lock again.
     if (!locked() && document.hasFocus() && auto.want(now())) auto.forceRelease();
   };
-  // Keyboard Lock only works in fullscreen, so take it on entry and give it back on exit.
-  const onFullscreen = () => {
-    if (fullscreenDoc().fullscreenElement) void keyboard()?.lock();
-    else keyboard()?.unlock();
-  };
 
   function toggleLock() {
     needGesture = false;
@@ -744,8 +499,6 @@ export function attachInput(o: InputOptions): Input {
     else if (locked()) document.exitPointerLock();
   }
 
-  window.addEventListener("keydown", onKeyDown);
-  window.addEventListener("keyup", onKeyUp);
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("mouseup", onMouseUp);
   window.addEventListener("blur", onBlur);
@@ -755,10 +508,6 @@ export function attachInput(o: InputOptions): Input {
   document.addEventListener("visibilitychange", onVisibility);
   document.addEventListener("pointerlockchange", onLockChange);
   document.addEventListener("pointerlockerror", onLockError);
-  fullscreenDoc().addEventListener("fullscreenchange", onFullscreen);
-  window.addEventListener("paste", onPaste);
-  // Attached while the page is fullscreen already: the keys are locked from now
-  if (fullscreenDoc().fullscreenElement) void keyboard()?.lock();
   const timer = setInterval(tick, 50);
   const resize = new ResizeObserver(([entry]) => {
     // Safari has no device-pixel box: there it is the CSS box at the device pixel ratio.
@@ -821,17 +570,23 @@ export function attachInput(o: InputOptions): Input {
       scrollMode = mode;
       scrollScale = speed / 100;
     },
+    desktop: () => size !== null,
+    pointerLock(chord) {
+      releaseButtons();
+      if (chord === "toggle") toggleLock();
+      else {
+        auto.forceRelease();
+        if (locked()) document.exitPointerLock();
+      }
+    },
     detach() {
-      // The keys and the mouse are the page's now (its control panel, a dialog): what the
-      // clone holds from here is let go, or it stays down there
-      releaseAll();
+      // The mouse is the page's now (its control panel, a dialog): a button the clone holds
+      // from here is let go, or it stays down there
+      releaseButtons();
       clearInterval(timer);
       resize.disconnect();
       clearTimeout(scrollEnd);
-      pasteSink.remove();
       ratio?.removeEventListener("change", onRatio);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("mouseup", onMouseUp);
       window.removeEventListener("blur", onBlur);
@@ -841,12 +596,7 @@ export function attachInput(o: InputOptions): Input {
       document.removeEventListener("visibilitychange", onVisibility);
       document.removeEventListener("pointerlockchange", onLockChange);
       document.removeEventListener("pointerlockerror", onLockError);
-      fullscreenDoc().removeEventListener("fullscreenchange", onFullscreen);
-      window.removeEventListener("paste", onPaste);
       if (locked()) document.exitPointerLock();
-      // The keyboard stays locked (every key) while the page is fullscreen, also when the keys
-      // are the page's (its control panel, a dialog): Escape and the chord then reach the page
-      // instead of leaving fullscreen or going to the system.
     },
   };
 }

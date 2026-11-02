@@ -178,6 +178,9 @@ interface PageClipboard {
   /** Bytes for a request this window made. */
   onData(d: ClipboardBytes): void;
   setConnected(connected: boolean): void;
+  /** A key that goes to the clone (`~/desk/keys.ts`), before its gesture: a copy chord's
+   *  write (`onCopyKey`). */
+  onCopyKey(e: KeyboardEvent): void;
   /** A key press or click: retry a write the browser refused. */
   onGesture(): void;
   /** Whether the local clipboard comes only from a paste chord's paste event. */
@@ -416,8 +419,6 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
   window.addEventListener("paste", onPaste);
   window.addEventListener("copy", onCopy);
   window.addEventListener("cut", onCopy);
-  // Capture phase: before the input's key handler, whose gesture would write `unwritten`.
-  window.addEventListener("keydown", onCopyKey, true);
 
   return {
     onMessage(msg) {
@@ -475,6 +476,7 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
       if (focusReads) run(() => write(u.serial, u.blobs));
       else void write(u.serial, u.blobs);
     },
+    onCopyKey,
     pasteByEvent: () => focusReads === false,
     toLocal,
     toClone,
@@ -483,7 +485,6 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
       window.removeEventListener("paste", onPaste);
       window.removeEventListener("copy", onCopy);
       window.removeEventListener("cut", onCopy);
-      window.removeEventListener("keydown", onCopyKey, true);
     },
   };
 }

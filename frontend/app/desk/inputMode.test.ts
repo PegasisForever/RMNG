@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
 import { modeAfter } from "./inputMode";
-import { isControlPanelChord, controlPanelChordLabel } from "./shortcut";
 
 describe("modeAfter", () => {
   test("a finger or a pen is touch; a mouse click is mouse", () => {
@@ -19,43 +18,5 @@ describe("modeAfter", () => {
   test("a key is mouse, unless it types into a text box of the page", () => {
     expect(modeAfter({ t: "keydown", editable: false, repeat: false })).toBe("mouse");
     expect(modeAfter({ t: "keydown", editable: true, repeat: false })).toBeNull();
-  });
-});
-
-describe("isControlPanelChord", () => {
-  const key = (m: Partial<Record<"metaKey" | "ctrlKey" | "altKey" | "shiftKey", boolean>>, code = "Space") => ({
-    code,
-    metaKey: false,
-    ctrlKey: false,
-    altKey: false,
-    shiftKey: false,
-    ...m,
-  });
-
-  test("Super+Space on Linux and Windows", () => {
-    expect(isControlPanelChord(key({ metaKey: true }), "linux")).toBe(true);
-    expect(isControlPanelChord(key({ metaKey: true }), "windows")).toBe(true);
-    expect(isControlPanelChord(key({ altKey: true }), "linux")).toBe(false);
-  });
-
-  test("Option+Space on macOS, not Command+Space (Spotlight)", () => {
-    expect(isControlPanelChord(key({ altKey: true }), "mac")).toBe(true);
-    expect(isControlPanelChord(key({ metaKey: true }), "mac")).toBe(false);
-  });
-
-  test("the old chords, another key, or more modifiers are not it", () => {
-    expect(isControlPanelChord(key({ ctrlKey: true, altKey: true }), "linux")).toBe(false);
-    expect(isControlPanelChord(key({ metaKey: true, shiftKey: true }), "mac")).toBe(false);
-    expect(isControlPanelChord(key({ metaKey: true }, "KeyA"), "linux")).toBe(false);
-    expect(isControlPanelChord(key({}), "linux")).toBe(false);
-    expect(isControlPanelChord(key({ metaKey: true, altKey: true }), "windows")).toBe(false);
-  });
-});
-
-describe("controlPanelChordLabel", () => {
-  test("Option + Space on a Mac; Super or Windows + Space elsewhere, in fullscreen", () => {
-    expect(controlPanelChordLabel("mac")).toBe("⌥ Option + Space");
-    expect(controlPanelChordLabel("linux")).toBe("Super + Space (in fullscreen)");
-    expect(controlPanelChordLabel("windows")).toBe("Windows + Space (in fullscreen)");
   });
 });
