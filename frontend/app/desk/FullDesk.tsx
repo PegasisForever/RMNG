@@ -173,8 +173,10 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   const [dock, setDock] = useState<Dock>(() => readDock(monitor));
   const [dockAt, setDockAt] = useState<HTMLDivElement | null>(null);
   useEffect(() => setDock(readDock(monitor)), [monitor]);
-  /** Mouse mode: the mouse is over the dock (or a menu of its). */
+  /** Mouse mode: the mouse is over the dock (or a menu of its). A dialog shows with the control
+   *  panel closed (a pinned column's). */
   const [overDock, setOverDock] = useState(false);
+  const [panelDialog, setPanelDialog] = useState(false);
   /** The box for the alerts of clones that stopped working (monitor 0's window only). */
   const [alertsAt, setAlertsAt] = useState<HTMLDivElement | null>(null);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
@@ -268,7 +270,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   };
   /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. Else the keys
    *  are the page's (`./keys.ts`), and so are a Mac's edit keys while the keyboard is locked. */
-  const mouseInput = mouse && !controlPanel && !layoutOpen && !fullHintShown && !(peek && overGroup) && !overDock;
+  const mouseInput = mouse && !controlPanel && !layoutOpen && !fullHintShown && !(peek && overGroup) && !overDock && !panelDialog;
   const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, page: { chord: toggleControlPanel, escape } });
 
   // The pinned columns: those of columns there are, in the board's order. The dock holds as
@@ -719,6 +721,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
                 if (t) setTab(t);
                 setControlPanel(true);
               },
+              onDialog: setPanelDialog,
             }}
           />
         ),

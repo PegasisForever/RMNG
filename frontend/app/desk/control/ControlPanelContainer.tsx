@@ -12,8 +12,9 @@
 // Wide (`WIDE_MIN`), they are columns (`./WideLayout.tsx`): the usage rail, the
 // board's columns, the side panel; a dialog opens over them, in the middle. Over the clone's
 // screen each column has a pin: a pinned column stays in this monitor window's dock, at its left
-// edge, while the control panel is closed (`dock`, `~/lib/dock.ts`). What a docked column does
-// that needs the control panel (Settings, a dialog, an open ticket) opens it.
+// edge, while the control panel is closed (`dock`, `~/lib/dock.ts`). A dialog a docked column
+// opens shows by itself, over the clone's screen; what needs the control panel (Settings, an
+// open ticket) opens it.
 import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router";
@@ -81,7 +82,8 @@ function Loading({ label }: { label: string }) {
   return <p className="p-4 text-sm text-black/40 dark:text-white/40">{label}</p>;
 }
 
-/** A dialog that is open, and the tab it opened in. */
+/** A dialog that is open, and the tab it opened in (null: a pinned column opened it while the
+ *  control panel was closed). */
 type Dialog =
   | { kind: "clone"; ticketUrl: string; columnId: string | null }
   | { kind: "ticket" }
@@ -143,13 +145,15 @@ export function ControlPanelContainer({
    *  for (`fitPins`); `onToggle`: a press on a column's
    *  pin; `at`: the dock's box at the window's left edge (null until it is there, or while no
    *  column is pinned); `onShowPanel`: open the control panel (on `tab`), for what a docked
-   *  column does that needs it. Absent: no pins (the control panel's own window). */
+   *  column does that needs it (Settings, an open ticket); `onDialog`: a dialog shows or goes. Absent: no pins (the control panel's own window). */
   dock?: {
     pins: readonly string[];
     docked: readonly string[];
     onToggle: (pin: string) => void;
     at: HTMLElement | null;
     onShowPanel: (tab?: PanelTab) => void;
+    /** A dialog is on the page that shows with the control panel closed (or none any more). */
+    onDialog?: (open: boolean) => void;
   };
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -171,16 +175,21 @@ export function ControlPanelContainer({
     if (tab && !visited.has(tab)) setVisited(new Set([...visited, tab]));
   }, [tab, visited]);
 
-  const [dialog, setDialog] = useState<{ on: PanelTab; d: Dialog } | null>(null);
+  const [dialog, setDialog] = useState<{ on: PanelTab | null; d: Dialog } | null>(null);
   const wide = width >= WIDE_MIN;
-  /** Open a dialog; from a pinned column while the control panel is closed, the control panel
-   *  opens (narrow, on Clones) and the dialog is over it. */
+  /** Open a dialog; from a pinned column while the control panel is closed, by itself over the
+   *  clone's screen (the control panel stays closed). */
   const open = (d: Dialog) => {
     if (tab) return setDialog({ on: tab, d });
-    if (!dock) return;
-    dock.onShowPanel("clones");
-    setDialog({ on: "clones", d });
+    if (dock) setDialog({ on: null, d });
   };
+  // Where a dialog shows with the control panel closed (one from a pinned column; wide, any:
+  // a window dialog is on the page, not in the control panel's box), the page keeps the mouse
+  // and the keys from the clone
+  const onDialog = dock?.onDialog;
+  useEffect(() => {
+    onDialog?.(dialog !== null && (dialog.on === null || wide));
+  }, [dialog, wide, onDialog]);
   const closeDialog = () => setDialog(null);
   /** The dialog open now, for a job that answers after its dialog closed. */
   const openDialog = useRef(dialog);
@@ -609,6 +618,11 @@ export function ControlPanelContainer({
         )
       : null;
 
+  /** A pinned column's dialog: over the whole page (the narrow control panel's tabs put theirs
+   *  in the tab's space), with the control panel closed. */
+  const dockDialog =
+    dialog && dialog.on === null ? <ModalPlacementProvider value="window">{dialogView(dialog.d)}</ModalPlacementProvider> : null;
+
   if (wide) {
     return (
       // Fixed things in it (a sheet, a dialog) take its whole space: the control panel's box over the
@@ -662,9 +676,10 @@ export function ControlPanelContainer({
               />
             </ColumnPinsProvider>
           </div>
-          {dialog ? dialogView(dialog.d) : null}
+          {dialog?.on ? dialogView(dialog.d) : null}
           {alertsView}
           {dockView}
+          {dockDialog}
         </div>
       </ModalPlacementProvider>
     );
@@ -691,6 +706,7 @@ export function ControlPanelContainer({
       </NarrowLayout>
       {alertsView}
       {dockView}
+      {dockDialog}
     </ModalPlacementProvider>
   );
 }

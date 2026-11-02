@@ -3,6 +3,8 @@ import { useState } from "react";
 import { fn } from "storybook/test";
 
 import { LayoutEditorView } from "~/components/LayoutEditorView";
+import { PortForwardModal } from "~/components/PortForwardModal";
+import { cloneWorking } from "~/components/__fixtures__/clones";
 import { cloneOperation, deleteOperation } from "~/components/__fixtures__/operations";
 import { DEFAULT_DESKTOP_LAYOUT } from "~/lib/clientLayout";
 import type { Operation } from "~/lib/types";
@@ -287,6 +289,17 @@ export const DesktopPinnedControlPanel: Story = {
     away: false,
     controlPanel: controlPanel({ open: true, onPopOut: fn(), pins: { pinned: PINS } }, DESKTOP),
     buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
+  },
+};
+
+/** A pinned column opened a dialog (a clone card's ⋯, Port forward) with the control panel
+ *  closed: the dialog shows by itself over the clone's screen and the dock; the control panel
+ *  stays closed. */
+export const DesktopPinnedDialog: Story = {
+  args: {
+    ...desktop,
+    ...pinned(PINS),
+    dialog: <PortForwardModal clone={cloneWorking} sshPublicHost="rmng.example.com" onClose={fn()} onCopy={async () => true} />,
   },
 };
 
