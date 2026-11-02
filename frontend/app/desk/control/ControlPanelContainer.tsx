@@ -10,7 +10,10 @@
 // it, in that tab's space (`ModalPlacementProvider`), so the clone's screen stays in view.
 //
 // Wide (`WIDE_MIN`), they are columns (`./WideLayout.tsx`): the usage rail, the
-// board's columns, the side panel; a dialog opens over them, in the middle.
+// board's columns, the side panel; a dialog opens over them, in the middle. Over the clone's
+// screen each column has a pin: a pinned column stays in this monitor window's dock, at its left
+// edge, while the control panel is closed (`dock`, `~/lib/dock.ts`). What a docked column does
+// that needs the control panel (Settings, a dialog, an open ticket) opens it.
 import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router";
@@ -19,7 +22,7 @@ import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalCont
 import { CloneModalContainer } from "~/components/CloneModalContainer";
 import { ask } from "~/components/ConfirmLayer";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
-import { ModalPlacementProvider } from "~/components/ModalShell";
+import { ModalPlacementProvider, ModalSurfaceProvider } from "~/components/ModalShell";
 import { PortForwardModal } from "~/components/PortForwardModal";
 import { RebaseModalContainer } from "~/components/RebaseModalContainer";
 import { useSettingsPanel } from "~/components/useSettingsPanel";
@@ -39,6 +42,7 @@ import {
   unarchiveClone,
 } from "~/lib/api";
 import { copyText } from "~/lib/clipboard";
+import { columnPin, RAIL_PIN, TICKETS_PIN } from "~/lib/dock";
 import { useTickets } from "~/lib/linear/useTickets";
 import { workspaceHomeUrl } from "~/lib/linear/workspaces";
 import { focusPage, hostWindow } from "~/lib/host";
@@ -59,12 +63,12 @@ import { NotesView, type NotesPane } from "./NotesView";
 import { moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
-import { COLUMN_GLASS, ErrorLine, TEXT_3 } from "./ui";
+import { COLUMN_GLASS, type ColumnPins, ColumnPinsProvider, ErrorLine, TEXT_3 } from "./ui";
 import { BoardDnd } from "./BoardDnd";
 import { NarrowLayout } from "./NarrowLayout";
 import { useBoard } from "./useBoard";
 import { UsageView } from "./UsageView";
-import { WIDE_MIN, WideLayout } from "./WideLayout";
+import { DockLayout, RailColumn, WIDE_MIN, WideLayout } from "./WideLayout";
 
 // Browser-only and heavy (BlockNote, the chat stream): loaded when first shown
 const NotesEditorContainer = lazy(() => import("~/components/NotesEditorContainer"));
@@ -101,6 +105,7 @@ export function ControlPanelContainer({
   onLayout,
   notify = false,
   alertsAt,
+  dock,
 }: {
   /** The control panel's width, CSS px: narrow (tabs) or wide (columns). */
   width: number;
@@ -132,6 +137,19 @@ export function ControlPanelContainer({
   /** Over the clone's screen, in the window that notifies: the screen's box for the alerts of
    *  clones that stopped working (`../CloneAlerts.tsx`); null until it is there. */
   alertsAt?: HTMLElement | null;
+  /** Wide, over the clone's screen: this monitor window's pinned columns. `pins`: the pins of
+   *  columns there are, in the board's order (`orderPins`); `docked`: those the dock has room
+   *  for (`fitPins`); `onToggle`: a press on a column's
+   *  pin; `at`: the dock's box at the window's left edge (null until it is there, or while no
+   *  column is pinned); `onShowPanel`: open the control panel (on `tab`), for what a docked
+   *  column does that needs it. Absent: no pins (the control panel's own window). */
+  dock?: {
+    pins: readonly string[];
+    docked: readonly string[];
+    onToggle: (pin: string) => void;
+    at: HTMLElement | null;
+    onShowPanel: (tab?: PanelTab) => void;
+  };
 }) {
   const [error, setError] = useState<string | null>(null);
   const run = (p: Promise<unknown>) => p.then(() => setError(null)).catch((e: Error) => setError(e.message));
@@ -153,7 +171,15 @@ export function ControlPanelContainer({
   }, [tab, visited]);
 
   const [dialog, setDialog] = useState<{ on: PanelTab; d: Dialog } | null>(null);
-  const open = (d: Dialog) => tab && setDialog({ on: tab, d });
+  const wide = width >= WIDE_MIN;
+  /** Open a dialog; from a pinned column while the control panel is closed, the control panel
+   *  opens and the dialog is over it. */
+  const open = (d: Dialog) => {
+    if (tab) return setDialog({ on: tab, d });
+    if (!dock || !wide) return;
+    dock.onShowPanel();
+    setDialog({ on: "clones", d });
+  };
   const closeDialog = () => setDialog(null);
   /** The dialog open now, for a job that answers after its dialog closed. */
   const openDialog = useRef(dialog);
@@ -212,7 +238,7 @@ export function ControlPanelContainer({
    *  has no screen, so its notes open instead. Wide, an open ticket closes:
    *  the side panels are the clone's again. */
   const selectClone = (clone: Clone) => {
-    select({ clone: clone.id, ticket: width >= WIDE_MIN ? null : selection.ticket });
+    select({ clone: clone.id, ticket: wide ? null : selection.ticket });
     if (clone.archived) {
       onTab("notes");
       return;
@@ -444,8 +470,9 @@ export function ControlPanelContainer({
     />
   );
 
-  /** A tab's content, as the tabs show it, or (`wide`) as its column. */
-  const tabContent = (t: PanelTab, wide = false): ReactNode => {
+  /** A tab's content, as the tabs show it, or (`wide`) as its column; `docked`: in the pinned
+   *  columns' dock, the clone columns `docked.columns` only. */
+  const tabContent = (t: PanelTab, wide = false, docked: { columns: readonly string[] } | null = null): ReactNode => {
     switch (t) {
       case "usage":
         return (
@@ -471,7 +498,11 @@ export function ControlPanelContainer({
             error={tickets.error}
             open={openTicket}
             detail={openTicket ? ticketPanel(openTicket, false) : null}
-            onOpen={(ticket) => setOpenTicketId(ticket.id)}
+            onOpen={(ticket) => {
+              setOpenTicketId(ticket.id);
+              // The open ticket shows in the side panels, with the control panel
+              if (docked && !tab) dock?.onShowPanel();
+            }}
             onBack={() => setOpenTicketId(null)}
             onNewTicket={() => open({ kind: "ticket" })}
             workspaces={tickets.workspaces}
@@ -488,6 +519,7 @@ export function ControlPanelContainer({
         return (
           <ClonesView
             columnsLayout={wide}
+            onlyColumns={docked?.columns}
             columns={board.columns}
             clones={state.hosts}
             cloneTickets={tickets.forClones}
@@ -534,7 +566,48 @@ export function ControlPanelContainer({
     ? createPortal(<CloneAlerts alerts={alerts.alerts} onOpen={alerts.open} onClose={alerts.close} />, alertsAt)
     : null;
 
-  if (width >= WIDE_MIN) {
+  // The pins (a press on one pins or unpins its column), and the pinned columns in the dock
+  const pins: ColumnPins = dock && wide ? { pinned: new Set(dock.pins), onToggle: dock.onToggle } : null;
+  const dockColumns = (dock?.docked ?? []).filter((p) => p.startsWith(columnPin(""))).map((p) => p.slice(columnPin("").length));
+  const dockView =
+    dock?.at && wide && dock.docked.length
+      ? createPortal(
+          // No clone's screen under the dock: its menus and dialogs solid, as the control panel's
+          // window has them
+          <ModalSurfaceProvider value="solid">
+            <ColumnPinsProvider value={pins}>
+              <DockLayout>
+                {dock.docked.includes(RAIL_PIN) ? (
+                  <RailColumn
+                    glass={false}
+                    usage={usage}
+                    settingsOpen={false}
+                    onSettings={() => dock.onShowPanel("settings")}
+                    onPopOut={onPopOut}
+                    onLayout={onLayout}
+                    rail={tabContent("usage", true)}
+                  />
+                ) : null}
+                {/* A drag area of its own, as the board's: the clones between the docked columns,
+                    the tickets in order, a ticket onto a docked column */}
+                <BoardDnd
+                  lanes={board.lanes}
+                  tickets={visibleTickets.map((x) => x.id)}
+                  onMoveCard={dropClone}
+                  onReorderTickets={board.orderTickets}
+                  onTicketToColumn={dropTicketOnColumn}
+                >
+                  {dock.docked.includes(TICKETS_PIN) ? tabContent("tickets", true, { columns: [] }) : null}
+                  {dockColumns.length ? tabContent("clones", true, { columns: dockColumns }) : null}
+                </BoardDnd>
+              </DockLayout>
+            </ColumnPinsProvider>
+          </ModalSurfaceProvider>,
+          dock.at,
+        )
+      : null;
+
+  if (wide) {
     return (
       // Fixed things in it (a sheet, a dialog) take its whole space: the control panel's box over the
       // screen, or the window
@@ -546,47 +619,50 @@ export function ControlPanelContainer({
             </div>
           ) : null}
           <div className="min-h-0 flex-1">
-            <WideLayout
-              width={width}
-              glass={glass}
-              usage={usage}
-              settingsOpen={tab === "settings"}
-              onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
-              onPopOut={onPopOut}
-              onLayout={onLayout}
-              rail={tabContent("usage", true)}
-              board={
-                // One drag area for both: a ticket dropped on a clone column makes a clone
-                <BoardDnd
-                  lanes={board.lanes}
-                  tickets={visibleTickets.map((x) => x.id)}
-                  onMoveCard={dropClone}
-                  onReorderTickets={board.orderTickets}
-                  onTicketToColumn={dropTicketOnColumn}
-                >
-                  {tabContent("tickets", true)}
-                  {tabContent("clones", true)}
-                </BoardDnd>
-              }
-              // An open ticket takes the side panel; the clone's notes come
-              // back when it closes, and when the control panel closes (the side panels without the control panel
-              // are the clone's)
-              side={{
-                ticket: openTicket && tab ? ticketPanel(openTicket, false) : undefined,
-                notes: notesClone ? notesView("notes", true) : null,
-                chat: notesView("chat", true),
-                widthPct: sideWidth,
-              }}
-              sideAt={sideAt}
-              onSideWidthCommit={(pct) => {
-                setSideWidth(pct);
-                rememberSideWidth(pct);
-              }}
-              settings={tabContent("settings")}
-            />
+            <ColumnPinsProvider value={pins}>
+              <WideLayout
+                width={width}
+                glass={glass}
+                usage={usage}
+                settingsOpen={tab === "settings"}
+                onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
+                onPopOut={onPopOut}
+                onLayout={onLayout}
+                rail={tabContent("usage", true)}
+                board={
+                  // One drag area for both: a ticket dropped on a clone column makes a clone
+                  <BoardDnd
+                    lanes={board.lanes}
+                    tickets={visibleTickets.map((x) => x.id)}
+                    onMoveCard={dropClone}
+                    onReorderTickets={board.orderTickets}
+                    onTicketToColumn={dropTicketOnColumn}
+                  >
+                    {tabContent("tickets", true)}
+                    {tabContent("clones", true)}
+                  </BoardDnd>
+                }
+                // An open ticket takes the side panel; the clone's notes come
+                // back when it closes, and when the control panel closes (the side panels without the control panel
+                // are the clone's)
+                side={{
+                  ticket: openTicket && tab ? ticketPanel(openTicket, false) : undefined,
+                  notes: notesClone ? notesView("notes", true) : null,
+                  chat: notesView("chat", true),
+                  widthPct: sideWidth,
+                }}
+                sideAt={sideAt}
+                onSideWidthCommit={(pct) => {
+                  setSideWidth(pct);
+                  rememberSideWidth(pct);
+                }}
+                settings={tabContent("settings")}
+              />
+            </ColumnPinsProvider>
           </div>
           {dialog ? dialogView(dialog.d) : null}
           {alertsView}
+          {dockView}
         </div>
       </ModalPlacementProvider>
     );

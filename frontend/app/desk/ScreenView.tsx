@@ -7,6 +7,9 @@
 //   no touch surface of this view's over it (it has its own: `./TerminalScreen.tsx`).
 // - Touch mode's surface: the whole display as a trackpad, or, with the keyboard docked, the
 //   area above it as a touch screen. Mouse mode has none: the mouse goes to the canvas.
+// - The pinned columns' dock (`dock`, where the control panel puts them: `~/lib/dock.ts`), at
+//   the left edge, the full height down to the keyboard, beside the clone's screen (the
+//   container puts the screen right of it). Under the control panel and its backdrop.
 // - The notes over the screen: what dictation hears at the bottom, and why
 //   there is no screen to use in the middle.
 // - The keyboard at the bottom (touch mode), with the bar that sets its height.
@@ -111,6 +114,10 @@ export type ScreenViewProps = {
   /** Wide: the side panels' box (`ref`, where the control panel puts them; or a story's `content`), and
    *  whether they are in the window (else slid out to the right); null: none. */
   side?: { shown: boolean; ref?: Ref<HTMLDivElement>; content?: ReactNode } | null;
+  /** The pinned columns' dock at the left edge: its width, CSS px (its columns' and the left
+   *  inset's), and its box (`ref`, where the control panel puts the columns; or a story's
+   *  `content`); null: none. */
+  dock?: { width: number; ref?: Ref<HTMLDivElement>; content?: ReactNode } | null;
   /** The floating buttons; null: none. */
   buttons: Parameters<typeof FloatingButtons>[0] | null;
   /** The right group (the buttons and the side panels) slid out of the window to the right,
@@ -143,6 +150,7 @@ export function ScreenView({
   notes,
   controlPanel,
   side,
+  dock,
   buttons,
   away = false,
   alerts,
@@ -160,6 +168,9 @@ export function ScreenView({
   const panel = controlPanelBox(width, height, safe);
   /** The safe area's width. */
   const safeW = width - safe.left - safe.right;
+  /** Where the clone's part of the display starts: right of the dock, or the safe area's left. */
+  const dockW = dock?.width ?? 0;
+  const left = Math.max(safe.left, dockW);
   const controlPanelShown = useControlPanelExit(controlPanel.open);
   const place = { left: 0, top: 0, width: screen.width, height: screen.height };
   const on = (f: typeof onPad, kind: TouchKind) => (e: PointerEvent<HTMLDivElement>) => f(kind, e);
@@ -182,7 +193,7 @@ export function ScreenView({
       {terminal ? (
         // Down to the keyboard, or to the home bar; clear of the sides' insets (the terminal's own
         // bar keeps clear of the clock bar)
-        <div className="absolute top-0" style={{ left: safe.left, width: safeW, height: keyboard ? visible : height - bottom }}>
+        <div className="absolute top-0" style={{ left, width: width - left - safe.right, height: keyboard ? visible : height - bottom }}>
           {terminal}
         </div>
       ) : mouse ? null : keyboard?.docked ? (
@@ -205,7 +216,27 @@ export function ScreenView({
           onPointerCancel={on(onPad, "cancel")}
         />
       )}
-      <div className="pointer-events-none absolute" style={{ left: safe.left, top: safe.top, width: safeW, height: visible - safe.top }}>
+      {dock ? (
+        // A solid ground: no clone's screen under it. Its columns stay clear of the insets
+        <div
+          ref={dock.ref}
+          data-dock
+          className="absolute left-0 top-0 bg-neutral-100 text-neutral-900 dark:bg-neutral-950 dark:text-white"
+          style={{
+            width: dockW,
+            bottom: keyboard ? keysH : 0,
+            paddingLeft: safe.left,
+            paddingTop: safe.top,
+            paddingBottom: keyboard ? 0 : bottom,
+          }}
+        >
+          {dock.content}
+        </div>
+      ) : null}
+      <div
+        className="pointer-events-none absolute"
+        style={{ left, top: safe.top, width: width - left - safe.right, height: visible - safe.top }}
+      >
         <ScreenNotes {...notes} bottom={(keyboard ? 0 : bottom) + 12} />
       </div>
 

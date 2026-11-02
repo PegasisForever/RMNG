@@ -18,8 +18,10 @@ import {
   keys,
   keysHeight,
   controlPanelFor,
+  dockFor,
   sideFor,
 } from "./__fixtures__/screen";
+import { columnPin, dockWidth, orderPins, RAIL_PIN, togglePin } from "~/lib/dock";
 import { type Insets, NO_INSETS } from "./geometry";
 import { CloneAlerts } from "./CloneAlerts";
 import { ScreenView, type ScreenViewProps, controlPanelBox } from "./ScreenView";
@@ -52,6 +54,7 @@ const controlPanel = (
     badges?: Partial<Record<PanelTab, number>>;
     onPopOut?: () => void;
     operations?: Operation[];
+    pins?: { pinned: readonly string[]; onToggle?: (pin: string) => void };
   } = {},
   d: { width: number; height: number; safe: Insets } = PHONE,
 ): ScreenViewProps["controlPanel"] => ({
@@ -225,6 +228,21 @@ const desktop = {
   away: true,
 };
 
+/** The pins of the dock stories: the rail and the In progress column. */
+const PINS = [RAIL_PIN, columnPin("doing")];
+/** The board's clone columns, in order (the Clones tab's story's). */
+const BOARD = ["todo", "doing", "blocked", "archived"];
+
+/** `pins` pinned to the desktop's window: the dock at its left edge, and the clone's screen in
+ *  the space right of it, at the scale the full monitor had (the monitor claimed narrower). */
+const pinned = (pins: readonly string[], onToggle?: (pin: string) => void) => {
+  const w = dockWidth(pins);
+  return {
+    dock: w ? { width: w, content: dockFor(pins, onToggle) } : null,
+    screen: { x: w, y: 0, width: DESKTOP.width - w, height: DESKTOP.height },
+  };
+};
+
 /** Only the clone's screen: the buttons slid out of the window to the right. */
 export const Desktop: Story = { args: { ...desktop } };
 
@@ -248,6 +266,26 @@ export const DesktopControlPanel: Story = {
     ...desktop,
     away: false,
     controlPanel: controlPanel({ open: true, onPopOut: fn(), operations: [cloneOperation, deleteOperation] }, DESKTOP),
+    buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
+  },
+};
+
+/** Two columns pinned to this window (the rail, In progress): they stay at the window's left
+ *  edge, in a dock on a solid ground, while the control panel is closed. The clone's screen is
+ *  right of it, as large as before: the browser claims the monitor narrower by what the dock
+ *  covers, and the layout keeps its full size. A lit pin unpins its column. */
+export const DesktopPinnedColumns: Story = {
+  args: { ...desktop, ...pinned(PINS) },
+};
+
+/** The control panel open over the pinned columns: each wide column has a pin in its header;
+ *  the pinned ones (the rail, In progress) are lit. */
+export const DesktopPinnedControlPanel: Story = {
+  args: {
+    ...desktop,
+    ...pinned(PINS),
+    away: false,
+    controlPanel: controlPanel({ open: true, onPopOut: fn(), pins: { pinned: PINS } }, DESKTOP),
     buttons: buttons({ controlPanelOpen: true, keyboard: false, fit: undefined }),
   },
 };
@@ -414,6 +452,42 @@ export const DesktopInteractive: Story = {
           type="button"
           onClick={() => setOpen((o) => !o)}
           className="absolute bottom-3 left-3 z-50 rounded bg-white/90 px-2 py-1 text-xs text-black"
+        >
+          Super Space
+        </button>
+      </>
+    );
+  },
+};
+
+/** Pin and unpin: open the control panel (its button, or the Super Space button at the
+ *  bottom), press a column's pin, close it. The dock at the left edge grows and shrinks, and
+ *  the clone's screen takes the rest. A lit pin in the dock unpins too. */
+export const DesktopPinsInteractive: Story = {
+  args: { ...desktop, away: false },
+  render: function Render(args) {
+    const [open, setOpen] = useState(true);
+    const [tab, setTab] = useState<PanelTab>("clones");
+    const [pins, setPins] = useState<string[]>([RAIL_PIN]);
+    const onToggle = (pin: string) => setPins((p) => togglePin(p, pin));
+    const ordered = orderPins(pins, BOARD);
+    return (
+      <>
+        <ScreenView
+          {...args}
+          {...pinned(ordered, onToggle)}
+          controlPanel={controlPanel({ open, tab, onTab: setTab, onPopOut: fn(), pins: { pinned: ordered, onToggle } }, DESKTOP)}
+          buttons={buttons({
+            controlPanelOpen: open,
+            keyboard: false,
+            fit: undefined,
+            onControlPanel: () => setOpen((o) => !o),
+          })}
+        />
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="absolute bottom-3 left-1/2 z-50 -translate-x-1/2 rounded bg-white/90 px-2 py-1 text-xs text-black"
         >
           Super Space
         </button>

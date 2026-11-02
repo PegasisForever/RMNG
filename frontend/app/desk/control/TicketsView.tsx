@@ -34,6 +34,7 @@ import { LabelPill, PriorityIcon, StateIcon, TicketCardBody } from "~/components
 import type { LinearWorkspace } from "~/lib/linear/types";
 import { branchNameOf, type LinearTicket, TICKET_COLUMN_ID, ticketDragId } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
+import { TICKETS_PIN } from "~/lib/dock";
 
 import { DragItem, DropColumn, useBoardDnd } from "./BoardDnd";
 import { type Move, movesFor } from "./order";
@@ -59,6 +60,7 @@ import {
   TEXT_2,
   TEXT_3,
   useColumnFrame,
+  PinButton,
 } from "./ui";
 
 export interface TicketsViewProps {
@@ -190,7 +192,8 @@ export function TicketsView(p: TicketsViewProps) {
   const buttons = (
     <>
       {p.workspaces.length ? (
-        <HeaderButton icon={ExternalLink} label="Linear" showLabel onClick={(e) => openMenu("workspaces", e)} />
+        // A column (wide) has its pin in the header too: the icon alone, its name in a tooltip
+        <HeaderButton icon={ExternalLink} label="Linear" showLabel={!p.column} onClick={(e) => openMenu("workspaces", e)} />
       ) : null}
       {p.onNewTicket ? <HeaderButton icon={Plus} label="New ticket" showLabel primary onClick={p.onNewTicket} /> : null}
     </>
@@ -208,6 +211,7 @@ export function TicketsView(p: TicketsViewProps) {
           <span className={`tabular-nums ${TEXT_3}`}>{p.loading ? "…" : p.tickets.length}</span>
           <span className="flex-1" />
           {buttons}
+          <PinButton pin={TICKETS_PIN} title="Tickets" />
         </h3>
         {p.error ? <p className="px-3 pb-1 text-xs text-rose-600 dark:text-rose-400">{p.error}</p> : null}
         <DropColumn

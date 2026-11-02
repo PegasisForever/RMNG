@@ -14,6 +14,7 @@ import {
   readLayout,
   saveLayout,
 } from "~/lib/clientLayout";
+import { renumberDocks } from "~/lib/dock";
 import { resize } from "~/lib/monitorLayout";
 import { askWindowSizes } from "~/lib/useMonitorChannel";
 import { openMonitorWindows } from "~/viewer/open";
@@ -36,6 +37,8 @@ export function LayoutEditorContainer({
   const apply = (next: BrowserLayout, change?: LayoutChange) => {
     setLayout(next);
     saveLayout(next);
+    // Each monitor's pinned columns go with it (before the claim, which takes them off)
+    if (change?.t === "renumber") renumberDocks(change.map);
     onApplied(next);
     if (change?.t === "add") {
       // In the click itself, so the browser lets the window open

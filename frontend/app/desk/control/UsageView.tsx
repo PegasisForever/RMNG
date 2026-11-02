@@ -26,10 +26,11 @@ import { type AcctOrder, orderedWithinBuckets } from "~/lib/accountOrder";
 import { until } from "~/lib/format";
 import type { ClaudeUsage, ClaudeUsageWindow, Operation } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
+import { RAIL_PIN } from "~/lib/dock";
 import type { SoundReport } from "~/viewer/protocol";
 
 import type { ServerUsage } from "../ToolRow";
-import { BOX, CARD_BOX, DANGER_TEXT, EmptyLine, HeaderButton, LINE, TabPanel, TabHeader, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "./ui";
+import { BOX, CARD_BOX, DANGER_TEXT, EmptyLine, HeaderButton, LINE, PinButton, TabPanel, TabHeader, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "./ui";
 
 export interface UsageViewProps {
   /** Both providers' accounts (`ControlState.claudeAccounts`). */
@@ -90,6 +91,8 @@ export function UsageView({
           {accounts.length ? (
             <HeaderButton icon={RefreshCw} label={busy ? "Refreshing…" : "Refresh"} showLabel={!rail} disabled={busy} onClick={refresh} />
           ) : null}
+          {/* The rail's pin (wide, over the clone's screen): the whole rail, the server's numbers too */}
+          {rail ? <PinButton pin={RAIL_PIN} title="the server and accounts column" /> : null}
         </TabHeader>
       }
     >

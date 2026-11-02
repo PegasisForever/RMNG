@@ -27,7 +27,9 @@ import { resolveColumns, withDefaults } from "~/lib/board";
 
 import { BoardDnd } from "../control/BoardDnd";
 import { NarrowLayout } from "../control/NarrowLayout";
-import { SidePanels, sideWidthPx, WIDE_MIN, WideLayout } from "../control/WideLayout";
+import { DockLayout, RailColumn, SidePanels, sideWidthPx, WIDE_MIN, WideLayout } from "../control/WideLayout";
+import { ColumnPinsProvider } from "../control/ui";
+import { columnPin, RAIL_PIN, TICKETS_PIN } from "~/lib/dock";
 import { SIDE_DEFAULT } from "~/lib/sidePanelWidth";
 import { type PanelTab, ROW_STATS_MIN, type ServerUsage } from "../ToolRow";
 
@@ -217,6 +219,7 @@ export function controlPanelFor({
   badges,
   onPopOut,
   operations,
+  pins,
 }: {
   width: number;
   /** Over the clone's screen (wide: each column glass), not in the control panel's own window. */
@@ -227,45 +230,84 @@ export function controlPanelFor({
   onPopOut?: () => void;
   /** The server's jobs, at the top of the wide layout's rail; absent: the Usage story's. */
   operations?: Operation[];
+  /** Wide, over the clone's screen: the columns' pins (`~/lib/dock.ts`), the pinned ones lit;
+   *  absent: no pins. */
+  pins?: { pinned: readonly string[]; onToggle?: (pin: string) => void };
 }): ReactNode {
   if (width >= WIDE_MIN) {
     return (
-      <div className={`flex h-full flex-col ${glass ? "" : "p-2"}`}>
-        <WideLayout
-          width={width}
-          glass={glass}
-          usage={usage}
-          settingsOpen={tab === "settings"}
-          onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
-          onPopOut={onPopOut}
-          onLayout={glass ? fn() : undefined}
-          rail={<UsageView {...railArgs} operations={operations ?? railArgs.operations} rail />}
-          board={
-            <BoardDnd
-              lanes={lanes()}
-              tickets={ticketsArgs.tickets.map((t) => t.id)}
-              onMoveCard={fn()}
-              onReorderTickets={fn()}
-              onTicketToColumn={fn()}
-            >
-              <TicketsView {...ticketsArgs} column />
-              <ClonesView {...clonesArgs} columnsLayout onRenameColumn={fn()} />
-            </BoardDnd>
-          }
-          side={{
-            notes: <NotesView {...notesArgs} only="notes" />,
-            chat: <NotesView {...notesArgs} only="chat" />,
-            widthPct: SIDE_DEFAULT,
-          }}
-          onSideWidthCommit={fn()}
-          settings={<SettingsView {...settingsArgs} />}
-        />
-      </div>
+      <ColumnPinsProvider value={pins ? { pinned: new Set(pins.pinned), onToggle: pins.onToggle ?? fn() } : null}>
+        <div className={`flex h-full flex-col ${glass ? "" : "p-2"}`}>
+          <WideLayout
+            width={width}
+            glass={glass}
+            usage={usage}
+            settingsOpen={tab === "settings"}
+            onSettings={() => onTab(tab === "settings" ? "clones" : "settings")}
+            onPopOut={onPopOut}
+            onLayout={glass ? fn() : undefined}
+            rail={<UsageView {...railArgs} operations={operations ?? railArgs.operations} rail />}
+            board={
+              <BoardDnd
+                lanes={lanes()}
+                tickets={ticketsArgs.tickets.map((t) => t.id)}
+                onMoveCard={fn()}
+                onReorderTickets={fn()}
+                onTicketToColumn={fn()}
+              >
+                <TicketsView {...ticketsArgs} column />
+                <ClonesView {...clonesArgs} columnsLayout onRenameColumn={fn()} />
+              </BoardDnd>
+            }
+            side={{
+              notes: <NotesView {...notesArgs} only="notes" />,
+              chat: <NotesView {...notesArgs} only="chat" />,
+              widthPct: SIDE_DEFAULT,
+            }}
+            onSideWidthCommit={fn()}
+            settings={<SettingsView {...settingsArgs} />}
+          />
+        </div>
+      </ColumnPinsProvider>
     );
   }
   return (
     <NarrowLayout row={{ width: width - 12, usage, tab, onTab, badges, onPopOut }}>
       {tabFor(tab, width - 12 < ROW_STATS_MIN)}
     </NarrowLayout>
+  );
+}
+
+/** The pinned columns' dock at a monitor window's left edge (`~/lib/dock.ts`), as the container
+ *  fills it: the pinned ones of the rail, the tickets and the clone columns, with the tabs'
+ *  own stories' data. A press on a lit pin unpins its column (`onToggle`). */
+export function dockFor(pinned: readonly string[], onToggle: (pin: string) => void = fn()): ReactNode {
+  const columns = pinned.filter((p) => p.startsWith(columnPin(""))).map((p) => p.slice(columnPin("").length));
+  return (
+    <ColumnPinsProvider value={{ pinned: new Set(pinned), onToggle }}>
+      <DockLayout>
+        {pinned.includes(RAIL_PIN) ? (
+          <RailColumn
+            glass={false}
+            usage={usage}
+            settingsOpen={false}
+            onSettings={fn()}
+            onPopOut={fn()}
+            onLayout={fn()}
+            rail={<UsageView {...railArgs} rail />}
+          />
+        ) : null}
+        <BoardDnd
+          lanes={lanes()}
+          tickets={ticketsArgs.tickets.map((t) => t.id)}
+          onMoveCard={fn()}
+          onReorderTickets={fn()}
+          onTicketToColumn={fn()}
+        >
+          {pinned.includes(TICKETS_PIN) ? <TicketsView {...ticketsArgs} column /> : null}
+          {columns.length ? <ClonesView {...clonesArgs} columnsLayout onlyColumns={columns} onRenameColumn={fn()} /> : null}
+        </BoardDnd>
+      </DockLayout>
+    </ColumnPinsProvider>
   );
 }

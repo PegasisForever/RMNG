@@ -6,7 +6,7 @@
 // The control panel is flat content (`../GLASS.md`): on the glass of its panel over the clone's
 // screen, or on the solid ground of their own window. Each color has its light value and its
 // `dark:` one; the names below are the ones the control panel share.
-import { Check, ChevronLeft, type LucideIcon, X } from "lucide-react";
+import { Check, ChevronLeft, type LucideIcon, Pin, X } from "lucide-react";
 import {
   createContext,
   type MouseEvent as ReactMouseEvent,
@@ -43,6 +43,34 @@ const ColumnFrame = createContext(COLUMN_SOLID);
 /** The wide layout says which frame its columns wear. */
 export const ColumnFrameProvider = ColumnFrame.Provider;
 export const useColumnFrame = () => useContext(ColumnFrame);
+
+/** The wide columns' pins (`~/lib/dock.ts`): which are pinned to this monitor window's left
+ *  side, and a press on a pin. Null where there is no clone's screen to pin them beside (the
+ *  control panel's own window): no pins. */
+export type ColumnPins = { pinned: ReadonlySet<string>; onToggle: (pin: string) => void } | null;
+const ColumnPinsContext = createContext<ColumnPins>(null);
+export const ColumnPinsProvider = ColumnPinsContext.Provider;
+
+/** A wide column's pin, in its header: it pins the column to the window's left side, or (lit)
+ *  unpins it. Nothing where there are no pins. */
+export function PinButton({ pin, title }: { pin: string; title: string }) {
+  const pins = useContext(ColumnPinsContext);
+  if (!pins) return null;
+  const on = pins.pinned.has(pin);
+  const label = on ? `Unpin ${title}` : `Pin ${title} to this window's left side`;
+  return (
+    <button
+      type="button"
+      onClick={() => pins.onToggle(pin)}
+      aria-pressed={on}
+      aria-label={label}
+      data-tip={label}
+      className={`flex size-7 shrink-0 items-center justify-center ${on ? `${R_PIECE} ${LIT}` : ICON_BUTTON}`}
+    >
+      <Pin aria-hidden className={`size-3.5 ${on ? "fill-current" : ""}`} strokeWidth={2} />
+    </button>
+  );
+}
 
 /** Shape (`../GLASS.md`): corners that sit inside one another are concentric. A surface (a
  *  column, a panel) has 16 px corners; a piece set 6 px in from its edge, along it or in its

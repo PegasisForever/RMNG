@@ -56,6 +56,7 @@ import type { Clone, Operation } from "~/lib/types";
 import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import { workspaceBadge } from "~/lib/workspace";
+import { columnPin } from "~/lib/dock";
 
 import { DragItem, DropColumn, useBoardDnd } from "./BoardDnd";
 import { type Move, movesFor } from "./order";
@@ -84,6 +85,7 @@ import {
   TEXT_2,
   TEXT_3,
   useColumnFrame,
+  PinButton,
 } from "./ui";
 
 export interface ClonesViewProps {
@@ -120,6 +122,8 @@ export interface ClonesViewProps {
   onArchive: (clone: Clone) => void;
   onUnarchive: (clone: Clone) => void;
   onDelete: (clone: Clone) => void;
+  /** Wide: only these columns (by id), as the pinned columns' dock shows them; absent: all. */
+  onlyColumns?: readonly string[];
   /** The board's columns side by side (wide), not one list with a section each. */
   columnsLayout?: boolean;
   /** A column's new title (a double-click on it). Absent: titles are not renamed here. */
@@ -403,13 +407,16 @@ export function ClonesView(p: ClonesViewProps) {
   if (p.columnsLayout) {
     return (
       <>
-        {columns.map((column) => (
+        {columns.filter((c) => !p.onlyColumns || p.onlyColumns.includes(c.id)).map((column) => (
           <section
             key={column.id}
             aria-label={column.title}
             className={`flex h-full w-72 shrink-0 flex-col ${frame} ${ON_GLASS}`}
           >
-            <h3 className={`flex h-10 shrink-0 items-center gap-2 pl-3 pr-1.5 text-sm font-semibold ${TEXT}`}>{heading(column)}</h3>
+            <h3 className={`flex h-10 shrink-0 items-center gap-2 pl-3 pr-1.5 text-sm font-semibold ${TEXT}`}>
+              {heading(column)}
+              <PinButton pin={columnPin(column.id)} title={column.title} />
+            </h3>
             <DropColumn
               id={column.id}
               items={column.cloneIds}

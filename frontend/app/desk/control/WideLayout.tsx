@@ -16,6 +16,10 @@
 // window (`../GLASS.md`: the window has no glass). The row's scroll bar is hidden: a touchpad, a
 // wheel with Shift, or a finger scrolls it.
 //
+// Over the clone's screen each column has a pin (the rail's is in its accounts' header): a
+// pinned column stays at the monitor window's left edge while the control panel is closed, in
+// the dock (`DockLayout`, `~/lib/dock.ts`).
+//
 // Pure: each part comes in as a slot (`./ControlPanelContainer.tsx` fills them).
 import { MonitorCog, Settings } from "lucide-react";
 
@@ -31,7 +35,17 @@ import {
 import { createPortal } from "react-dom";
 
 import { PopOutButton, type ServerUsage } from "../ToolRow";
-import { BUTTON, COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, NO_SCROLLBARS, ON_GLASS, R_PIECE, TEXT } from "./ui";
+import {
+  BUTTON,
+  COLUMN_GLASS,
+  COLUMN_SOLID,
+  ColumnFrameProvider,
+  LIT,
+  NO_SCROLLBARS,
+  ON_GLASS,
+  R_PIECE,
+  TEXT,
+} from "./ui";
 import { ServerStats } from "./UsageView";
 
 /** At least this wide (CSS px), the control panel takes this layout. */
@@ -83,9 +97,6 @@ export function WideLayout({
   settings: ReactNode;
 }) {
   const frame = glass ? COLUMN_GLASS : COLUMN_SOLID;
-  /** The rail in the control panel's own window: on the window's ground, with no frame (its cards
-   *  and the server's numbers have their own) */
-  const railFrame = glass ? COLUMN_GLASS : "overflow-hidden";
   // The side panels' width: the container's (stored) to start, then this one's while it is set
   const [pct, setPct] = useState(side.widthPct);
   const pctRef = useRef(side.widthPct);
@@ -116,39 +127,15 @@ export function WideLayout({
   );
 
   const railColumn = (
-    <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${railFrame} ${ON_GLASS}`}>
-      <div className="flex h-12 shrink-0 items-center gap-1.5 pl-3 pr-1.5">
-        <h2 className={`min-w-0 flex-1 truncate text-sm font-semibold ${TEXT}`}>RMNG Control</h2>
-        {onLayout ? (
-          <button
-            type="button"
-            onClick={onLayout}
-            aria-label="Edit layout"
-            data-tip="Edit layout"
-            className={`flex size-9 items-center justify-center ${BUTTON}`}
-          >
-            <MonitorCog aria-hidden className="size-[18px]" strokeWidth={1.75} />
-          </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={onSettings}
-          aria-pressed={settingsOpen}
-          aria-label="Settings"
-          data-tip="Settings"
-          className={`flex size-9 items-center justify-center ${
-            settingsOpen ? `${R_PIECE} border border-transparent ${LIT}` : BUTTON
-          }`}
-        >
-          <Settings aria-hidden className="size-[18px]" strokeWidth={1.75} />
-        </button>
-        {onPopOut ? <PopOutButton onPopOut={onPopOut} /> : null}
-      </div>
-      <div className="shrink-0 px-1.5 pb-1.5">
-        <ServerStats usage={usage} />
-      </div>
-      <div className="min-h-0 flex-1">{rail}</div>
-    </aside>
+    <RailColumn
+      glass={glass}
+      usage={usage}
+      settingsOpen={settingsOpen}
+      onSettings={onSettings}
+      onPopOut={onPopOut}
+      onLayout={onLayout}
+      rail={rail}
+    />
   );
 
   if (settingsOpen) {
@@ -186,6 +173,84 @@ export function WideLayout({
         ) : sideAt ? (
           createPortal(panels, sideAt)
         ) : null}
+      </div>
+    </ColumnFrameProvider>
+  );
+}
+
+/** The rail: the server's numbers and the accounts' usage, under its header (Edit layout,
+ *  Settings, the pop-out; its pin is in the accounts' header, `./UsageView.tsx`, where there is
+ *  room for it). Glass over the clone's screen; on a solid ground (the
+ *  control panel's own window, the pinned columns' dock) it has no frame: its cards and the
+ *  server's numbers have their own. */
+export function RailColumn({
+  glass,
+  usage,
+  settingsOpen,
+  onSettings,
+  onPopOut,
+  onLayout,
+  rail,
+}: {
+  glass: boolean;
+  usage: ServerUsage | null;
+  settingsOpen: boolean;
+  onSettings: () => void;
+  onPopOut?: () => void;
+  onLayout?: () => void;
+  rail: ReactNode;
+}) {
+  const railFrame = glass ? COLUMN_GLASS : "overflow-hidden";
+  return (
+    <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${railFrame} ${ON_GLASS}`}>
+      <div className="flex h-12 shrink-0 items-center gap-1.5 pl-3 pr-1.5">
+        <h2 className={`min-w-0 flex-1 truncate text-sm font-semibold ${TEXT}`}>RMNG Control</h2>
+        {onLayout ? (
+          <button
+            type="button"
+            onClick={onLayout}
+            aria-label="Edit layout"
+            data-tip="Edit layout"
+            className={`flex size-9 items-center justify-center ${BUTTON}`}
+          >
+            <MonitorCog aria-hidden className="size-[18px]" strokeWidth={1.75} />
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={onSettings}
+          aria-pressed={settingsOpen}
+          aria-label="Settings"
+          data-tip="Settings"
+          className={`flex size-9 items-center justify-center ${
+            settingsOpen ? `${R_PIECE} border border-transparent ${LIT}` : BUTTON
+          }`}
+        >
+          <Settings aria-hidden className="size-[18px]" strokeWidth={1.75} />
+        </button>
+        {onPopOut ? <PopOutButton onPopOut={onPopOut} /> : null}
+      </div>
+      <div className="shrink-0 px-1.5 pb-1.5">
+        <ServerStats usage={usage} />
+      </div>
+      <div className="min-h-0 flex-1">{rail}</div>
+    </aside>
+  );
+}
+
+/** The pinned columns' dock (`~/lib/dock.ts`): the columns the operator pinned, side by side,
+ *  at the left edge of a monitor window, beside the clone's screen. There is no clone's screen
+ *  under it, so it is the control panel's window's look: a solid ground, the columns flat
+ *  hollows (`../GLASS.md`). Each column scrolls up and down on its own; the row does not scroll
+ *  (the dock is as wide as its columns: `dockWidth`). */
+export function DockLayout({ children }: { children: ReactNode }) {
+  return (
+    <ColumnFrameProvider value={COLUMN_SOLID}>
+      <div
+        aria-label="Pinned columns"
+        className={`flex h-full select-text gap-2 p-2 [&_button]:select-none ${NO_SCROLLBARS}`}
+      >
+        {children}
       </div>
     </ColumnFrameProvider>
   );

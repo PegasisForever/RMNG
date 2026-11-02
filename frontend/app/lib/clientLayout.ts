@@ -16,6 +16,7 @@ import type { ControlState } from "~/lib/types";
 import type { MonitorSpec } from "~/lib/wire/MonitorSpec";
 import type { ScrollMode } from "~/lib/wire/ScrollMode";
 
+import { claimedMonitors, readDocks } from "./dock";
 import { MAX_MONITORS, normalize } from "./monitorLayout";
 
 export type ClientKind = "desktop" | "phone";
@@ -140,11 +141,12 @@ export async function ensureLayout(kind: ClientKind, seed: () => BrowserLayout):
   return readLayout() ?? first;
 }
 
-/** What this browser claims: its stored layout, without the pixel scales; null before it has
- *  one (`ensureLayout`). */
+/** What this browser claims: its stored layout, without the pixel scales, each monitor less the
+ *  width its window's pinned columns take (`./dock.ts`); null before it has one
+ *  (`ensureLayout`). */
 export function layoutClaim(): LayoutBody | null {
   const l = readLayout();
-  return l && { monitors: l.monitors, scrollMode: l.scrollMode, scrollSpeed: l.scrollSpeed };
+  return l && { monitors: claimedMonitors(l.monitors, readDocks()), scrollMode: l.scrollMode, scrollSpeed: l.scrollSpeed };
 }
 
 /** The channel the Edit layout dialog talks to the monitor windows of this browser on. */

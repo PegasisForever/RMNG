@@ -42,6 +42,12 @@
 // fullscreen: the fullscreen, the key lock, the window's name and address are the shell's
 // (`~/lib/host.ts`), so a reload onto a new build keeps them.
 //
+// Wide, the control panel's columns have pins: a pinned column stays in this window's dock, at
+// its left edge, beside the clone's screen (`~/lib/dock.ts`). Each monitor window has its own
+// pins. The layout keeps the monitor's full size; the browser claims it less the clone px the
+// dock covers at the window's scale (`dockCut`), so the clone's screen keeps its scale in the
+// space right of the dock. While the mouse is over the dock, the mouse and the keys are its.
+//
 // The clone's screen shows at the pixel scale in the middle (smaller only where it does not
 // fit), not stretched. This browser's layout is in force while it is in use: a window opens,
 // comes to the front, or is touched or clicked.
@@ -53,7 +59,9 @@
 import { type PointerEvent, useEffect, useRef, useState } from "react";
 
 import { LayoutEditorContainer } from "~/components/LayoutEditorContainer";
-import { type BrowserLayout, clientKind, ensureLayout, readLayout, saveLayout } from "~/lib/clientLayout";
+import { withDefaults } from "~/lib/board";
+import { type BrowserLayout, clientId, clientKind, ensureLayout, readLayout, saveLayout } from "~/lib/clientLayout";
+import { type Dock, dockCut, dockWidth, fitPins, orderPins, readDock, saveDock, togglePin } from "~/lib/dock";
 import { resize } from "~/lib/monitorLayout";
 import { hostWindow } from "~/lib/host";
 import { useMonitorChannel, useOpenMonitors } from "~/lib/useMonitorChannel";
@@ -108,6 +116,8 @@ const UPLOAD_NOTE_MS = 5000;
 const CONTROL_PANEL_WINDOW = "rmng-control-panel";
 const CONTROL_PANEL_WINDOW_W = 560;
 const CONTROL_PANEL_WINDOW_H = 900;
+/** The dock's width settles this long (a window being resized) before it is claimed, ms. */
+const DOCK_SETTLE_MS = 300;
 
 type Props = {
   /** The display, CSS px, and its unsafe edges (the clock bar, the home bar, a cut-out). */
@@ -157,6 +167,12 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   /** Touch mode, wide: a swipe from the right edge brought the side panels in. Their box. */
   const [swiped, setSwiped] = useState(false);
   const [sideAt, setSideAt] = useState<HTMLDivElement | null>(null);
+  /** This window's pinned columns (its monitor's dock, kept with the layout), and their box. */
+  const [dock, setDock] = useState<Dock>(() => readDock(monitor));
+  const [dockAt, setDockAt] = useState<HTMLDivElement | null>(null);
+  useEffect(() => setDock(readDock(monitor)), [monitor]);
+  /** Mouse mode: the mouse is over the dock (or a menu of its). */
+  const [overDock, setOverDock] = useState(false);
   /** The box for the alerts of clones that stopped working (monitor 0's window only). */
   const [alertsAt, setAlertsAt] = useState<HTMLDivElement | null>(null);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
@@ -202,6 +218,8 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   const areaH = dockedNow ? height - keysH : height;
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
 
+  const monitorRef = useRef(monitor);
+  monitorRef.current = monitor;
   /** This browser's layout, shared by its windows; null until it has one. */
   const [layout, setLayout] = useState<BrowserLayout | null>(readLayout);
   const fitAt = (scale: number) => phoneMonitorSize(width, areaH, dpr, scale);
@@ -210,8 +228,11 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   useEffect(() => {
     // The first time: one monitor, this window's size (`./firstLayout.ts`); a phone keeps one
     void ensureLayout(kind, () => firstLayout(kind, (s) => fitAtRef.current(s))).then(setLayout);
-    // Another window of this browser changed it
-    const onStorage = () => setLayout(readLayout());
+    // Another window of this browser changed it (or renumbered the monitors' docks)
+    const onStorage = () => {
+      setLayout(readLayout());
+      setDock(readDock(monitorRef.current));
+    };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, [kind]);
@@ -245,8 +266,39 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   };
   /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. Else the keys
    *  are the page's (`./keys.ts`), and so are a Mac's edit keys while the keyboard is locked. */
-  const mouseInput = mouse && !controlPanel && !layoutOpen && !fullHintShown && !(peek && overGroup);
+  const mouseInput = mouse && !controlPanel && !layoutOpen && !fullHintShown && !(peek && overGroup) && !overDock;
   const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, page: { chord: toggleControlPanel, escape } });
+
+  // The pinned columns: those of columns there are, in the board's order; wide only. The dock
+  // holds as many as leave the clone's screen room, and the screen is in the space right of it.
+  const pins = wide ? orderPins(dock.pins, withDefaults(r.live.state.boardColumns ?? []).map((c) => c.id)) : [];
+  const inDock = fitPins(pins, width, safe.left);
+  const dockBox = inDock.length ? safe.left + dockWidth(inDock) : 0;
+  const dockBoxRef = useRef(dockBox);
+  dockBoxRef.current = dockBox;
+  const togglePinned = (pin: string) => {
+    const d = readDock(monitor);
+    const next = { ...d, pins: togglePin(d.pins, pin) };
+    saveDock(monitor, next);
+    setDock(next);
+  };
+  // Mouse mode: over the dock (or a menu it opened), the mouse and the keys are the page's. A
+  // drag that started in it stays the page's until the button is let go.
+  useEffect(() => {
+    if (!mouse) {
+      setOverDock(false);
+      return;
+    }
+    const onMove = (e: globalThis.PointerEvent) => {
+      if (e.pointerType !== "mouse") return;
+      const over =
+        e.clientX < dockBoxRef.current ||
+        (e.target instanceof Element && e.target.closest("[data-dock], [role=menu], [role=listbox]") !== null && dockBoxRef.current > 0);
+      if (over || e.buttons === 0) setOverDock(over);
+    };
+    window.addEventListener("pointermove", onMove, { capture: true, passive: true });
+    return () => window.removeEventListener("pointermove", onMove, { capture: true });
+  }, [mouse]);
 
   // Files dropped on the clone's screen go to the selected clone's home, one after another
   // (`~/viewer/upload.ts`). A drop on the control panel, the right group or a dialog is theirs.
@@ -261,7 +313,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     const ours = (e: DragEvent) =>
       !e.defaultPrevented &&
       (e.dataTransfer?.types.includes("Files") ?? false) &&
-      !(e.target instanceof Element && e.target.closest("[data-right-group], [data-modal], [role=dialog]")) &&
+      !(e.target instanceof Element && e.target.closest("[data-right-group], [data-dock], [data-modal], [role=dialog]")) &&
       !(e.target instanceof Node && panelRef.current?.contains(e.target));
     const onOver = (e: DragEvent) => {
       if (!ours(e)) return;
@@ -404,7 +456,27 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     },
   );
 
-  const fit = screenFit(width, areaH, r.monitor.width, r.monitor.height, dpr, scale);
+  // The clone px the dock covers, taken from the monitor in what this browser claims: at the
+  // scale the monitor's full size has in this window, so the narrower one keeps that scale
+  // right of the dock (`dockCut`). The window keeps it with its pins, for every window's claim.
+  const fullScale = mine ? screenFit(width, height, mine.width, mine.height, dpr, scale).scale : 0;
+  const cut = dockBox && mine ? dockCut(dockBox, dpr, fullScale) : 0;
+  const layoutClient = r.live.state.layout?.client;
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const d = readDock(monitor);
+      if (d.cut === cut) return;
+      saveDock(monitor, { ...d, cut });
+      setDock({ ...d, cut });
+      // In force at once where this browser's layout is in force, or the operator is here; else
+      // the next claim takes it
+      if (document.hasFocus() || !layoutClient || layoutClient === clientId(kind)) r.claim();
+    }, DOCK_SETTLE_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [monitor, cut]);
+
+  const fit = screenFit(width - dockBox, areaH, r.monitor.width, r.monitor.height, dpr, scale);
   // The video's pixels stay those of the unzoomed view; a zoom scales the picture
   useEffect(() => {
     r.session.current?.resize(Math.round(r.monitor.width * fit.scale), Math.round(r.monitor.height * fit.scale));
@@ -423,7 +495,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   const at = useRef<{ x: number; y: number; shown: number } | null>(null);
   const cx = (r.pos.x * shown) / dpr;
   const cy = (r.pos.y * shown) / dpr;
-  let prev = at.current ?? { x: (width - w) / 2, y: (height - h) / 2, shown };
+  let prev = at.current ?? { x: dockBox + (width - dockBox - w) / 2, y: (height - h) / 2, shown };
   if (prev.shown !== shown) {
     const k = shown / prev.shown;
     prev = { x: prev.x + (r.pos.x * prev.shown) / dpr * (1 - k), y: prev.y + (r.pos.y * prev.shown) / dpr * (1 - k), shown };
@@ -431,7 +503,11 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   // With a mouse, the screen stays in the middle of its area: the cursor is the mouse's own. In
   // touch mode the screen may fill the display, but the cursor stays in the safe area: clear of
   // the sides' insets, above the home bar and the keyboard
-  const x = mouse ? fit.left : followAxis(prev.x, cx, w, width - safe.right, width, CURSOR_MARGIN, safe.left);
+  // Right of the dock, where there is one
+  const x = mouse
+    ? dockBox + fit.left
+    : dockBox +
+      followAxis(prev.x - dockBox, cx, w, width - dockBox - safe.right, width - dockBox, CURSOR_MARGIN, Math.max(0, safe.left - dockBox));
   // The buttons are always there: the cursor stays below their row too, and the screen moves
   // down for it, its start no lower than the row's end (black above it). Docked, the screen
   // rests in the middle of its area above the keys, and moves the same way
@@ -463,10 +539,13 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
         return;
       }
     }
-    // A touch outside the control panel puts the phone's keyboard away
-    if (isTyping() && !target.closest("[role=tabpanel]")) {
+    // A touch outside the control panel (or the dock) puts the phone's keyboard away
+    if (isTyping() && !target.closest("[role=tabpanel], [data-dock]")) {
       (document.activeElement as HTMLElement).blur();
     }
+    // A click on the clone's screen takes the focus out of the dock, so the keys go to the clone
+    const a = document.activeElement;
+    if (a instanceof HTMLElement && a.closest("[data-dock]") && !target.closest("[data-dock], [role=menu], [role=listbox]")) a.blur();
     // With a mouse, a click beside the control panel and the buttons puts the control panel away. A menu of
     // theirs (a card's ⋯), a dropdown's list and a dialog of theirs are drawn on the body, out
     // of their box, and are theirs all the same.
@@ -629,11 +708,26 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
             onLayout={() => setLayoutOpen(true)}
             notify={monitor === 0}
             alertsAt={monitor === 0 ? alertsAt : null}
+            dock={
+              wide
+                ? {
+                    pins,
+                    docked: inDock,
+                    onToggle: togglePinned,
+                    at: dockAt,
+                    onShowPanel: (t) => {
+                      if (t) setTab(t);
+                      setControlPanel(true);
+                    },
+                  }
+                : undefined
+            }
           />
         ),
       }}
       // In mouse mode the panels go with the group (`away`), so they do not slide on their own
       side={wide ? { shown: mouse || sideShown, ref: setSideAt } : null}
+      dock={dockBox ? { width: dockBox, ref: setDockAt } : null}
       alerts={monitor === 0 ? { ref: setAlertsAt } : null}
       buttons={{
         controlPanelOpen: controlPanel,

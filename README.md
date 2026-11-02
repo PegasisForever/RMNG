@@ -59,7 +59,7 @@ RMNG builds Hyperhost, an unreleased cloud provider infrastructure product. One 
 **Fleet Management**
 
 - One control-server Docker container is the web/API/media entrypoint
-- Web app with a control panel (clones, tickets, account usage, notes, settings) and per-clone notes
+- Web app with a control panel (clones, tickets, account usage, notes, settings) and per-clone notes. On a large screen any of the control panel's columns can be pinned to a monitor window's left side: it stays beside the clone's screen, and the clone's monitor is made narrower by the same width
 - Docker + lxcfs clone isolation
 - Full GNOME in each clone
 - Central SMB share for clone file systems
