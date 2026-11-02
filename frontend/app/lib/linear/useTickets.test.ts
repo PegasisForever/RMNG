@@ -1,7 +1,12 @@
-// The rules the hook applies around its fetches: which keys get asked, which clone-linked
-// identifiers get asked for by name, and what happens when two answers report the same issue.
+// The ticket module. First the rules it applies around its fetches: which keys get asked,
+// which clone-linked identifiers get asked for by name, and what happens when two answers
+// report the same issue. Then the module itself, driven against Linear in memory: a key starts
+// a poll, a refused write is put back, the open ticket follows the queue.
 import { expect, test } from "bun:test";
 
+import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
+
+import { memoryLinear } from "./memoryLinear";
 import {
   askablePresets,
   dueForLookup,
@@ -9,9 +14,12 @@ import {
   linkedIds,
   linkedOnly,
   mergeTickets,
+  type TicketInputs,
+  ticketStore,
+  ticketsOf,
   upsertTicket,
 } from "./useTickets";
-import type { LinearTicket } from "./types";
+import type { LinearTicket, TicketWorkflowState } from "./types";
 
 function preset(linearKey: string): { linearKey: string } {
   return { linearKey };
@@ -151,4 +159,123 @@ test("a preset with no key is not worth asking with, and labels default to none"
     { labels: ["DEV"], linearKey: "lin_a" },
     { labels: [], linearKey: "lin_b" },
   ]);
+});
+
+// --- the module, against Linear in memory ----------------------------------------------
+
+const WE = [{ name: "work", labels: ["WE"], linearKey: "lin_we" }] as unknown as PresetRedacted[];
+
+const DONE: TicketWorkflowState = { id: "s-done", name: "Done", type: "done" };
+
+/** The module over a store asking Linear in memory, as the control panel uses it, with
+ *  everything it tells the control panel written down. */
+function desk(issues: LinearTicket[] = [ticket("WE-1", "Old"), ticket("WE-2")], openId: string | null = null) {
+  const linear = memoryLinear({
+    issues: { lin_we: issues.map((t) => ({ ...t, team: "WE" })) },
+    teams: { WE: { labels: [], states: [DONE] } },
+  });
+  const store = ticketStore(linear);
+  const opened: [string | null, boolean | undefined][] = [];
+  const errors: (string | null)[] = [];
+  const inputs: TicketInputs = {
+    clones: [],
+    order: [],
+    openId,
+    onOpen: (id, replace) => opened.push([id, replace]),
+    onShowClone: () => {},
+    onError: (e) => errors.push(e),
+  };
+  store.start();
+  return { linear, store, opened, errors, now: () => ticketsOf(store, store.get(), inputs) };
+}
+
+/** Every answer on its way has landed. */
+const settle = () => Bun.sleep(1);
+
+test("no key asks nothing; a key typed into Settings starts a poll at once", async () => {
+  const d = desk();
+  expect(d.linear.calls).toEqual([]);
+  expect(d.now().loading).toBe(false);
+
+  d.now().setPresets(WE);
+  expect(d.linear.calls).toContain("open lin_we");
+  await settle();
+  expect(d.now().visible.map((t) => t.id)).toEqual(["WE-1", "WE-2"]);
+  d.store.stop();
+});
+
+test("an edit shows at once, and a refused one puts the ticket back", async () => {
+  const d = desk();
+  d.now().setPresets(WE);
+  await settle();
+  d.linear.refuse = true;
+
+  d.now().edit(d.now().visible[0], { title: "New" });
+  expect(d.now().visible[0].title).toBe("New");
+  await settle();
+  expect(d.now().visible[0].title).toBe("Old");
+  expect(d.errors).toEqual(["Linear refused the update on WE-1"]);
+  d.store.stop();
+});
+
+test("an edit that lands stays, and Linear is asked again", async () => {
+  const d = desk();
+  d.now().setPresets(WE);
+  await settle();
+  const polls = d.linear.calls.filter((c) => c === "open lin_we").length;
+
+  d.now().edit(d.now().visible[0], { title: "New" });
+  await settle();
+  expect(d.linear.issues.lin_we[0].title).toBe("New");
+  expect(d.now().visible[0].title).toBe("New");
+  expect(d.linear.calls.filter((c) => c === "open lin_we").length).toBe(polls + 1);
+  expect(d.errors).toEqual([null]);
+  d.store.stop();
+});
+
+test("the open ticket moves to the next one when it leaves the queue", async () => {
+  const d = desk(undefined, "WE-1");
+  d.now().setPresets(WE);
+  await settle();
+  expect(d.now().open?.id).toBe("WE-1");
+
+  d.now().setState(d.now().visible[0], DONE);
+  // In place of the open one: the operator did not ask for WE-2 by name
+  expect(d.opened).toEqual([["WE-2", true]]);
+  await settle();
+  expect(d.now().visible.map((t) => t.id)).toEqual(["WE-2"]);
+  d.store.stop();
+});
+
+test("a ticket that stays in the queue keeps the panel where it is", async () => {
+  const d = desk(undefined, "WE-1");
+  d.now().setPresets(WE);
+  await settle();
+  d.now().setLabel(d.now().visible[0], { id: "l1", name: "bug", color: "#f00" }, true);
+  // A second ticket that leaves is not the open one
+  d.now().moveTo(d.now().visible[1], "canceled");
+  expect(d.opened).toEqual([]);
+  d.store.stop();
+});
+
+test("a new ticket is in the queue and open in the panel once Linear has it", async () => {
+  const d = desk();
+  d.now().setPresets(WE);
+  await settle();
+  const created = await d.now().create({ team: "WE", title: "Fresh", description: "" });
+  expect(d.now().visible[0].id).toBe(created.id);
+  expect(d.opened).toEqual([[created.id, undefined]]);
+  d.store.stop();
+});
+
+test("a team's states are asked once, and the panel shows them when they come", async () => {
+  const d = desk();
+  d.now().setPresets(WE);
+  await settle();
+  const t = d.now().visible[0];
+  expect(d.now().panel(t, false).statesLoading).toBe(true);
+  await settle();
+  expect(d.now().panel(t, false).stateOptions).toEqual([DONE]);
+  expect(d.linear.calls.filter((c) => c.startsWith("team"))).toEqual(["team WE"]);
+  d.store.stop();
 });

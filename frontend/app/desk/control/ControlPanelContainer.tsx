@@ -1,7 +1,8 @@
 // The control panel's container: it holds what its tabs draw (the live server state, the
-// Linear tickets), does what they ask (every write to the server and to Linear), and opens the
-// dialogs. Each write has the same shape: show the change now, send it, put the old value back
-// if it is refused.
+// Linear tickets), does what they ask, and opens the dialogs. The board's columns, the ticket
+// order and the mutes are the board module's (`./useBoard.ts`), the tickets the ticket
+// module's (`~/lib/linear/useTickets.ts`). Each write has the same shape: show the change
+// now, send it, put the old value back if it is refused.
 //
 // Narrow, the control panel is tabs under the tool row (`../ToolRow.tsx`). Each tab, once opened,
 // stays mounted while another one shows, so a half-typed setting, a scrolled list or an open
@@ -29,10 +30,6 @@ import {
   activate,
   archiveClone,
   deleteClone,
-  getConfig,
-  putBoardColumns,
-  putMutedClones,
-  putTicketOrder,
   rebaseClone,
   renameClone,
   refreshClaudeUsage,
@@ -42,55 +39,29 @@ import {
   swapCodexAccount,
   unarchiveClone,
 } from "~/lib/api";
-import {
-  archivesOnDrop,
-  type BoardColumn,
-  columnIdOf,
-  moveCard,
-  newColumnId,
-  removeColumn,
-  resolveColumns,
-  withDefaults,
-} from "~/lib/board";
 import { copyText } from "~/lib/clipboard";
-import { issueSetLabel, issueSetState, issueSetStateId, issueUpdate, keysForTeam } from "~/lib/linear/mutations";
-import type { TicketLabel, TicketWorkflowState } from "~/lib/linear/types";
-import { useTeamMeta } from "~/lib/linear/useTeamMeta";
 import { useTickets } from "~/lib/linear/useTickets";
-import { useWorkspaces } from "~/lib/linear/useWorkspaces";
 import { workspaceHomeUrl } from "~/lib/linear/workspaces";
 import { hostWindow } from "~/lib/host";
-import { toggleMuted } from "~/lib/mute";
 import { readSelection, sameSelection, type Selection, withSelection } from "~/lib/selection";
 import { BASTION_PORT, buildSshCommand } from "~/lib/ssh";
-import {
-  adoptTickets,
-  cloneForTicket,
-  cloneTickets,
-  findTicket,
-  type LinearTicket,
-  openTickets,
-  orderTickets,
-  queued,
-  ticketAfter,
-  type TicketState,
-} from "~/lib/tickets";
+import { findTicket, type LinearTicket } from "~/lib/tickets";
 import type { ClaudeUsage, Clone, ControlState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
 import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
-import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 import type { SoundReport } from "~/viewer/protocol";
 
 import { type PanelTab, ROW_STATS_MIN, type ServerUsage, TABS as TAB_INFO } from "../ToolRow";
 import { ClonesView } from "./ClonesView";
 import { NotesView, type NotesPane } from "./NotesView";
-import { type Move, moved } from "./order";
+import { moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
 import { COLUMN_GLASS, ErrorLine, TEXT_3 } from "./ui";
 import { BoardDnd } from "./BoardDnd";
 import { NarrowLayout } from "./NarrowLayout";
+import { useBoard } from "./useBoard";
 import { UsageView } from "./UsageView";
 import { WIDE_MIN, WideLayout } from "./WideLayout";
 
@@ -163,14 +134,6 @@ export function ControlPanelContainer({
   const now = useNow();
   const sshHost = typeof window === "undefined" ? "" : window.location.hostname;
 
-  // The presets carry the Linear keys this browser reads tickets with
-  const [presets, setPresets] = useState<PresetRedacted[]>([]);
-  useEffect(() => {
-    getConfig()
-      .then((c) => setPresets(c.presets))
-      .catch((e: Error) => setError(e.message));
-  }, []);
-
   // Wide: the side panels' width (one stored width for both), read after mount
   const [sideWidth, setSideWidth] = useState(SIDE_DEFAULT);
   useEffect(() => {
@@ -193,46 +156,16 @@ export function ControlPanelContainer({
   const clonesById = new Map(state.hosts.map((h) => [h.id, h]));
   const accounts = state.claudeAccounts ?? [];
 
-  // ---- the board's columns, the ticket order and the mutes: shown now, then stored ----
-  const serverColumns = JSON.stringify(state.boardColumns ?? []);
-  const [columns, setColumns] = useState<BoardColumn[]>(() => withDefaults(state.boardColumns ?? []));
-  useEffect(() => setColumns(withDefaults(JSON.parse(serverColumns) as BoardColumn[])), [serverColumns]);
-  const applyColumns = (next: BoardColumn[]) => {
-    setColumns(next);
-    run(putBoardColumns(next));
-  };
-
-  const serverOrder = JSON.stringify(state.ticketOrder ?? []);
-  const [ticketOrder, setTicketOrder] = useState<string[]>(() => state.ticketOrder ?? []);
-  useEffect(() => setTicketOrder(JSON.parse(serverOrder) as string[]), [serverOrder]);
-  const applyTicketOrder = (next: string[]) => {
-    setTicketOrder(next);
-    run(putTicketOrder(next));
-  };
-
-  const serverMuted = JSON.stringify(state.mutedClones ?? []);
-  const [mutedClones, setMutedClones] = useState<string[]>(() => state.mutedClones ?? []);
-  useEffect(() => setMutedClones(JSON.parse(serverMuted) as string[]), [serverMuted]);
-
-  // ---- Linear ----
-  const {
-    tickets: linearTickets,
-    error: ticketsError,
-    loading: ticketsLoading,
-    refetch: refetchTickets,
-    upsert: upsertTicket,
-  } = useTickets(
-    presets,
-    state.hosts.flatMap((h) => (h.linearTicket ? [h.linearTicket] : [])),
+  // ---- the board's columns, the ticket order and the mutes (`./useBoard.ts`) ----
+  const board = useBoard(
+    {
+      clones: state.hosts,
+      columns: state.boardColumns ?? [],
+      ticketOrder: state.ticketOrder ?? [],
+      muted: state.mutedClones ?? [],
+    },
+    { onError: setError },
   );
-  const workspaces = useWorkspaces(presets);
-  const visibleTickets = orderTickets(openTickets(linearTickets, state.hosts), ticketOrder);
-  // Each ticket keeps the place it was first drawn in
-  useEffect(() => {
-    const adopted = adoptTickets(visibleTickets, ticketOrder);
-    if (adopted) applyTicketOrder(adopted);
-  });
-  const liveCloneTickets = cloneTickets(state.hosts, linearTickets);
 
   // What is open, held in the page's address (`?clone=`, `?ticket=`;
   // `~/lib/selection`): the browser's Back returns to the one before it, and a link opens it
@@ -244,52 +177,28 @@ export function ControlPanelContainer({
     if (sameSelection(next, selection)) return;
     setParams((p) => withSelection(p, next), { replace, preventScrollReset: true });
   };
-  const openTicketId = selection.ticket;
   const setOpenTicketId = (ticket: string | null, replace = false) => select({ ...selection, ticket }, replace);
-  const openTicket = openTicketId ? findTicket(openTicketId, visibleTickets) : null;
 
-  /** A Linear write: on screen now, in Linear a round trip later, put back if refused. */
-  const writeTicket = (ticket: LinearTicket, next: LinearTicket, call: (keys: string[]) => Promise<unknown>) => {
-    upsertTicket(next);
-    run(
-      call(keysForTeam(presets, ticket.team ?? ""))
-        .catch((e: Error) => {
-          upsertTicket(ticket);
-          throw e;
-        })
-        .then(refetchTickets),
-    );
-  };
-  /** The open ticket leaves the list: the tab goes to the one after it. */
-  const advancePast = (ticket: LinearTicket) => {
-    if (openTicket?.id !== ticket.id) return;
-    setOpenTicketId(ticketAfter(visibleTickets, ticket.id)?.id ?? null, true);
-  };
-  const editTicket = (t: LinearTicket, patch: { title?: string; description?: string }) =>
-    writeTicket(t, { ...t, ...patch }, (keys) => issueUpdate(keys, t, patch));
-  const moveTicket = (t: LinearTicket, next: TicketState) => {
-    if (!queued(next)) advancePast(t);
-    writeTicket(t, { ...t, state: next }, (keys) => issueSetState(keys, t, next));
-  };
-  const setTicketState = (t: LinearTicket, s: TicketWorkflowState) => {
-    if (!queued(s.type)) advancePast(t);
-    writeTicket(t, { ...t, state: s.type, stateId: s.id, stateName: s.name }, (keys) => issueSetStateId(keys, t, s.id));
-  };
-  const setTicketLabel = (t: LinearTicket, label: TicketLabel, on: boolean) =>
-    writeTicket(
-      t,
-      { ...t, labels: on ? [...t.labels, label] : t.labels.filter((l) => l.id !== label.id) },
-      (keys) => issueSetLabel(keys, t, label.id, on),
-    );
+  // ---- Linear (`~/lib/linear/useTickets.ts`) ----
+  const tickets = useTickets({
+    clones: state.hosts,
+    order: board.ticketOrder,
+    openId: selection.ticket,
+    onOpen: setOpenTicketId,
+    onShowClone: (clone) => selectClone(clone),
+    onError: setError,
+  });
+  const visibleTickets = tickets.visible;
+  const openTicket = tickets.open;
+  // Each ticket keeps the place it was first drawn in
+  useEffect(() => board.adoptTickets(visibleTickets));
 
   // ---- the clone on the screen, and the one the Notes tab is on ----
   /** An archived clone the Notes tab shows; null: the one on the screen. */
   const addressed = selection.clone ? (clonesById.get(selection.clone) ?? null) : null;
   const notesId = addressed?.archived ? addressed.id : null;
   const notesClone = (notesId ? clonesById.get(notesId) : null) ?? (state.selected ? clonesById.get(state.selected) : null) ?? null;
-  const notesTicket = notesClone?.linearTicket ? findTicket(notesClone.linearTicket, linearTickets) : null;
-  const openTicketMeta = useTeamMeta(presets, openTicket);
-  const notesTicketMeta = useTeamMeta(presets, notesTicket);
+  const notesTicket = notesClone?.linearTicket ? tickets.find(notesClone.linearTicket) : null;
 
   /** Put a clone on the screen; the control panel stays open (the operator closes it). An archived one
    *  has no screen, so its notes open instead. Wide, an open ticket closes:
@@ -335,7 +244,7 @@ export function ControlPanelContainer({
   // A clone that stops working raises a notification; a press on it shows that clone
   useCloneNotifications(
     state.hosts,
-    mutedClones,
+    board.mutedClones,
     (id) => {
       hostWindow().focus();
       const clone = clonesById.get(id);
@@ -344,51 +253,35 @@ export function ControlPanelContainer({
     notify,
   );
 
-  /** Where a parent or sub-issue goes: the ticket in this tab, or the clone made for it. */
-  const resolveLink = (id: string, inList: boolean) => {
-    const t = inList ? findTicket(id, visibleTickets) : null;
-    if (t) return { title: `Show ${t.id}`, open: () => setOpenTicketId(t.id) };
-    const clone = cloneForTicket(id, state.hosts);
-    return clone ? { title: `Show the clone for ${id}: ${clone.id}`, open: () => selectClone(clone) } : null;
-  };
-
-  const ticketPanel = (t: LinearTicket, meta: ReturnType<typeof useTeamMeta>, own: boolean) => (
+  /** A ticket's panel; `own`: a clone's own ticket, in its Notes. */
+  const ticketPanel = (t: LinearTicket, own: boolean) => (
     <TicketPanel
-      ticket={t}
+      {...tickets.panel(t, own)}
       onCopyBranchName={copyText}
       onCopyTicketLink={copyText}
       description={
         <Suspense fallback={<Loading label="Loading…" />}>
-          <TicketDescription key={t.id} markdown={t.description ?? ""} onSave={(md) => editTicket(t, { description: md })} />
+          <TicketDescription key={t.id} markdown={t.description ?? ""} onSave={(md) => tickets.edit(t, { description: md })} />
         </Suspense>
       }
-      onTitleChange={(title) => editTicket(t, { title })}
-      onStateChange={(s) => setTicketState(t, s)}
-      stateOptions={meta.states}
-      statesLoading={meta.loading}
-      labelOptions={meta.labels}
-      labelsLoading={meta.loading}
-      onAddLabel={(l) => setTicketLabel(t, l, true)}
-      onRemoveLabel={(l) => setTicketLabel(t, l, false)}
       onCreateClone={own ? undefined : () => open({ kind: "clone", ticketUrl: t.url, columnId: null })}
-      resolveLink={(id) => resolveLink(id, !own)}
     />
   );
 
   const notesSlot = () => {
     if (!notesClone) return null;
-    if (notesClone.linearTicket && notesTicket) return ticketPanel(notesTicket, notesTicketMeta, true);
+    if (notesClone.linearTicket && notesTicket) return ticketPanel(notesTicket, true);
     const editor = (
       <Suspense fallback={<Loading label="Loading editor…" />}>
         <NotesEditorContainer key={notesClone.id} cloneId={notesClone.id} />
       </Suspense>
     );
     if (!notesClone.linearTicket) return editor;
-    if (ticketsLoading) return <Loading label={`Loading ${notesClone.linearTicket}…`} />;
+    if (tickets.loading) return <Loading label={`Loading ${notesClone.linearTicket}…`} />;
     return (
       <>
         <p className={`px-4 pb-2 text-xs ${TEXT_3}`}>
-          {notesClone.linearTicket} did not load{ticketsError ? `: ${ticketsError}` : ""}. Showing notes.
+          {notesClone.linearTicket} did not load{tickets.error ? `: ${tickets.error}` : ""}. Showing notes.
         </p>
         {editor}
       </>
@@ -396,28 +289,6 @@ export function ControlPanelContainer({
   };
 
   // ---- clones ----
-  /** Into a column; into an archive column archives it and out of one restores it, as the
-   *  board's drop does. A refused call puts the card back. */
-  const moveToColumn = (clone: Clone, columnId: string, at?: number) => {
-    const before = columns;
-    const resolved = resolveColumns(columns, state.hosts);
-    const index = at ?? resolved.find((c) => c.id === columnId)?.cloneIds.length ?? 0;
-    applyColumns(moveCard(resolved, clone.id, columnId, index));
-    const archive = archivesOnDrop(columns, columnId);
-    if (archive === (clone.archived === true)) return;
-    (archive ? archiveClone(clone.id) : unarchiveClone(clone.id))
-      .then(() => setError(null))
-      .catch((e: Error) => {
-        setError(e.message);
-        applyColumns(before);
-      });
-  };
-  const moveInColumn = (clone: Clone, columnId: string, move: Move) => {
-    const resolved = resolveColumns(columns, state.hosts);
-    const ids = resolved.find((c) => c.id === columnId)?.cloneIds ?? [];
-    const next = moved(ids, clone.id, move);
-    applyColumns(moveCard(resolved, clone.id, columnId, next.indexOf(clone.id)));
-  };
   const deleteOne = (clone: Clone) => {
     const subs = state.hosts.filter((h) => h.parent === clone.id).length;
     const also = subs > 0 ? ` and its ${subs} sub clone${subs === 1 ? "" : "s"}` : "";
@@ -429,35 +300,17 @@ export function ControlPanelContainer({
     });
   };
 
-  // A clone made into a column is filed there once it exists; the one just made goes on the
-  // screen when its dialog closes
-  const [pendingColumn, setPendingColumn] = useState<{ columnId: string; target: string } | null>(null);
+  // The clone just made goes on the screen when its dialog closes
   const newClone = useRef<string | null>(null);
-  useEffect(() => {
-    if (!pendingColumn) return;
-    const { columnId, target } = pendingColumn;
-    if (!state.hosts.some((h) => h.id === target)) return;
-    setPendingColumn(null);
-    if (columnIdOf(columns, target) !== columnId) applyColumns(moveCard(columns, target, columnId, 0));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.hosts, pendingColumn]);
 
   // ---- settings ----
-  const columnCounts = Object.fromEntries(resolveColumns(columns, state.hosts).map((c) => [c.id, c.cloneIds.length]));
   const settings = useSettingsPanel({
     accounts,
     operations: state.operations,
     onImportAccount: (provider, group) => open({ kind: "import", replacing: null, provider, group }),
     forkSources: state.hosts.filter((h) => h.managed).map((h) => h.id),
-    boardColumns: columns,
-    boardColumnCounts: columnCounts,
-    onAddBoardColumn: (title) =>
-      applyColumns([...columns, { id: newColumnId(title, columns), title, cloneIds: [], archive: false }]),
-    onRenameBoardColumn: (id, title) => applyColumns(columns.map((c) => (c.id === id ? { ...c, title } : c))),
-    onSetBoardColumnArchive: (id, archive) => applyColumns(columns.map((c) => (c.id === id ? { ...c, archive } : c))),
-    onDeleteBoardColumn: (id) => applyColumns(removeColumn(columns, id)),
-    onReorderBoardColumns: (ids) =>
-      applyColumns(ids.flatMap((id) => columns.filter((c) => c.id === id))),
+    // A Linear key typed into Settings is asked with at once
+    onSaved: (config) => tickets.setPresets(config.presets),
   });
 
   const refreshUsage = () => Promise.all([refreshClaudeUsage(), refreshCodexUsage()]).then(() => undefined);
@@ -479,7 +332,7 @@ export function ControlPanelContainer({
             }}
             onStart={(fork, req) =>
               startClone(fork, req).then((op) => {
-                if (d.columnId) setPendingColumn({ columnId: d.columnId, target: op.target });
+                if (d.columnId) board.fileNewClone(op.target, d.columnId);
                 newClone.current = op.target;
                 return op;
               })
@@ -488,15 +341,7 @@ export function ControlPanelContainer({
         );
       case "ticket":
         return (
-          <TicketModalContainer
-            presets={presets}
-            onClose={closeDialog}
-            onCreated={(created) => {
-              upsertTicket(created);
-              setOpenTicketId(created.id);
-              refetchTickets();
-            }}
-          />
+          <TicketModalContainer presets={tickets.presets} onClose={closeDialog} onCreate={tickets.create} />
         );
       case "import":
         return (
@@ -552,10 +397,8 @@ export function ControlPanelContainer({
     }
   };
   // ---- drag and drop (`./BoardDnd.tsx`) ----
-  const lanes = resolveColumns(columns, state.hosts).map((c) => ({ id: c.id, cloneIds: c.cloneIds }));
   const dropClone = (cloneId: string, columnId: string, index: number) => {
-    const clone = clonesById.get(cloneId);
-    if (clone) moveToColumn(clone, columnId, index);
+    if (clonesById.has(cloneId)) board.moveClone(cloneId, columnId, index);
   };
   const dropTicketOnColumn = (ticketId: string, columnId: string) => {
     const t = findTicket(ticketId, visibleTickets);
@@ -564,11 +407,11 @@ export function ControlPanelContainer({
   /** A tab with what drags in it: the clones between their columns, the tickets in order. */
   const withDnd = (t: PanelTab, node: ReactNode): ReactNode =>
     t === "clones" ? (
-      <BoardDnd lanes={lanes} onMoveCard={dropClone}>
+      <BoardDnd lanes={board.lanes} onMoveCard={dropClone}>
         {node}
       </BoardDnd>
     ) : t === "tickets" ? (
-      <BoardDnd tickets={visibleTickets.map((x) => x.id)} onReorderTickets={applyTicketOrder}>
+      <BoardDnd tickets={visibleTickets.map((x) => x.id)} onReorderTickets={board.orderTickets}>
         {node}
       </BoardDnd>
     ) : (
@@ -580,7 +423,7 @@ export function ControlPanelContainer({
     <NotesView
       only={card ? pane : undefined}
       clone={notesClone}
-      ticket={notesClone ? liveCloneTickets[notesClone.id] : undefined}
+      ticket={notesClone ? tickets.forClones[notesClone.id] : undefined}
       pane={pane}
       notesLabel={notesClone?.linearTicket ? "Ticket" : "Notes"}
       notes={notesSlot()}
@@ -620,34 +463,34 @@ export function ControlPanelContainer({
           <TicketsView
             column={wide}
             tickets={visibleTickets}
-            loading={ticketsLoading}
-            error={ticketsError}
+            loading={tickets.loading}
+            error={tickets.error}
             open={openTicket}
-            detail={openTicket ? ticketPanel(openTicket, openTicketMeta, false) : null}
+            detail={openTicket ? ticketPanel(openTicket, false) : null}
             onOpen={(ticket) => setOpenTicketId(ticket.id)}
             onBack={() => setOpenTicketId(null)}
             onNewTicket={() => open({ kind: "ticket" })}
-            workspaces={workspaces}
+            workspaces={tickets.workspaces}
             onOpenWorkspace={(w) => window.open(workspaceHomeUrl(w), "_blank", "noopener,noreferrer")}
             onCreateClone={(ticket) => open({ kind: "clone", ticketUrl: ticket.url, columnId: null })}
             onOpenInLinear={(url) => window.open(url, "_blank", "noopener,noreferrer")}
             onCopy={copyText}
-            onMove={(ticket, move) => applyTicketOrder(moved(visibleTickets.map((x) => x.id), ticket.id, move))}
-            onMoveToBacklog={(ticket) => moveTicket(ticket, "backlog")}
-            onCancel={(ticket) => moveTicket(ticket, "canceled")}
+            onMove={(ticket, move) => board.orderTickets(moved(visibleTickets.map((x) => x.id), ticket.id, move))}
+            onMoveToBacklog={(ticket) => tickets.moveTo(ticket, "backlog")}
+            onCancel={(ticket) => tickets.moveTo(ticket, "canceled")}
           />
         );
       case "clones":
         return (
           <ClonesView
             columnsLayout={wide}
-            columns={columns}
+            columns={board.columns}
             clones={state.hosts}
-            cloneTickets={liveCloneTickets}
+            cloneTickets={tickets.forClones}
             stats={stats}
             cloneTokens={state.cloneTokens ?? {}}
             operations={state.operations}
-            mutedClones={mutedClones}
+            mutedClones={board.mutedClones}
             selectedId={state.selected ?? null}
             notesId={notesId}
             onSelect={selectClone}
@@ -658,19 +501,15 @@ export function ControlPanelContainer({
               if (!clone.archived) onTab(null);
             }}
             onNewClone={(columnId) => open({ kind: "clone", ticketUrl: "", columnId })}
-            onMoveToColumn={(clone, columnId) => moveToColumn(clone, columnId)}
-            onRenameColumn={(id, title) => applyColumns(columns.map((c) => (c.id === id ? { ...c, title } : c)))}
-            onMove={moveInColumn}
+            onMoveToColumn={(clone, columnId) => board.moveClone(clone.id, columnId)}
+            onRenameColumn={board.renameColumn}
+            onMove={(clone, columnId, move) => board.moveInColumn(clone.id, columnId, move)}
             onOpenInLinear={(url) => window.open(url, "_blank", "noopener,noreferrer")}
             onChangeAccount={(clone) => open({ kind: "account", clone })}
             onRebase={(clone) => open({ kind: "rebase", clone })}
             onPortForward={(clone) => open({ kind: "forward", clone })}
             onCopySsh={(clone) => copyText(buildSshCommand(sshHost, BASTION_PORT, clone.id))}
-            onToggleMute={(clone) => {
-              const next = toggleMuted(mutedClones, clone.id);
-              setMutedClones(next);
-              run(putMutedClones(next));
-            }}
+            onToggleMute={(clone) => board.toggleMute(clone.id)}
             onArchive={(clone) => run(archiveClone(clone.id))}
             onUnarchive={(clone) => run(unarchiveClone(clone.id))}
             onDelete={deleteOne}
@@ -682,7 +521,7 @@ export function ControlPanelContainer({
         return notesView("chat");
       case "settings":
         // The test page in the browser's own window: the app's frame has no safe area of its own
-        return <SettingsView {...settings} onScreenArea={() => hostWindow().location.assign("/screen-area")} />;
+        return <SettingsView {...settings} {...board.settings} onScreenArea={() => hostWindow().location.assign("/screen-area")} />;
     }
   };
 
@@ -710,10 +549,10 @@ export function ControlPanelContainer({
               board={
                 // One drag area for both: a ticket dropped on a clone column makes a clone
                 <BoardDnd
-                  lanes={lanes}
+                  lanes={board.lanes}
                   tickets={visibleTickets.map((x) => x.id)}
                   onMoveCard={dropClone}
-                  onReorderTickets={applyTicketOrder}
+                  onReorderTickets={board.orderTickets}
                   onTicketToColumn={dropTicketOnColumn}
                 >
                   {tabContent("tickets", true)}
@@ -724,7 +563,7 @@ export function ControlPanelContainer({
               // back when it closes, and when the control panel closes (the side panels without the control panel
               // are the clone's)
               side={{
-                ticket: openTicket && tab ? ticketPanel(openTicket, openTicketMeta, false) : undefined,
+                ticket: openTicket && tab ? ticketPanel(openTicket, false) : undefined,
                 notes: notesClone ? notesView("notes", true) : null,
                 chat: notesView("chat", true),
                 widthPct: sideWidth,

@@ -1,4 +1,5 @@
-// The Linear workspaces the configured keys belong to, as `useWorkspaces` reports them.
+// The Linear workspaces the configured keys belong to, as the ticket module reports them
+// (`~/lib/linear/useTickets.ts`).
 //
 // Two of them, because one is the case that proves nothing: a menu with a single row looks the
 // same whether or not the merge works.

@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 
 import { ask } from "~/components/ConfirmLayer";
-import type { SettingsCategory, SettingsPanelProps } from "~/components/SettingsPanes";
+import type { SettingsCategory, SettingsFormProps } from "~/components/SettingsPanes";
 import { useAccountOrder } from "~/lib/accountOrder";
 import {
   getConfig,
@@ -17,7 +17,6 @@ import {
   testConfig,
   updateServer,
 } from "~/lib/api";
-import type { BoardColumn } from "~/lib/board";
 import {
   settingsDraftFrom,
   settingsPatch,
@@ -42,32 +41,20 @@ interface SettingsPanelOptions {
   onImportAccount: (provider?: "claude" | "codex", group?: string) => void;
   /** Forkable clone ids, newest first, for the preset default-source picker. */
   forkSources: string[];
-  // --- board columns ---
-  /** The board's columns, left to right. */
-  boardColumns: BoardColumn[];
-  /** Clones per column id, so a delete can say what it displaces. */
-  boardColumnCounts: Record<string, number>;
-  onAddBoardColumn: (title: string) => void;
-  onRenameBoardColumn: (columnId: string, title: string) => void;
-  onSetBoardColumnArchive: (columnId: string, archive: boolean) => void;
-  onDeleteBoardColumn: (columnId: string) => void;
-  onReorderBoardColumns: (columnIds: string[]) => void;
+  /** A save landed: the config as the server now has it. The ticket module takes its presets
+   *  from here, so a Linear key typed in Settings is used without a reload. */
+  onSaved?: (config: AppConfigRedacted) => void;
 }
 
-/** Everything the settings form needs but cannot do itself. */
+/** Everything the settings form needs but cannot do itself. The Board category's columns
+ *  are the board module's (`~/desk/control/useBoard.ts`). */
 export function useSettingsPanel({
   accounts,
   operations,
   onImportAccount,
   forkSources,
-  boardColumns,
-  boardColumnCounts,
-  onAddBoardColumn,
-  onRenameBoardColumn,
-  onSetBoardColumnArchive,
-  onDeleteBoardColumn,
-  onReorderBoardColumns,
-}: SettingsPanelOptions): SettingsPanelProps {
+  onSaved,
+}: SettingsPanelOptions): SettingsFormProps {
   // Which category the rail is on. Starts at the top.
   const [category, setCategory] = useState<SettingsCategory>("board");
   const [draft, setDraft] = useState<SettingsDraft | null>(null);
@@ -183,6 +170,7 @@ export function useSettingsPanel({
     try {
       const res = await putConfig(settingsPatch(draft));
       load(res.config); // re-seed from the server's redacted view; clears write-only inputs
+      onSaved?.(res.config);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } catch (e) {
@@ -230,12 +218,5 @@ export function useSettingsPanel({
     onRestartServer: () => void doRestart(),
     judgeTestMessage: judgeTestMsg,
     onTestJudge: runJudgeTest,
-    boardColumns,
-    boardColumnCounts,
-    onAddBoardColumn,
-    onRenameBoardColumn,
-    onSetBoardColumnArchive,
-    onDeleteBoardColumn,
-    onReorderBoardColumns,
   };
 }
