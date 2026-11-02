@@ -387,7 +387,7 @@ export function attachInput(o: InputOptions): Input {
   /** The chord's modifier's press, held back while the chord may follow (`InputOptions.chord`). */
   let heldMod: number | null = null;
   /** A paste chord's key press, held until the paste event it fires has made its offer. */
-  let heldPaste: { keycode: number; timer: ReturnType<typeof setTimeout> } | null = null;
+  let heldPaste: { keycode: number; tap: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Where a paste chord's paste goes. Safari pastes only into something editable, and fires
    *  no paste event otherwise, so the chord's key press moves the focus here, and the paste
    *  moves it back. Only for the chord: an editable focus would start an input method (IME)
@@ -563,6 +563,19 @@ export function attachInput(o: InputOptions): Input {
     const paste =
       e.code === "KeyV" && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey && o.pasteByEvent();
     if (!paste) e.preventDefault();
+    const flag = modFlagOf(e.code);
+    // macOS sends no keyup for a key released while Command is down, so the clone would hold
+    // it (Cmd+V, sent as Ctrl+V, pasted again and again in the clone's key repeat). Such a key
+    // goes as a tap: pressed and released at once, and again on each of the browser's repeats,
+    // which stop when the key goes up.
+    const tap = isMac && e.metaKey && !flag;
+    if (tap && e.repeat) {
+      if (!paste) {
+        send({ kind: "key_code", keycode: k, pressed: true });
+        send({ kind: "key_code", keycode: k, pressed: false });
+      }
+      return;
+    }
     // The clone runs its own key repeat, so the browser's repeats are not sent.
     if (e.repeat) return;
     if (o.chord.holds.includes(e.code) && !keys.has(k)) {
@@ -570,29 +583,31 @@ export function attachInput(o: InputOptions): Input {
       return;
     }
     flushMod();
-    // Held already: on macOS no keyup comes for a key released while Command is down, so a
-    // second Cmd+C is a second press of a C the clone still holds. Release it first.
+    // Held already (pressed before Command went down, and let go with it down): press it again
     if (keys.has(k)) send({ kind: "key_code", keycode: k, pressed: false });
-    keys.add(k);
-    const flag = modFlagOf(e.code);
+    if (!tap) keys.add(k);
     if (flag) mods.set(k, flag);
     if (paste) {
       pasteSink.focus({ preventScroll: true });
-      holdPaste(k);
-    } else send({ kind: "key_code", keycode: k, pressed: true });
+      holdPaste(k, tap);
+    } else {
+      send({ kind: "key_code", keycode: k, pressed: true });
+      if (tap) send({ kind: "key_code", keycode: k, pressed: false });
+    }
   }
 
-  function holdPaste(keycode: number) {
+  function holdPaste(keycode: number, tap: boolean) {
     flushPaste();
-    heldPaste = { keycode, timer: setTimeout(flushPaste, PASTE_WAIT_MS) };
+    heldPaste = { keycode, tap, timer: setTimeout(flushPaste, PASTE_WAIT_MS) };
   }
 
-  /** Send the held paste key's press. */
+  /** Send the held paste key's press (and, for a tap, its release). */
   function flushPaste() {
     if (!heldPaste) return;
     pasteSink.blur();
     clearTimeout(heldPaste.timer);
     send({ kind: "key_code", keycode: heldPaste.keycode, pressed: true });
+    if (heldPaste.tap) send({ kind: "key_code", keycode: heldPaste.keycode, pressed: false });
     heldPaste = null;
   }
 

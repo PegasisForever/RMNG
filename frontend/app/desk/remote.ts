@@ -266,6 +266,30 @@ export function useRemote({
   /** Put the stored layout in force now: it changed. */
   const claim = useCallback(() => claims.current?.claim(true), []);
 
+  // The clone's sound plays only where the clones are used: in the foreground, in the browser
+  // whose layout is in force (a client that takes the clones takes their sound). Anywhere else
+  // the page's audio is closed, the key clicks' too in the background, so a phone does not show
+  // the page as playing. The server sends the sound to the window that asked for it last.
+  const [front, setFront] = useState(() => typeof document === "undefined" || document.visibilityState === "visible");
+  useEffect(() => {
+    const look = () => setFront(document.visibilityState === "visible");
+    const gone = () => setFront(false);
+    document.addEventListener("visibilitychange", look);
+    window.addEventListener("pageshow", look);
+    window.addEventListener("pagehide", gone);
+    return () => {
+      document.removeEventListener("visibilitychange", look);
+      window.removeEventListener("pageshow", look);
+      window.removeEventListener("pagehide", gone);
+    };
+  }, []);
+  const inUse = !live.state.layout || live.state.layout.client === clientId(kind);
+  const soundHere = front && inUse;
+  useEffect(() => {
+    session.current?.setSound(soundHere);
+    if (!soundHere) setSoundReport(null);
+  }, [soundHere, sessionNo]);
+
   /** The modifiers, made once (`./modifiers.ts`): what they decide goes to the clone. */
   const modifiers = useRef<Modifiers | null>(null);
   if (!modifiers.current) {
@@ -308,6 +332,10 @@ export function useRemote({
       document.removeEventListener("pointerup", unlock);
     };
   }, [sounds]);
+  // In the background the clicks' audio is closed too (see the clone's sound above)
+  useEffect(() => {
+    if (!front) sounds.close();
+  }, [front, sounds]);
 
   /** Dictation (`./dictation.ts`): its key's state, the words still being recognized (shown
    *  over the screen), and the text it is sure of, typed into the clone. */

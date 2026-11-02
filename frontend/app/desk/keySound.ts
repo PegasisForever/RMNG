@@ -141,6 +141,17 @@ export class KeySounds {
     };
   }
 
+  /** Close the audio, as the page goes to the background: with an audio context open (and the
+   *  signal below that keeps it on), a phone shows the page as playing. The next `unlock`
+   *  opens it again. */
+  close() {
+    const ctx = this.ctx;
+    this.ctx = null;
+    this.last = null;
+    this.buffers.clear();
+    if (ctx && ctx.state !== "closed") void ctx.close().catch(() => {});
+  }
+
   /** A signal far below hearing (±1e-5, at half the sample rate), looped for as long as the
    *  page lives, so the phone never turns the output off between clicks. */
   private keepAwake(ctx: AudioContext) {

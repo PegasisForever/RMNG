@@ -32,6 +32,9 @@ export interface Session {
   sendTerm(msg: FromBrowser): void;
   /** The box is now `width`×`height` device pixels. */
   resize(width: number, height: number): void;
+  /** Play the clone's sound here (monitor 0's window only), or stop it and close the page's
+   *  audio for it altogether, so a phone no longer shows the page as playing. */
+  setSound(on: boolean): void;
   detach(): void;
 }
 
@@ -106,7 +109,7 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
     },
     [offscreen],
   );
-  const sound = monitor === SOUND_MONITOR ? attachSound(post, events.onSoundReport) : null;
+  let sound: ReturnType<typeof attachSound> | null = null;
 
   return {
     canvas,
@@ -117,6 +120,15 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
     locks: (caps) => post({ type: "send", msg: { t: "locks", caps } }),
     sendTerm: (msg) => post({ type: "send", msg }),
     resize: (width, height) => post({ type: "resize", width, height }),
+    setSound(on) {
+      if (on && !sound && monitor === SOUND_MONITOR) sound = attachSound(post, events.onSoundReport);
+      else if (!on && sound) {
+        sound.detach();
+        sound = null;
+        // The worker stops asking the server for packets
+        post({ type: "sound", on: false });
+      }
+    },
     detach() {
       sound?.detach();
       worker.terminate();

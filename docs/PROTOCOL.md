@@ -50,8 +50,8 @@ All numbers are big-endian.
 | `10..` | the H.264 access unit (Annex-B) |
 
 Sound (kind `3`, server → browser): a 9-byte `AudioHeader`, then one Opus packet of the
-selected clone's desktop sound (10 ms of 48 kHz stereo). The server sends sound only to a
-window that asked for it (`sound` below). A message with nothing after the header is the quiet
+selected clone's desktop sound (10 ms of 48 kHz stereo). The server sends sound only to the
+window that asked for it last (`sound` below): one that asks takes it from every other. A message with nothing after the header is the quiet
 marker: the clone's sound is silent, and the clone sends nothing more until the sound comes
 back.
 
@@ -64,7 +64,9 @@ back.
 
 The window starts its Opus decoder again on a new stream. The web app
 ([sound.ts](../frontend/app/viewer/sound.ts)) plays the sound only in the monitor 0 window,
-so two windows never play it twice. The worker decodes each packet with WebCodecs
+so two windows never play it twice, and only while that window is in the foreground and its
+browser's layout is in force (the device in use). Anywhere else the page closes its audio
+altogether, so a phone does not show the page as playing. The worker decodes each packet with WebCodecs
 (`AudioDecoder`, `opus`) and sends the samples on a `MessagePort` straight to an AudioWorklet,
 so the page thread never holds the sound. The worklet's buffer
 ([sound-buffer.ts](../frontend/app/viewer/sound-buffer.ts)) follows Selkies' rules: it starts
@@ -134,7 +136,7 @@ keeps only the pieces of the replies it asked for since then.
 | `request_keyframe` | `RequestKeyframe {monitor_id}` | Re-encode the monitor's last frame as a keyframe: after a decode error. Ignored for a monitor other than the socket's own (`?monitor=`). |
 | `ack` | `{seq, held_ms, clip, decoding}` (u32 each) | The newest video frame the decoder output (`seq` from its header; a frame dropped while the window waits for a keyframe counts when it arrives), how long, in ms, the window held that number before this message, how many clipboard pieces arrived on this socket (`clip`, wraps; 0 when left out), and how many frames wait in the window's decoder (`decoding`, its `decodeQueueSize`; 0 when left out). Sent every 50 ms when `seq` changed, at once when a clipboard piece arrives, and once a second otherwise. Before the first frame (a terminal, or no video yet) `seq` is 0, which the server ignores. Below. |
 | `echo` | `{id}` (u32) | The server answers with `echo` and the same `id`, ahead of the video that waits in this socket's queue. The time to the answer is the round trip plus the wait in the kernel send buffer and in any proxy on the way. `rmng-fps` uses it; the viewer does not send it. |
-| `sound` | `{on}` (bool) | Send the selected clone's sound to this socket (kind `3`), or stop. A socket gets none until it asks; the window asks again on each new socket. |
+| `sound` | `{on}` (bool) | Send the selected clone's sound to this socket (kind `3`), or stop. A socket gets none until it asks, and one that asks takes the sound from every other; the window asks again on each new socket. |
 
 **Connect.** The server queues the view spec, the last cursor of this monitor and the
 current clipboard offer, then re-encodes the last frame of this monitor as a keyframe. A

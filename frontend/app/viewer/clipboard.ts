@@ -5,7 +5,8 @@
 // changed" event. So:
 // - Local → clone: when the window gets focus, read the local clipboard. If it changed since a
 //   monitor window last saw it, offer it to the server, keep the bytes, and answer the server's
-//   requests from them.
+//   requests from them. A copy in the page itself (the side panels, the control panel) comes
+//   with no change of focus, so each copy or cut in the page does the same once it is done.
 // - Clone → local: an offer becomes the shared "pending" offer. The focused window asks at once
 //   for the best type of each kind (image, HTML, text), and writes
 //   what came after each reply. With no window focused, the next window that gets focus does
@@ -250,19 +251,36 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
   }
 
   /** On focus: offer the local clipboard if it is new, else fetch the pending offer. */
-  async function syncLocal() {
+  async function syncLocal(copied = false) {
     await known;
     if (!focused()) return;
     const blobs = focusReads ? await readLocal() : null;
     if (blobs?.size) {
       const hash = await digest(blobs);
-      if (hash !== localStorage.getItem(SEEN_KEY)) {
+      // A copy in the page is offered even when it is what the clipboard held before: it is
+      // newer than what the clone copied since
+      if (copied || hash !== localStorage.getItem(SEEN_KEY)) {
         localStorage.setItem(SEEN_KEY, hash);
         offerLocal(blobs);
         return;
       }
     }
-    fetchPending();
+    if (!copied) fetchPending();
+  }
+
+  /** A copy or a cut in the page: offer what it put on the clipboard. With focus reads, from
+   *  the clipboard once the copy is done; else from what the copy carries (what the page's
+   *  editor set on it), or the selection the browser copies itself. */
+  function onCopy(e: ClipboardEvent) {
+    if (!connected) return;
+    if (focusReads) {
+      setTimeout(() => run(() => syncLocal(true)), 0);
+      return;
+    }
+    const blobs = e.clipboardData ? pasted(e.clipboardData) : new Map<LocalType, Blob>();
+    const text = blobs.size ? "" : (document.getSelection()?.toString() ?? "");
+    if (text) blobs.set("text/plain", new Blob([text], { type: "text/plain" }));
+    if (blobs.size) offerLocal(blobs);
   }
 
   /** A paste chord's paste event (no focus reads): offer what it carries, before its V reaches
@@ -393,9 +411,11 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
     o.sendData({ serial, mimeType: mime, bytes });
   }
 
-  const onFocus = () => run(syncLocal);
+  const onFocus = () => run(() => syncLocal());
   window.addEventListener("focus", onFocus);
   window.addEventListener("paste", onPaste);
+  window.addEventListener("copy", onCopy);
+  window.addEventListener("cut", onCopy);
   // Capture phase: before the input's key handler, whose gesture would write `unwritten`.
   window.addEventListener("keydown", onCopyKey, true);
 
@@ -444,7 +464,7 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
     setConnected(c) {
       connected = c;
       fetching = null;
-      if (c) run(syncLocal);
+      if (c) run(() => syncLocal());
     },
     onGesture() {
       const u = unwritten;
@@ -461,6 +481,8 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
     detach() {
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("paste", onPaste);
+      window.removeEventListener("copy", onCopy);
+      window.removeEventListener("cut", onCopy);
       window.removeEventListener("keydown", onCopyKey, true);
     },
   };

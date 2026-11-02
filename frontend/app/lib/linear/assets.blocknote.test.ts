@@ -12,7 +12,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 import { toLinearMarkdown, toProxyMarkdown } from "~/lib/linear/assets";
 
-GlobalRegistrator.register();
+if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 const { BlockNoteEditor } = await import("@blocknote/core");
 
 const ASSET = "https://uploads.linear.app/ab12/cd34/shot.png";

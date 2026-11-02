@@ -74,7 +74,7 @@ pub(crate) enum Queued {
     /// A JSON [`ToBrowser`] text message.
     Text(Arc<str>),
     /// A binary sound message ([`wire::browser::AudioHeader`] + one Opus packet), only for the
-    /// viewers that asked for sound.
+    /// viewer that asked for sound last ([`set_sound`]).
     Audio(Arc<[u8]>),
 }
 
@@ -282,7 +282,18 @@ impl AudioStream {
     }
 }
 
-/// Send one sound packet of `clone` to the viewers that asked for sound, while `clone` is the
+/// Viewer `id` asked for the sound (`on`) or stopped. The sound plays in one window only, the one
+/// in use: a window that asks takes it from any other, so two devices never play it at once.
+fn set_sound(viewers: &mut HashMap<u64, ViewerConn>, id: u64, on: bool) {
+    if !viewers.contains_key(&id) {
+        return;
+    }
+    for (other, v) in viewers.iter_mut() {
+        v.sound = if *other == id { on } else { v.sound && !on };
+    }
+}
+
+/// Send one sound packet of `clone` to the viewer that asked for sound, while `clone` is the
 /// selected one. Its capture runs only while it is watched, and stops a moment after the
 /// selection moves; the packets of that moment go nowhere.
 fn relay_audio(app: &App, viewers: &Viewers, clone: &str, packet: wire::socket::AudioPacket) {
@@ -1645,11 +1656,7 @@ pub(crate) fn handle_viewer_msg(app: &App, plane: &Plane, id: u64, msg: FromBrow
             encode_held(app, &plane.encoders, viewers, monitor);
             steer_bitrate(app, &plane.encoders, viewers, monitor);
         }
-        FromBrowser::Sound { on } => {
-            if let Some(v) = viewers.lock().unwrap().get_mut(&id) {
-                v.sound = on;
-            }
-        }
+        FromBrowser::Sound { on } => set_sound(&mut viewers.lock().unwrap(), id, on),
         // Back through this viewer's own queue, ahead of the video waiting there.
         FromBrowser::Echo { id: n } => send_to(viewers, id, Queued::of(&ToBrowser::Echo { id: n })),
     }
@@ -2196,6 +2203,29 @@ mod tests {
     /// A video message is the browser header, then the access unit as it came.
     /// A packet starts a new sound stream when it comes from another clone or its number went
     /// back (the clone started its capture again); else it continues the stream.
+    /// The sound goes to the window that asked for it last; a window that stops takes it from
+    /// none.
+    #[test]
+    fn the_sound_goes_to_the_window_that_asked_last() {
+        let conn = |id| ViewerConn { id, outbox: Arc::new(Outbox::new()), monitor: 0, tab: None, sound: false };
+        let mut viewers: HashMap<u64, ViewerConn> = (1..=3).map(|id| (id, conn(id))).collect();
+        let on = |v: &HashMap<u64, ViewerConn>| {
+            let mut ids: Vec<u64> = v.values().filter(|c| c.sound).map(|c| c.id).collect();
+            ids.sort();
+            ids
+        };
+        set_sound(&mut viewers, 1, true);
+        assert_eq!(on(&viewers), vec![1]);
+        set_sound(&mut viewers, 2, true);
+        assert_eq!(on(&viewers), vec![2]);
+        set_sound(&mut viewers, 1, false);
+        assert_eq!(on(&viewers), vec![2]);
+        set_sound(&mut viewers, 2, false);
+        assert_eq!(on(&viewers), Vec::<u64>::new());
+        set_sound(&mut viewers, 9, true);
+        assert_eq!(on(&viewers), Vec::<u64>::new());
+    }
+
     #[test]
     fn a_new_clone_or_a_new_capture_run_starts_a_new_sound_stream() {
         let mut a = AudioStream::default();

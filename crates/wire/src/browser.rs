@@ -191,7 +191,7 @@ pub enum FromBrowser {
     /// does not send it.
     Echo { id: u32 },
     /// Send the selected clone's sound to this window (`on`), or stop. A window gets none
-    /// until it asks.
+    /// until it asks, and one that asks takes the sound from every other window.
     Sound { on: bool },
 }
 
