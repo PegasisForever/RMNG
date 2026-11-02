@@ -158,3 +158,8 @@ export const CODE_TO_EVDEV: Readonly<Record<string, number>> = {
   F23: 193,
   F24: 194,
 };
+
+/** Evdev mouse buttons (`BTN_*`), sent as `button`. */
+export const BTN_LEFT = 0x110;
+export const BTN_RIGHT = 0x111;
+export const BTN_MIDDLE = 0x112;
