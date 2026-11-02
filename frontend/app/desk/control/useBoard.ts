@@ -280,7 +280,6 @@ export function boardStore(first: BoardFrame, server: BoardServer, report: (erro
           report(err.message);
           dispatch({ type: "refused", write: w });
         },
-
       );
     }
   };

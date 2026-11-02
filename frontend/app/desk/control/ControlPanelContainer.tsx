@@ -636,8 +636,7 @@ export function ControlPanelContainer({
                 // One drag area for both: a ticket dropped on a clone column makes a clone
                 <BoardDnd
                   lanes={board.lanes}
-                  tickets=
-{visibleTickets.map((x) => x.id)}
+                  tickets={visibleTickets.map((x) => x.id)}
                   onMoveCard={dropClone}
                   onReorderTickets={board.orderTickets}
                   onTicketToColumn={dropTicketOnColumn}
