@@ -160,6 +160,9 @@ function AccountTag({
   );
 }
 
+/** A clone's tooltip, under its id, where a double click goes to it (`onOpen`). */
+export const OPEN_HINT = "Double-click to switch to it and close the control panel";
+
 export interface CloneCardProps {
   clone: Clone;
   /** This clone's Linear ticket as Linear has it now. Absent ⇒ the card draws the title and
@@ -521,6 +524,7 @@ export function CloneCard({
         if (!(e.target as Element).closest("button, input")) onOpen?.();
       }}
       data-tip={clone.id}
+      data-tip-sub={onOpen ? OPEN_HINT : undefined}
       className={`group flex items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
         // Sub clone rows are indented under their parent; top-level rows keep the normal gutter.
         isChild ? "pl-6" : "pl-1.5"

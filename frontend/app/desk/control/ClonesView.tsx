@@ -45,7 +45,7 @@ import { CloneCard } from "~/components/CloneCard";
 import chatgptLogo from "~/assets/chatgpt.svg";
 import claudeLogo from "~/assets/claude.svg";
 import { CloneStatusDot, statusLabel } from "~/components/CloneStatus";
-import { formatCloneUsage, RenameField } from "~/components/CloneCard";
+import { formatCloneUsage, OPEN_HINT, RenameField } from "~/components/CloneCard";
 import { type AccountBinding, accountBinding } from "~/lib/accountBinding";
 import { cloneTitle } from "~/lib/cloneTitle";
 import { type BoardColumn, resolveColumns, subCloneTree, withDefaults } from "~/lib/board";
@@ -569,6 +569,8 @@ function CloneRow({
           type="button"
           onClick={onSelect}
           onDoubleClick={onOpen}
+          data-tip={clone.id}
+          data-tip-sub={OPEN_HINT}
           aria-current={selected ? "true" : undefined}
           className={`min-w-0 flex-1 py-1.5 pr-1 text-left ${PRESS} ${child ? "pl-8" : "pl-3"}`}
         >
