@@ -8,6 +8,7 @@ import type { InputMsg } from "~/lib/wire/InputMsg";
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 // What happy-dom lacks that `attachInput` looks at
 (globalThis as { ResizeObserverEntry?: unknown }).ResizeObserverEntry ??= class {};
+MouseEvent.prototype.getModifierState ??= () => false;
 const { attachInput } = await import("./input");
 
 /** The page's input on a Mac, and what it sends, as "code down" / "code up". */
@@ -16,12 +17,14 @@ function mac(pasteByEvent = false) {
   // A Mac: `attachInput` reads the platform as it attaches
   const platform = Object.getOwnPropertyDescriptor(navigator, "platform");
   Object.defineProperty(navigator, "platform", { value: "MacIntel", configurable: true });
+  const canvas = document.createElement("canvas");
   const input = attachInput({
-    canvas: document.createElement("canvas"),
+    canvas,
     overlay: document.createElement("img"),
     monitor: 0,
     send: (m: InputMsg) => {
       if (m.kind === "key_code") sent.push(`${m.keycode} ${m.pressed ? "down" : "up"}`);
+      if (m.kind === "button") sent.push(`button ${m.button} ${m.pressed ? "down" : "up"}`);
     },
     sendLocks: () => {},
     onGesture: () => {},
@@ -33,7 +36,7 @@ function mac(pasteByEvent = false) {
   input.setLayout([{ id: 0, x: 0, y: 0, width: 1920, height: 1080, primary: true }]);
   const key = (type: "keydown" | "keyup", code: string, init: KeyboardEventInit = {}) =>
     window.dispatchEvent(new KeyboardEvent(type, { code, bubbles: true, cancelable: true, ...init }));
-  return { sent, key, input };
+  return { sent, key, input, canvas };
 }
 
 // On a Mac, Command goes as Ctrl (29), and V is 47
@@ -72,4 +75,12 @@ test("a paste chord whose V waits for the paste event is a tap too", () => {
       done();
     }, 300),
   );
+});
+
+test("detach lets go of the keys and the buttons the clone holds: the control panel opened over a held key", () => {
+  const { sent, key, input, canvas } = mac();
+  key("keydown", "ShiftLeft", { shiftKey: true });
+  canvas.dispatchEvent(new MouseEvent("mousedown", { button: 0, shiftKey: true, bubbles: true, cancelable: true }));
+  input.detach();
+  expect(sent).toEqual(["42 down", "button 272 down", "42 up", "button 272 up"]);
 });

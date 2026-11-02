@@ -822,10 +822,12 @@ export function attachInput(o: InputOptions): Input {
       scrollScale = speed / 100;
     },
     detach() {
+      // The keys and the mouse are the page's now (its control panel, a dialog): what the
+      // clone holds from here is let go, or it stays down there
+      releaseAll();
       clearInterval(timer);
       resize.disconnect();
       clearTimeout(scrollEnd);
-      if (heldPaste) clearTimeout(heldPaste.timer);
       pasteSink.remove();
       ratio?.removeEventListener("change", onRatio);
       window.removeEventListener("keydown", onKeyDown);
