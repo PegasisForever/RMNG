@@ -610,7 +610,9 @@ function Account({
   selection: string | null | undefined;
   group: string | null | undefined;
 }) {
-  const badge = group ?? (selection === "auto" ? "auto" : null);
+  // A side pinned to an email keeps its pin inside a pool: no pool badge for it.
+  const pinned = !!selection && selection !== "auto" && selection !== "none" && !selection.startsWith("group:");
+  const badge = pinned ? null : (group ?? (selection === "auto" ? "auto" : null));
   return (
     <span className="flex min-w-0 flex-1 items-center gap-1">
       <img src={logo} alt="" className={`size-3 shrink-0 opacity-70 ${invert ? "dark:invert" : ""}`} />

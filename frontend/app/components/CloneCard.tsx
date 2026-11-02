@@ -79,12 +79,15 @@ export function formatCloneUsage(
 /** The selection {@link AccountTag} reads the badge off: the clone-level group
  *  binding first (it moved out of the selection string — see
  *  `ChangeAccountModalContainer`), then a legacy per-side group, then the
- *  side's own selection. Without this the badge always reads "auto". */
+ *  side's own selection. Without this the badge always reads "auto". A side pinned to
+ *  an email keeps its pin inside a pool: the group does not replace it. */
 function badgeSelection(
   group: string | null | undefined,
   selection?: string | null,
 ): string | undefined {
-  return group ? `group:${group}` : (selection ?? undefined);
+  const pinned =
+    !!selection && selection !== "auto" && selection !== "none" && !selection.startsWith("group:");
+  return group && !pinned ? `group:${group}` : (selection ?? undefined);
 }
 
 function MetricSlot({ metric, labelWidth = "w-6" }: { metric?: Metric; labelWidth?: string }) {
