@@ -6,7 +6,9 @@
 // The layout keeps each monitor's full size. The dock takes its width from the clone's screen,
 // so what the browser claims is narrower: the monitor less `cut` clone px at its right
 // (`claimedMonitors`). The window that shows the monitor works out `cut` (`dockCut`) and keeps it
-// here, so any window of the browser can claim the whole layout. No React.
+// here, so any window of the browser can claim the whole layout. `cut` does not follow the
+// window's size: the claimed resolution changes when a pin, the pixel scale or the screen's
+// pixel ratio changes, not when the window is resized. No React.
 import type { MonitorSpec } from "~/lib/wire/MonitorSpec";
 
 import { resize } from "./monitorLayout";
@@ -60,12 +62,12 @@ export const NO_DOCK: Dock = { pins: [], cut: 0 };
 
 /**
  * The clone px a dock `dockCss` CSS px wide takes from the monitor's width (even: the encoder
- * takes even sizes only). `scale` is the device px one clone px takes in the window with no
- * dock (`screenFit`'s scale for the monitor's full size: the pixel scale, or less where the
- * window is smaller than the monitor). At that scale the dock covers `dockCss × dpr / scale`
- * clone px, so the narrower monitor is shown at the same scale in the space the dock leaves:
- * one clone pixel takes as many screen pixels as before, whatever the window's shape and the
- * screen's pixel ratio.
+ * takes even sizes only): `dockCss × dpr / scale`, with `dpr` the screen's device px per CSS px
+ * and `scale` the monitor's pixel scale (device px per clone px). It is the rule Match window
+ * sizes a monitor by (the window's device px / the pixel scale), so in a window the monitor
+ * matches, the dock and the narrower monitor at its pixel scale fill it side by side. The
+ * window's size is not in it: a window resized shows the same monitor larger or smaller, as
+ * one with no dock does.
  */
 export function dockCut(dockCss: number, dpr: number, scale: number): number {
   if (dockCss <= 0 || !(scale > 0)) return 0;

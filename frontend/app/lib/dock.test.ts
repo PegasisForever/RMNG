@@ -83,24 +83,22 @@ describe("dockCut", () => {
     expect(dockCut(200, 2, 0)).toBe(0);
   });
 
-  // The clone's screen right of the dock keeps the scale the full monitor had in the window,
-  // whatever the window's shape
-  const keepsScale = (winW: number, winH: number, monW: number, monH: number, dpr: number, scale: number, dock: number) => {
-    const before = screenFit(winW, winH, monW, monH, dpr, scale);
-    const cut = dockCut(dock, dpr, before.scale);
+  // In a window the monitor matches (Match window: the window's device px / the pixel scale),
+  // the dock and the narrower monitor at its pixel scale fill the window side by side
+  const fillsMatched = (monW: number, monH: number, dpr: number, scale: number, dock: number) => {
+    const winW = (monW * scale) / dpr;
+    const winH = (monH * scale) / dpr;
+    const cut = dockCut(dock, dpr, scale);
     const after = screenFit(winW - dock, winH, monW - cut, monH, dpr, scale);
-    // The cut is rounded up to even px: at most 2 clone px less wide
-    expect(Math.abs(after.scale - before.scale)).toBeLessThan(before.scale * (2 / (monW - cut)) + 1e-9);
-    expect(after.width).toBeLessThanOrEqual(winW - dock + 1e-9);
+    expect(after.scale).toBe(scale);
+    // The cut is rounded up to even clone px: at most 2 clone px of black beside the screen
+    expect(winW - dock - after.width).toBeGreaterThanOrEqual(-1e-9);
+    expect(winW - dock - after.width).toBeLessThan((2 * scale) / dpr + 1e-9);
   };
-  test("the window is the monitor's size", () => keepsScale(1920, 1080, 1920, 1080, 1, 1, 304));
-  test("a 2× screen, pixel scale 2", () => keepsScale(1920, 1080, 1920, 1080, 2, 2, 304));
-  test("the window is narrower than the monitor (the monitor fits by its width)", () =>
-    keepsScale(1500, 1080, 1920, 1080, 1, 1, 304));
-  test("the window is shorter than the monitor (the monitor fits by its height)", () =>
-    keepsScale(1920, 800, 1920, 1080, 1, 1, 304));
-  test("the window is larger than the monitor (black round it)", () => keepsScale(2560, 1440, 1920, 1080, 1, 1, 304));
-  test("a 1.25× screen, pixel scale 1.5, a window of another shape", () => keepsScale(1700, 1000, 2400, 1300, 1.25, 1.5, 600));
+  test("a matched window, 1× screen, pixel scale 1", () => fillsMatched(1920, 1080, 1, 1, 272));
+  test("a matched window, 2× screen, pixel scale 2", () => fillsMatched(1920, 1080, 2, 2, 568));
+  test("a matched window, 2× screen, pixel scale 1", () => fillsMatched(3840, 2160, 2, 1, 272));
+  test("a matched window, 1.25× screen, pixel scale 1.5", () => fillsMatched(2400, 1300, 1.25, 1.5, 600));
 });
 
 describe("claimedMonitors", () => {

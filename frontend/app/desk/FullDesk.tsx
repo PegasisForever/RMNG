@@ -45,8 +45,10 @@
 // Wide, the control panel's columns have pins: a pinned column stays in this window's dock, at
 // its left edge, beside the clone's screen (`~/lib/dock.ts`). Each monitor window has its own
 // pins. The layout keeps the monitor's full size; the browser claims it less the clone px the
-// dock covers at the window's scale (`dockCut`), so the clone's screen keeps its scale in the
-// space right of the dock. While the mouse is over the dock, the mouse and the keys are its.
+// dock covers at the monitor's pixel scale (`dockCut`), so in a window the monitor matches the
+// clone's screen fills the space right of the dock. The claim changes when a pin, the pixel
+// scale or the screen's pixel ratio changes, never when the window is resized. While the mouse
+// is over the dock, the mouse and the keys are its.
 //
 // The clone's screen shows at the pixel scale in the middle (smaller only where it does not
 // fit), not stretched. This browser's layout is in force while it is in use: a window opens,
@@ -116,7 +118,7 @@ const UPLOAD_NOTE_MS = 5000;
 const CONTROL_PANEL_WINDOW = "rmng-control-panel";
 const CONTROL_PANEL_WINDOW_W = 560;
 const CONTROL_PANEL_WINDOW_H = 900;
-/** The dock's width settles this long (a window being resized) before it is claimed, ms. */
+/** The dock's width settles this long (a window moving between screens) before it is claimed, ms. */
 const DOCK_SETTLE_MS = 300;
 
 type Props = {
@@ -216,7 +218,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   );
   /** The clone's screen's area: the display, or the part above the docked keyboard. */
   const areaH = dockedNow ? height - keysH : height;
-  const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+  const dpr = useDevicePixelRatio();
 
   const monitorRef = useRef(monitor);
   monitorRef.current = monitor;
@@ -269,9 +271,10 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   const mouseInput = mouse && !controlPanel && !layoutOpen && !fullHintShown && !(peek && overGroup) && !overDock;
   const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, page: { chord: toggleControlPanel, escape } });
 
-  // The pinned columns: those of columns there are, in the board's order; wide only. The dock
-  // holds as many as leave the clone's screen room, and the screen is in the space right of it.
-  const pins = wide ? orderPins(dock.pins, withDefaults(r.live.state.boardColumns ?? []).map((c) => c.id)) : [];
+  // The pinned columns: those of columns there are, in the board's order. The dock holds as
+  // many as leave the clone's screen room, and the screen is in the space right of it. The
+  // claim takes off all of them, whatever the window's size (see `cut`).
+  const pins = orderPins(dock.pins, withDefaults(r.live.state.boardColumns ?? []).map((c) => c.id));
   const inDock = fitPins(pins, width, safe.left);
   const dockBox = inDock.length ? safe.left + dockWidth(inDock) : 0;
   const dockBoxRef = useRef(dockBox);
@@ -456,11 +459,10 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     },
   );
 
-  // The clone px the dock covers, taken from the monitor in what this browser claims: at the
-  // scale the monitor's full size has in this window, so the narrower one keeps that scale
-  // right of the dock (`dockCut`). The window keeps it with its pins, for every window's claim.
-  const fullScale = mine ? screenFit(width, height, mine.width, mine.height, dpr, scale).scale : 0;
-  const cut = dockBox && mine ? dockCut(dockBox, dpr, fullScale) : 0;
+  // The clone px the dock covers, taken from the monitor in what this browser claims: all the
+  // pinned columns at the monitor's pixel scale (`dockCut`), not what the window's size shows of
+  // them, nor its insets. The window keeps it with its pins, for every window's claim.
+  const cut = pins.length && mine ? dockCut(dockWidth(pins), dpr, scale) : 0;
   const layoutClient = r.live.state.layout?.client;
   useEffect(() => {
     const t = setTimeout(() => {
@@ -708,20 +710,16 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
             onLayout={() => setLayoutOpen(true)}
             notify={monitor === 0}
             alertsAt={monitor === 0 ? alertsAt : null}
-            dock={
-              wide
-                ? {
-                    pins,
-                    docked: inDock,
-                    onToggle: togglePinned,
-                    at: dockAt,
-                    onShowPanel: (t) => {
-                      if (t) setTab(t);
-                      setControlPanel(true);
-                    },
-                  }
-                : undefined
-            }
+            dock={{
+              pins,
+              docked: inDock,
+              onToggle: togglePinned,
+              at: dockAt,
+              onShowPanel: (t) => {
+                if (t) setTab(t);
+                setControlPanel(true);
+              },
+            }}
           />
         ),
       }}
@@ -778,4 +776,23 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
       onPointerDownCapture={onDownCapture}
     />
   );
+}
+
+/** The screen's device px per CSS px, kept up to date: a window moved to a screen of another
+ *  density, or the browser's zoom, changes it with no CSS size changed. */
+function useDevicePixelRatio(): number {
+  const read = () => (typeof window === "undefined" ? 1 : window.devicePixelRatio || 1);
+  const [dpr, setDpr] = useState(read);
+  useEffect(() => {
+    let q: MediaQueryList | null = null;
+    const watch = () => {
+      q?.removeEventListener("change", watch);
+      setDpr(read());
+      q = matchMedia(`(resolution: ${read()}dppx)`);
+      q.addEventListener("change", watch);
+    };
+    watch();
+    return () => q?.removeEventListener("change", watch);
+  }, []);
+  return dpr;
 }

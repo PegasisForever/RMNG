@@ -137,7 +137,8 @@ export function ControlPanelContainer({
   /** Over the clone's screen, in the window that notifies: the screen's box for the alerts of
    *  clones that stopped working (`../CloneAlerts.tsx`); null until it is there. */
   alertsAt?: HTMLElement | null;
-  /** Wide, over the clone's screen: this monitor window's pinned columns. `pins`: the pins of
+  /** Over the clone's screen: this monitor window's pinned columns (pinned from the wide
+   *  columns; the dock stays where the control panel is narrow). `pins`: the pins of
    *  columns there are, in the board's order (`orderPins`); `docked`: those the dock has room
    *  for (`fitPins`); `onToggle`: a press on a column's
    *  pin; `at`: the dock's box at the window's left edge (null until it is there, or while no
@@ -173,11 +174,11 @@ export function ControlPanelContainer({
   const [dialog, setDialog] = useState<{ on: PanelTab; d: Dialog } | null>(null);
   const wide = width >= WIDE_MIN;
   /** Open a dialog; from a pinned column while the control panel is closed, the control panel
-   *  opens and the dialog is over it. */
+   *  opens (narrow, on Clones) and the dialog is over it. */
   const open = (d: Dialog) => {
     if (tab) return setDialog({ on: tab, d });
-    if (!dock || !wide) return;
-    dock.onShowPanel();
+    if (!dock) return;
+    dock.onShowPanel("clones");
     setDialog({ on: "clones", d });
   };
   const closeDialog = () => setDialog(null);
@@ -500,8 +501,8 @@ export function ControlPanelContainer({
             detail={openTicket ? ticketPanel(openTicket, false) : null}
             onOpen={(ticket) => {
               setOpenTicketId(ticket.id);
-              // The open ticket shows in the side panels, with the control panel
-              if (docked && !tab) dock?.onShowPanel();
+              // The open ticket shows with the control panel: in the side panels, or (narrow) its tab
+              if (docked && !tab) dock?.onShowPanel("tickets");
             }}
             onBack={() => setOpenTicketId(null)}
             onNewTicket={() => open({ kind: "ticket" })}
@@ -566,11 +567,12 @@ export function ControlPanelContainer({
     ? createPortal(<CloneAlerts alerts={alerts.alerts} onOpen={alerts.open} onClose={alerts.close} />, alertsAt)
     : null;
 
-  // The pins (a press on one pins or unpins its column), and the pinned columns in the dock
-  const pins: ColumnPins = dock && wide ? { pinned: new Set(dock.pins), onToggle: dock.onToggle } : null;
+  // The pins (a press on one pins or unpins its column), and the pinned columns in the dock. The
+  // dock stays where the control panel is narrow too: the pins are the window's, not its width's
+  const pins: ColumnPins = dock ? { pinned: new Set(dock.pins), onToggle: dock.onToggle } : null;
   const dockColumns = (dock?.docked ?? []).filter((p) => p.startsWith(columnPin(""))).map((p) => p.slice(columnPin("").length));
   const dockView =
-    dock?.at && wide && dock.docked.length
+    dock?.at && dock.docked.length
       ? createPortal(
           // No clone's screen under the dock: its menus and dialogs solid, as the control panel's
           // window has them
@@ -688,6 +690,7 @@ export function ControlPanelContainer({
           ))}
       </NarrowLayout>
       {alertsView}
+      {dockView}
     </ModalPlacementProvider>
   );
 }
