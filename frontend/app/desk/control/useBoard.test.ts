@@ -98,6 +98,21 @@ test("a drop out of an archive column restores the clone; a move between plain c
   expect(plain.sent.map((w) => w.to)).toEqual(["columns"]);
 });
 
+test("a drop in the column the card is already in only orders it: no archive, no restore", () => {
+  // Archived from its menu, its card still in a plain column: a drag down that column
+  const archived = [clone("a", true), clone("b")];
+  const plain = run([{ type: "moveClone", clones: archived, cloneId: "a", columnId: "todo", at: 1 }], boardFrom(frame({ clones: archived })));
+  expect(ids(shown(plain.s.columns), "todo")).toEqual(["b", "a"]);
+  expect(plain.sent.map((w) => w.to)).toEqual(["columns"]);
+
+  // Restored from its menu, its card still in an archive column: a drag up that column
+  const live = [clone("a"), clone("b"), clone("c")];
+  const cols = [{ ...COLUMNS[0], cloneIds: ["a"] }, { ...COLUMNS[1], cloneIds: ["b", "c"] }];
+  const out = run([{ type: "moveClone", clones: live, cloneId: "c", columnId: "done", at: 0 }], boardFrom(frame({ clones: live, columns: cols })));
+  expect(ids(shown(out.s.columns), "done")).toEqual(["c", "b"]);
+  expect(out.sent.map((w) => w.to)).toEqual(["columns"]);
+});
+
 test("a clone being made is filed into its column in the frame that first has it", () => {
   const filing = run([{ type: "file", cloneId: "n", columnId: "todo", clones: CLONES }]);
   // Not made yet: nothing moves

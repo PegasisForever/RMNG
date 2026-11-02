@@ -9,7 +9,8 @@
 //      would ever do it: without this the control panel would show a layout the server does
 //      not have until a reload.
 //   4. A drop into an archive column archives the clone, a drop out of one restores it; if
-//      that call is refused, the columns go back to what they were.
+//      that call is refused, the columns go back to what they were. A drop in the column the
+//      card is already in only orders it.
 //   5. A clone being made into a column is filed there in the frame that first has it.
 //   6. A ticket the column draws for the first time takes its place in the order
 //      (`adoptTickets`). A refused adoption is not sent again as it is, or rules 3 and 6
@@ -202,6 +203,10 @@ export function stepBoard(s: BoardState, e: BoardEvent): BoardStep {
       const resolved = resolveColumns(columns, e.clones);
       const at = e.at ?? resolved.find((c) => c.id === e.columnId)?.cloneIds.length ?? 0;
       const step = setColumns(s, moveCard(resolved, e.cloneId, e.columnId, at));
+      // A new place in the same column is only an order: it archives and restores nothing, so
+      // a clone archived (or restored) from its menu keeps that state where its card is
+      const from = resolved.find((c) => c.cloneIds.includes(e.cloneId))?.id;
+      if (from === e.columnId) return step;
       const clone = e.clones.find((c) => c.id === e.cloneId);
       const archived = archivesOnDrop(columns, e.columnId);
       if (!clone || archived === (clone.archived === true)) return step;
