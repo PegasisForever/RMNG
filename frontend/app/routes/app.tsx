@@ -9,7 +9,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
+import { ConfirmLayer } from "~/components/ConfirmLayer";
 import { SetupWizardContainer } from "~/components/SetupWizardContainer";
+import { TooltipLayer } from "~/components/TooltipLayer";
 import { getConfig } from "~/lib/api";
 import { shellWindow } from "~/lib/host";
 import type { AppConfigRedacted } from "~/lib/wire/AppConfigRedacted";
@@ -121,6 +123,7 @@ export default function App() {
     return (
       <div className="fixed inset-0 select-text overflow-auto">
         <SetupWizardContainer initialConfig={setup.config} onDone={readSetup} />
+        <TooltipLayer />
       </div>
     );
   }
@@ -148,6 +151,9 @@ export default function App() {
           onMonitor={setMonitor}
         />
       ) : null}
+      {/* The tooltips and the questions of every part of the page */}
+      <TooltipLayer />
+      <ConfirmLayer />
     </div>
   );
 }

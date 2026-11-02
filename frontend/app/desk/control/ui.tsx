@@ -88,8 +88,17 @@ export const DIVIDE = "divide-black/10 dark:divide-white/10";
 export const PRESS = "hover:bg-black/5 active:bg-black/10 dark:hover:bg-white/5 dark:active:bg-white/10";
 /** A box on the tab (a card, a field's ground, a hollow). */
 export const BOX = "bg-white/60 dark:bg-white/[0.06]";
-/** A button: a small box of its own. */
-const BUTTON = `bg-white/60 border border-black/10 dark:bg-white/10 dark:border-white/10 ${TEXT} active:bg-black/10 dark:active:bg-white/20`;
+/** A button (`../GLASS.md`, Flat content), with a press for a finger. Size and text size are
+ *  the caller's. */
+export const BUTTON = `${R_PIECE} border border-black/15 bg-white/50 hover:bg-white/80 active:bg-white/90 dark:border-white/15 dark:bg-white/5 dark:hover:bg-white/10 dark:active:bg-white/15 ${TEXT}`;
+/** The button that ends the task (Done, Create, Send): the one green one. */
+export const DONE_BUTTON = `${R_PIECE} bg-emerald-600 text-white hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-40`;
+/** A small icon button. */
+export const ICON_BUTTON = "rounded-md text-black/55 hover:bg-black/5 active:bg-black/10 dark:text-white/60 dark:hover:bg-white/10 dark:active:bg-white/15";
+/** A danger action (remove): red text, never a red surface. */
+export const DANGER_TEXT = "text-rose-600 dark:text-rose-400";
+/** An error said in a line of text (not a band, `ErrorLine`). */
+export const ERROR_TEXT = "text-rose-700 dark:text-rose-300";
 /** A field (a text box) on the panel, as `../GLASS.md`'s flat content has it. */
 export const FIELD =
   "rounded-[10px] border border-black/10 bg-white/60 text-neutral-900 outline-none focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30";

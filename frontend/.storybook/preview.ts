@@ -3,6 +3,9 @@ import type { Preview } from "@storybook/react-vite";
 // The app's global stylesheet — pulls in Tailwind + the base font/colors so stories
 // render with the same look as the real app.
 import "../app/app.css";
+import { Fragment, createElement } from "react";
+
+import { TooltipLayer } from "../app/components/TooltipLayer";
 
 const preview: Preview = {
   parameters: {
@@ -54,7 +57,8 @@ const preview: Preview = {
         // The solid ground of the control panel's own window (neutral-950 / neutral-100)
         document.body.style.background = dark ? "#0a0a0a" : "#f5f5f5";
       }
-      return Story();
+      // The app's tooltips (`data-tip`), as the page has them
+      return createElement(Fragment, null, Story(), createElement(TooltipLayer));
     },
     // Locale is the fourth seam, and a prop rather than a context read — so it is injected by
     // overriding the arg rather than by wrapping the story in a provider. The toolbar is the
