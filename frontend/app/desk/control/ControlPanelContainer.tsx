@@ -30,9 +30,6 @@ import {
   archiveClone,
   deleteClone,
   getConfig,
-  putBoardColumns,
-  putMutedClones,
-  putTicketOrder,
   rebaseClone,
   renameClone,
   refreshClaudeUsage,
@@ -42,16 +39,6 @@ import {
   swapCodexAccount,
   unarchiveClone,
 } from "~/lib/api";
-import {
-  archivesOnDrop,
-  type BoardColumn,
-  columnIdOf,
-  moveCard,
-  newColumnId,
-  removeColumn,
-  resolveColumns,
-  withDefaults,
-} from "~/lib/board";
 import { copyText } from "~/lib/clipboard";
 import { issueSetLabel, issueSetState, issueSetStateId, issueUpdate, keysForTeam } from "~/lib/linear/mutations";
 import type { TicketLabel, TicketWorkflowState } from "~/lib/linear/types";
@@ -60,11 +47,9 @@ import { useTickets } from "~/lib/linear/useTickets";
 import { useWorkspaces } from "~/lib/linear/useWorkspaces";
 import { workspaceHomeUrl } from "~/lib/linear/workspaces";
 import { hostWindow } from "~/lib/host";
-import { toggleMuted } from "~/lib/mute";
 import { readSelection, sameSelection, type Selection, withSelection } from "~/lib/selection";
 import { BASTION_PORT, buildSshCommand } from "~/lib/ssh";
 import {
-  adoptTickets,
   cloneForTicket,
   cloneTickets,
   findTicket,
@@ -85,12 +70,13 @@ import type { SoundReport } from "~/viewer/protocol";
 import { type PanelTab, ROW_STATS_MIN, type ServerUsage, TABS as TAB_INFO } from "../ToolRow";
 import { ClonesView } from "./ClonesView";
 import { NotesView, type NotesPane } from "./NotesView";
-import { type Move, moved } from "./order";
+import { moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
 import { COLUMN_GLASS, ErrorLine, TEXT_3 } from "./ui";
 import { BoardDnd } from "./BoardDnd";
 import { NarrowLayout } from "./NarrowLayout";
+import { useBoard } from "./useBoard";
 import { UsageView } from "./UsageView";
 import { WIDE_MIN, WideLayout } from "./WideLayout";
 
@@ -193,26 +179,16 @@ export function ControlPanelContainer({
   const clonesById = new Map(state.hosts.map((h) => [h.id, h]));
   const accounts = state.claudeAccounts ?? [];
 
-  // ---- the board's columns, the ticket order and the mutes: shown now, then stored ----
-  const serverColumns = JSON.stringify(state.boardColumns ?? []);
-  const [columns, setColumns] = useState<BoardColumn[]>(() => withDefaults(state.boardColumns ?? []));
-  useEffect(() => setColumns(withDefaults(JSON.parse(serverColumns) as BoardColumn[])), [serverColumns]);
-  const applyColumns = (next: BoardColumn[]) => {
-    setColumns(next);
-    run(putBoardColumns(next));
-  };
-
-  const serverOrder = JSON.stringify(state.ticketOrder ?? []);
-  const [ticketOrder, setTicketOrder] = useState<string[]>(() => state.ticketOrder ?? []);
-  useEffect(() => setTicketOrder(JSON.parse(serverOrder) as string[]), [serverOrder]);
-  const applyTicketOrder = (next: string[]) => {
-    setTicketOrder(next);
-    run(putTicketOrder(next));
-  };
-
-  const serverMuted = JSON.stringify(state.mutedClones ?? []);
-  const [mutedClones, setMutedClones] = useState<string[]>(() => state.mutedClones ?? []);
-  useEffect(() => setMutedClones(JSON.parse(serverMuted) as string[]), [serverMuted]);
+  // ---- the board's columns, the ticket order and the mutes (`./useBoard.ts`) ----
+  const board = useBoard(
+    {
+      clones: state.hosts,
+      columns: state.boardColumns ?? [],
+      ticketOrder: state.ticketOrder ?? [],
+      muted: state.mutedClones ?? [],
+    },
+    { onError: setError },
+  );
 
   // ---- Linear ----
   const {
@@ -226,12 +202,9 @@ export function ControlPanelContainer({
     state.hosts.flatMap((h) => (h.linearTicket ? [h.linearTicket] : [])),
   );
   const workspaces = useWorkspaces(presets);
-  const visibleTickets = orderTickets(openTickets(linearTickets, state.hosts), ticketOrder);
+  const visibleTickets = orderTickets(openTickets(linearTickets, state.hosts), board.ticketOrder);
   // Each ticket keeps the place it was first drawn in
-  useEffect(() => {
-    const adopted = adoptTickets(visibleTickets, ticketOrder);
-    if (adopted) applyTicketOrder(adopted);
-  });
+  useEffect(() => board.adoptTickets(visibleTickets));
   const liveCloneTickets = cloneTickets(state.hosts, linearTickets);
 
   // What is open, held in the page's address (`?clone=`, `?ticket=`;
@@ -335,7 +308,7 @@ export function ControlPanelContainer({
   // A clone that stops working raises a notification; a press on it shows that clone
   useCloneNotifications(
     state.hosts,
-    mutedClones,
+    board.mutedClones,
     (id) => {
       hostWindow().focus();
       const clone = clonesById.get(id);
@@ -396,28 +369,6 @@ export function ControlPanelContainer({
   };
 
   // ---- clones ----
-  /** Into a column; into an archive column archives it and out of one restores it, as the
-   *  board's drop does. A refused call puts the card back. */
-  const moveToColumn = (clone: Clone, columnId: string, at?: number) => {
-    const before = columns;
-    const resolved = resolveColumns(columns, state.hosts);
-    const index = at ?? resolved.find((c) => c.id === columnId)?.cloneIds.length ?? 0;
-    applyColumns(moveCard(resolved, clone.id, columnId, index));
-    const archive = archivesOnDrop(columns, columnId);
-    if (archive === (clone.archived === true)) return;
-    (archive ? archiveClone(clone.id) : unarchiveClone(clone.id))
-      .then(() => setError(null))
-      .catch((e: Error) => {
-        setError(e.message);
-        applyColumns(before);
-      });
-  };
-  const moveInColumn = (clone: Clone, columnId: string, move: Move) => {
-    const resolved = resolveColumns(columns, state.hosts);
-    const ids = resolved.find((c) => c.id === columnId)?.cloneIds ?? [];
-    const next = moved(ids, clone.id, move);
-    applyColumns(moveCard(resolved, clone.id, columnId, next.indexOf(clone.id)));
-  };
   const deleteOne = (clone: Clone) => {
     const subs = state.hosts.filter((h) => h.parent === clone.id).length;
     const also = subs > 0 ? ` and its ${subs} sub clone${subs === 1 ? "" : "s"}` : "";
@@ -429,35 +380,15 @@ export function ControlPanelContainer({
     });
   };
 
-  // A clone made into a column is filed there once it exists; the one just made goes on the
-  // screen when its dialog closes
-  const [pendingColumn, setPendingColumn] = useState<{ columnId: string; target: string } | null>(null);
+  // The clone just made goes on the screen when its dialog closes
   const newClone = useRef<string | null>(null);
-  useEffect(() => {
-    if (!pendingColumn) return;
-    const { columnId, target } = pendingColumn;
-    if (!state.hosts.some((h) => h.id === target)) return;
-    setPendingColumn(null);
-    if (columnIdOf(columns, target) !== columnId) applyColumns(moveCard(columns, target, columnId, 0));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.hosts, pendingColumn]);
 
   // ---- settings ----
-  const columnCounts = Object.fromEntries(resolveColumns(columns, state.hosts).map((c) => [c.id, c.cloneIds.length]));
   const settings = useSettingsPanel({
     accounts,
     operations: state.operations,
     onImportAccount: (provider, group) => open({ kind: "import", replacing: null, provider, group }),
     forkSources: state.hosts.filter((h) => h.managed).map((h) => h.id),
-    boardColumns: columns,
-    boardColumnCounts: columnCounts,
-    onAddBoardColumn: (title) =>
-      applyColumns([...columns, { id: newColumnId(title, columns), title, cloneIds: [], archive: false }]),
-    onRenameBoardColumn: (id, title) => applyColumns(columns.map((c) => (c.id === id ? { ...c, title } : c))),
-    onSetBoardColumnArchive: (id, archive) => applyColumns(columns.map((c) => (c.id === id ? { ...c, archive } : c))),
-    onDeleteBoardColumn: (id) => applyColumns(removeColumn(columns, id)),
-    onReorderBoardColumns: (ids) =>
-      applyColumns(ids.flatMap((id) => columns.filter((c) => c.id === id))),
   });
 
   const refreshUsage = () => Promise.all([refreshClaudeUsage(), refreshCodexUsage()]).then(() => undefined);
@@ -479,7 +410,7 @@ export function ControlPanelContainer({
             }}
             onStart={(fork, req) =>
               startClone(fork, req).then((op) => {
-                if (d.columnId) setPendingColumn({ columnId: d.columnId, target: op.target });
+                if (d.columnId) board.fileNewClone(op.target, d.columnId);
                 newClone.current = op.target;
                 return op;
               })
@@ -552,10 +483,8 @@ export function ControlPanelContainer({
     }
   };
   // ---- drag and drop (`./BoardDnd.tsx`) ----
-  const lanes = resolveColumns(columns, state.hosts).map((c) => ({ id: c.id, cloneIds: c.cloneIds }));
   const dropClone = (cloneId: string, columnId: string, index: number) => {
-    const clone = clonesById.get(cloneId);
-    if (clone) moveToColumn(clone, columnId, index);
+    if (clonesById.has(cloneId)) board.moveClone(cloneId, columnId, index);
   };
   const dropTicketOnColumn = (ticketId: string, columnId: string) => {
     const t = findTicket(ticketId, visibleTickets);
@@ -564,11 +493,11 @@ export function ControlPanelContainer({
   /** A tab with what drags in it: the clones between their columns, the tickets in order. */
   const withDnd = (t: PanelTab, node: ReactNode): ReactNode =>
     t === "clones" ? (
-      <BoardDnd lanes={lanes} onMoveCard={dropClone}>
+      <BoardDnd lanes={board.lanes} onMoveCard={dropClone}>
         {node}
       </BoardDnd>
     ) : t === "tickets" ? (
-      <BoardDnd tickets={visibleTickets.map((x) => x.id)} onReorderTickets={applyTicketOrder}>
+      <BoardDnd tickets={visibleTickets.map((x) => x.id)} onReorderTickets={board.orderTickets}>
         {node}
       </BoardDnd>
     ) : (
@@ -632,7 +561,7 @@ export function ControlPanelContainer({
             onCreateClone={(ticket) => open({ kind: "clone", ticketUrl: ticket.url, columnId: null })}
             onOpenInLinear={(url) => window.open(url, "_blank", "noopener,noreferrer")}
             onCopy={copyText}
-            onMove={(ticket, move) => applyTicketOrder(moved(visibleTickets.map((x) => x.id), ticket.id, move))}
+            onMove={(ticket, move) => board.orderTickets(moved(visibleTickets.map((x) => x.id), ticket.id, move))}
             onMoveToBacklog={(ticket) => moveTicket(ticket, "backlog")}
             onCancel={(ticket) => moveTicket(ticket, "canceled")}
           />
@@ -641,13 +570,13 @@ export function ControlPanelContainer({
         return (
           <ClonesView
             columnsLayout={wide}
-            columns={columns}
+            columns={board.columns}
             clones={state.hosts}
             cloneTickets={liveCloneTickets}
             stats={stats}
             cloneTokens={state.cloneTokens ?? {}}
             operations={state.operations}
-            mutedClones={mutedClones}
+            mutedClones={board.mutedClones}
             selectedId={state.selected ?? null}
             notesId={notesId}
             onSelect={selectClone}
@@ -658,19 +587,15 @@ export function ControlPanelContainer({
               if (!clone.archived) onTab(null);
             }}
             onNewClone={(columnId) => open({ kind: "clone", ticketUrl: "", columnId })}
-            onMoveToColumn={(clone, columnId) => moveToColumn(clone, columnId)}
-            onRenameColumn={(id, title) => applyColumns(columns.map((c) => (c.id === id ? { ...c, title } : c)))}
-            onMove={moveInColumn}
+            onMoveToColumn={(clone, columnId) => board.moveClone(clone.id, columnId)}
+            onRenameColumn={board.renameColumn}
+            onMove={(clone, columnId, move) => board.moveInColumn(clone.id, columnId, move)}
             onOpenInLinear={(url) => window.open(url, "_blank", "noopener,noreferrer")}
             onChangeAccount={(clone) => open({ kind: "account", clone })}
             onRebase={(clone) => open({ kind: "rebase", clone })}
             onPortForward={(clone) => open({ kind: "forward", clone })}
             onCopySsh={(clone) => copyText(buildSshCommand(sshHost, BASTION_PORT, clone.id))}
-            onToggleMute={(clone) => {
-              const next = toggleMuted(mutedClones, clone.id);
-              setMutedClones(next);
-              run(putMutedClones(next));
-            }}
+            onToggleMute={(clone) => board.toggleMute(clone.id)}
             onArchive={(clone) => run(archiveClone(clone.id))}
             onUnarchive={(clone) => run(unarchiveClone(clone.id))}
             onDelete={deleteOne}
@@ -682,7 +607,7 @@ export function ControlPanelContainer({
         return notesView("chat");
       case "settings":
         // The test page in the browser's own window: the app's frame has no safe area of its own
-        return <SettingsView {...settings} onScreenArea={() => hostWindow().location.assign("/screen-area")} />;
+        return <SettingsView {...settings} {...board.settings} onScreenArea={() => hostWindow().location.assign("/screen-area")} />;
     }
   };
 
@@ -710,10 +635,11 @@ export function ControlPanelContainer({
               board={
                 // One drag area for both: a ticket dropped on a clone column makes a clone
                 <BoardDnd
-                  lanes={lanes}
-                  tickets={visibleTickets.map((x) => x.id)}
+                  lanes={board.lanes}
+                  tickets=
+{visibleTickets.map((x) => x.id)}
                   onMoveCard={dropClone}
-                  onReorderTickets={applyTicketOrder}
+                  onReorderTickets={board.orderTickets}
                   onTicketToColumn={dropTicketOnColumn}
                 >
                   {tabContent("tickets", true)}
