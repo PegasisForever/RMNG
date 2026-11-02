@@ -5,11 +5,15 @@
 // The rules, in one place:
 //   1. A change shows at once (the local copy) and goes to the server in the same step.
 //   2. A frame whose copy of a list is new replaces the local copy of that list.
-//   3. A drop into an archive column archives the clone, a drop out of one restores it; if
+//   3. A refused write puts the server's copy back. The server keeps its copy, so no frame
+//      would ever do it: without this the control panel would show a layout the server does
+//      not have until a reload.
+//   4. A drop into an archive column archives the clone, a drop out of one restores it; if
 //      that call is refused, the columns go back to what they were.
-//   4. A clone being made into a column is filed there in the frame that first has it.
-//   5. A ticket the column draws for the first time takes its place in the order
-//      (`adoptTickets`).
+//   5. A clone being made into a column is filed there in the frame that first has it.
+//   6. A ticket the column draws for the first time takes its place in the order
+//      (`adoptTickets`). A refused adoption is not sent again as it is, or rules 3 and 6
+//      would send it on every render.
 //
 // The rules are a pure step function (`stepBoard`): an event in, the next state and the
 // writes to send out. `boardStore` sends them through the server calls it is given, so a
@@ -69,6 +73,8 @@ export interface BoardState {
   muted: Synced<string[]>;
   /** A clone being made, and the column it goes into once a frame has it. */
   filing: { cloneId: string; columnId: string } | null;
+  /** The last adoption the server refused, as JSON, until a frame brings a new order. */
+  refusedAdoption: string | null;
 }
 
 /** A frame of the server's state, the parts the board reads. */
@@ -82,7 +88,8 @@ export interface BoardFrame {
 /** One call to the server. */
 export type BoardWrite =
   | { to: "columns"; value: BoardColumn[] }
-  | { to: "ticketOrder"; value: string[] }
+  /** `adopted`: written by `adoptTickets`, not by the operator. */
+  | { to: "ticketOrder"; value: string[]; adopted?: boolean }
   | { to: "muted"; value: string[] }
   /** Archive (or restore) a clone that was dropped into (or out of) an archive column;
    *  `before`: the columns before the drop. */
@@ -90,6 +97,8 @@ export type BoardWrite =
 
 export type BoardEvent =
   | ({ type: "frame" } & BoardFrame)
+  /** The server refused `write`. */
+  | { type: "refused"; write: BoardWrite }
   | { type: "moveClone"; clones: Clone[]; cloneId: string; columnId: string; at?: number }
   | { type: "moveInColumn"; clones: Clone[]; cloneId: string; columnId: string; move: Move }
   | { type: "addColumn"; title: string }
@@ -119,6 +128,7 @@ export function boardFrom(frame: BoardFrame): BoardState {
     ticketOrder: synced(frame.ticketOrder),
     muted: synced(frame.muted),
     filing: null,
+    refusedAdoption: null,
   };
 }
 
@@ -132,6 +142,10 @@ function echo<T>(s: Synced<T>, raw: T, value: T = raw): Synced<T> {
 }
 
 const local = <T>(s: Synced<T>, value: T): Synced<T> => ({ ...s, local: value });
+
+/** The server's copy back, if `value` is still what the list shows. A later change is left
+ *  alone: its own write settles it. */
+const refused = <T>(s: Synced<T>, value: T): Synced<T> => (s.local === value ? { ...s, local: null } : s);
 
 /** The columns changed by the operator: shown now, sent. */
 function setColumns(s: BoardState, value: BoardColumn[]): BoardStep {
@@ -154,14 +168,35 @@ export function stepBoard(s: BoardState, e: BoardEvent): BoardStep {
   const columns = shown(s.columns);
   switch (e.type) {
     case "frame": {
+      const ticketOrder = echo(s.ticketOrder, e.ticketOrder);
       const next = {
         ...s,
         columns: echo(s.columns, e.columns, withDefaults(e.columns)),
-        ticketOrder: echo(s.ticketOrder, e.ticketOrder),
+        ticketOrder,
         muted: echo(s.muted, e.muted),
+        refusedAdoption: ticketOrder === s.ticketOrder ? s.refusedAdoption : null,
       };
       const changed = next.columns !== s.columns || next.ticketOrder !== s.ticketOrder || next.muted !== s.muted;
       return fileIfThere(changed ? next : s, e.clones);
+    }
+    case "refused": {
+      const w = e.write;
+      switch (w.to) {
+        case "columns":
+          return nothing({ ...s, columns: refused(s.columns, w.value) });
+        case "ticketOrder":
+          return nothing({
+            ...s,
+            ticketOrder: refused(s.ticketOrder, w.value),
+            refusedAdoption: w.adopted ? JSON.stringify(w.value) : s.refusedAdoption,
+          });
+        case "muted":
+          return nothing({ ...s, muted: refused(s.muted, w.value) });
+        case "archive":
+          // The columns write went through, so the server has the drop: the old columns go
+          // back to it as a write of their own
+          return setColumns(s, w.before);
+      }
     }
     case "moveClone": {
       const resolved = resolveColumns(columns, e.clones);
@@ -193,8 +228,11 @@ export function stepBoard(s: BoardState, e: BoardEvent): BoardStep {
     case "adoptTickets": {
       // The same state back when there is nothing to adopt: the column asks on every render
       const adopted = adoptTickets(e.drawn, shown(s.ticketOrder));
-      if (!adopted) return nothing(s);
-      return { state: { ...s, ticketOrder: local(s.ticketOrder, adopted) }, send: [{ to: "ticketOrder", value: adopted }] };
+      if (!adopted || JSON.stringify(adopted) === s.refusedAdoption) return nothing(s);
+      return {
+        state: { ...s, ticketOrder: local(s.ticketOrder, adopted) },
+        send: [{ to: "ticketOrder", value: adopted, adopted: true }],
+      };
     }
     case "toggleMute": {
       const value = toggleMuted(shown(s.muted), e.cloneId);
@@ -206,7 +244,8 @@ export function stepBoard(s: BoardState, e: BoardEvent): BoardStep {
 }
 
 /** The board's state, the steps that change it and the calls they make. Each settled call
- *  reports to `report`: null when it went through, the server's words when it was refused. */
+ *  reports to `report`: null when it went through, the server's words when it was refused
+ *  (and then the step puts the server's copy back). */
 export interface BoardStore {
   get: () => BoardState;
   subscribe: (listener: () => void) => () => void;
@@ -237,7 +276,11 @@ export function boardStore(first: BoardFrame, server: BoardServer, report: (erro
     for (const w of step.send) {
       call(w).then(
         () => report(null),
-        (err: Error) => report(err.message),
+        (err: Error) => {
+          report(err.message);
+          dispatch({ type: "refused", write: w });
+        },
+
       );
     }
   };

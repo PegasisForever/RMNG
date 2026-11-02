@@ -6,7 +6,16 @@ import { expect, test } from "bun:test";
 import type { BoardColumn } from "~/lib/board";
 import type { Clone } from "~/lib/types";
 
-import { type BoardEvent, type BoardFrame, boardFrom, type BoardState, shown, stepBoard, type BoardWrite } from "./useBoard";
+import {
+  type BoardEvent,
+  type BoardFrame,
+  boardFrom,
+  type BoardState,
+  boardStore,
+  type BoardWrite,
+  shown,
+  stepBoard,
+} from "./useBoard";
 
 const clone = (id: string, archived = false): Clone => ({ id, host: "10.99.0.1", managed: true, archived });
 
@@ -112,9 +121,82 @@ test("a clone that is already there when it is filed is filed at once", () => {
 test("a ticket drawn for the first time takes its place in the order, once", () => {
   const { s, sent } = run([{ type: "adoptTickets", drawn: [{ id: "WE-9" }, { id: "WE-1" }] }]);
   expect(shown(s.ticketOrder)).toEqual(["we-9", "we-1"]);
-  expect(sent).toEqual([{ to: "ticketOrder", value: ["we-9", "we-1"] }]);
+  expect(sent).toEqual([{ to: "ticketOrder", value: ["we-9", "we-1"], adopted: true }]);
   // The column asks on every render: nothing new is the same state back
   const again = stepBoard(s, { type: "adoptTickets", drawn: [{ id: "WE-9" }, { id: "WE-1" }] });
   expect(again.state).toBe(s);
   expect(again.send).toEqual([]);
+});
+
+// --- refused: the server's copy comes back ---------------------------------------------
+
+/** Each kind of change, and the list it shows on. */
+const CHANGES: [BoardEvent, (s: BoardState) => unknown][] = [
+  [{ type: "moveInColumn", clones: CLONES, cloneId: "b", columnId: "todo", move: "up" }, (s) => shown(s.columns)],
+  [{ type: "orderTickets", ids: ["we-2", "we-1"] }, (s) => shown(s.ticketOrder)],
+  [{ type: "toggleMute", cloneId: "a" }, (s) => shown(s.muted)],
+];
+
+test("a refused write puts the server's copy back, which no frame would do", () => {
+  for (const [change, list] of CHANGES) {
+    const start = boardFrom(frame());
+    const { s, sent } = run([change], start);
+    expect(list(s)).not.toEqual(list(start));
+    const back = run([{ type: "refused", write: sent[0] }], s).s;
+    expect(list(back)).toEqual(list(start));
+  }
+});
+
+test("a refused write leaves a later change alone", () => {
+  const first = run([{ type: "toggleMute", cloneId: "a" }]);
+  const second = run([{ type: "toggleMute", cloneId: "b" }], first.s);
+  // The first is refused while the second is on its way: the second still shows
+  const s = run([{ type: "refused", write: first.sent[0] }], second.s).s;
+  expect(shown(s.muted)).toEqual(["a", "b"]);
+});
+
+test("a refused archive puts the columns back, on the server too", () => {
+  const drop = run([{ type: "moveClone", clones: CLONES, cloneId: "a", columnId: "done" }]);
+  const { s, sent } = run([{ type: "refused", write: drop.sent[1] }], drop.s);
+  expect(shown(s.columns)).toEqual(COLUMNS);
+  expect(sent).toEqual([{ to: "columns", value: COLUMNS }]);
+});
+
+test("a refused adoption is not sent again on the next render, but a new ticket tries again", () => {
+  const drawn = [{ id: "WE-9" }, { id: "WE-1" }];
+  const adopt = run([{ type: "adoptTickets", drawn }]);
+  const s = run([{ type: "refused", write: adopt.sent[0] }], adopt.s).s;
+  expect(shown(s.ticketOrder)).toEqual(["we-1"]);
+  expect(stepBoard(s, { type: "adoptTickets", drawn }).send).toEqual([]);
+  expect(stepBoard(s, { type: "adoptTickets", drawn: [{ id: "WE-7" }, ...drawn] }).send).toHaveLength(1);
+});
+
+test("the store sends through the server calls it is given, and rolls back what they refuse", async () => {
+  const calls: string[] = [];
+  const errors: (string | null)[] = [];
+  const refuse = (what: string) => (v: unknown) => {
+    calls.push(`${what} ${JSON.stringify(v)}`);
+    return Promise.reject(new Error(`no ${what}`));
+  };
+  const store = boardStore(
+    frame(),
+    {
+      putColumns: refuse("columns"),
+      putTicketOrder: refuse("order"),
+      putMuted: refuse("muted"),
+      archive: refuse("archive"),
+      unarchive: refuse("unarchive"),
+    },
+    (e) => errors.push(e),
+  );
+  let renders = 0;
+  store.subscribe(() => (renders += 1));
+
+  store.dispatch({ type: "toggleMute", cloneId: "a" });
+  expect(shown(store.get().muted)).toEqual(["a"]);
+  await Bun.sleep(0);
+  expect(calls).toEqual(['muted ["a"]']);
+  expect(errors).toEqual(["no muted"]);
+  expect(shown(store.get().muted)).toEqual([]);
+  expect(renders).toBe(2);
 });
