@@ -6,6 +6,7 @@
 // The markup is the Settings tab (`~/desk/control/SettingsView.tsx`).
 import { useEffect, useState } from "react";
 
+import { ask } from "~/components/ConfirmLayer";
 import type { SettingsCategory, SettingsPanelProps } from "~/components/SettingsPanes";
 import { useAccountOrder } from "~/lib/accountOrder";
 import {
@@ -148,24 +149,24 @@ export function useSettingsPanel({
     }
   }
 
-  function doUpdate() {
-    if (
-      !confirm(
-        "Update the control-server now?\n\nIt will pull the latest image and restart itself. The UI will briefly disconnect and reconnect; running clones are unaffected.",
-      )
-    )
-      return;
+  async function doUpdate() {
+    const yes = await ask({
+      title: "Update the control-server now?",
+      body: "It will pull the latest image and restart itself. The UI will briefly disconnect and reconnect; running clones are unaffected.",
+      ok: "Update",
+    });
+    if (!yes) return;
     setServerMsg("updating… the server will restart shortly");
     update.run();
   }
 
   async function doRestart() {
-    if (
-      !confirm(
-        "Restart the control-server now?\n\nThe UI will briefly disconnect and reconnect; running clones are unaffected.",
-      )
-    )
-      return;
+    const yes = await ask({
+      title: "Restart the control-server now?",
+      body: "The UI will briefly disconnect and reconnect; running clones are unaffected.",
+      ok: "Restart",
+    });
+    if (!yes) return;
     setServerMsg("restarting… reconnecting shortly");
     try {
       await restartServer();
@@ -225,8 +226,8 @@ export function useSettingsPanel({
     updateOperation: update.op ?? null,
     updateDisabled: !serverStatus?.available || update.busy,
     onCheckUpdate: checkUpdate,
-    onUpdateServer: doUpdate,
-    onRestartServer: doRestart,
+    onUpdateServer: () => void doUpdate(),
+    onRestartServer: () => void doRestart(),
     judgeTestMessage: judgeTestMsg,
     onTestJudge: runJudgeTest,
     boardColumns,

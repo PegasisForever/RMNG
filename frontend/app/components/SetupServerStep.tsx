@@ -4,6 +4,7 @@
 // It takes the wizard's whole model plus one updater, the same pair `SetupWizardView` holds
 // and `SetupReviewStep` reads, rather than a value/setter couple per field.
 import { Field, settingsInput } from "~/components/SettingsFields";
+import { TEXT_2, TEXT_3 } from "~/desk/control/ui";
 import type { SetupDraft } from "~/lib/setupDraft";
 
 export function SetupServerStep({
@@ -20,7 +21,7 @@ export function SetupServerStep({
 }) {
   return (
     <div className="space-y-4">
-      <p className="text-sm text-slate-600 dark:text-slate-300">
+      <p className={`text-sm ${TEXT_2}`}>
         Server-side defaults for the fleet.
       </p>
 
@@ -32,7 +33,7 @@ export function SetupServerStep({
           spellCheck={false}
           className={settingsInput}
         />
-        <span className="mt-0.5 block text-xs text-slate-400 dark:text-slate-500">
+        <span className={`mt-0.5 block text-xs ${TEXT_3}`}>
           Prepended to derived clone hostnames — e.g.{" "}
           <code>{draft.hostnamePrefix || "pega-"}</code>dev-123.
         </span>

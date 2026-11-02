@@ -6,13 +6,15 @@ import {
 } from "lucide-react";
 import { useId, useState } from "react";
 
-import { GLASS_OUTLINE } from "~/lib/glass";
+import { ICON_BUTTON, TEXT, TEXT_2 } from "~/desk/control/ui";
 import type { Operation } from "~/lib/types";
 
+/** The bar's fill. Busy is grey: the one accent, green, is for what is done
+ *  (`~/desk/GLASS.md`, Color). */
 const STATUS_COLOR: Record<Operation["status"], string> = {
-  running: "bg-sky-500",
+  running: "bg-neutral-500 dark:bg-neutral-300",
   done: "bg-emerald-500",
-  error: "bg-red-500",
+  error: "bg-rose-500",
 };
 
 const STATUS_ICON = {
@@ -40,14 +42,9 @@ export const VERB: Record<Operation["kind"], string> = {
   update: "Updating",
 };
 
-/** The card's own frame, where it sits on a solid surface (a dialog's running job): rounded,
- *  opaque, with the hairline every card-shaped thing carries (`GLASS_OUTLINE`) and a shadow
- *  tight enough to sit close to the surface under it. Dark mode runs the shadow's geometry
- *  at roughly five times the alpha, in black: against a dark surface the light-mode values
- *  come out to nothing. */
-const FRAME =
-  `rounded-lg bg-white dark:bg-slate-900 ${GLASS_OUTLINE} ` +
-  "shadow-[0_1px_6px_rgb(15_23_42_/_0.04),0_4px_16px_rgb(15_23_42_/_0.05)] dark:shadow-[0_1px_6px_rgb(0_0_0_/_0.22),0_4px_16px_rgb(0_0_0_/_0.26)]";
+/** The card's own frame, where it sits in a dialog (a running job): a card of `~/desk/GLASS.md`'s
+ *  flat content, with no shadow. */
+const FRAME = "rounded-lg border border-black/10 bg-white/70 dark:border-white/10 dark:bg-white/[0.06]";
 
 export function OperationProgress({
   op,
@@ -68,10 +65,10 @@ export function OperationProgress({
   const card = (
     <article aria-labelledby={titleId} className={box ? "px-2.5 py-2" : "px-2 py-1.5"}>
       <div className="flex items-center justify-between gap-2 text-[10px] font-medium">
-        <span className="flex min-w-0 items-center gap-1.5 text-slate-500 dark:text-slate-400">
+        <span className={`flex min-w-0 items-center gap-1.5 ${TEXT_2}`}>
           <StatusIcon
             aria-hidden="true"
-            className={`size-3 shrink-0 ${op.status === "running" ? "motion-safe:animate-spin text-sky-500" : ""} ${op.status === "done" ? "text-emerald-500" : ""} ${op.status === "error" ? "text-red-500" : ""}`}
+            className={`size-3 shrink-0 ${op.status === "running" ? "motion-safe:animate-spin" : ""} ${op.status === "done" ? "text-emerald-600 dark:text-emerald-400" : ""} ${op.status === "error" ? "text-rose-600 dark:text-rose-400" : ""}`}
           />
           {verb}
           <span className="sr-only"> — {STATUS_LABEL[op.status]}</span>
@@ -82,7 +79,7 @@ export function OperationProgress({
           aria-expanded={open}
           aria-controls={logId}
           aria-label={`${open ? "Hide" : "Show"} log for ${op.target}`}
-          className="flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-slate-500 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-sky-500 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          className={`flex shrink-0 items-center gap-1 px-1 py-0.5 ${ICON_BUTTON}`}
         >
           Log
           <ChevronDown
@@ -93,26 +90,26 @@ export function OperationProgress({
       </div>
       <h3
         id={titleId}
-        className="break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100"
+        className={`break-words text-sm font-medium leading-snug ${TEXT}`}
       >
         {op.target}
       </h3>
       {op.source ? (
         <p
-          title={`From ${op.source}`}
-          className="mt-0.5 truncate text-[10px] text-slate-500 dark:text-slate-400"
+          data-tip={`From ${op.source}`}
+          className={`mt-0.5 truncate text-[10px] ${TEXT_2}`}
         >
           From {op.source}
         </p>
       ) : null}
       <div className="mb-1 mt-1 flex items-center gap-2 text-[10px]">
         <span
-          title={op.message}
-          className="min-w-0 flex-1 truncate text-slate-500 dark:text-slate-400"
+          data-tip={op.message}
+          className={`min-w-0 flex-1 truncate ${TEXT_2}`}
         >
           {op.message}
         </span>
-        <span className="shrink-0 font-medium tabular-nums text-slate-600 dark:text-slate-300">
+        <span className={`shrink-0 font-medium tabular-nums ${TEXT}`}>
           {Math.round(pct)}%
         </span>
       </div>
@@ -123,8 +120,8 @@ export function OperationProgress({
         aria-valuemax={100}
         aria-valuenow={pct}
         aria-valuetext={`${STATUS_LABEL[op.status]}: ${op.message} (${Math.round(pct)}%)`}
-        // On the control panel's card, the track of its usage bars
-        className={`h-1 w-full overflow-hidden rounded-sm ${box ? "bg-black/10 dark:bg-white/15" : "bg-slate-100 dark:bg-slate-800"}`}
+        // The track of the usage bars
+        className="h-1 w-full overflow-hidden rounded-sm bg-black/10 dark:bg-white/15"
       >
         <div
           className={`h-full ${STATUS_COLOR[op.status]} transition-all`}
@@ -134,7 +131,8 @@ export function OperationProgress({
       <pre
         id={logId}
         hidden={!open}
-        className="mt-2 max-h-48 select-text overflow-auto rounded bg-slate-50 p-2 text-[11px] leading-relaxed text-slate-600 dark:bg-slate-950 dark:text-slate-300"
+        // A hollow in the card, as a column is on the board
+        className={`mt-2 max-h-48 select-text overflow-auto rounded-md border border-black/10 bg-black/[0.03] p-2 text-[11px] leading-relaxed dark:border-white/10 dark:bg-black/25 ${TEXT_2}`}
       >
         {op.log.join("\n") || "(no output yet)"}
       </pre>

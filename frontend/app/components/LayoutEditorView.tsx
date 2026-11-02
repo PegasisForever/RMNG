@@ -19,7 +19,8 @@
 // While the dialog is open, each monitor window shows its monitor's number large in its middle
 // (the container tells them), so the boxes here can be matched to the windows.
 //
-// Its panel is glass and its content flat (`~/desk/GLASS.md`).
+// Its content is flat on the dialog's panel (`~/desk/GLASS.md`). Its lists are the app's own
+// (`DropdownSelect`), not the browser's, and its buttons' names show in tooltips (`data-tip`).
 //
 // Pure: the layout comes in and every change goes out, with what it does to the monitors'
 // numbers (`LayoutChange`). The container saves and applies it, opens and renumbers the monitor
@@ -27,7 +28,18 @@
 import { ExternalLink, Maximize2, Plus, Star, Trash2 } from "lucide-react";
 import { type PointerEvent, type ReactNode, useLayoutEffect, useRef, useState } from "react";
 
+import { DropdownSelect } from "~/components/DropdownSelect";
 import { ModalShell } from "~/components/ModalShell";
+import {
+  BUTTON,
+  DANGER_TEXT,
+  DONE_BUTTON,
+  FIELD,
+  ICON_BUTTON,
+  TEXT,
+  TEXT_2,
+  TEXT_3,
+} from "~/desk/control/ui";
 import { type BrowserLayout, PIXEL_SCALES } from "~/lib/clientLayout";
 import {
   MAX_MONITORS,
@@ -58,11 +70,14 @@ const SCROLL_MODES: { value: ScrollMode; label: string }[] = [
   { value: "mouse", label: "Mouse wheel" },
 ];
 
-/** The dialog's classes: on glass, flat. */
+/** A pixel scale's row in a list. */
+const SCALE_ROWS = PIXEL_SCALES.map((s) => ({ value: String(s), label: `${s}×` }));
+
+/** The dialog's classes: flat (`~/desk/GLASS.md`). */
 const LOOK = {
-  title: "text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-white",
-  text: "text-black/60 dark:text-white/60",
-  faint: "text-black/40 dark:text-white/40",
+  title: `text-[15px] font-semibold tracking-tight ${TEXT}`,
+  text: TEXT_2,
+  faint: TEXT_3,
   note: "text-amber-700 dark:text-amber-300",
   area: "rounded-xl border border-black/10 bg-white/40 dark:border-white/10 dark:bg-black/25",
   ghost: "rounded-lg border border-dashed border-black/40 dark:border-white/40",
@@ -72,15 +87,13 @@ const LOOK = {
   number: "text-neutral-900 dark:text-white",
   size: "text-black/50 dark:text-white/50",
   scale:
-    "rounded-md border border-black/15 bg-white px-0.5 py-0 text-[11px] tabular-nums text-black/80 dark:border-white/15 dark:bg-neutral-900 dark:text-white/80",
-  icon: "rounded-md p-0.5 text-black/55 hover:bg-black/5 hover:text-black dark:text-white/60 dark:hover:bg-white/10 dark:hover:text-white",
-  danger: "rounded-md p-0.5 text-rose-600 hover:bg-rose-500/15 dark:text-rose-400 dark:hover:bg-rose-500/20 dark:hover:text-rose-300",
-  tip: "rounded-md bg-neutral-900 px-1.5 py-0.5 text-white dark:bg-neutral-950",
-  add: "inline-flex items-center gap-1 rounded-[10px] border border-black/15 bg-white/50 px-3 py-1.5 text-xs font-medium text-neutral-900 hover:bg-white/80 disabled:opacity-40 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10",
-  label: "text-black/60 dark:text-white/60",
-  input:
-    "w-full rounded-[10px] border border-black/10 bg-white/60 px-2.5 py-1.5 text-sm text-neutral-900 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-white/30",
-  done: "rounded-[10px] bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500",
+    "rounded-md border border-black/15 bg-white px-1 py-0 text-[11px] tabular-nums text-black/80 dark:border-white/15 dark:bg-neutral-900 dark:text-white/80",
+  icon: `${ICON_BUTTON} p-0.5`,
+  danger: `rounded-md p-0.5 hover:bg-rose-500/15 dark:hover:bg-rose-500/20 ${DANGER_TEXT}`,
+  add: `inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium disabled:opacity-40 ${BUTTON}`,
+  label: TEXT_2,
+  input: `w-full ${FIELD} px-2.5 py-1.5 text-sm`,
+  done: `${DONE_BUTTON} px-5 py-1.5 text-sm font-semibold`,
 };
 
 /** What a change does to the monitors' numbers: a monitor added (its number), or monitors
@@ -129,7 +142,7 @@ export function LayoutEditorView({
     });
 
   return (
-    <ModalShell size="md" onExited={onClose} glass>
+    <ModalShell size="md" onExited={onClose}>
       {(close) => (
         <>
           <h3 className={LOOK.title}>Edit layout</h3>
@@ -160,20 +173,15 @@ export function LayoutEditorView({
             />
           ) : (
             // A phone: its one screen, so only its pixel scale
-            <label className="mt-3 block">
+            <label className="mt-3 block" data-tip="Screen pixels per clone pixel">
               <span className={`mb-0.5 block text-xs font-medium ${LOOK.label}`}>Pixel scale</span>
-              <select
-                title="Screen pixels per clone pixel"
-                value={scales[0]}
-                onChange={(e) => scale(0, Number(e.target.value))}
+              <DropdownSelect
+                rows={SCALE_ROWS}
+                value={String(scales[0])}
+                onChange={(v) => scale(0, Number(v))}
+                label="Pixel scale: screen pixels per clone pixel"
                 className={LOOK.input}
-              >
-                {PIXEL_SCALES.map((s) => (
-                  <option key={s} value={s}>
-                    {s}×
-                  </option>
-                ))}
-              </select>
+              />
             </label>
           )}
           {note ? <p className={`mt-1 text-[11px] ${LOOK.note}`}>{note}</p> : null}
@@ -197,17 +205,13 @@ export function LayoutEditorView({
           <div className="mt-3 grid grid-cols-[1fr_7rem] gap-2">
             <label className="block">
               <span className={`mb-0.5 block text-xs font-medium ${LOOK.label}`}>Scroll</span>
-              <select
+              <DropdownSelect
+                rows={SCROLL_MODES}
                 value={layout.scrollMode}
-                onChange={(e) => onChange({ ...layout, scrollMode: e.target.value as ScrollMode })}
+                onChange={(v) => onChange({ ...layout, scrollMode: v as ScrollMode })}
+                label="Scroll"
                 className={LOOK.input}
-              >
-                {SCROLL_MODES.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
             <label className="block">
               <span className={`mb-0.5 block text-xs font-medium ${LOOK.label}`}>Speed %</span>
@@ -351,20 +355,21 @@ function Arrangement({
               <div
                 className={`flex items-center justify-center gap-0.5 ${roomy ? "mt-1" : "mt-0.5 max-w-full flex-wrap"}`}
               >
-                <select
-                  aria-label={`Pixel scale of monitor ${i}: screen pixels per clone pixel`}
-                  title="Pixel scale: screen pixels per clone pixel in its window"
-                  value={scales[i]}
+                {/* A press on it, or in its list (on the body, but a child here for React's
+                    events), starts no drag */}
+                <div
+                  data-tip="Pixel scale: screen pixels per clone pixel in its window"
                   onPointerDown={(e) => e.stopPropagation()}
-                  onChange={(e) => onScale(i, Number(e.target.value))}
-                  className={`${LOOK.scale} ${roomy ? "" : "basis-full"}`}
+                  className={roomy ? "" : "flex basis-full justify-center"}
                 >
-                  {PIXEL_SCALES.map((s) => (
-                    <option key={s} value={s}>
-                      {s}×
-                    </option>
-                  ))}
-                </select>
+                  <DropdownSelect
+                    rows={SCALE_ROWS}
+                    value={String(scales[i])}
+                    onChange={(v) => onScale(i, Number(v))}
+                    label={`Pixel scale of monitor ${i}: screen pixels per clone pixel`}
+                    className={LOOK.scale}
+                  />
+                </div>
                 {primary ? null : (
                   <IconButton label="Make primary (monitor 0)" onClick={() => onPrimary(i)}>
                     <Star className="size-3.5" />
@@ -396,8 +401,8 @@ function Arrangement({
   );
 }
 
-/** A small icon button in a monitor's box, its label in a tooltip above it on hover. A press on
- *  it starts no drag. */
+/** A small icon button in a monitor's box, its label in a tooltip (`data-tip`). A press on it
+ *  starts no drag. */
 function IconButton({
   label,
   danger = false,
@@ -418,15 +423,10 @@ function IconButton({
       disabled={disabled}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={onClick}
-      className={`group relative disabled:opacity-40 ${danger ? LOOK.danger : LOOK.icon}`}
+      data-tip={label}
+      className={`disabled:opacity-40 ${danger ? LOOK.danger : LOOK.icon}`}
     >
       {children}
-      <span
-        role="tooltip"
-        className={`pointer-events-none absolute bottom-full left-1/2 z-20 mb-1 -translate-x-1/2 whitespace-nowrap text-[10px] font-medium opacity-0 transition-opacity group-hover:opacity-100 ${LOOK.tip}`}
-      >
-        {label}
-      </span>
     </button>
   );
 }

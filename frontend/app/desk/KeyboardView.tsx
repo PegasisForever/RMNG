@@ -215,7 +215,7 @@ function KeyButton({
     <div
       role="button"
       aria-label={k.clip ? k.label : k.id}
-      title={k.clip ? k.label : undefined}
+      data-tip={k.clip ? k.label : undefined}
       aria-pressed={
         k.mod || k.fn || k.code === CAPS_LOCK ? state !== undefined : dictation ? dictation === "listening" : undefined
       }

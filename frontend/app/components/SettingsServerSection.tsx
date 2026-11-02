@@ -6,6 +6,8 @@
 // shows here rather than only in the rail: the server restarts itself partway through, and
 // the operator wants to watch that from the panel that started it.
 import { OperationProgress } from "~/components/OperationProgress";
+import { settingsButton } from "~/components/SettingsFields";
+import { DONE_BUTTON, TEXT_2 } from "~/desk/control/ui";
 import type { Operation } from "~/lib/types";
 import type { UpdateStatus } from "~/lib/wire/UpdateStatus";
 
@@ -33,7 +35,7 @@ export function SettingsServerSection({
 }) {
   return (
     <div className="space-y-2">
-      <div className="text-xs text-slate-500 dark:text-slate-400">
+      <div className={`text-xs ${TEXT_2}`}>
         {status?.currentRevision ? (
           <>Version <code>{status.currentRevision}</code>{status.currentCreated ? ` · ${status.currentCreated}` : ""}</>
         ) : (
@@ -44,7 +46,7 @@ export function SettingsServerSection({
         <button
           type="button"
           onClick={onCheckUpdate}
-          className="rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+          className={settingsButton}
         >
           Check for updates
         </button>
@@ -52,23 +54,23 @@ export function SettingsServerSection({
           type="button"
           onClick={onUpdate}
           disabled={updateDisabled}
-          className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white"
+          className={`${DONE_BUTTON} px-3 py-1.5 text-xs font-medium`}
         >
           Update
         </button>
         <button
           type="button"
           onClick={onRestart}
-          className="rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+          className={settingsButton}
         >
           Restart
         </button>
         {status ? (
-          <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${status.available ? "bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400" : "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400"}`}>
+          <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${status.available ? "bg-amber-500/15 text-amber-700 dark:text-amber-300" : "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"}`}>
             {status.available ? "update available" : "up to date"}
           </span>
         ) : null}
-        {message ? <p className="text-xs text-slate-500 dark:text-slate-400">{message}</p> : null}
+        {message ? <p className={`text-xs ${TEXT_2}`}>{message}</p> : null}
       </div>
       {operation ? <OperationProgress op={operation} /> : null}
     </div>

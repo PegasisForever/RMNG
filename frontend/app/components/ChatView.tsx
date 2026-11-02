@@ -15,6 +15,19 @@ import { useEffect, useRef } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import {
+  BUTTON,
+  DANGER_BUTTON,
+  DONE_BUTTON,
+  ErrorLine,
+  FIELD,
+  ICON_BUTTON,
+  LIT,
+  R_PIECE,
+  TEXT,
+  TEXT_2,
+  TEXT_3,
+} from "~/desk/control/ui";
 import type { ChatMessage } from "~/lib/types";
 import type { ScheduledMessage } from "~/lib/wire/ScheduledMessage";
 
@@ -87,21 +100,24 @@ const LOOK = {
   user: "glass glass-green",
   assistant: "glass text-neutral-900 dark:text-white",
   working: "glass",
-  faint: "text-black/40 dark:text-white/40",
-  quiet: "text-black/60 dark:text-white/60",
+  faint: TEXT_3,
+  quiet: TEXT_2,
   line: "border-black/10 dark:border-white/10",
   note: "bg-black/5 text-black/60 dark:bg-white/5 dark:text-white/60",
   item: "border-black/10 bg-white/50 dark:border-white/10 dark:bg-white/5",
-  itemText: "text-black/60 dark:text-white/60",
-  field:
-    "border-black/10 bg-white/60 text-neutral-900 placeholder:text-black/40 focus:border-black/30 dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-white/40 dark:focus:border-white/30",
-  button: "border-black/15 bg-white/50 text-black/60 hover:bg-white/80 dark:border-white/15 dark:bg-white/5 dark:text-white/60 dark:hover:bg-white/10",
-  buttonOn: "glass-lit border-transparent",
-  // Code in a bubble: a translucent box, not the solid slate one
-  code: "[&_code]:bg-black/5 [&_pre]:bg-black/5 dark:[&_code]:bg-white/10 dark:[&_pre]:bg-white/10",
+  itemText: TEXT_2,
+  field: `${FIELD} placeholder:text-black/40 dark:placeholder:text-white/40`,
+  button: BUTTON,
+  // The schedule button while it is on: the one thing on, flat on the panel
+  buttonOn: `${R_PIECE} ${LIT} border-transparent`,
+  // Danger is red text, never a red surface. The button's own text color is swapped out, not
+  // added to: of two text colors in one class list, the one Tailwind emits last wins.
+  stop: DANGER_BUTTON,
+  // Send and Schedule end the task: the one green button
+  send: `${DONE_BUTTON} border-transparent`,
   // 6 px in from the panel's edge, so its corners are concentric with the panel's (16 − 6)
   composer: "p-1.5",
-  radius: "rounded-[10px]",
+  radius: R_PIECE,
 };
 
 /** A composer button: the height of the one-line field beside it (34 px), so the two line up. */
@@ -123,15 +139,15 @@ const MARKDOWN: Components = {
     </a>
   ),
   code: ({ children }) => (
-    <code className="rounded bg-slate-100 px-1 font-mono text-[0.85em] dark:bg-slate-900">{children}</code>
+    <code className="rounded bg-black/5 px-1 font-mono text-[0.85em] dark:bg-white/10">{children}</code>
   ),
   pre: ({ children }) => (
-    <pre className="my-1.5 overflow-x-auto rounded bg-slate-100 p-2 font-mono text-xs dark:bg-slate-900 [&_code]:bg-transparent [&_code]:p-0">
+    <pre className="my-1.5 overflow-x-auto rounded bg-black/5 p-2 font-mono text-xs dark:bg-white/10 [&_code]:bg-transparent [&_code]:p-0">
       {children}
     </pre>
   ),
   blockquote: ({ children }) => (
-    <blockquote className="my-1.5 border-l-2 border-slate-300 pl-2 text-slate-600 dark:border-slate-600 dark:text-slate-300">
+    <blockquote className="my-1.5 border-l-2 border-black/20 pl-2 text-black/60 dark:border-white/20 dark:text-white/60">
       {children}
     </blockquote>
   ),
@@ -141,9 +157,9 @@ const MARKDOWN: Components = {
     </div>
   ),
   th: ({ children }) => (
-    <th className="border border-slate-300 px-1.5 py-0.5 text-left font-semibold dark:border-slate-600">{children}</th>
+    <th className="border border-black/15 px-1.5 py-0.5 text-left font-semibold dark:border-white/15">{children}</th>
   ),
-  td: ({ children }) => <td className="border border-slate-300 px-1.5 py-0.5 dark:border-slate-600">{children}</td>,
+  td: ({ children }) => <td className="border border-black/15 px-1.5 py-0.5 dark:border-white/15">{children}</td>,
 };
 
 /** The server's id for a message sent while the assistant worked, until the assistant takes
@@ -158,7 +174,7 @@ function Bubble({ m }: { m: ChatMessage }) {
   return (
     <div className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}>
       <div
-        className={`max-w-[88%] min-w-0 break-words rounded-2xl px-3 py-2 text-sm ${LOOK.code} ${
+        className={`max-w-[88%] min-w-0 break-words rounded-2xl px-3 py-2 text-sm ${
           isUser ? `whitespace-pre-wrap ${LOOK.user} ${queued ? "opacity-60" : ""}` : LOOK.assistant
         }`}
       >
@@ -237,7 +253,7 @@ export function ChatView({
               {activity ? (
                 <span
                   className={`mt-1 block break-words font-mono text-xs leading-snug ${LOOK.quiet}`}
-                  title={activity}
+                  data-tip={activity}
                 >
                   {activity}
                 </span>
@@ -247,11 +263,7 @@ export function ChatView({
         ) : null}
       </div>
 
-      {error ? (
-        <div className="border-t border-red-200 bg-red-50 px-3 py-1.5 text-xs break-words text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-400">
-          {error}
-        </div>
-      ) : null}
+      {error ? <ErrorLine message={error} /> : null}
       {archived ? (
         <div className={`border-t px-3 py-1.5 text-xs ${LOOK.line} ${LOOK.note}`}>
           Unarchive this clone to message the assistant.
@@ -268,14 +280,15 @@ export function ChatView({
               <span className="shrink-0 font-medium text-emerald-700 dark:text-emerald-400">
                 {formatWhen(Number(m.at), now, locale)}
               </span>
-              <span className={`min-w-0 flex-1 truncate ${LOOK.itemText}`} title={m.text}>
+              <span className={`min-w-0 flex-1 truncate ${LOOK.itemText}`} data-tip={m.text}>
                 {m.text}
               </span>
               <button
                 type="button"
                 onClick={() => onCancelScheduled(m.id)}
-                title="Cancel this scheduled message"
-                className="shrink-0 rounded-md px-1.5 py-0.5 text-slate-400 hover:bg-slate-200 hover:text-red-600 dark:hover:bg-slate-700 dark:hover:text-red-400"
+                data-tip="Cancel this scheduled message"
+                aria-label="Cancel this scheduled message"
+                className={`shrink-0 px-1.5 py-0.5 ${ICON_BUTTON}`}
               >
                 ✕
               </button>
@@ -302,12 +315,12 @@ export function ChatView({
               value={scheduleAt}
               min={epochMsToLocalInput(now)}
               onChange={(e) => onScheduleAtChange(e.target.value)}
-              className={`min-w-0 flex-1 border px-2 py-1 text-sm focus:outline-none ${LOOK.radius} ${LOOK.field}`}
+              className={`min-w-0 flex-1 px-2 py-1 text-sm ${LOOK.field}`}
             />
             <button
               type="button"
               onClick={() => onScheduleAtChange("")}
-              className={`shrink-0 border px-2 py-1 text-xs ${LOOK.radius} ${LOOK.button}`}
+              className={`shrink-0 px-2 py-1 text-xs ${LOOK.button}`}
             >
               Cancel
             </button>
@@ -349,17 +362,17 @@ export function ChatView({
               // Typing stays enabled while the assistant works: a message then steers it, the
               // way a new Slack message in its thread does.
               disabled={archived}
-              className={`min-w-0 resize-none overflow-y-auto whitespace-pre-wrap break-words ${LOOK.radius} border px-2 py-1.5 text-sm leading-5 [grid-area:1/1] placeholder:truncate focus:outline-none disabled:opacity-60 ${LOOK.field}`}
+              className={`min-w-0 resize-none overflow-y-auto whitespace-pre-wrap break-words px-2 py-1.5 text-sm leading-5 [grid-area:1/1] placeholder:truncate disabled:opacity-60 ${LOOK.field}`}
             />
           </div>
           <button
             type="button"
             onClick={() => onScheduleAtChange(picking ? "" : epochMsToLocalInput(now + 15 * 60 * 1000))}
             disabled={archived}
-            title={picking ? "Send now instead" : "Schedule this message for later"}
+            data-tip={picking ? "Send now instead" : "Schedule this message for later"}
             aria-label={picking ? "Send now instead" : "Schedule this message for later"}
             aria-pressed={picking}
-            className={`${SQUARE} ${LOOK.radius} disabled:opacity-40 ${picking ? LOOK.buttonOn : LOOK.button}`}
+            className={`${SQUARE} disabled:opacity-40 ${picking ? LOOK.buttonOn : LOOK.button}`}
           >
             <Clock className="size-4" />
           </button>
@@ -367,9 +380,9 @@ export function ChatView({
             <button
               type="submit"
               disabled={archived || !input.trim() || !scheduleAt}
-              title="Schedule this message"
+              data-tip="Schedule this message"
               aria-label="Schedule this message"
-              className={`${SQUARE} ${LOOK.radius} border-transparent bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40`}
+              className={`${SQUARE} ${LOOK.send}`}
             >
               <CalendarClock className="size-4" />
             </button>
@@ -380,9 +393,9 @@ export function ChatView({
                   type="button"
                   onClick={onStop}
                   disabled={stopping}
-                  title={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
+                  data-tip={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
                   aria-label={stopping ? "Stopping…" : "Interrupt the assistant's current turn"}
-                  className={`${SQUARE} ${LOOK.radius} border-transparent bg-red-600 text-white hover:bg-red-700 disabled:opacity-50`}
+                  className={`${SQUARE} disabled:opacity-50 ${LOOK.stop}`}
                 >
                   {/* The spinner is the only way an icon-only button can say the stop is in
                       flight, now that "Stopping…" is not there to read. */}
@@ -396,9 +409,9 @@ export function ChatView({
               <button
                 type="submit"
                 disabled={archived || !input.trim()}
-                title={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
+                data-tip={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
                 aria-label={busy ? "Send now: the assistant reads it at its next step" : "Send this message"}
-                className={`${SQUARE} ${LOOK.radius} border-transparent bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40`}
+                className={`${SQUARE} ${LOOK.send}`}
               >
                 <SendHorizontal className="size-4" />
               </button>

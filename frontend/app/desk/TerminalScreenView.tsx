@@ -4,10 +4,7 @@
 import type { PointerEvent, ReactNode } from "react";
 
 import type { TouchKind } from "./KeyboardView";
-import { TermBar } from "./TermBar";
-
-/** The terminal's background (the xterm.js theme's, `~/viewer/terminal.tsx`). */
-const TERM_BG = "#1c1c1f";
+import { TERM_BG, TermBar } from "./TermBar";
 
 export function TerminalScreenView({
   sessions,

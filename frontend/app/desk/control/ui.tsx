@@ -17,7 +17,7 @@ import {
   useState,
 } from "react";
 
-import { type Box, MenuDivider, MenuItem, MenuPanel } from "~/components/OverflowMenu";
+import { type Box, MENU_ROW, MenuDivider, MenuItem, MenuPanel } from "~/components/OverflowMenu";
 
 /** The control panel's panel over the clone's screen (narrow): a dialog's glass, with its own blur
  *  and long shadow, on a backdrop that only darkens the screen (`CONTROL_PANEL_DIM`), as a
@@ -49,6 +49,11 @@ export const useColumnFrame = () => useContext(ColumnFrame);
  *  corner, has 16 − 6 = 10 px (`R_PIECE`). Pieces in a row share the one radius. */
 export const R_PIECE = "rounded-[10px]";
 
+/** A piece that floats where no clone's screen is under it (the control panel's own window): a
+ *  menu, a card being dragged. Solid, with a line and a shadow under it, as an open list there
+ *  (`~/components/AnchoredList.tsx`). Over the clone's screen the same pieces are thick glass. */
+export const FLOAT_SOLID =
+  "border border-black/10 bg-white shadow-[0_8px_24px_-6px_rgb(0_0_0/0.25)] dark:border-white/10 dark:bg-neutral-800";
 /** A card in a column (a clone, a ticket): its edge. Set 6 px into the column, so R_PIECE. */
 const CARD = `${R_PIECE} border border-black/10 dark:border-white/10`;
 /** A card on a column (an account, a ticket, a clone): one edge, one fill, for all three. Light:
@@ -97,6 +102,8 @@ export const DONE_BUTTON = `${R_PIECE} bg-emerald-600 text-white hover:bg-emeral
 export const ICON_BUTTON = "rounded-md text-black/55 hover:bg-black/5 active:bg-black/10 dark:text-white/60 dark:hover:bg-white/10 dark:active:bg-white/15";
 /** A danger action (remove): red text, never a red surface. */
 export const DANGER_TEXT = "text-rose-600 dark:text-rose-400";
+/** A button whose action destroys something: `BUTTON` with red text in place of its own. */
+export const DANGER_BUTTON = BUTTON.replace(TEXT, DANGER_TEXT);
 /** An error said in a line of text (not a band, `ErrorLine`). */
 export const ERROR_TEXT = "text-rose-700 dark:text-rose-300";
 /** A field (a text box) on the panel, as `../GLASS.md`'s flat content has it. */
@@ -200,8 +207,10 @@ export function HeaderButton({
       onClick={onClick}
       disabled={disabled}
       aria-label={label}
-      className={`flex h-7 min-w-8 shrink-0 items-center justify-center gap-1 ${R_PIECE} px-2 text-xs font-medium disabled:opacity-40 ${
-        primary ? "bg-emerald-600 text-white active:bg-emerald-500" : BUTTON
+      // An icon alone says what it does in a tooltip
+      data-tip={Icon && !showLabel ? label : undefined}
+      className={`flex h-7 min-w-8 shrink-0 items-center justify-center gap-1 px-2 text-xs font-medium disabled:opacity-40 ${
+        primary ? DONE_BUTTON : BUTTON
       }`}
     >
       {Icon ? <Icon aria-hidden className="size-4" /> : null}
@@ -270,12 +279,13 @@ export function ActionSheet({
   };
   return (
     // Over the whole panel (its glass is the containing block of what is fixed in it), or the
-    // whole window. The sheet is solid: on glass, over a dimmed page, glass would look murky.
+    // whole window. The sheet is solid: on glass, over a dimmed page, glass would look murky. No
+    // shadow: the light is above, so a sheet at the bottom casts none up (`../GLASS.md`).
     <div className="fixed inset-0 z-40 flex flex-col items-center justify-end bg-black/25 dark:bg-black/50" onClick={onClose}>
       <div
         role="menu"
         aria-label={typeof title === "string" ? title : undefined}
-        className="max-h-full w-full max-w-xl overflow-y-auto overscroll-y-contain rounded-t-2xl bg-neutral-100 px-2 pb-2 shadow-[0_-8px_32px_rgb(0_0_0/0.25)] dark:bg-neutral-900"
+        className="max-h-full w-full max-w-xl overflow-y-auto overscroll-y-contain rounded-t-2xl bg-neutral-100 px-2 pb-2 dark:bg-neutral-900"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="sticky top-0 flex h-10 items-center gap-2 bg-neutral-100 pl-1 dark:bg-neutral-900">
@@ -306,9 +316,7 @@ export function ActionSheet({
                     className={`flex h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-lg px-1 text-center text-xs leading-tight ${
                       a.current
                         ? LIT
-                        : a.danger
-                          ? "bg-rose-500/10 text-rose-600 active:bg-rose-500/20 dark:text-rose-400"
-                          : `bg-white text-neutral-900 active:bg-neutral-200 dark:bg-white/10 dark:text-white dark:active:bg-white/20`
+                        : `bg-white active:bg-neutral-200 dark:bg-white/10 dark:active:bg-white/20 ${a.danger ? DANGER_TEXT : TEXT}`
                     }`}
                   >
                     <a.icon aria-hidden className="size-4 shrink-0" />
@@ -344,10 +352,10 @@ export function DesktopMenu({ at, groups, onClose }: { at: Box; groups: SheetGro
       {shown.map((g, i) => (
         <div key={i}>
           {i > 0 ? <MenuDivider /> : null}
-          {g.title ? <p className="px-3 pb-0.5 pt-1 text-[11px] font-medium text-slate-400 dark:text-slate-500">{g.title}</p> : null}
+          {g.title ? <p className={`px-2.5 pb-0.5 pt-1 text-[11px] font-medium ${TEXT_3}`}>{g.title}</p> : null}
           {g.actions.map((a) =>
             a.current ? (
-              <p key={a.label} className="flex w-full items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 dark:text-slate-500">
+              <p key={a.label} className={`${MENU_ROW} ${TEXT_3}`}>
                 <a.icon aria-hidden className="size-4 shrink-0" />
                 <span className="flex-1">{a.label}</span>
                 <Check aria-hidden className="size-3.5" />

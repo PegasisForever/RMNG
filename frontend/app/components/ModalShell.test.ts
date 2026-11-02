@@ -59,6 +59,13 @@ test("the close swaps only the animation, never the panel's shape", () => {
   }
 });
 
+test("over the clone's screen the panel is glass; with no screen under it, solid", () => {
+  for (const size of SIZES) {
+    expect(panelClass(size, false).split(" ")).toContain("glass");
+    expect(panelClass(size, false, "solid").split(" ")).not.toContain("glass");
+  }
+});
+
 test("the exit delay covers the frames it waits for", () => {
   expect(MODAL_EXIT_MS).toBeGreaterThan(MODAL_ANIMATION_MS);
 });

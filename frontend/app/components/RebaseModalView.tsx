@@ -11,6 +11,7 @@ import { DropdownSelect } from "~/components/DropdownSelect";
 import { ModalShell } from "~/components/ModalShell";
 import { OperationProgress } from "~/components/OperationProgress";
 import { cloneField, cloneLabel } from "~/components/cloneFieldStyles";
+import { BUTTON, DONE_BUTTON, ErrorLine, R_PIECE, TEXT, TEXT_2 } from "~/desk/control/ui";
 import type { Operation } from "~/lib/types";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
@@ -63,10 +64,10 @@ export function RebaseModalView({
     <ModalShell size="lg" dismissible={!busy} open={open} onExited={onClose}>
       {(close) => (
         <>
-          <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
+          <h3 className={`shrink-0 text-[15px] font-semibold tracking-tight ${TEXT}`}>
             Rebase {cloneId}
           </h3>
-          <p className="mt-1 shrink-0 text-[11px] text-slate-400 dark:text-slate-500">
+          <p className={`mt-1 shrink-0 text-xs ${TEXT_2}`}>
             Swaps the system image for the picked preset's image. Home, id, and
             the clone's own preset bindings stay — rebase is image only.
           </p>
@@ -96,7 +97,7 @@ export function RebaseModalView({
                 className={cloneField}
               />
             </label>
-            <label className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+            <label className={`flex items-center gap-2 text-xs ${TEXT_2}`}>
               <input
                 type="checkbox"
                 checked={rebuild}
@@ -109,9 +110,9 @@ export function RebaseModalView({
           </div>
 
           {error ? (
-            <p className="mt-3 shrink-0 text-[11px] text-red-600 dark:text-red-400">
-              {error}
-            </p>
+            <div className={`mt-3 shrink-0 overflow-hidden ${R_PIECE}`}>
+              <ErrorLine message={error} />
+            </div>
           ) : null}
 
           {operation ? (
@@ -125,7 +126,7 @@ export function RebaseModalView({
               type="button"
               onClick={() => close()}
               disabled={busy}
-              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:text-slate-300 dark:hover:bg-slate-800"
+              className={`${BUTTON} px-3 py-1.5 text-sm disabled:opacity-40`}
             >
               Cancel
             </button>
@@ -133,7 +134,7 @@ export function RebaseModalView({
               type="button"
               onClick={onSubmit}
               disabled={!valid || busy}
-              className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+              className={`${DONE_BUTTON} px-4 py-1.5 text-sm font-medium`}
             >
               {busy ? "Rebasing…" : "Rebase"}
             </button>

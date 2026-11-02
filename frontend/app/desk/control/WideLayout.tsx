@@ -12,8 +12,9 @@
 // Over the clone's screen (`glass`) each column is glass of its own, with nothing round them all,
 // and the row takes the display's whole width: the columns scroll out to its edges, with the
 // gap from them inside the row. In the control panel's window, on its solid ground, they are flat
-// hollows. The side panels are glass in both: they are over the columns. The row's scroll bar
-// is hidden: a touchpad, a wheel with Shift, or a finger scrolls it.
+// hollows. The side panels are over the columns: glass over the clone's screen, solid in the
+// window (`../GLASS.md`: the window has no glass). The row's scroll bar is hidden: a touchpad, a
+// wheel with Shift, or a finger scrolls it.
 //
 // Pure: each part comes in as a slot (`./ControlPanelContainer.tsx` fills them).
 import { MonitorCog, Settings } from "lucide-react";
@@ -30,18 +31,18 @@ import {
 import { createPortal } from "react-dom";
 
 import { PopOutButton, type ServerUsage } from "../ToolRow";
-import { COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, NO_SCROLLBARS, ON_GLASS, R_PIECE, TEXT, TEXT_2 } from "./ui";
+import { BUTTON, COLUMN_GLASS, COLUMN_SOLID, ColumnFrameProvider, LIT, NO_SCROLLBARS, ON_GLASS, R_PIECE, TEXT } from "./ui";
 import { ServerStats } from "./UsageView";
 
 /** At least this wide (CSS px), the control panel takes this layout. */
 export const WIDE_MIN = 1000;
 
-/** A button in the rail's header. */
-const RAIL_BUTTON = `border-black/10 bg-white/50 hover:bg-white/80 dark:border-white/10 dark:bg-white/[0.06] dark:hover:bg-white/10 ${TEXT_2}`;
-
-/** A side panel: glass over the columns, with the usual thick tint (not the columns' denser one),
- *  so the columns under it show through. */
+/** A side panel over the clone's screen: glass over the columns, with the usual thick tint (not
+ *  the columns' denser one), so the columns under it show through. */
 const PANEL = `glass glass-thick rounded-2xl pointer-events-auto flex min-h-0 flex-col overflow-hidden`;
+/** A side panel in the control panel's window: solid, as a sheet over the control panel is
+ *  (`../GLASS.md`), with the columns' edge. */
+const PANEL_SOLID = `rounded-xl border border-black/10 bg-neutral-100 dark:border-white/10 dark:bg-neutral-900 pointer-events-auto flex min-h-0 flex-col overflow-hidden`;
 
 export function WideLayout({
   width,
@@ -103,6 +104,7 @@ export function WideLayout({
       ticket={side.ticket}
       notes={side.notes}
       chat={side.chat}
+      solid={!glass}
       width={sideW}
       onWidth={(px) => setSidePct((px / width) * 100)}
       onWidthDone={() => onSideWidthCommit(pctRef.current)}
@@ -114,7 +116,7 @@ export function WideLayout({
   );
 
   const railColumn = (
-    <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${railFrame}`}>
+    <aside aria-label="Server and accounts" className={`flex h-full w-64 shrink-0 flex-col ${railFrame} ${ON_GLASS}`}>
       <div className="flex h-12 shrink-0 items-center gap-1.5 pl-3 pr-1.5">
         <h2 className={`min-w-0 flex-1 truncate text-sm font-semibold ${TEXT}`}>RMNG Control</h2>
         {onLayout ? (
@@ -122,8 +124,8 @@ export function WideLayout({
             type="button"
             onClick={onLayout}
             aria-label="Edit layout"
-            title="Edit layout"
-            className={`flex size-9 items-center justify-center ${R_PIECE} border ${RAIL_BUTTON}`}
+            data-tip="Edit layout"
+            className={`flex size-9 items-center justify-center ${BUTTON}`}
           >
             <MonitorCog aria-hidden className="size-[18px]" strokeWidth={1.75} />
           </button>
@@ -133,11 +135,9 @@ export function WideLayout({
           onClick={onSettings}
           aria-pressed={settingsOpen}
           aria-label="Settings"
-          title="Settings"
-          className={`flex size-9 items-center justify-center ${R_PIECE} border ${
-            settingsOpen
-              ? `border-transparent ${LIT}`
-              : RAIL_BUTTON
+          data-tip="Settings"
+          className={`flex size-9 items-center justify-center ${
+            settingsOpen ? `${R_PIECE} border border-transparent ${LIT}` : BUTTON
           }`}
         >
           <Settings aria-hidden className="size-[18px]" strokeWidth={1.75} />
@@ -207,16 +207,20 @@ export const sideWidthPx = (width: number, pct: number) => Math.round(Math.max((
 /** The side panels, the full height of their box: the open ticket, or the clone's notes over its assistant. The one touched or focused last
  *  takes three quarters of the height, with an ease that goes past and comes back. A band on
  *  their left edge sets their width: a drag, the arrow keys, a double click back to the start.
- *  Each panel is glass of its own, with its blur and its shadow. */
+ *  Each panel is glass of its own, with its blur and its shadow; `solid` in the control panel's
+ *  window. */
 export function SidePanels({
   ticket,
   notes,
   chat,
+  solid = false,
   width,
   onWidth,
   onWidthDone,
   onWidthReset,
 }: Omit<SideProps, "widthPct"> & {
+  /** In the control panel's window: solid panels, not glass. */
+  solid?: boolean;
   /** CSS px. */
   width: number;
   /** The new width during a drag, CSS px from the panels' right edge to the pointer. */
@@ -228,6 +232,7 @@ export function SidePanels({
   const [focus, setFocus] = useState<"notes" | "chat">("notes");
   const box = useRef<HTMLDivElement>(null);
   if (!ticket && notes === null) return null;
+  const panel = solid ? PANEL_SOLID : PANEL;
 
   /** Drag the left edge; the pointer is the band's, so the board's drags never see it. Where
    *  in the band it was taken stays under the pointer. */
@@ -282,7 +287,7 @@ export function SidePanels({
         className="pointer-events-auto absolute inset-y-0 -left-1.5 z-10 w-4 cursor-col-resize touch-none select-none outline-none"
       />
       {ticket ? (
-        <section aria-label="Ticket" className={`flex-1 ${PANEL}`}>
+        <section aria-label="Ticket" className={`flex-1 ${panel}`}>
           {ticket}
         </section>
       ) : (
@@ -291,7 +296,7 @@ export function SidePanels({
             aria-label="Notes"
             onFocusCapture={() => setFocus("notes")}
             onPointerDownCapture={() => setFocus("notes")}
-            className={`${half(focus === "notes")} ${PANEL}`}
+            className={`${half(focus === "notes")} ${panel}`}
           >
             {notes}
           </section>
@@ -299,7 +304,7 @@ export function SidePanels({
             aria-label="Assistant"
             onFocusCapture={() => setFocus("chat")}
             onPointerDownCapture={() => setFocus("chat")}
-            className={`${half(focus === "chat")} ${PANEL}`}
+            className={`${half(focus === "chat")} ${panel}`}
           >
             {chat}
           </section>

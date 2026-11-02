@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { MODAL_ANIMATION } from "~/components/ModalShell";
+import { TEXT_2 } from "~/desk/control/ui";
 import { MODAL_EXIT_MS } from "~/lib/useModalExit";
 
 /** `monitor`: the number to show; null: none (the last one plays its way out first). */
@@ -32,7 +33,7 @@ export function MonitorNumber({ monitor }: { monitor: number | null }) {
       }}
     >
       <span className="text-7xl font-bold leading-none tabular-nums">{n}</span>
-      <span className="mt-2 text-sm font-medium text-black/55 dark:text-white/60">{n === 0 ? "Primary" : "Monitor"}</span>
+      <span className={`mt-2 text-sm font-medium ${TEXT_2}`}>{n === 0 ? "Primary" : "Monitor"}</span>
     </div>,
     document.body,
   );

@@ -4,6 +4,7 @@
 // The resolved-preset line belongs to this tab and only this tab. New ticket does not need it
 // (its team dropdown already reads "DEV · preset 1", i.e. the same choice) and No ticket picks
 // a preset by hand, so neither one draws it.
+import { ERROR_TEXT, TEXT, TEXT_3 } from "~/desk/control/ui";
 import {
   cloneRow,
   cloneRowField,
@@ -56,7 +57,7 @@ export function CloneExistingTicketFields({
             className={cloneRowField}
           />
           {ticket && !parsed ? (
-            <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">
+            <p className={`mt-1 text-[11px] ${ERROR_TEXT}`}>
               couldn’t find a ticket id (like WE-142) in that
             </p>
           ) : null}
@@ -65,7 +66,7 @@ export function CloneExistingTicketFields({
 
       <div className={cloneRow}>
         <span className={cloneRowLabel}>Preset</span>
-        <p className="text-sm font-normal text-slate-700 dark:text-slate-200">
+        <p className={`text-sm font-normal ${TEXT}`}>
           {preset ? (
             <>
               <span className="font-medium">{preset.name}</span>
@@ -74,12 +75,12 @@ export function CloneExistingTicketFields({
           ) : parsed && presets.length > 0 ? (
             // Blocking, not cosmetic: with no preset dropdown there's nothing to override the
             // auto-selection with, so say what to fix.
-            <span className="text-red-600 dark:text-red-400">
+            <span className={ERROR_TEXT}>
               no preset claims {parsed.prefix.toUpperCase()} — add it to a
               preset’s ticket-id prefixes in Settings
             </span>
           ) : (
-            <span className="text-slate-400 dark:text-slate-500">—</span>
+            <span className={TEXT_3}>—</span>
           )}
         </p>
       </div>

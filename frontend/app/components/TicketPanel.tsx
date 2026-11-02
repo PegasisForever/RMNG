@@ -27,6 +27,7 @@ import { MenuChoice, MenuNote, OverflowMenu } from "~/components/OverflowMenu";
 import { LabelPill, PriorityIcon, StateIcon, STATE_LABEL } from "~/components/TicketCard";
 import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import type { TicketLabel, TicketLink, TicketWorkflowState } from "~/lib/linear/types";
+import { DONE_BUTTON, ICON_BUTTON, LINE, ON_GLASS, PRESS, TEXT, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 import { workspaceBadge } from "~/lib/workspace";
 
 /** Copy the ticket's git branch name, or its link. It sits in the header rather than among the
@@ -60,9 +61,10 @@ function CopyButton({
           window.setTimeout(() => setCopied(false), 1200);
         });
       }}
-      title={`${label}: ${text}`}
+      data-tip={label}
+      data-tip-sub={text}
       aria-label={label}
-      className="shrink-0 cursor-pointer rounded p-1 text-slate-400 hover:bg-slate-500/10 hover:text-slate-600 dark:hover:text-slate-300"
+      className={`shrink-0 cursor-pointer p-1 ${ICON_BUTTON}`}
     >
       {copied ? (
         <Check aria-hidden className="size-4 text-emerald-600 dark:text-emerald-400" />
@@ -101,7 +103,7 @@ function StateMenu({
       label={`Change the state of ${ticket.id}, currently ${current}`}
       align="left"
       trigger={(open) => (
-        <span className={`rounded p-0.5 ${open ? "bg-slate-500/15" : "hover:bg-slate-500/15"}`}>
+        <span className={`rounded-md p-0.5 ${open ? "bg-black/10 dark:bg-white/15" : PRESS}`}>
           <StateIcon state={ticket.state} label={current} />
         </span>
       )}
@@ -156,8 +158,8 @@ function AddLabelMenu({
         <span
           className={`inline-flex items-center rounded-full border border-dashed px-1.5 py-0.5 leading-none ${
             open
-              ? "border-slate-400 text-slate-600 dark:border-slate-500 dark:text-slate-300"
-              : "border-slate-300 text-slate-400 hover:border-slate-400 hover:text-slate-600 dark:border-slate-600 dark:hover:border-slate-500 dark:hover:text-slate-300"
+              ? `border-black/30 dark:border-white/30 ${TEXT_2}`
+              : `border-black/15 hover:border-black/30 dark:border-white/20 dark:hover:border-white/30 ${TEXT_3} ${PRESS}`
           }`}
         >
           <Plus aria-hidden className="size-3" />
@@ -217,7 +219,7 @@ function LinkRow({ link, here }: { link: TicketLink; here: TicketLinkTarget | nu
   // and has to give way to it. In the sub-issue list they do nothing, the container there
   // being a block.
   const row =
-    "flex w-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-slate-500/10";
+    `flex w-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-left ${PRESS}`;
   const body = (
     <>
       <StateIcon state={link.state} />
@@ -226,14 +228,12 @@ function LinkRow({ link, here }: { link: TicketLink; here: TicketLinkTarget | nu
           identifier is all caps and digits with nothing below the baseline, while the title
           next to it runs from cap height down through its descenders. The pixel puts the two
           blocks of ink on the same middle. */}
-      <span className="shrink-0 translate-y-px font-mono text-[11px] text-slate-500 dark:text-slate-400">
+      <span className={`shrink-0 translate-y-px font-mono text-[11px] ${TEXT_2}`}>
         {link.id}
       </span>
       <span
         className={`min-w-0 flex-1 truncate text-xs ${
-          done
-            ? "text-slate-400 line-through dark:text-slate-500"
-            : "text-slate-700 dark:text-slate-200"
+          done ? `line-through ${TEXT_3}` : TEXT
         }`}
       >
         {link.title}
@@ -243,7 +243,7 @@ function LinkRow({ link, here }: { link: TicketLink; here: TicketLinkTarget | nu
 
   if (here) {
     return (
-      <button type="button" onClick={here.open} title={here.title} className={row}>
+      <button type="button" onClick={here.open} data-tip={here.title} className={row}>
         {body}
       </button>
     );
@@ -253,11 +253,11 @@ function LinkRow({ link, here }: { link: TicketLink; here: TicketLinkTarget | nu
       href={link.url}
       target="_blank"
       rel="noopener noreferrer"
-      title={`Open ${link.id} in Linear`}
+      data-tip={`Open ${link.id} in Linear`}
       className={row}
     >
       {body}
-      <ExternalLink aria-hidden className="size-3 shrink-0 text-slate-300 dark:text-slate-600" />
+      <ExternalLink aria-hidden className={`size-3 shrink-0 ${TEXT_3}`} />
     </a>
   );
 }
@@ -355,7 +355,7 @@ function EditableTitle({
             e.currentTarget.blur();
           }
         }}
-        className="w-full resize-none overflow-hidden whitespace-pre-wrap break-words rounded bg-transparent p-0 text-xl font-semibold leading-snug text-slate-900 outline-none [grid-area:1/1] hover:bg-slate-500/5 focus:bg-slate-500/5 dark:text-slate-100"
+        className="w-full resize-none overflow-hidden whitespace-pre-wrap break-words rounded bg-transparent p-0 text-xl font-semibold leading-snug text-neutral-900 outline-none [grid-area:1/1] hover:bg-black/5 focus:bg-black/5 dark:text-white dark:hover:bg-white/5 dark:focus:bg-white/5"
       />
     </div>
   );
@@ -382,7 +382,8 @@ export function TicketPanel({
   ).length;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    // Its parts from `~/components` (the description's editor, the menus) flat on the glass
+    <div className={`flex h-full min-h-0 flex-col ${ON_GLASS}`}>
       {/* `px-6` down the card, wider than the app's usual `px-4`. Everything here is prose the
           operator reads rather than chrome they scan, and prose wants a margin: the ticket's
           own text should not start where a card's border ends. */}
@@ -431,9 +432,9 @@ export function TicketPanel({
           href={ticket.url}
           target="_blank"
           rel="noopener noreferrer"
-          title="Open in Linear"
+          data-tip="Open in Linear"
           aria-label="Open in Linear"
-          className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-500/10 hover:text-slate-600 dark:hover:text-slate-300"
+          className={`shrink-0 p-1 ${ICON_BUTTON}`}
         >
           <ExternalLink aria-hidden className="size-4" />
         </a>
@@ -451,7 +452,7 @@ export function TicketPanel({
               already says, and the panel is narrow enough that lines are the scarce thing. */}
           {ticket.parent ? (
             <div className="-mr-2 flex items-center gap-2">
-              <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+              <span className={`shrink-0 text-[10px] font-semibold uppercase tracking-wide ${TEXT_3}`}>
                 Parent
               </span>
               <LinkRow link={ticket.parent} here={resolveLink?.(ticket.parent.id) ?? null} />
@@ -463,13 +464,13 @@ export function TicketPanel({
             be about, and the editor's own first line says the rest. */}
         <section>
           {description ?? (
-            <p className="text-xs text-slate-400 dark:text-slate-500">No description.</p>
+            <p className={`text-xs ${TEXT_3}`}>No description.</p>
           )}
         </section>
 
         {ticket.children.length > 0 ? (
           <section>
-            <h3 className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            <h3 className={`mb-1 text-[10px] font-semibold uppercase tracking-wide ${TEXT_3}`}>
               Sub-issues {done}/{ticket.children.length}
             </h3>
             <div className="-mx-2">
@@ -482,11 +483,11 @@ export function TicketPanel({
       </div>
 
       {onCreateClone ? (
-        <footer className="shrink-0 border-t border-slate-900/10 px-6 py-2 dark:border-white/10">
+        <footer className={`shrink-0 border-t px-6 py-2 ${LINE}`}>
           <button
             type="button"
             onClick={onCreateClone}
-            className="w-full cursor-pointer rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
+            className={`w-full cursor-pointer px-3 py-1.5 text-xs font-medium ${DONE_BUTTON}`}
           >
             Create a clone for {ticket.id}
           </button>

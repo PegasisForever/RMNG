@@ -1,7 +1,10 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
-import { ModalShell, type ModalClose } from "./ModalShell";
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
+import { BUTTON, DONE_BUTTON, TEXT, TEXT_2 } from "~/desk/control/ui";
+
+import { ModalShell, ModalSurfaceProvider, type ModalClose } from "./ModalShell";
 
 /** Stand-in for a dialog's own markup. Every dialog puts its content here and reaches the
  *  shell's door out the same way, so the frame can be reviewed without one. */
@@ -16,12 +19,12 @@ function SampleDialog({
 }) {
   return (
     <>
-      <h3 className="shrink-0 text-sm font-semibold text-slate-900 dark:text-slate-100">
+      <h3 className={`shrink-0 text-[15px] font-semibold tracking-tight ${TEXT}`}>
         {title}
       </h3>
       <div className="min-h-0 shrink space-y-2 overflow-y-auto pt-3">
         {Array.from({ length: lines }, (_, i) => (
-          <p key={i} className="text-xs text-slate-500 dark:text-slate-400">
+          <p key={i} className={`text-xs ${TEXT_2}`}>
             A dialog states what it is — how wide, whether Escape may close
             it — and puts its own markup inside.
           </p>
@@ -31,13 +34,13 @@ function SampleDialog({
         <button
           type="button"
           onClick={() => close()}
-          className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+          className={`${BUTTON} px-3 py-1.5 text-sm`}
         >
           Cancel
         </button>
         <button
           type="button"
-          className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+          className={`${DONE_BUTTON} px-4 py-1.5 text-sm font-medium`}
         >
           Apply
         </button>
@@ -56,11 +59,12 @@ const meta = {
       <SampleDialog title="Dialog" close={close} />
     ),
   },
-  /** The shell positions itself over the page, so the stories give it a page-coloured one to
-   *  sit on rather than a white void. Cancel and Escape both play the real exit frames. */
+  /** Over a clone's screen, as a dialog opens: glass. Cancel and Escape both play the real exit
+   *  frames. */
   decorators: [
     (Story) => (
-      <div className="h-screen bg-slate-50 dark:bg-slate-950">
+      <div className="relative h-screen w-screen overflow-hidden bg-black">
+        <FakeDesktop />
         <Story />
       </div>
     ),
@@ -92,7 +96,7 @@ export const Panel: Story = {
   args: {
     size: "panel",
     children: (close: ModalClose) => (
-      <div className="flex min-h-0 flex-1 flex-col p-5">
+      <div className="flex min-h-0 flex-1 flex-col p-4">
         <SampleDialog title="Panel" close={close} lines={20} />
       </div>
     ),
@@ -109,4 +113,19 @@ export const NotDismissible: Story = {
       <SampleDialog title="Working…" close={close} />
     ),
   },
+};
+
+/** In the control panel's own window (no clone's screen under it): solid, in the page's look, on
+ *  the window's solid ground. */
+export const Solid: Story = {
+  args: { size: "sm" },
+  decorators: [
+    (Story) => (
+      <ModalSurfaceProvider value="solid">
+        <div className="absolute inset-0 bg-neutral-100 dark:bg-neutral-950">
+          <Story />
+        </div>
+      </ModalSurfaceProvider>
+    ),
+  ],
 };

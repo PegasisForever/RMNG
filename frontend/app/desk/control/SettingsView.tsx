@@ -8,7 +8,7 @@ import { Frame, Save } from "lucide-react";
 
 import { SETTINGS_CATEGORIES, SettingsPane, type SettingsPanelProps } from "~/components/SettingsPanes";
 
-import { EmptyLine, ErrorLine, LINE, LIT, PRESS, R_PIECE, TEXT_2 } from "./ui";
+import { DONE_BUTTON, EmptyLine, ErrorLine, LINE, LIT, ON_GLASS, PRESS, R_PIECE, TEXT_2 } from "./ui";
 
 export type SettingsViewProps = SettingsPanelProps & {
   /** Open the screen area test page (`routes/screenArea.tsx`); absent: no button. */
@@ -20,7 +20,7 @@ export function SettingsView(p: SettingsViewProps) {
   const active = categories.find((c) => c.id === p.category) ?? categories[0];
   return (
     // The panes, flat on the glass (`.on-glass`, `../glass.css`)
-    <div className="on-glass @container flex h-full min-h-0">
+    <div className={`${ON_GLASS} @container flex h-full min-h-0`}>
       <nav aria-label="Settings categories" className={`flex w-12 shrink-0 flex-col gap-1 border-r p-1.5 @lg:w-32 ${LINE}`}>
         {categories.map(({ id, label, icon: Icon }) => (
           <button
@@ -29,7 +29,7 @@ export function SettingsView(p: SettingsViewProps) {
             onClick={() => p.onCategoryChange(id)}
             aria-current={id === active.id ? "page" : undefined}
             aria-label={label}
-            title={label}
+            data-tip={label}
             className={`flex h-9 items-center justify-center gap-2 ${R_PIECE} px-2 text-left text-sm @lg:justify-start ${
               id === active.id ? `${LIT} font-medium` : `${TEXT_2} ${PRESS}`
             }`}
@@ -44,7 +44,7 @@ export function SettingsView(p: SettingsViewProps) {
             type="button"
             onClick={p.onScreenArea}
             aria-label="Screen area test"
-            title="Screen area test: the page's area and the safe area"
+            data-tip="Screen area test: the page's area and the safe area"
             className={`flex h-9 items-center justify-center gap-2 ${R_PIECE} px-2 text-left text-sm @lg:justify-start ${TEXT_2} ${PRESS}`}
           >
             <Frame aria-hidden className="size-4 shrink-0" />
@@ -57,7 +57,7 @@ export function SettingsView(p: SettingsViewProps) {
           onClick={p.onSave}
           disabled={!p.draft || p.saving}
           aria-label="Save"
-          className={`flex h-9 items-center justify-center gap-1.5 ${R_PIECE} bg-emerald-600 text-sm font-medium text-white active:bg-emerald-500 disabled:opacity-40`}
+          className={`flex h-9 items-center justify-center gap-1.5 text-sm font-medium ${DONE_BUTTON}`}
         >
           <Save aria-hidden className="size-4" />
           <span className="hidden @lg:inline">{p.saving ? "Saving…" : "Save"}</span>

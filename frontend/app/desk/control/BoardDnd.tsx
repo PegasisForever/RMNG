@@ -35,8 +35,11 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { useModalSurface } from "~/components/ModalShell";
 import { arrange, type Lane, laneOf, REARRANGE_MIN_TRAVEL, settle } from "~/lib/boardDrag";
 import { TICKET_COLUMN_ID, ticketIdFromDrag } from "~/lib/tickets";
+
+import { FLOAT_SOLID, ON_GLASS, R_PIECE } from "./ui";
 
 /** The card a view draws for a dragged clone or ticket. */
 type Overlays = { clone?: (id: string) => ReactNode; ticket?: (id: string) => ReactNode };
@@ -102,6 +105,7 @@ export function BoardDnd({
   children: ReactNode;
 }) {
   const [dragId, setDragId] = useState<string | null>(null);
+  const surface = useModalSurface();
   const [preview, setPreview] = useState<Lane[] | null>(null);
   const [ticketPreview, setTicketPreview] = useState<string[] | null>(null);
   const arrangedAt = useRef<{ x: number; y: number } | null>(null);
@@ -200,8 +204,10 @@ export function BoardDnd({
           : createPortal(
               <DragOverlay>
                 {overlay ? (
-                  // Lifted off the tab: solid, with a long shadow
-                  <div className="overflow-hidden rounded-lg bg-white shadow-[0_12px_32px_rgb(0_0_0/0.3)] dark:bg-neutral-800">
+                  // Lifted off the tab: a piece of thick glass with its long shadow, the card's own
+                  // corners (`../GLASS.md`), on the body so it is not glass inside a column's glass;
+                  // solid in the control panel's own window
+                  <div className={`overflow-hidden ${R_PIECE} ${ON_GLASS} ${surface === "solid" ? FLOAT_SOLID : "glass glass-thick"}`}>
                     {overlay}
                   </div>
                 ) : null}

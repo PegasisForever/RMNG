@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { ConfirmLayer } from "~/components/ConfirmLayer";
+import { ModalSurfaceProvider } from "~/components/ModalShell";
 import { SetupWizardContainer } from "~/components/SetupWizardContainer";
 import { TooltipLayer } from "~/components/TooltipLayer";
 import { getConfig } from "~/lib/api";
@@ -134,12 +135,10 @@ export default function App() {
     <div className="fixed inset-0 touch-none select-none overflow-hidden bg-black text-white">
       <div ref={probe} className="pointer-events-none absolute inset-0 pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)]" />
       {message && page ? (
-        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 p-8 text-center text-slate-500">
-          <div>{message}</div>
-          <div className="font-mono text-sm">
-            page {page.size[0]} × {page.size[1]}
-          </div>
-        </div>
+        // A note, as "Connecting…" over the clone's screen
+        <p className="absolute inset-0 flex items-center justify-center p-6">
+          <span className="glass glass-thick rounded-full px-4 py-2 text-center text-sm">{message}</span>
+        </p>
       ) : null}
       {secure && page && setup && controlPanelOnly ? <ControlPanelWindow width={page.size[0]} /> : null}
       {secure && page && setup && !controlPanelOnly ? (
@@ -153,7 +152,10 @@ export default function App() {
       ) : null}
       {/* The tooltips and the questions of every part of the page */}
       <TooltipLayer />
-      <ConfirmLayer />
+      {/* Solid in the control panel's own window, as its other dialogs (`ControlPanelWindow`) */}
+      <ModalSurfaceProvider value={controlPanelOnly ? "solid" : "glass"}>
+        <ConfirmLayer />
+      </ModalSurfaceProvider>
     </div>
   );
 }

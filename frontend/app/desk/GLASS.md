@@ -43,7 +43,7 @@ lines are white or black at a low one. No solid white or blue box is left.
 | Class | Use it for | Light | Dark |
 |---|---|---|---|
 | `glass` | Every surface: rim, sheen, short shadow. Blur 8 px. | White tint 35 %, dark text, a hairline edge. | Grey tint 30 %, white text. |
-| `glass-thick` | A surface with text to read: a dialog, a tooltip, the monitor's number, a note. Blur 14 px, a long shadow. | White tint 55 %. | Grey tint 50 %. |
+| `glass-thick` | A surface with text to read: a dialog, a tooltip, a menu, the monitor's number, a note; a card being dragged. Blur 14 px, a long shadow. | White tint 55 %. | Grey tint 50 %. |
 | `glass-control` | A surface that is itself a control (a floating button): more light under the mouse; sinks on a press; an outline on keyboard focus; 45 % when disabled. | Dark outline. | White outline. |
 | `glass-flat` | A piece on a backdrop that already blurs and darkens the screen (the wide control panel's columns): no blur and no shadow of its own, only the tint, the rim and the sheen. | | |
 | `glass-lit` | A control whose thing is open (the control panel shown, fullscreen on): the other look's glass. | Dark glass, white text. | Frosted white glass, dark text. |
@@ -60,8 +60,44 @@ without the control panel (the mouse at the right edge): the same thick glass, w
 floating buttons) blurs and darkens it (`CONTROL_PANEL_BACKDROP`, `bg-black/25` / `bg-black/40`, blur
 12 px). Each backdrop fades in and out with the control panel (200 ms), and takes no touch or click. In the control panel's own window there is no clone's
 screen under them: the same flat content sits on a solid ground (`bg-neutral-100` /
-`bg-neutral-950`), with no glass. A sheet or a dialog over the control panel is solid
-(`bg-neutral-100` / `bg-neutral-900`): over a dimmed page, glass would look murky.
+`bg-neutral-950`), with no glass.
+
+Dialogs (`~/components/ModalShell.tsx`) decide their surface in one place, not each dialog:
+
+- A dialog over the clone's screen is glass (`glass glass-thick`, 26 px corners), on a backdrop
+  that only darkens the screen (`bg-black/20` / `bg-black/35`). This is also true over the wide
+  control panel.
+- A dialog in the narrow control panel takes its tab's space (`ModalPlacementProvider`) and is
+  solid (`bg-neutral-100` / `bg-neutral-900`): on the panel's glass, glass would show the tab
+  through it and look murky. A sheet over a tab (`ActionSheet`) is solid for the same reason,
+  with no shadow: it sits at the bottom, and the light is above it.
+- In the control panel's own window, every dialog is solid (`bg-neutral-100` / `bg-neutral-900`,
+  a 1 px line, a shadow), on the same darkening backdrop: there is no screen under it. The
+  window says so to its dialogs (`ModalSurfaceProvider`, `solid`).
+
+The content of every dialog is the flat content below.
+
+An open list (a dropdown's, `~/components/AnchoredList.tsx`) has one look in every place: thick
+glass (`glass glass-thick`), 10 px corners as its field's. It is drawn on the body, over the
+dialogs, so it blurs the dialog or the tab it opens from (a glass piece cannot blur through the
+glass it is in). Its rows are flat: main text; the row under the mouse or the arrow keys
+`bg-black/5` / `bg-white/10`; the chosen row with a check; a caption or a row that cannot be
+picked in the least text's grey. In the control panel's own window the list is solid (`bg-white`
+/ `bg-neutral-800`, a 1 px line, a shadow).
+
+A menu (a ⋯ menu: a card's, the ticket panel's, a column's; `~/components/OverflowMenu.tsx`,
+`MenuPanel`) is thick glass too, drawn on the body for the same reason: 16 px corners, its rows
+set 6 px in with 10 px corners. Its rows are flat: an action in the main text, a remove in red
+text (`DANGER_TEXT`), the row under the mouse or a finger as any row (`PRESS`), a heading, a
+note or the choice that is on now in the least text's grey, a line between groups. In the
+control panel's own window it is solid, as an open list there (`FLOAT_SOLID`). BlockNote's menus
+in the notes and a ticket's description (its toolbar, the "/" menu, its dropdowns and tooltips)
+are the same glass, with the same rows; its text is the main text (`../app.css`). They are drawn
+in the editor, so they blur only what is in the panel under them.
+
+A card being dragged is lifted off its column: a piece of thick glass with its long shadow (a
+higher piece casts a longer shadow), the card's own 10 px corners (`R_PIECE`), on the body. In
+the control panel's own window it is solid (`FLOAT_SOLID`).
 
 The keyboard (`./KeyboardView.tsx`, `keyboardPanel`) is the one surface with a denser tint: it is
 large and full of keys, so each key must show over a white window or a black one. Light: grey
@@ -69,6 +105,20 @@ large and full of keys, so each key must show over a white window or a black one
 round (16 px, `rounded-t-2xl`), as a panel's. Docked, the keyboard is under the screen, not over
 it, so it is a solid panel in the same colors (`bg-neutral-300` / `bg-neutral-950`), square, with
 no blur.
+
+### Solid, with no clone's screen under them
+
+Where there is nothing to blur, there is no glass: the flat content sits on a solid ground.
+
+- The control panel's own window, and a sheet or a dialog over the control panel (above).
+- The docked keyboard (above).
+- The setup wizard (`~/components/SetupWizardView.tsx`), a whole page before the first clone:
+  ground `bg-neutral-100` / `bg-neutral-950`, its card `bg-white` / `bg-neutral-900` with a 1 px
+  line and 16 px corners, no shadow.
+- The error page (`~/root.tsx`): on black in both looks, so the dark values only.
+- A headless clone's terminal and its tab bar (`./TermBar.tsx`): one black in both looks
+  (`TERM_BG`, `#171717`, neutral-900), the bar under the clone's screen as the docked keyboard is.
+  The open tab is the other look's (`bg-white text-neutral-900`).
 
 ## Flat content
 
@@ -91,7 +141,7 @@ Each color has its light value and its `dark:` value.
 | A remove button | `text-rose-600` | `text-rose-400` |
 | A line between rows | `divide-black/10` | `divide-white/10` |
 | A row under the mouse, under a finger | `hover:bg-black/5`, `active:bg-black/10` | `bg-white/5`, `bg-white/10` |
-| A card (a clone, a ticket, an account) | `rounded-lg border-black/10 bg-white/70` | `border-white/10 bg-white/[0.06]` |
+| A card (a clone, a ticket, an account) | `rounded-[10px] border-black/10 bg-white/60` (`CARD_BOX`) | `border-white/10 bg-white/[0.07]` |
 | A column of the board | `rounded-xl border-black/10 bg-black/[0.03]` | `border-white/10 bg-white/[0.03]` |
 | The clone on the screen | `bg-emerald-500/10`, a 3 px emerald bar at the left | `bg-emerald-400/10` |
 | The open tab, the one choice on | `bg-neutral-900 text-white` (the other look) | `bg-white text-neutral-900` |
@@ -107,9 +157,11 @@ Each color has its light value and its `dark:` value.
 
 - Neutral grey only: no blue in the greys (the app is black and grey).
 - One accent, green (Tailwind emerald): the primary monitor, Done, "here". Never on a glass
-  surface itself: no green rim, no green glow.
-- A count is a small solid dot: green for "to do", red (`rose-500`) for "went wrong". It has its
-  own top highlight and a shadow, as a drop of colored glass.
+  surface itself: no green rim, no green glow. A clone's state dot is data, not an accent: blue
+  working, grey not working, purple offline, red unread (`~/components/CloneStatus.tsx`).
+- A count is a small solid dot: green for "to do", red (`rose-500`) for "went wrong" or "look
+  at it". It has its own top highlight and a shadow, as a drop of colored glass. Clones that
+  stopped with no one looking (unread) are red, as their dot on the card is.
 - A danger action (remove) is red text, never a red surface.
 
 ## Shape
@@ -120,9 +172,9 @@ Each color has its light value and its `dark:` value.
 
   | Thing | Radius | Inset of what is in it |
   |---|---|---|
-  | A surface: a column, a side panel, the narrow control panel, the keyboard's top | 16 px (`rounded-2xl`) | 6 px (`INSET`, `p-1.5`) |
+  | A surface: a column, a side panel, the narrow control panel, the keyboard's top, a menu | 16 px (`rounded-2xl`) | 6 px (`INSET`, `p-1.5`) |
   | A piece in a surface: a card, a column's header button (a 40 px header, 28 px buttons, 6 px from the right), a tab on the tool row, a Settings category and Save, the assistant's field and buttons, a field | 10 px (`R_PIECE`, `rounded-[10px]`) | — |
-  | A glass dialog | 26 px (`rounded-[26px]`) | 16 px (`p-4`): its buttons and fields are 10 px |
+  | A dialog (glass or solid) | 26 px (`rounded-[26px]`) | 16 px (`p-4`): its buttons and fields are 10 px |
   | A small control inside a piece (a ⋯, a chip) | 6 px (`rounded-md`) | — |
 - Cards in a column: 6 px from its sides and its bottom, and 6 px apart (`CARD_LIST`).
 - The monitor's number: a 144 px square (`size-36`), always the same size, in the top-left

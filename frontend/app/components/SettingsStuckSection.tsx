@@ -1,5 +1,6 @@
-import { Field, Section, settingsInput } from "~/components/SettingsFields";
+import { Field, Section, settingsButton, settingsInput } from "~/components/SettingsFields";
 import { DropdownSelect } from "~/components/DropdownSelect";
+import { TEXT_2 } from "~/desk/control/ui";
 import type { JudgeProvider } from "~/lib/wire/JudgeProvider";
 
 export function SettingsStuckSection({
@@ -49,12 +50,12 @@ export function SettingsStuckSection({
         <button
           type="button"
           onClick={onTest}
-          className="rounded border border-slate-300 dark:border-slate-600 px-2.5 py-1.5 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+          className={settingsButton}
         >
           Test judge
         </button>
         {testMessage ? (
-          <p className="text-xs text-slate-500 dark:text-slate-400">
+          <p className={`text-xs ${TEXT_2}`}>
             {testMessage}
           </p>
         ) : null}

@@ -81,12 +81,13 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     message = error.message;
     detail = error.stack ?? "";
   }
-  // On the page's black ground, in a box of its own that scrolls (the page does not)
+  // On the page's black ground, in a box of its own that scrolls (the page does not). The ground
+  // is black in both looks, so the colors are the dark ones (`~/desk/GLASS.md`).
   return (
     <main className="fixed inset-0 select-text overflow-auto p-8">
       <div className="mx-auto max-w-2xl">
-        <h1 className="text-xl font-semibold text-red-400">{message}</h1>
-        {detail ? <pre className="mt-4 overflow-auto rounded bg-slate-800 p-4 text-xs text-slate-400">{detail}</pre> : null}
+        <h1 className="text-xl font-semibold text-rose-300">{message}</h1>
+        {detail ? <pre className="mt-4 overflow-auto rounded-[10px] border border-white/10 bg-white/[0.06] p-4 text-xs text-white/60">{detail}</pre> : null}
       </div>
     </main>
   );

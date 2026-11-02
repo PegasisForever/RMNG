@@ -62,5 +62,5 @@ export const SignedOut: Story = {
   },
 };
 
-/** The rail (wide, a mouse): one column; the reset times are tooltips, and the scroll has no bar. */
+/** The rail (wide): one column, and the scroll has no bar. */
 export const Rail: Story = { args: { rail: true }, parameters: { frameWidth: 256 } };

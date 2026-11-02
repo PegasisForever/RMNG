@@ -2,6 +2,8 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import { fn } from "storybook/test";
 
+import { ModalSurfaceProvider } from "~/components/ModalShell";
+
 import { FakeDesktop } from "../__fixtures__/desktop";
 import { controlPanelFor } from "../__fixtures__/screen";
 import type { PanelTab } from "../ToolRow";
@@ -16,9 +18,12 @@ function ControlPanel({ width, height, surface, tab: first }: { width: number; h
   const glass = surface === "glass";
   const content = controlPanelFor({ width, glass, tab, onTab: setTab, badges: { clones: 2 }, onPopOut: glass ? fn() : undefined });
   return surface === "window" ? (
-    <div className="relative overflow-hidden bg-neutral-100 dark:bg-neutral-950" style={{ width, height }}>
-      {content}
-    </div>
+    // Its menus and dialogs solid, as the window has them (`ControlPanelWindow`)
+    <ModalSurfaceProvider value="solid">
+      <div className="relative overflow-hidden bg-neutral-100 dark:bg-neutral-950" style={{ width, height }}>
+        {content}
+      </div>
+    </ModalSurfaceProvider>
   ) : (
     // The control panel's box over the screen: in from the sides narrow; the display's whole width wide
     <div

@@ -7,9 +7,9 @@
 // image onto a fresh empty home dataset (headed unless asked, preset defaults underneath
 // the account overrides).
 //
-// It is a glass dialog laid out as Settings (`~/desk/control/SettingsView.tsx`): the modes a
+// It is a dialog laid out as Settings (`~/desk/control/SettingsView.tsx`): the modes a
 // rail of buttons on the left with Create at its foot (where Settings has Save), the form
-// scrolling beside it. Its fields are drawn flat on the glass (`.on-glass`, `~/desk/glass.css`).
+// scrolling beside it. Its fields are flat on the dialog's panel (`~/desk/GLASS.md`).
 // Its corners: the dialog's 26 px, and 10 px for what sits 16 px in from them
 // (`~/desk/GLASS.md`, Shape).
 //
@@ -45,6 +45,19 @@ import type { CloneGroup } from "~/lib/wire/CloneGroup";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
 import type { ReactNode } from "react";
+
+import {
+  BUTTON,
+  DONE_BUTTON,
+  ERROR_TEXT,
+  ErrorLine,
+  LINE,
+  LIT,
+  PRESS,
+  R_PIECE,
+  TEXT,
+  TEXT_2,
+} from "~/desk/control/ui";
 
 export interface CloneModalViewProps {
   /** The whole form, as one editable model. */
@@ -103,15 +116,6 @@ const MODES: { mode: CloneMode; label: string; icon: LucideIcon }[] = [
   { mode: "plain", label: "No ticket", icon: MessageSquare },
   { mode: "template", label: "From template", icon: Boxes },
 ];
-
-/** The flat content on the glass (`~/desk/control/ui.tsx`), for the rail. */
-const G = {
-  title: "text-neutral-900 dark:text-white",
-  text2: "text-black/60 dark:text-white/60",
-  line: "border-black/10 dark:border-white/10",
-  press: "hover:bg-black/5 active:bg-black/10 dark:hover:bg-white/5 dark:active:bg-white/10",
-  lit: "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900",
-};
 
 export function CloneModalView({
   draft,
@@ -221,7 +225,7 @@ export function CloneModalView({
     the fork tabs. */}
     {draft.mode === "template" ? (
       <>
-        <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+        <section className={`border-t pt-4 ${LINE}`}>
           <h4 className={`${cloneSectionCaption} mb-3`}>Accounts</h4>
           <CloneAccountFields
             accounts={accounts}
@@ -238,7 +242,7 @@ export function CloneModalView({
             }
           />
         </section>
-        <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+        <section className={`border-t pt-4 ${LINE}`}>
           <h4 className={`${cloneSectionCaption} mb-3`}>Options</h4>
           <CloneOptionsRow
             headless={draft.headless}
@@ -262,7 +266,7 @@ export function CloneModalView({
     clone (live or archived) fills in directly. Only the fork
     tabs take a source. */}
     {draft.mode === "template" ? null : (
-      <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+      <section className={`border-t pt-4 ${LINE}`}>
         <h4 className={`${cloneSectionCaption} mb-3`}>Source</h4>
         <label className={cloneRow}>
           <span className={cloneRowLabel}>Source clone to fork</span>
@@ -292,7 +296,7 @@ export function CloneModalView({
     )}
 
     {draft.mode === "template" ? null : (
-      <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+      <section className={`border-t pt-4 ${LINE}`}>
         <h4 className={`${cloneSectionCaption} mb-3`}>Accounts</h4>
         <CloneAccountFields
           accounts={accounts}
@@ -312,7 +316,7 @@ export function CloneModalView({
     )}
 
     {linearKeyMissing ? (
-      <p className="mt-3 text-[11px] text-red-600 dark:text-red-400">
+      <p className={`mt-3 text-[11px] ${ERROR_TEXT}`}>
         {presets.length === 0
           ? draft.mode === "create"
             ? "Creating a ticket needs a preset with a Linear API key — add one in Settings."
@@ -328,12 +332,12 @@ export function CloneModalView({
     prose, and the dialog has the room now that only the Existing tab carries the
     preset line. Still resizable. */}
     {draft.mode === "existing" || draft.mode === "create" ? (
-      <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+      <section className={`border-t pt-4 ${LINE}`}>
         {/* The checkbox decides whether the assistant gets a first message at all;
         the two boxes below only shape that message, so unchecked greys them out. */}
         <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1">
           <h4 className={cloneSectionCaption}>Instructions</h4>
-          <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400">
+          <label className={`flex cursor-pointer items-center gap-2 text-xs font-medium ${TEXT_2}`}>
             <input
               type="checkbox"
               checked={draft.kickoff}
@@ -341,7 +345,7 @@ export function CloneModalView({
                 onDraftChange("kickoff", e.target.checked)
               }
               disabled={busy}
-              className="h-3.5 w-3.5 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 dark:border-slate-600"
+              className="size-3.5 accent-emerald-600"
             />
             Auto send first message to the assistant
           </label>
@@ -386,7 +390,7 @@ export function CloneModalView({
     ) : null}
 
     {draft.mode === "template" ? null : (
-      <section className="border-t border-slate-100 pt-4 dark:border-slate-800">
+      <section className={`border-t pt-4 ${LINE}`}>
         <h4 className={`${cloneSectionCaption} mb-3`}>Options</h4>
         <CloneOptionsRow
           headless={draft.headless}
@@ -410,12 +414,12 @@ export function CloneModalView({
   return (
     // Neither Cancel nor Escape may close over a running clone operation, so both are held by
     // the same `busy`.
-    <ModalShell size="panel" dismissible={!busy} open={open} onExited={onClose} glass>
+    <ModalShell size="panel" dismissible={!busy} open={open} onExited={onClose}>
       {(close) => (
         // Settings' layout: the rail (16 px in from the dialog's 26 px corners, its buttons 10 px)
-        <div className="on-glass flex min-h-0 flex-1">
-          <nav aria-label="Clone modes" className={`flex w-52 shrink-0 flex-col gap-1 border-r p-4 ${G.line}`}>
-            <h3 className={`px-2 pb-2 text-[15px] font-semibold tracking-tight ${G.title}`}>New clone</h3>
+        <div className="flex min-h-0 flex-1">
+          <nav aria-label="Clone modes" className={`flex w-52 shrink-0 flex-col gap-1 border-r p-4 ${LINE}`}>
+            <h3 className={`px-2 pb-2 text-[15px] font-semibold tracking-tight ${TEXT}`}>New clone</h3>
             {MODES.map(({ mode, label, icon: Icon }) => (
               <button
                 key={mode}
@@ -423,8 +427,8 @@ export function CloneModalView({
                 disabled={busy}
                 onClick={() => onDraftChange("mode", mode)}
                 aria-current={mode === draft.mode ? "page" : undefined}
-                className={`flex h-9 items-center gap-2 rounded-[10px] px-2 text-left text-sm disabled:opacity-50 ${
-                  mode === draft.mode ? `${G.lit} font-medium` : `${G.text2} ${G.press}`
+                className={`flex h-9 items-center gap-2 ${R_PIECE} px-2 text-left text-sm disabled:opacity-50 ${
+                  mode === draft.mode ? `${LIT} font-medium` : `${TEXT_2} ${PRESS}`
                 }`}
               >
                 <Icon aria-hidden className="size-4 shrink-0" />
@@ -436,7 +440,7 @@ export function CloneModalView({
               type="button"
               onClick={() => close()}
               disabled={busy}
-              className={`flex h-9 items-center justify-center rounded-[10px] text-sm disabled:opacity-40 ${G.text2} ${G.press}`}
+              className={`flex h-9 items-center justify-center text-sm disabled:opacity-40 ${BUTTON}`}
             >
               Cancel
             </button>
@@ -444,7 +448,7 @@ export function CloneModalView({
               type="button"
               onClick={onSubmit}
               disabled={!valid || busy}
-              className="flex h-9 items-center justify-center rounded-[10px] bg-emerald-600 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+              className={`flex h-9 items-center justify-center text-sm font-medium ${DONE_BUTTON}`}
             >
               {busy ? "Creating…" : "Create"}
             </button>
@@ -454,8 +458,12 @@ export function CloneModalView({
               {form}
             </div>
             {error || operation ? (
-              <div className={`shrink-0 space-y-2 border-t p-4 ${G.line}`}>
-                {error ? <p className="text-[11px] text-rose-700 dark:text-rose-300">{error}</p> : null}
+              <div className={`shrink-0 space-y-2 border-t p-4 ${LINE}`}>
+                {error ? (
+                  <div className={`overflow-hidden ${R_PIECE}`}>
+                    <ErrorLine message={error} />
+                  </div>
+                ) : null}
                 {operation ? <OperationProgress op={operation} /> : null}
               </div>
             ) : null}

@@ -16,8 +16,7 @@
 // The container closes the dialog when the last one is done, so the list behind it is already
 // the new one.
 //
-// It is drawn in glass (`~/desk/GLASS.md`), as the Edit layout dialog: a glass panel, flat
-// content on it.
+// Its content is flat on the dialog's panel (`~/desk/GLASS.md`), as the Edit layout dialog's.
 //
 // It renders from props alone. Every server call lives in ImportAccountModalContainer, and
 // every state the operator can reach here is a prop, so all of them are stories.
@@ -26,6 +25,7 @@ import type { ReactNode } from "react";
 
 import { DropdownSelect } from "~/components/DropdownSelect";
 import { ModalShell } from "~/components/ModalShell";
+import { BUTTON, DONE_BUTTON, ErrorLine, FIELD, LIT, R_PIECE, TEXT, TEXT_2 } from "~/desk/control/ui";
 
 /** After the sign-in: the account it landed, and how far this page is with it. */
 export type SignInProgress = {
@@ -42,23 +42,20 @@ export type SignInProgress = {
   problem: string | null;
 };
 
-/** The dialog's classes: on glass, flat, as the Edit layout dialog's (`./LayoutEditorView.tsx`). */
+/** The dialog's classes: flat, as the Edit layout dialog's (`./LayoutEditorView.tsx`). */
 const LOOK = {
-  title: "text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-white",
-  text: "text-black/60 dark:text-white/60",
-  strong: "font-medium text-neutral-900 dark:text-white",
-  input:
-    "w-full rounded-[10px] border border-black/10 bg-white/60 px-2.5 py-2 text-sm text-neutral-900 placeholder:text-black/40 focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-white/40 dark:focus:border-white/30",
-  open: "border border-black/15 bg-white/50 text-neutral-900 hover:bg-white/80 dark:border-white/15 dark:bg-white/5 dark:text-white dark:hover:bg-white/10",
+  title: `text-[15px] font-semibold tracking-tight ${TEXT}`,
+  text: TEXT_2,
+  strong: `font-medium ${TEXT}`,
+  input: `w-full ${FIELD} px-2.5 py-2 text-sm placeholder:text-black/40 dark:placeholder:text-white/40`,
+  open: BUTTON,
   tab: "bg-black/5 text-black/60 dark:bg-white/10 dark:text-white/60",
-  tabOn: "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900",
-  cancel: "rounded-[10px] px-3 py-1.5 text-sm text-black/60 hover:bg-black/5 dark:text-white/60 dark:hover:bg-white/10",
-  done: "rounded-[10px] bg-emerald-600 px-5 py-1.5 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-40",
-  error: "rounded-[10px] bg-rose-500/15 text-rose-700 dark:text-rose-300",
-  late: "rounded-[10px] bg-amber-500/15 text-amber-800 dark:text-amber-300",
+  tabOn: LIT,
+  cancel: `${BUTTON} px-3 py-1.5 text-sm`,
+  done: `${DONE_BUTTON} px-5 py-1.5 text-sm font-semibold`,
+  late: `${R_PIECE} bg-amber-500/15 text-amber-800 dark:text-amber-300`,
   ok: "text-emerald-700 dark:text-emerald-300",
   lateIcon: "text-amber-700 dark:text-amber-300",
-  radius: "rounded-[10px]",
 };
 
 export function ImportAccountModalView({
@@ -111,11 +108,11 @@ export function ImportAccountModalView({
   const site = provider === "codex" ? "ChatGPT" : "Claude";
 
   return (
-    <ModalShell size="sm" open={open} onExited={onClose} glass>
+    <ModalShell size="sm" open={open} onExited={onClose}>
       {(close) => (
         <>
           {/* The account it is for in the title, so the line under it stays one line */}
-          <h3 className={`truncate ${LOOK.title}`} title={replacing ?? undefined}>
+          <h3 className={`truncate ${LOOK.title}`} data-tip={replacing ?? undefined}>
             {replacing ? `Sign in again: ${replacing}` : provider === "codex" ? "Add Codex account" : "Add Claude account"}
           </h3>
           {progress ? (
@@ -152,7 +149,7 @@ export function ImportAccountModalView({
                 target="_blank"
                 rel="noopener noreferrer"
                 aria-disabled={!loginUrl}
-                className={`mt-3 flex w-full items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium ${LOOK.radius} ${LOOK.open} ${
+                className={`mt-3 flex w-full items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium ${LOOK.open} ${
                   loginUrl ? "" : "pointer-events-none opacity-50"
                 }`}
               >
@@ -175,17 +172,23 @@ export function ImportAccountModalView({
               {replacing || groups.length === 0 ? null : (
                 <label className={`mt-3 flex items-center gap-2 text-xs ${LOOK.text}`}>
                   Pool
-                  <DropdownSelect
-                    rows={[{ value: "", label: "No pool" }, ...groups.map((g) => ({ value: g, label: g }))]}
-                    value={group}
-                    onChange={onGroupChange}
-                    label="Pool"
-                    className={`flex-1 ${LOOK.input}`}
-                  />
+                  <div className="min-w-0 flex-1">
+                    <DropdownSelect
+                      rows={[{ value: "", label: "No pool" }, ...groups.map((g) => ({ value: g, label: g }))]}
+                      value={group}
+                      onChange={onGroupChange}
+                      label="Pool"
+                      className={LOOK.input}
+                    />
+                  </div>
                 </label>
               )}
 
-              {error ? <p className={`mt-3 px-3 py-2 text-xs break-words ${LOOK.error}`}>{error}</p> : null}
+              {error ? (
+                <div className={`mt-3 overflow-hidden ${R_PIECE}`}>
+                  <ErrorLine message={error} />
+                </div>
+              ) : null}
 
               <div className="mt-4 flex justify-end gap-2">
                 <button type="button" onClick={() => close()} className={LOOK.cancel}>

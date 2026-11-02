@@ -4,6 +4,7 @@
 // it on the screens and keeps the page here.
 import { useState } from "react";
 
+import { ModalSurfaceProvider } from "~/components/ModalShell";
 import { useLiveState } from "~/lib/useLiveState";
 
 import { formatLxcUsage } from "~/lib/format";
@@ -16,19 +17,22 @@ export function ControlPanelWindow({ width }: { width: number }) {
   const [tab, setTab] = useState<PanelTab>("clones");
   const unread = live.state.hosts.filter((h) => h.unread && !h.archived && h.id !== live.state.selected).length;
   return (
-    // No clone's screen under them here: a solid ground in the page's look, no glass
-    <div className="absolute inset-0 bg-neutral-100 dark:bg-neutral-950">
-      <ControlPanelContainer
-        width={width}
-        glass={false}
-        usage={formatLxcUsage(live.lxcStats)}
-        badges={unread ? { clones: unread } : undefined}
-        tab={tab}
-        onTab={(t) => t && setTab(t)}
-        state={live.state}
-        stats={live.stats}
-        sound={null}
-      />
-    </div>
+    // No clone's screen under them here: a solid ground in the page's look, no glass (its
+    // dialogs too)
+    <ModalSurfaceProvider value="solid">
+      <div className="absolute inset-0 bg-neutral-100 dark:bg-neutral-950">
+        <ControlPanelContainer
+          width={width}
+          glass={false}
+          usage={formatLxcUsage(live.lxcStats)}
+          badges={unread ? { clones: unread } : undefined}
+          tab={tab}
+          onTab={(t) => t && setTab(t)}
+          state={live.state}
+          stats={live.stats}
+          sound={null}
+        />
+      </div>
+    </ModalSurfaceProvider>
   );
 }

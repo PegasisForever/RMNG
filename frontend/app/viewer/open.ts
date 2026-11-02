@@ -1,8 +1,10 @@
+import { tell } from "~/components/ConfirmLayer";
+
 /** The name of monitor `id`'s window, which `openMonitorWindows` finds it by. */
 export const monitorWindowName = (id: number) => `rmng-monitor-${id}`;
 
 /** Open one browser window per monitor of `monitors`, each at `/?monitor=N`. Windows the
- *  browser blocks are told of in an alert, unless `sayBlocked` is false.
+ *  browser blocks are told of in a message (`tell`), unless `sayBlocked` is false.
  *  Each is a plain window at the browser's default place and size; the operator moves, sizes and
  *  fullscreens it. A window that is open already stays as it is. */
 export async function openMonitorWindows(monitors: { id: number }[], sayBlocked = true) {
@@ -16,7 +18,10 @@ export async function openMonitorWindows(monitors: { id: number }[], sayBlocked 
   }
   // Chrome and Safari block every pop-up after the first one of a click, and say so only with
   // a small icon in the address bar.
-  if (blocked > 0 && sayBlocked) alert(`The browser blocked ${blocked} monitor window(s). ${allowPopups()}`);
+  // The message stays until the operator closes it; nothing here waits for that
+  if (blocked > 0 && sayBlocked) {
+    void tell(`The browser blocked ${blocked} monitor window${blocked === 1 ? "" : "s"}`, allowPopups());
+  }
 }
 
 /** How to let this site open pop-ups, in the browser the operator uses. */

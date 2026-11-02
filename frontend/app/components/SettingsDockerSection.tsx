@@ -1,6 +1,7 @@
 // The Docker / Clones section's body: the clone naming setting and the per-clone
 // resource limits.
 import { Field, settingsInput } from "~/components/SettingsFields";
+import { TEXT_3 } from "~/desk/control/ui";
 
 export function SettingsDockerSection({
   hostnamePrefix,
@@ -28,7 +29,7 @@ export function SettingsDockerSection({
             className={settingsInput}
           />
         </Field>
-        <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
+        <p className={`mt-0.5 text-xs ${TEXT_3}`}>
           Prepended to derived clone hostnames — e.g.{" "}
           <code>{hostnamePrefix || "pega-"}</code>dev-123 /{" "}
           <code>{hostnamePrefix || "pega-"}</code>my-task. Lowercased +
@@ -55,7 +56,7 @@ export function SettingsDockerSection({
           />
         </Field>
       </div>
-      <p className="text-xs text-slate-400 dark:text-slate-500">
+      <p className={`text-xs ${TEXT_3}`}>
         Limits apply to newly created clones (existing clones keep the limits
         they were created with).
       </p>

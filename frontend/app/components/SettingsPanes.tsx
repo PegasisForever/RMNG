@@ -14,8 +14,9 @@ import type { LucideIcon } from "lucide-react";
 
 import { BoardColumnsEditor } from "~/components/BoardColumnsEditor";
 import { SettingsDockerSection } from "~/components/SettingsDockerSection";
-import { Field, Section, settingsInput } from "~/components/SettingsFields";
+import { Field, Section, settingsCode, settingsInput } from "~/components/SettingsFields";
 import { SettingsGroupsEditor } from "~/components/SettingsGroupsEditor";
+import { TEXT_2 } from "~/desk/control/ui";
 import type { BoardColumn } from "~/lib/board";
 import { SettingsPresetList } from "~/components/SettingsPresetList";
 import { SettingsServerSection } from "~/components/SettingsServerSection";
@@ -136,26 +137,28 @@ function PresetsPane({
         title="Assistant"
         hint="The chat panel talks to an outside assistant: a pi-web server. Each clone gets one chat there, started by its first message. The assistant controls the clone with the rmng CLI, so it needs this server's address as it can reach it (not a Tailscale name it cannot resolve)."
       >
-        <Field label="Assistant URL (pi-web)">
-          <input
-            value={draft.assistant.url}
-            onChange={(e) => onDraftChange("assistant", { ...draft.assistant, url: e.target.value })}
-            placeholder="http://10.0.0.12:9999"
-            spellCheck={false}
-            className={settingsInput}
-          />
-        </Field>
-        <Field label="This server's address, as the assistant reaches it">
-          <input
-            value={draft.assistant.serverUrl}
-            onChange={(e) =>
-              onDraftChange("assistant", { ...draft.assistant, serverUrl: e.target.value })
-            }
-            placeholder="http://10.0.0.129:9000"
-            spellCheck={false}
-            className={settingsInput}
-          />
-        </Field>
+        <div className="space-y-2">
+          <Field label="Assistant URL (pi-web)">
+            <input
+              value={draft.assistant.url}
+              onChange={(e) => onDraftChange("assistant", { ...draft.assistant, url: e.target.value })}
+              placeholder="http://10.0.0.12:9999"
+              spellCheck={false}
+              className={settingsInput}
+            />
+          </Field>
+          <Field label="This server's address, as the assistant reaches it">
+            <input
+              value={draft.assistant.serverUrl}
+              onChange={(e) =>
+                onDraftChange("assistant", { ...draft.assistant, serverUrl: e.target.value })
+              }
+              placeholder="http://10.0.0.129:9000"
+              spellCheck={false}
+              className={settingsInput}
+            />
+          </Field>
+        </div>
       </Section>
 
       {/* Layer a: the shared operating memory EVERY agent reads as its native global rules
@@ -169,7 +172,7 @@ function PresetsPane({
           onChange={(e) => onDraftChange("globalPrompt", e.target.value)}
           spellCheck={false}
           rows={12}
-          className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
+          className={settingsCode}
         />
       </Section>
 
@@ -184,7 +187,7 @@ function PresetsPane({
           onChange={(e) => onDraftChange("agentPlaybook", e.target.value)}
           spellCheck={false}
           rows={16}
-          className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
+          className={settingsCode}
         />
       </Section>
 
@@ -234,7 +237,7 @@ function LlmPane({
             onImportAccount(provider, group)
           }
         />
-        <label className="mt-3 flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+        <label className={`mt-3 flex items-center gap-2 text-sm ${TEXT_2}`}>
           <input
             type="checkbox"
             checked={draft.codex.autoReset}

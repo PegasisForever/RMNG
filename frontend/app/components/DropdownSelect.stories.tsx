@@ -6,11 +6,13 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
+import { FIELD } from "~/desk/control/ui";
+
 import type { DropdownRow } from "./DropdownSelect";
 import { DropdownSelect } from "./DropdownSelect";
 
-const field =
-  "w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100";
+const field = `w-full ${FIELD} px-3 py-2 text-sm font-normal`;
 
 function Controlled({
   rows,
@@ -41,7 +43,18 @@ function Controlled({
 const meta = {
   title: "Clone/Components/DropdownSelect",
   component: DropdownSelect,
-  parameters: { layout: "centered" },
+  parameters: { layout: "fullscreen" },
+  // Over a clone's screen, where the lists open: the list is glass, the field flat on the page
+  decorators: [
+    (Story) => (
+      <div className="relative flex h-screen w-screen items-start justify-center overflow-hidden bg-black pt-24">
+        <FakeDesktop />
+        <div className="relative">
+          <Story />
+        </div>
+      </div>
+    ),
+  ],
 } satisfies Meta<typeof DropdownSelect>;
 
 export default meta;

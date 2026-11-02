@@ -2,20 +2,33 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import { fn } from "storybook/test";
 
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
+import { FIELD, TEXT_2 } from "~/desk/control/ui";
+
 import { PrioritySelect } from "./PrioritySelect";
 
 /** The field styling of the dialog this sits in, so the trigger is judged at the size it
  *  ships at rather than as a bare button. */
-const field =
-  "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 dark:border-slate-600 dark:text-slate-100";
+const field = `mt-1 w-full ${FIELD} px-3 py-2 text-sm font-normal`;
 
 const meta = {
   title: "Tickets/Components/PrioritySelect",
   component: PrioritySelect,
-  parameters: { layout: "centered" },
+  parameters: { layout: "fullscreen" },
+  // Over a clone's screen, where the lists open: the list is glass, the field flat on the page
+  decorators: [
+    (Story) => (
+      <div className="relative flex h-screen w-screen items-start justify-center overflow-hidden bg-black pt-24">
+        <FakeDesktop />
+        <div className="relative">
+          <Story />
+        </div>
+      </div>
+    ),
+  ],
   args: { value: 0, onChange: fn(), className: field },
   render: (args) => (
-    <div className="w-56 text-xs font-medium text-slate-500 dark:text-slate-400">
+    <div className={`w-56 text-xs font-medium ${TEXT_2}`}>
       Priority
       <PrioritySelect {...args} />
     </div>
@@ -45,7 +58,7 @@ export const Interactive: Story = {
   render: function Render(args) {
     const [value, setValue] = useState(args.value);
     return (
-      <div className="w-56 text-xs font-medium text-slate-500 dark:text-slate-400">
+      <div className={`w-56 text-xs font-medium ${TEXT_2}`}>
         Priority
         <PrioritySelect
           {...args}

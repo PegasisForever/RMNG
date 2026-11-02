@@ -16,10 +16,10 @@ import type { TermData } from "~/lib/wire/TermData";
 /** A dark theme. */
 const THEME: ITheme = {
   foreground: "#ffffff",
-  background: "#1c1c1f",
+  background: "#171717", // neutral-900, as the tab bar (`~/desk/TermBar.tsx`)
   cursor: "#ffffff",
-  selectionBackground: "#2b4766",
-  black: "#26262b",
+  selectionBackground: "#525252",
+  black: "#262626",
   red: "#c01c28",
   green: "#2ec27e",
   yellow: "#f5c211",

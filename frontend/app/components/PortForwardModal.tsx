@@ -4,6 +4,7 @@
 import { useState } from "react";
 
 import { ModalShell } from "~/components/ModalShell";
+import { BOX, BUTTON, DONE_BUTTON, FIELD, LINE, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 import type { Clone } from "~/lib/types";
 import { BASTION_PORT, buildForwardCommand } from "~/lib/ssh";
 
@@ -38,25 +39,23 @@ export function PortForwardModal({
       ? buildForwardCommand(sshPublicHost, BASTION_PORT, clone.id, local, remote)
       : null;
 
-  const box =
-    "min-w-0 rounded-md border border-slate-300 px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100";
+  const box = `min-w-0 ${FIELD} px-2.5 py-1.5 text-sm placeholder:text-black/40 dark:placeholder:text-white/40`;
+  const caption = `flex flex-col gap-1 text-[11px] font-medium uppercase tracking-wide ${TEXT_3}`;
   return (
     <ModalShell size="md" onExited={onClose}>
       {(close) => (
         <>
-          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+          <h3 className={`text-[15px] font-semibold tracking-tight ${TEXT}`}>
             Port forward ·{" "}
-            <span className="text-emerald-700 dark:text-emerald-400">
-              {clone.displayName ?? clone.id}
-            </span>
+            <span className={TEXT_2}>{clone.displayName ?? clone.id}</span>
           </h3>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          <p className={`mt-1 text-xs ${TEXT_2}`}>
             Run the command on your machine. While it runs, <code>localhost:&lt;local&gt;</code>{" "}
             there reaches the port inside this clone.
           </p>
 
           <div className="mt-4 grid grid-cols-2 gap-2">
-            <label className="flex flex-col gap-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+            <label className={caption}>
               Clone port
               <input
                 autoFocus
@@ -70,7 +69,7 @@ export function PortForwardModal({
                 className={box}
               />
             </label>
-            <label className="flex flex-col gap-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+            <label className={caption}>
               Local port
               <input
                 inputMode="numeric"
@@ -85,7 +84,7 @@ export function PortForwardModal({
             </label>
           </div>
 
-          <pre className="mt-3 min-h-[3.5rem] whitespace-pre-wrap break-all rounded-md bg-slate-100 px-2 py-1.5 font-mono text-xs text-slate-700 select-all dark:bg-slate-800 dark:text-slate-200">
+          <pre className={`mt-3 min-h-[3.5rem] whitespace-pre-wrap break-all border px-2.5 py-1.5 font-mono text-xs select-all ${R_PIECE} ${LINE} ${BOX} ${command ? TEXT : TEXT_3}`}>
             {command ?? "Type a port from 1 to 65535."}
           </pre>
 
@@ -93,7 +92,7 @@ export function PortForwardModal({
             <button
               type="button"
               onClick={() => close()}
-              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+              className={`${BUTTON} px-3 py-1.5 text-sm`}
             >
               Close
             </button>
@@ -101,7 +100,7 @@ export function PortForwardModal({
               type="button"
               disabled={!command}
               onClick={() => command && void onCopy(command).then(setCopied)}
-              className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+              className={`${DONE_BUTTON} px-3 py-1.5 text-sm font-medium`}
             >
               {copied === true ? "Copied!" : copied === false ? "Copy failed — copy manually" : "Copy command"}
             </button>

@@ -1,6 +1,7 @@
 import { ExternalLink, Settings } from "lucide-react";
 import { type PointerEvent, type ReactNode } from "react";
 
+import { BUTTON, LIT, TEXT, TEXT_3 } from "./control/ui";
 import { GAP, TOOL_H } from "./geometry";
 
 /** The control panel the tool row opens, in place of the keyboard. */
@@ -38,12 +39,13 @@ type Props = {
   onPopOut?: () => void;
 };
 
-/** A box on the row (a number, a tab), flat on the control panel's surface (`./GLASS.md`). */
+/** A number on the row, flat on the control panel's surface (`./GLASS.md`). */
 const CHIP = "rounded-[10px] border border-black/10 bg-white/50 dark:border-white/10 dark:bg-white/[0.06]";
-/** A tab or a button on the row, under the mouse. */
-const IDLE = `${CHIP} text-neutral-900 hover:bg-white/80 dark:text-white dark:hover:bg-white/10`;
+/** A tab or a button on the row: a button of the control panel's (`./control/ui.tsx`), lit under
+ *  the mouse, pressed under a finger. */
+const IDLE = BUTTON;
 /** The open tab: the other look, as lit glass. */
-const ON = "rounded-[10px] border border-transparent bg-neutral-900 text-white dark:bg-white dark:text-neutral-900";
+const ON = `rounded-[10px] border border-transparent ${LIT}`;
 
 /** The tool row, over the control panel: the server's CPU, memory and disk (where there is room),
  *  then tabs that act as tabs do. One is open at most. */
@@ -84,7 +86,7 @@ export function PopOutButton({ onPopOut }: { onPopOut: () => void }) {
     <button
       type="button"
       aria-label="Open the control panel in a window of its own"
-      title="Open the control panel in a window of its own"
+      data-tip="Open the control panel in a window of its own"
       onClick={onPopOut}
       className={`flex size-9 shrink-0 items-center justify-center ${IDLE}`}
     >
@@ -96,8 +98,8 @@ export function PopOutButton({ onPopOut }: { onPopOut: () => void }) {
 function Stat({ label, value }: { label: string; value: string | undefined }) {
   return (
     <div className={`flex min-w-[58px] shrink-0 flex-col items-center justify-center px-1.5 leading-none ${CHIP}`}>
-      <span className="text-[10px] text-black/45 dark:text-white/45">{label}</span>
-      <span className="mt-0.5 font-mono text-xs tabular-nums text-neutral-900 dark:text-white">{value ?? "—"}</span>
+      <span className={`text-[10px] ${TEXT_3}`}>{label}</span>
+      <span className={`mt-0.5 font-mono text-xs tabular-nums ${TEXT}`}>{value ?? "—"}</span>
     </div>
   );
 }

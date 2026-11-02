@@ -22,6 +22,8 @@
 import { Expand, Keyboard, LayoutGrid, Maximize, Minimize, Monitor } from "lucide-react";
 import { type ReactNode, useRef } from "react";
 
+import { TEXT_2 } from "./control/ui";
+
 /** One button's size, and the space between them, CSS px. */
 export const FLOAT_BUTTON = 44;
 export const FLOAT_GAP = 8;
@@ -211,8 +213,8 @@ function Round({
         className="glass glass-thick pointer-events-none absolute right-0 top-full z-10 mt-2 flex flex-col items-end whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs opacity-0 transition-opacity group-hover:opacity-100 group-hover:delay-300"
       >
         <span>{label}</span>
-        {hold ? <span className="text-black/55 dark:text-white/60">Right-click or hold: {hold}</span> : null}
-        {keys ? <span className="text-black/55 dark:text-white/60">Keys: {keys}</span> : null}
+        {hold ? <span className={TEXT_2}>Right-click or hold: {hold}</span> : null}
+        {keys ? <span className={TEXT_2}>Keys: {keys}</span> : null}
       </span>
     </div>
   );

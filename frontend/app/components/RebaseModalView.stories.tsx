@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
 
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
 import { RebaseModalView } from "./RebaseModalView";
 import { makeOperation } from "./__fixtures__/operations";
 import { makeClonePresets } from "./__fixtures__/presets";
@@ -9,6 +10,15 @@ const meta = {
   title: "Clone/Components/RebaseModalView",
   component: RebaseModalView,
   parameters: { layout: "fullscreen" },
+  // Over a clone's screen, as the dialog opens
+  decorators: [
+    (Story) => (
+      <div className="relative h-screen w-screen overflow-hidden bg-black">
+        <FakeDesktop />
+        <Story />
+      </div>
+    ),
+  ],
   args: {
     cloneId: "pega-encoder-scratch",
     presets: makeClonePresets(),

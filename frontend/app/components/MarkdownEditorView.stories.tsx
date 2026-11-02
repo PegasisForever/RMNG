@@ -9,9 +9,9 @@ import { MarkdownEditorView } from "./MarkdownEditorView";
  *  height, and a focus ring. Reproduced here so the editor is judged at the size it ships at. */
 function Frame({ children }: { children: ReactNode }) {
   return (
-    <div className="w-[30rem] text-xs font-medium text-slate-500 dark:text-slate-400">
+    <div className="w-[30rem] text-xs font-medium text-neutral-500 dark:text-neutral-400">
       Description
-      <div className="mt-1 min-h-[6.5rem] rounded-md border border-slate-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
+      <div className="mt-1 min-h-[6.5rem] rounded-md border border-neutral-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-neutral-600">
         {children}
       </div>
     </div>
@@ -65,7 +65,7 @@ export const Interactive: Story = {
             args.onChange(next);
           }}
         />
-        <pre className="mt-2 max-h-40 overflow-auto border-t border-slate-200 px-3 pt-2 font-mono text-[11px] whitespace-pre-wrap text-slate-500 dark:border-slate-700 dark:text-slate-400">
+        <pre className="mt-2 max-h-40 overflow-auto border-t border-neutral-200 px-3 pt-2 font-mono text-[11px] whitespace-pre-wrap text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
           {markdown || "(empty)"}
         </pre>
       </Frame>

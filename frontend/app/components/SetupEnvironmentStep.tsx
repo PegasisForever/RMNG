@@ -8,6 +8,8 @@
 // this step only confirms the environment is ready.)
 import type { ReactNode } from "react";
 
+import { TEXT_2, TEXT_3 } from "~/desk/control/ui";
+
 export function SetupEnvironmentStep({
   envChecklist,
 }: {
@@ -17,12 +19,12 @@ export function SetupEnvironmentStep({
 }) {
   return (
     <div className="space-y-4">
-      <p className="text-sm text-slate-600 dark:text-slate-300">
+      <p className={`text-sm ${TEXT_2}`}>
         rmng drives your local Docker daemon over its unix socket. Confirm the
         environment is ready, then continue.
       </p>
       {envChecklist}
-      <p className="text-xs text-slate-400 dark:text-slate-500">
+      <p className={`text-xs ${TEXT_3}`}>
         Clones get static IPs on the <code>rmng</code> bridge (
         <code>10.99.0.0/24</code> — <code>.1</code> gateway, <code>.2</code>{" "}
         control-server, <code>.10+</code> clone pool).

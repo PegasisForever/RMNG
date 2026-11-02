@@ -9,7 +9,7 @@ import { makeEnvCheckRow, makeEnvRows } from "./__fixtures__/setupEnv";
 /** The checklist sits in the setup wizard's body, so the story gives it that column width
  *  rather than letting the rows run the full page. */
 function Frame({ children }: { children: ReactNode }) {
-  return <div className="w-[34rem]">{children}</div>;
+  return <div className="w-[34rem] bg-white p-4 dark:bg-neutral-900">{children}</div>;
 }
 
 const meta = {

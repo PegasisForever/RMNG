@@ -2,6 +2,9 @@
 // the body, and a Back/Next footer. It renders from props alone — no config PUT — so every
 // state it can be in is a story. SetupWizardContainer owns the PUT and hands the result down.
 //
+// There is no clone's screen under it, so no glass (`~/desk/GLASS.md`): the flat content on a
+// solid ground, as in the control panel's own window.
+//
 // NOT a dismissable modal: there is no Escape, no overlay click and no ✕, because the app
 // does not exist behind it. The route renders this INSTEAD of the app while `setupComplete`
 // is false.
@@ -15,6 +18,7 @@ import { useState, type ReactNode } from "react";
 import { SetupEnvironmentStep } from "~/components/SetupEnvironmentStep";
 import { SetupReviewStep } from "~/components/SetupReviewStep";
 import { SetupServerStep } from "~/components/SetupServerStep";
+import { BUTTON, DONE_BUTTON, ErrorLine, LINE, R_PIECE, TEXT, TEXT_3 } from "~/desk/control/ui";
 import { SETUP_STEPS, type SetupDraft } from "~/lib/setupDraft";
 
 export interface SetupWizardViewProps {
@@ -57,14 +61,14 @@ export function SetupWizardView({
   onFinish,
 }: SetupWizardViewProps) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 dark:bg-slate-900 p-4">
-      <div className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-xl">
+    <div className="flex min-h-screen items-center justify-center bg-neutral-100 p-4 dark:bg-neutral-950">
+      <div className={`flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border bg-white dark:bg-neutral-900 ${LINE}`}>
         {/* Header + step indicator. */}
-        <div className="shrink-0 border-b border-slate-100 dark:border-slate-800 px-6 pb-4 pt-5">
-          <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+        <div className={`shrink-0 border-b px-6 pb-4 pt-5 ${LINE}`}>
+          <h1 className={`text-lg font-semibold ${TEXT}`}>
             Set up rmng
           </h1>
-          <p className="mt-0.5 text-xs text-slate-400 dark:text-slate-500">
+          <p className={`mt-0.5 text-xs ${TEXT_3}`}>
             First-run configuration — a few settings are baked in for good, so
             choose carefully.
           </p>
@@ -77,24 +81,22 @@ export function SetupWizardView({
                       i === step
                         ? "bg-emerald-600 text-white"
                         : i < step
-                          ? "bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-400"
-                          : "bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500"
+                          ? "bg-emerald-500/15 text-emerald-700 dark:bg-emerald-400/15 dark:text-emerald-300"
+                          : `bg-black/5 dark:bg-white/10 ${TEXT_3}`
                     }`}
                   >
                     {i < step ? <Check className="size-4" /> : i + 1}
                   </span>
                   <span
                     className={`hidden text-xs font-medium sm:inline ${
-                      i === step
-                        ? "text-slate-800 dark:text-slate-100"
-                        : "text-slate-400 dark:text-slate-500"
+                      i === step ? TEXT : TEXT_3
                     }`}
                   >
                     {label}
                   </span>
                 </div>
                 {i < SETUP_STEPS.length - 1 ? (
-                  <div className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+                  <div className="h-px flex-1 bg-black/10 dark:bg-white/10" />
                 ) : null}
               </div>
             ))}
@@ -104,8 +106,8 @@ export function SetupWizardView({
         {/* Body. */}
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           {error ? (
-            <div className="mb-4 rounded border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 px-3 py-2 text-xs text-red-700 dark:text-red-400">
-              {error}
+            <div className={`mb-4 overflow-hidden ${R_PIECE}`}>
+              <ErrorLine message={error} />
             </div>
           ) : null}
 
@@ -125,12 +127,12 @@ export function SetupWizardView({
         </div>
 
         {/* Footer: Back / Next / Finish. */}
-        <div className="flex shrink-0 items-center justify-between gap-2 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-800 px-6 py-3">
+        <div className={`flex shrink-0 items-center justify-between gap-2 border-t px-6 py-3 ${LINE}`}>
           <button
             type="button"
             onClick={onBack}
             disabled={step === 0 || saving}
-            className="rounded border border-slate-300 dark:border-slate-600 px-3 py-1.5 text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-40"
+            className={`${BUTTON} px-3 py-1.5 text-sm disabled:opacity-40`}
           >
             Back
           </button>
@@ -139,7 +141,7 @@ export function SetupWizardView({
               type="button"
               onClick={onNext}
               disabled={nextDisabled}
-              className="rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+              className={`${DONE_BUTTON} px-4 py-1.5 text-sm font-medium`}
             >
               {saving ? "Saving…" : "Next"}
             </button>
@@ -148,7 +150,7 @@ export function SetupWizardView({
               type="button"
               onClick={onFinish}
               disabled={saving}
-              className="rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+              className={`${DONE_BUTTON} px-4 py-1.5 text-sm font-medium`}
             >
               {saving ? "Finishing…" : "Finish setup"}
             </button>

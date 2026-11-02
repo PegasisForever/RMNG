@@ -10,8 +10,16 @@
 // which is local to the card (the build it starts is followed in Jobs, not here).
 import { useState } from "react";
 
-import { Field, settingsInput } from "~/components/SettingsFields";
+import {
+  Field,
+  settingsButton,
+  settingsCode,
+  settingsInput,
+  settingsInputSmall,
+  settingsRemoveButton,
+} from "~/components/SettingsFields";
 import { DropdownSelect } from "~/components/DropdownSelect";
+import { CARD_BOX, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 import { prebuildDockerfile } from "~/lib/api";
 import {
   newPreset,
@@ -40,7 +48,7 @@ export function SettingsPresetList({
   return (
     <div className="space-y-3">
       {presets.length === 0 ? (
-        <p className="text-xs text-slate-400 dark:text-slate-500">
+        <p className={`text-xs ${TEXT_3}`}>
           No presets.
         </p>
       ) : null}
@@ -57,7 +65,7 @@ export function SettingsPresetList({
       <button
         type="button"
         onClick={() => onChange([...presets, newPreset(firstGroup)])}
-        className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800"
+        className={settingsButton}
       >
         + Add preset
       </button>
@@ -104,7 +112,7 @@ function PresetCard({
   };
 
   return (
-    <div className="rounded border border-slate-200 dark:border-slate-700 p-3">
+    <div className={`${CARD_BOX} p-3`}>
       <div className="flex items-end gap-2">
         <div className="flex-1">
           <Field label="Preset name">
@@ -119,7 +127,7 @@ function PresetCard({
         <button
           type="button"
           onClick={onRemove}
-          className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+          className={settingsRemoveButton}
         >
           Remove
         </button>
@@ -131,7 +139,7 @@ function PresetCard({
             onChange={(e) => onChange({ labels: e.target.value })}
             placeholder="comma-separated, e.g. DEV, WE"
             spellCheck={false}
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+            className={settingsInputSmall}
           />
         </Field>
       </div>
@@ -143,7 +151,7 @@ function PresetCard({
             placeholder="(none)"
             spellCheck={false}
             autoComplete="off"
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+            className={settingsCode}
           />
         </Field>
       </div>
@@ -179,7 +187,7 @@ function PresetCard({
             value={selected}
             onChange={(value) => onChange({ group: value })}
             label="Default group (both Claude and Codex draw from it)"
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
+            className={settingsInputSmall}
           />
         </Field>
       </div>
@@ -209,7 +217,7 @@ function PresetCard({
             }
             onChange={(value) => onChange({ defaultForkClone: value })}
             label="Default fork clone (fork tabs)"
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100"
+            className={settingsInputSmall}
           />
         </Field>
       </div>
@@ -264,7 +272,7 @@ function PresetCard({
                     onChange({ vars: p.vars.filter((_, m) => m !== k) })
                   }
                   aria-label={`Remove ${v.key || "variable"}`}
-                  className="shrink-0 rounded px-2 py-1 text-xs text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  className={settingsRemoveButton}
                 >
                   Remove
                 </button>
@@ -275,7 +283,7 @@ function PresetCard({
               onClick={() =>
                 onChange({ vars: [...p.vars, { key: "", value: "" }] })
               }
-              className="self-start rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              className={`self-start ${settingsButton}`}
             >
               + Add variable
             </button>
@@ -290,7 +298,7 @@ function PresetCard({
             spellCheck={false}
             rows={8}
             placeholder="FROM pegasis0/rmng-template:latest"
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+            className={settingsCode}
           />
         </Field>
         <div className="mt-1.5 flex items-center gap-2">
@@ -298,12 +306,12 @@ function PresetCard({
             type="button"
             onClick={rebuildImage}
             disabled={rebuilding}
-            className="rounded border border-slate-300 dark:border-slate-600 px-2 py-1 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-50"
+            className={`${settingsButton} disabled:opacity-50`}
           >
             {rebuilding ? "Starting…" : "Rebuild image"}
           </button>
           {rebuild ? (
-            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+            <span className={`text-[11px] ${TEXT_2}`}>
               {rebuild}
             </span>
           ) : null}
@@ -317,7 +325,7 @@ function PresetCard({
             spellCheck={false}
             rows={4}
             placeholder="e.g. pip install -r requirements.txt (optional — empty runs nothing)"
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+            className={settingsCode}
           />
         </Field>
       </div>
@@ -329,7 +337,7 @@ function PresetCard({
             spellCheck={false}
             rows={4}
             placeholder="(optional)"
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+            className={settingsCode}
           />
         </Field>
       </div>
@@ -341,7 +349,7 @@ function PresetCard({
             spellCheck={false}
             rows={4}
             placeholder="(optional)"
-            className="w-full rounded border border-slate-300 dark:border-slate-600 px-2 py-1 font-mono text-xs focus:border-slate-400 dark:focus:border-slate-500 focus:outline-none dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+            className={settingsCode}
           />
         </Field>
       </div>

@@ -10,8 +10,8 @@ import { makeNotesBlocks } from "./__fixtures__/notes";
  *  it size to its contents. The document scrolls inside it. */
 function Frame({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-[34rem] w-[26rem] flex-col overflow-hidden rounded-2xl border border-slate-900/10 bg-white shadow-xl dark:border-white/10 dark:bg-slate-900">
-      <h2 className="shrink-0 truncate px-4 pt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
+    <div className="flex h-[34rem] w-[26rem] flex-col overflow-hidden rounded-2xl border border-neutral-900/10 bg-white shadow-xl dark:border-white/10 dark:bg-neutral-900">
+      <h2 className="shrink-0 truncate px-4 pt-3 text-sm font-semibold text-neutral-900 dark:text-neutral-100">
         pega-we-142
       </h2>
       <div className="min-h-0 flex-1 overflow-y-auto py-2">{children}</div>
@@ -79,7 +79,7 @@ export const Interactive: Story = {
             args.onChange(next);
           }}
         />
-        <p className="px-4 pb-3 pt-1 font-mono text-[11px] text-slate-400 dark:text-slate-500">
+        <p className="px-4 pb-3 pt-1 font-mono text-[11px] text-neutral-400 dark:text-neutral-500">
           {blocks === null ? "no edit yet" : `onChange: ${blocks.length} blocks`}
         </p>
       </Frame>

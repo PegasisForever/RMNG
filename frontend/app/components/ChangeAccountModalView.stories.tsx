@@ -2,6 +2,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
 import { fn } from "storybook/test";
 
+import { FakeDesktop } from "~/desk/__fixtures__/desktop";
 import { ChangeAccountModalView } from "./ChangeAccountModalView";
 import {
   accountsNow,
@@ -25,6 +26,15 @@ const meta = {
   title: "Clone/Components/ChangeAccountModalView",
   component: ChangeAccountModalView,
   parameters: { layout: "fullscreen" },
+  // Over a clone's screen, as the dialog opens
+  decorators: [
+    (Story) => (
+      <div className="relative h-screen w-screen overflow-hidden bg-black">
+        <FakeDesktop />
+        <Story />
+      </div>
+    ),
+  ],
   args: {
     cloneName: makeCloneWorking().displayName ?? makeCloneWorking().id,
     ...makeAccountLists(),

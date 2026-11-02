@@ -16,7 +16,7 @@ function SshCommandPreview({
   cloneId: string;
 }) {
   return (
-    <pre className="max-w-xl overflow-x-auto rounded border border-slate-300 bg-slate-50 p-3 font-mono text-xs text-slate-800 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100">
+    <pre className="max-w-xl overflow-x-auto rounded border border-neutral-300 bg-neutral-50 p-3 font-mono text-xs text-neutral-800 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100">
       {buildSshCommand(publicHost, bastionPort, cloneId)}
     </pre>
   );

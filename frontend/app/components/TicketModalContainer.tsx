@@ -67,7 +67,7 @@ export function TicketModalContainer({
                         descriptionEditor={
                                 <Suspense
                                         fallback={
-                                                <p className="px-3 text-xs text-slate-400 dark:text-slate-500">
+                                                <p className="px-3 text-xs text-black/40 dark:text-white/40">
                                                         Loading editor…
                                                 </p>
                                         }

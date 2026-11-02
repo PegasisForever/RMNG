@@ -5,10 +5,11 @@
 //
 // Pure like PrioritySelect: the only state is whether the menu is open, kept in the
 // leaf. Callers hand options down and get the picked value back.
-import { ChevronDown } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
-import { AnchoredList } from "~/components/AnchoredList";
+import { AnchoredList, LIST, LIST_ROW } from "~/components/AnchoredList";
+import { TEXT_3 } from "~/desk/control/ui";
 import { useModalEscape } from "~/lib/useModalEscape";
 
 /** One row in the menu: a pickable option, or a non-selectable section header. */
@@ -85,7 +86,7 @@ export function DropdownSelect({
             collapsed to the chevron and jumped ~6px the moment a value landed.
             `lh` follows whatever font size the form's field class sets. */}
         <span className="min-w-0 flex-1 truncate min-h-[1lh]">{shown}</span>
-        <ChevronDown aria-hidden className="size-3.5 shrink-0 text-slate-400" />
+        <ChevronDown aria-hidden className={`size-3.5 shrink-0 ${TEXT_3}`} />
       </button>
 
       {open ? (
@@ -165,7 +166,7 @@ function DropdownMenu({
         // moving focus into a list the operator has already stepped past.
         if (e.key === "Tab") onDismiss();
       }}
-      className="max-h-64 w-full overflow-y-auto rounded-md border border-slate-200 bg-white py-1 shadow-lg outline-none dark:border-slate-600 dark:bg-slate-800"
+      className={LIST}
     >
       {rows.map((row, i) =>
         isOption(row) ? (
@@ -185,25 +186,26 @@ function DropdownMenu({
               const p = pickable.indexOf(row);
               if (p !== -1) setActive(p);
             }}
-            className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm ${
-              !row.disabled && pickable[active] === row
-                ? "bg-slate-100 dark:bg-slate-700"
-                : ""
+            className={`${LIST_ROW.base} ${
+              !row.disabled && pickable[active] === row ? LIST_ROW.on : ""
             } ${
               row.disabled
-                ? "cursor-default text-slate-400 dark:text-slate-500"
+                ? LIST_ROW.disabled
                 : row.value === value
-                  ? "font-medium text-slate-900 dark:text-slate-100"
-                  : "text-slate-600 dark:text-slate-300"
+                  ? LIST_ROW.chosen
+                  : LIST_ROW.idle
             }`}
           >
             <span className="min-w-0 flex-1 truncate">{row.label}</span>
+            {row.value === value && !row.disabled ? (
+              <Check aria-hidden className="size-3.5 shrink-0" />
+            ) : null}
           </li>
         ) : (
           <li
             key={`header-${i}`}
             aria-hidden
-            className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500"
+            className={LIST_ROW.header}
           >
             {row.header}
           </li>

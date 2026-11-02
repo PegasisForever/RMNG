@@ -41,10 +41,11 @@
   }
 }
 
-/* The page's ground is black (`root.tsx`); Storybook sets its own (`.storybook/preview.ts`). */
+/* The page's ground is black (`root.tsx`); Storybook sets its own (`.storybook/preview.ts`). The
+   text is the main text of `desk/GLASS.md` (`TEXT`): neutral, with no blue in its grey. */
 html,
 body {
-  color: #0f172a;
+  color: oklch(20.5% 0 0);
   font-family:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
@@ -52,7 +53,7 @@ body {
 @media (prefers-color-scheme: dark) {
   html,
   body {
-    color: #e2e8f0;
+    color: #fff;
   }
 }
 
@@ -91,6 +92,60 @@ body {
    so it would otherwise win the cascade. */
 .bn-editor {
   background-color: transparent !important;
+}
+
+/* BlockNote's colors (the notes, a ticket's description), as `desk/GLASS.md`'s flat content: the
+   text is the main text (`TEXT`), a row under the mouse or the keys is a low black or white, the
+   choice that is on is the other look (`LIT`), the drag handle is the least text. The menus are
+   see-through here; their glass is below. Two classes (three in dark), so this beats BlockNote's
+   own rules whatever order the lazy editor chunk loads in. */
+.bn-root.bn-mantine {
+  --bn-colors-editor-text: oklch(20.5% 0 0);
+  --bn-colors-menu-text: oklch(20.5% 0 0);
+  --bn-colors-menu-background: transparent;
+  --bn-colors-tooltip-text: oklch(20.5% 0 0);
+  --bn-colors-tooltip-background: rgb(0 0 0 / 0.05);
+  --bn-colors-hovered-text: oklch(20.5% 0 0);
+  --bn-colors-hovered-background: rgb(0 0 0 / 0.1);
+  --bn-colors-selected-text: #fff;
+  --bn-colors-selected-background: oklch(20.5% 0 0);
+  --bn-colors-disabled-text: rgb(0 0 0 / 0.4);
+  --bn-colors-disabled-background: transparent;
+  --bn-colors-border: rgb(0 0 0 / 0.1);
+  --bn-colors-side-menu: rgb(0 0 0 / 0.4);
+}
+.bn-root.bn-mantine[data-color-scheme="dark"] {
+  --bn-colors-editor-text: #fff;
+  --bn-colors-menu-text: #fff;
+  --bn-colors-menu-background: transparent;
+  --bn-colors-tooltip-text: #fff;
+  --bn-colors-tooltip-background: rgb(255 255 255 / 0.1);
+  --bn-colors-hovered-text: #fff;
+  --bn-colors-hovered-background: rgb(255 255 255 / 0.1);
+  --bn-colors-selected-text: oklch(20.5% 0 0);
+  --bn-colors-selected-background: #fff;
+  --bn-colors-disabled-text: rgb(255 255 255 / 0.4);
+  --bn-colors-disabled-background: transparent;
+  --bn-colors-border: rgb(255 255 255 / 0.1);
+  --bn-colors-side-menu: rgb(255 255 255 / 0.4);
+}
+
+/* BlockNote's menus are thick glass (`desk/glass.css` names them with `.glass`). BlockNote's own
+   rules, outside any layer, would win over the glass's fill, edge and shadow: put them back.
+   Shape (`desk/GLASS.md`): a 16 px surface, its pieces 10 px, set 6 px in; a tooltip as the app's
+   (`TooltipLayer`). */
+.bn-root.bn-mantine :is(.bn-toolbar, .bn-suggestion-menu, .bn-grid-suggestion-menu, .mantine-Menu-dropdown, .bn-form-popover, .bn-tooltip) {
+  --bn-border-radius-small: 10px;
+  --popover-radius: 10px;
+  background-color: var(--glass-tint);
+  border: none;
+  border-radius: 16px;
+  box-shadow: var(--glass-inner), var(--glass-drop);
+  padding: 6px;
+}
+.bn-root.bn-mantine .bn-tooltip {
+  border-radius: 8px;
+  padding: 6px 10px;
 }
 
 /* A ticket's description, at the three metrics below, wherever it is edited: the panel beside

@@ -15,6 +15,7 @@ import { useSearchParams } from "react-router";
 
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
 import { CloneModalContainer } from "~/components/CloneModalContainer";
+import { ask } from "~/components/ConfirmLayer";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { ModalPlacementProvider } from "~/components/ModalShell";
 import { PortForwardModal } from "~/components/PortForwardModal";
@@ -87,7 +88,7 @@ import { NotesView, type NotesPane } from "./NotesView";
 import { type Move, moved } from "./order";
 import { SettingsView } from "./SettingsView";
 import { TicketsView } from "./TicketsView";
-import { COLUMN_GLASS, ErrorLine } from "./ui";
+import { COLUMN_GLASS, ErrorLine, TEXT_3 } from "./ui";
 import { BoardDnd } from "./BoardDnd";
 import { NarrowLayout } from "./NarrowLayout";
 import { UsageView } from "./UsageView";
@@ -386,7 +387,7 @@ export function ControlPanelContainer({
     if (ticketsLoading) return <Loading label={`Loading ${notesClone.linearTicket}…`} />;
     return (
       <>
-        <p className="px-4 pb-2 text-xs text-neutral-500">
+        <p className={`px-4 pb-2 text-xs ${TEXT_3}`}>
           {notesClone.linearTicket} did not load{ticketsError ? `: ${ticketsError}` : ""}. Showing notes.
         </p>
         {editor}
@@ -420,10 +421,12 @@ export function ControlPanelContainer({
   const deleteOne = (clone: Clone) => {
     const subs = state.hosts.filter((h) => h.parent === clone.id).length;
     const also = subs > 0 ? ` and its ${subs} sub clone${subs === 1 ? "" : "s"}` : "";
-    const msg = clone.managed
-      ? `Delete ${clone.id}${also}? This destroys its container${subs > 0 ? "s" : ""}.`
-      : `Remove ${clone.id}? This unregisters the clone.`;
-    if (confirm(msg)) run(deleteClone(clone.id));
+    const q = clone.managed
+      ? { title: `Delete ${clone.id}${also}?`, body: `This destroys its container${subs > 0 ? "s" : ""}.`, ok: "Delete" }
+      : { title: `Remove ${clone.id}?`, body: "This unregisters the clone.", ok: "Remove" };
+    void ask({ ...q, danger: true }).then((yes) => {
+      if (yes) run(deleteClone(clone.id));
+    });
   };
 
   // A clone made into a column is filed there once it exists; the one just made goes on the

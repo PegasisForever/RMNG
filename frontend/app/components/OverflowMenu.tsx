@@ -19,13 +19,9 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import {
-  GLASS_DIVIDER,
-  GLASS_FILL_DENSE,
-  GLASS_HOVER,
-  GLASS_OUTLINE,
-  GLASS_SHADOW_LIFTED,
-} from "~/lib/glass";
+import { useModalSurface } from "~/components/ModalShell";
+// Only in the components below, never at the top of this module: `ui` imports this module too
+import { DANGER_TEXT, FLOAT_SOLID, ICON_BUTTON, LINE, PRESS, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 
 /** Lets an item close the menu it is in, including one that closes on its own delay. */
 const CloseContext = createContext<() => void>(() => {});
@@ -34,8 +30,11 @@ export function useMenuClose(): () => void {
   return useContext(CloseContext);
 }
 
+/** The padding and text size every row shares, so a note lines up with the items above it. */
+export const MENU_ROW = "flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-xs";
+
 export function MenuDivider() {
-  return <div className={`my-1 h-px ${GLASS_DIVIDER}`} />;
+  return <div className={`mx-1 my-1.5 border-t ${LINE}`} />;
 }
 
 /** One row. The icon is required rather than optional: a menu where some items carry one and
@@ -62,20 +61,13 @@ export function MenuItem({
         close();
         onClick();
       }}
-      className={`flex w-full cursor-pointer items-center gap-1.5 px-3 py-1.5 text-left text-xs ${
-        danger
-          ? "text-red-600 hover:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20"
-          : `text-slate-600 dark:text-slate-300 ${GLASS_HOVER}`
-      }`}
+      className={`${MENU_ROW} ${R_PIECE} cursor-pointer ${danger ? DANGER_TEXT : TEXT} ${PRESS}`}
     >
       <Icon aria-hidden className="size-4 shrink-0" />
       {label}
     </button>
   );
 }
-
-/** The padding and text size every row shares, so a note lines up with the items above it. */
-const ROW = "flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs";
 
 /** One row of a menu that picks a value rather than running an action.
  *
@@ -106,12 +98,12 @@ export function MenuChoice({
         close();
         onClick();
       }}
-      className={`${ROW} cursor-pointer text-slate-600 dark:text-slate-300 ${GLASS_HOVER}`}
+      className={`${MENU_ROW} ${R_PIECE} cursor-pointer ${TEXT} ${PRESS}`}
     >
       <span className="flex size-4 shrink-0 items-center justify-center">{icon}</span>
       <span className="min-w-0 flex-1 truncate">{label}</span>
       {selected ? (
-        <Check aria-hidden className="size-3.5 shrink-0 text-slate-400 dark:text-slate-500" />
+        <Check aria-hidden className={`size-3.5 shrink-0 ${TEXT_2}`} />
       ) : null}
     </button>
   );
@@ -120,7 +112,7 @@ export function MenuChoice({
 /** A line of text where rows would be: the menu is loading, or has nothing to offer. Says so
  *  rather than opening empty, which reads as a menu that is broken. */
 export function MenuNote({ children }: { children: ReactNode }) {
-  return <p className={`${ROW} text-slate-400 dark:text-slate-500`}>{children}</p>;
+  return <p className={`${MENU_ROW} ${TEXT_3}`}>{children}</p>;
 }
 
 /** How far the panel sits off its trigger, and the least it keeps from a viewport edge. */
@@ -174,11 +166,14 @@ export function placeMenu(
 }
 
 /** The trigger's own styling, which only a custom trigger sets. The ⋮ button brings its own. */
-const PLAIN_TRIGGER = "flex cursor-pointer items-center rounded disabled:opacity-50";
+const PLAIN_TRIGGER = "flex cursor-pointer items-center rounded-md disabled:opacity-50";
 
 /** A menu's panel, portalled to the body at fixed coordinates off `at` (its trigger's box):
  *  placed to stay inside the window (`placeMenu`), closed by a click outside it, Escape, a
- *  scroll that would strand it, or an item (`useMenuClose`). Its surface is the dense glass. */
+ *  scroll that would strand it, or an item (`useMenuClose`). Its surface is thick glass
+ *  (`~/desk/GLASS.md`), on the body so it is never glass inside a glass column; solid in the
+ *  control panel's own window, where no clone's screen is under it. Its rows are flat, 10 px
+ *  corners set 6 px into its 16 px ones. */
 export function MenuPanel({
   at,
   align = "right",
@@ -196,7 +191,10 @@ export function MenuPanel({
   // Where the panel actually goes, which takes measuring the panel itself — see the layout
   // effect below. It renders hidden for the one pass that measurement needs.
   const [place, setPlace] = useState<{ top: number; left: number; maxHeight: number } | null>(null);
+  const surface = useModalSurface() === "solid" ? FLOAT_SOLID : "glass glass-thick";
   const menuRef = useRef<HTMLDivElement>(null);
+  // What scrolls inside the glass, so the glass's rim stays put while the rows move
+  const listRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
@@ -209,12 +207,13 @@ export function MenuPanel({
   // ones that open on a note and fill in from Linear.
   useLayoutEffect(() => {
     const el = menuRef.current;
-    if (!el) return;
+    const list = listRef.current;
+    if (!el || !list) return;
     const measure = () => {
       setPlace(
         placeMenu(
           at,
-          { width: el.offsetWidth, height: el.scrollHeight },
+          { width: el.offsetWidth, height: list.scrollHeight },
           { width: window.innerWidth, height: window.innerHeight },
           align,
         ),
@@ -222,7 +221,7 @@ export function MenuPanel({
     };
     measure();
     const observer = new ResizeObserver(measure);
-    observer.observe(el);
+    observer.observe(list);
     return () => observer.disconnect();
   }, [at, align]);
 
@@ -272,10 +271,12 @@ export function MenuPanel({
           maxHeight: place?.maxHeight,
           visibility: place ? undefined : "hidden",
         }}
-        className={`fixed z-50 w-56 overflow-y-auto rounded-md py-1 ${GLASS_OUTLINE} ${GLASS_FILL_DENSE} ${GLASS_SHADOW_LIFTED}`}
+        className={`fixed z-50 flex w-56 flex-col rounded-2xl ${surface}`}
         onClick={(e) => e.stopPropagation()}
       >
-        {children}
+        <div ref={listRef} className="min-h-0 overflow-y-auto overscroll-y-contain p-1.5">
+          {children}
+        </div>
       </div>
     </CloseContext.Provider>,
     document.body,
@@ -332,9 +333,8 @@ export function OverflowMenu({
         className={
           trigger
             ? PLAIN_TRIGGER
-            : `cursor-pointer rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-600 disabled:opacity-0 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-slate-300 ${
-                open ? "bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300" : ""
-              }`
+            : // Open: the fill it has under the mouse stays
+              `cursor-pointer p-1 disabled:opacity-0 ${ICON_BUTTON} ${open ? "bg-black/5 dark:bg-white/10" : ""}`
         }
       >
         {trigger ? trigger(open) : <EllipsisVertical className="size-4" />}

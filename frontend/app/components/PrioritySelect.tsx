@@ -8,11 +8,12 @@
 //
 // Pure. It holds one piece of state, whether its menu is open, which is exactly the ephemeral
 // kind a leaf keeps: nothing above it needs to know, and nothing is lost when it closes.
-import { ChevronDown } from "lucide-react";
+import { Check, ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { PRIORITY_LABEL, PriorityIcon } from "~/components/TicketCard";
-import { AnchoredList } from "~/components/AnchoredList";
+import { AnchoredList, LIST, LIST_ROW } from "~/components/AnchoredList";
+import { TEXT_3 } from "~/desk/control/ui";
 import { useModalEscape } from "~/lib/useModalEscape";
 
 /** The scale in the order Linear reads it: unranked first, then urgent down to low. */
@@ -72,7 +73,7 @@ export function PrioritySelect({
       >
         <PriorityIcon level={value} />
         <span className="min-w-0 flex-1 truncate">{PRIORITY_LABEL[value]}</span>
-        <ChevronDown aria-hidden className="size-3.5 shrink-0 text-slate-400" />
+        <ChevronDown aria-hidden className={`size-3.5 shrink-0 ${TEXT_3}`} />
       </button>
 
       {open ? (
@@ -139,7 +140,7 @@ function PriorityMenu({
         // focus into a list the operator has already stepped past.
         if (e.key === "Tab") onDismiss();
       }}
-      className="w-full overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-lg outline-none dark:border-slate-600 dark:bg-slate-800"
+      className={LIST}
     >
       {PRIORITY_LEVELS.map((level, i) => (
         <li
@@ -154,18 +155,15 @@ function PriorityMenu({
             onPick(level);
           }}
           onPointerEnter={() => setActive(i)}
-          className={`flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm ${
-            i === active ? "bg-slate-100 dark:bg-slate-700" : ""
-          } ${
-            level === value
-              ? "font-medium text-slate-900 dark:text-slate-100"
-              : "text-slate-600 dark:text-slate-300"
+          className={`${LIST_ROW.base} ${i === active ? LIST_ROW.on : ""} ${
+            level === value ? LIST_ROW.chosen : LIST_ROW.idle
           }`}
         >
           <PriorityIcon level={level} />
           <span className="min-w-0 flex-1 truncate">
             {PRIORITY_LABEL[level]}
           </span>
+          {level === value ? <Check aria-hidden className="size-3.5 shrink-0" /> : null}
         </li>
       ))}
     </ul>

@@ -13,9 +13,15 @@
    with dark text, dark glass with light text. Each look is a palette (`--g-*`); the pieces and
    their states take from it (`--glass-*`), so a variant changes only what it must. In the components
    layer: a Tailwind utility on the same element wins, except `shadow-*` and `ring-*`, which put
-   back all of `box-shadow` (do not use them on glass). */
+   back all of `box-shadow` (do not use them on glass).
+
+   BlockNote's menus (its toolbar, the "/" menu, its dropdowns and tooltips, in the notes and a
+   ticket's description) are thick glass too. BlockNote draws them, so they cannot take the
+   classes: they are named beside `.glass`, `.glass::before` and `.glass-thick` here, and
+   `../app.css` puts back what BlockNote's own rules (outside any layer) take from them. */
 @layer components {
-  .glass {
+  .glass,
+  :where(.bn-mantine) :is(.bn-toolbar, .bn-suggestion-menu, .bn-grid-suggestion-menu, .mantine-Menu-dropdown, .bn-form-popover, .bn-tooltip) {
     /* The light look's palette */
     --g-thin: rgb(255 255 255 / 0.35);
     --g-thick: rgb(255 255 255 / 0.55);
@@ -90,7 +96,8 @@
     backdrop-filter: blur(var(--glass-blur)) saturate(1.8);
     box-shadow: var(--glass-inner), var(--glass-drop);
   }
-  .glass::before {
+  .glass::before,
+  :where(.bn-mantine) :is(.bn-toolbar, .bn-suggestion-menu, .bn-grid-suggestion-menu, .mantine-Menu-dropdown, .bn-form-popover, .bn-tooltip)::before {
     content: "";
     position: absolute;
     inset: 0;
@@ -115,7 +122,8 @@
 
   /* A surface with text to read (a dialog, a tooltip, the monitor's number): more tint, more
      blur, a long shadow. */
-  .glass-thick {
+  .glass-thick,
+  :where(.bn-mantine) :is(.bn-toolbar, .bn-suggestion-menu, .bn-grid-suggestion-menu, .mantine-Menu-dropdown, .bn-form-popover, .bn-tooltip) {
     --glass-tint: var(--g-thick);
     --glass-blur: 14px;
     --glass-drop: var(--g-drop-long);
@@ -269,21 +277,4 @@
 }
 .dark .on-glass .bn-block-content:has(.ProseMirror-trailingBreak:only-child)::after {
   color: rgb(255 255 255 / 0.4);
-}
-
-/* A dropdown's list over the fields (`DropdownSelect`, `PrioritySelect`): what is under it is
-   blurred, as under any glass piece, so its rows read over the fields it covers. `[role]` twice:
-   it outweighs the light look's white fill (`.bg-white:not(.dark *)` above). */
-.on-glass [role="listbox"][role] {
-  -webkit-backdrop-filter: blur(20px) saturate(1.8);
-  backdrop-filter: blur(20px) saturate(1.8);
-  background-color: rgb(255 255 255 / 0.78);
-}
-@media (prefers-color-scheme: dark) {
-  .on-glass [role="listbox"][role] {
-    background-color: rgb(38 38 38 / 0.82);
-  }
-}
-.dark .on-glass [role="listbox"][role] {
-  background-color: rgb(38 38 38 / 0.82);
 }

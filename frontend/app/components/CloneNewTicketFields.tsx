@@ -10,7 +10,9 @@
 // resolved-preset line.
 import type { ReactNode } from "react";
 
+import { ERROR_TEXT } from "~/desk/control/ui";
 import {
+        cloneEditorBox,
         cloneRow,
         cloneRowField,
         cloneRowLabel,
@@ -79,7 +81,7 @@ export function CloneNewTicketFields({
                                                 className={cloneRowField}
                                         />
                                         {teamKeys.length === 0 ? (
-                                                <p className="mt-1 text-[11px] font-normal text-red-600 dark:text-red-400">
+                                                <p className={`mt-1 text-[11px] font-normal ${ERROR_TEXT}`}>
                                                         No preset declares a
                                                         team key — add ticket-id
                                                         prefixes to a preset in
@@ -118,7 +120,7 @@ export function CloneNewTicketFields({
                                 </span>
                                 {/* `px-3` matches the inputs, so the body starts where the title above it does. The
             editor brings no side padding of its own (see `ticket-description` in app.css). */}
-                                <div className="mt-0 min-h-[6.5rem] rounded-md border border-slate-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600">
+                                <div className={`min-h-[6.5rem] ${cloneEditorBox}`}>
                                         {description}
                                 </div>
                         </div>

@@ -19,7 +19,9 @@ import { createPortal } from "react-dom";
 import chatgptLogo from "~/assets/chatgpt.svg";
 import claudeLogo from "~/assets/claude.svg";
 import { DropdownSelect } from "~/components/DropdownSelect";
+import { useModalSurface } from "~/components/ModalShell";
 import { settingsInput } from "~/components/SettingsFields";
+import { BUTTON, CARD_BOX, FIELD, FLOAT_SOLID, ICON_BUTTON, LINE, R_PIECE, TEXT, TEXT_3 } from "~/desk/control/ui";
 import {
   applyTreeDrop,
   isDuplicateDrop,
@@ -38,10 +40,11 @@ import {
   treeKeyboardCoordinates,
 } from "./SettingsGroupsEditor.dnd";
 
-const actionClass =
-  "rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800";
-const gripClass =
-  "shrink-0 cursor-grab touch-none rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 focus-visible:outline-2 focus-visible:outline-blue-500 active:cursor-grabbing dark:hover:bg-slate-700 dark:hover:text-slate-200";
+const actionClass = `${BUTTON} px-2 py-1 text-xs disabled:opacity-40`;
+// Keyboard focus: a dark outline in light, a white one in dark, as a glass control's
+const gripClass = `shrink-0 cursor-grab touch-none p-1 ${ICON_BUTTON} focus-visible:outline-2 focus-visible:outline-neutral-900 active:cursor-grabbing dark:focus-visible:outline-white`;
+/** A small icon button that removes something (a group, a member). */
+const removeClass = `shrink-0 p-1 ${ICON_BUTTON} disabled:opacity-40`;
 
 /** Which side a member row serves: untagged rows serve both. */
 type Scope = Provider | "both";
@@ -84,6 +87,8 @@ export function SettingsGroupsEditor({
   const prefix = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const nextGroupId = useRef(0);
+  // Where the dragged piece floats: over the clone's screen (glass) or on a solid ground
+  const surface = useModalSurface();
   const dragSource = useRef<GroupDraft[] | null>(null);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -295,14 +300,14 @@ export function SettingsGroupsEditor({
             </Fragment>
           ))}
           {nodes.length === 0 && (
-            <p className="py-3 text-xs text-slate-400">No groups.</p>
+            <p className={`py-3 text-xs ${TEXT_3}`}>No groups.</p>
           )}
         </TreeRegion>
         {accounts.length === 0 && (
-          <p className="my-2 text-xs text-slate-400">{noAccountsHint}</p>
+          <p className={`my-2 text-xs ${TEXT_3}`}>{noAccountsHint}</p>
         )}
         {ungrouped.length > 0 && (
-          <p className="my-2 text-xs text-amber-600 dark:text-amber-400">
+          <p className="my-2 text-xs text-amber-700 dark:text-amber-300">
             Not in any group — saving deletes these accounts:{" "}
             {ungrouped.map((account) => account.email).join(", ")}. Add them to
             a group to keep them.
@@ -330,9 +335,11 @@ export function SettingsGroupsEditor({
             zIndex={10000}
           >
             {active && sourceGroup ? (
+              // Lifted off the list: a piece of thick glass of its own, over the page; solid in
+              // the control panel's own window, where no clone's screen is under it
               <div
                 data-drag-preview
-                className="rounded border border-blue-400 bg-white p-3 text-sm text-slate-800 shadow-xl dark:bg-slate-800 dark:text-slate-100"
+                className={`${R_PIECE} p-3 text-sm ${TEXT} ${surface === "solid" ? FLOAT_SOLID : "glass glass-thick"}`}
               >
                 <div className="flex items-center gap-2">
                   <GripVertical size={16} />
@@ -346,7 +353,7 @@ export function SettingsGroupsEditor({
                   )}
                 </div>
                 {duplicate && (
-                  <p className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+                  <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">
                     Already in this group
                   </p>
                 )}
@@ -392,7 +399,7 @@ function DropSlot({
     >
       {show && (
         <div
-          className={`pointer-events-none absolute inset-x-0 top-1/2 border-t-2 ${blocked ? "border-dashed border-amber-500" : "border-blue-500"}`}
+          className={`pointer-events-none absolute inset-x-0 top-1/2 border-t-2 ${blocked ? "border-dashed border-amber-500" : "border-emerald-500"}`}
         />
       )}
     </div>
@@ -445,9 +452,9 @@ function GroupCard({
     >
       <div
         ref={setNodeRef}
-        className={`rounded border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900 ${isDragging ? "opacity-40" : ""}`}
+        className={`${CARD_BOX} ${isDragging ? "opacity-40" : ""}`}
       >
-        <div className="flex items-center gap-2 rounded-t bg-slate-50 p-2 dark:bg-slate-800/60">
+        <div className="flex items-center gap-2 rounded-t-[10px] bg-black/[0.03] p-2 dark:bg-white/[0.03]">
           <button
             ref={setActivatorNodeRef}
             data-drag-handle={itemId(item)}
@@ -472,8 +479,8 @@ function GroupCard({
             disabled={!!active}
             onClick={onRemove}
             aria-label={`Remove group ${group.name || index + 1}`}
-            title="Remove group"
-            className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-200 disabled:opacity-40 dark:hover:bg-slate-700"
+            data-tip="Remove group"
+            className={removeClass}
           >
             <X size={14} />
           </button>
@@ -507,7 +514,7 @@ function GroupCard({
             </Fragment>
           ))}
           {group.accounts.length === 0 && (
-            <p className="rounded border border-dashed border-slate-200 px-3 py-4 text-center text-xs text-slate-400 dark:border-slate-700">
+            <p className={`rounded-md border border-dashed px-3 py-4 text-center text-xs ${LINE} ${TEXT_3}`}>
               Drag an account here
             </p>
           )}
@@ -544,7 +551,7 @@ function GroupCard({
               }}
               disabled={!!active}
               label={`reference an existing account into ${group.name || "this group"}`}
-              className={`${actionClass} min-w-0 max-w-full dark:bg-slate-900`}
+              className={`${actionClass} min-w-0 max-w-full`}
             />
           )}
         </div>
@@ -576,7 +583,7 @@ function MemberRow({
     <div
       ref={setNodeRef}
       data-account={item.email}
-      className={`flex min-h-9 items-center gap-2 rounded border border-slate-200 px-2 py-1 text-xs text-slate-700 dark:border-slate-700 dark:text-slate-200 ${isDragging ? "opacity-40" : ""}`}
+      className={`flex min-h-9 items-center gap-2 rounded-md border px-2 py-1 text-xs ${LINE} ${TEXT} ${isDragging ? "opacity-40" : ""}`}
     >
       <button
         ref={setActivatorNodeRef}
@@ -590,14 +597,14 @@ function MemberRow({
         <GripVertical size={14} />
       </button>
       <AccountLabel email={item.email} provider={provider} />
-      <label className="flex shrink-0 items-center gap-1 text-[10px] text-slate-400 dark:text-slate-500">
+      <label className={`flex shrink-0 items-center gap-1 text-[10px] ${TEXT_3}`}>
         serves
         <select
           aria-label={`which side ${item.email} serves in this group`}
           disabled={disabled}
           value={scope}
           onChange={(event) => onScopeChange(event.target.value as Scope)}
-          className="rounded border border-slate-200 bg-white px-1 py-0.5 text-[10px] text-slate-600 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+          className={`${FIELD} px-1 py-0.5 text-[10px] disabled:opacity-40`}
         >
           <option value="both">both</option>
           <option value="claude">Claude</option>
@@ -608,13 +615,13 @@ function MemberRow({
         type="button"
         disabled={disabled}
         onClick={onRemove}
-        title={
+        data-tip={
           lastGroup
             ? "Remove from its last group — saving deletes this account entirely"
             : "Remove from this group (it stays in its other groups)"
         }
         aria-label={`remove ${item.email} from this group`}
-        className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-100 disabled:opacity-40 dark:hover:bg-slate-800"
+        className={removeClass}
       >
         <X size={14} />
       </button>
@@ -638,11 +645,11 @@ function AccountLabel({
           className={`h-4 w-4 shrink-0 object-contain ${provider === "codex" ? "dark:invert" : ""}`}
         />
       ) : (
-        <span className="text-slate-400" title="Unknown provider">
+        <span className={TEXT_3} data-tip="Unknown provider">
           ?
         </span>
       )}
-      <span title={email} className="min-w-0 flex-1 truncate">
+      <span data-tip={email} className="min-w-0 flex-1 truncate">
         {email}
       </span>
     </>

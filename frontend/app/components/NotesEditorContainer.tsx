@@ -10,6 +10,7 @@ import type { PartialBlock } from "@blocknote/core";
 import { useEffect, useRef, useState } from "react";
 
 import { NotesEditorView } from "~/components/NotesEditorView";
+import { TEXT_3 } from "~/desk/control/ui";
 import { uploadFile } from "~/lib/api";
 
 const SAVE_DEBOUNCE_MS = 600;
@@ -87,7 +88,7 @@ export default function NotesEditorContainer({ cloneId }: { cloneId: string }) {
   }, [cloneId]);
 
   if (initial === "loading") {
-    return <div className="p-6 text-sm text-slate-400 dark:text-slate-500">Loading…</div>;
+    return <div className={`p-6 text-sm ${TEXT_3}`}>Loading…</div>;
   }
   return <SavingEditor key={cloneId} cloneId={cloneId} initialContent={initial} />;
 }

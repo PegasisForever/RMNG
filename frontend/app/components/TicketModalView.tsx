@@ -19,14 +19,15 @@
 // editor arrives as a slot for the same reason — it is browser-only and carries the upload
 // call, so TicketModalContainer decides when and how it mounts.
 //
-// It is a glass dialog: its fields drawn flat on the glass (`.on-glass`, `~/desk/glass.css`),
-// and its fields and buttons 10 px, 16 px in from the dialog's 26 px corners (`~/desk/GLASS.md`,
-// Shape).
+// Its fields are flat on the dialog's panel (`~/desk/GLASS.md`), and its fields and buttons
+// 10 px, 16 px in from the dialog's 26 px corners (GLASS.md, Shape).
 import { useState, type ReactNode } from "react";
 
 import { DropdownSelect } from "~/components/DropdownSelect";
 import { ModalShell } from "~/components/ModalShell";
 import { PrioritySelect } from "~/components/PrioritySelect";
+import { cloneEditorBox } from "~/components/cloneFieldStyles";
+import { BUTTON, DONE_BUTTON, ERROR_TEXT, ErrorLine, FIELD, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 import type { TeamKey } from "~/lib/cloneDraft";
 import type { TicketPerson } from "~/lib/linear/people";
 
@@ -115,18 +116,16 @@ export function TicketModalView({
   // dropdowns and inputs inherit `text-sm`'s 20px and land on 38px — now that every
   // control here is either an input or a custom dropdown, the pin is what keeps the row
   // one height.
-  const field =
-    `mt-1 h-9 w-full rounded-[10px] border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 dark:bg-slate-800 placeholder:text-slate-400 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:text-slate-100 dark:placeholder:text-slate-500`;
-  const label = "block text-xs font-medium text-slate-500 dark:text-slate-400";
-  const button = "rounded-[10px] px-3 py-1.5 text-sm";
+  const field = `mt-1 h-9 w-full ${FIELD} px-3 py-2 text-sm font-normal placeholder:text-black/40 dark:placeholder:text-white/40`;
+  const label = `block text-xs font-medium ${TEXT_2}`;
 
   return (
     // Neither Cancel nor Escape closes this while a create is in flight, so both are held by
     // the same `busy`: the button below, and `dismissible` for the key.
-    <ModalShell size="lg" dismissible={!busy} onExited={onClose} glass>
+    <ModalShell size="lg" dismissible={!busy} onExited={onClose}>
       {(close) => (
-        <div className="on-glass flex min-h-0 flex-1 flex-col">
-          <h3 className="shrink-0 text-[15px] font-semibold tracking-tight text-neutral-900 dark:text-white">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <h3 className={`shrink-0 text-[15px] font-semibold tracking-tight ${TEXT}`}>
             New ticket
           </h3>
 
@@ -196,14 +195,14 @@ export function TicketModalView({
             {/* Both warnings are about the team, and both sit under the row rather than inside
               its narrowest column, where either would wrap to four lines. */}
             {teams.length === 0 ? (
-              <p className="text-[11px] text-red-600 dark:text-red-400">
+              <p className={`text-[11px] ${ERROR_TEXT}`}>
                 No preset declares a team key. Add ticket-id prefixes to a
                 preset in Settings.
               </p>
             ) : null}
 
             {keyMissing ? (
-              <p className="text-[11px] text-red-600 dark:text-red-400">
+              <p className={`text-[11px] ${ERROR_TEXT}`}>
                 Preset “{chosen?.preset.name}” has no Linear API key. Add it in
                 Settings, or pick a team whose preset has one.
               </p>
@@ -229,7 +228,7 @@ export function TicketModalView({
               {/* `px-3` matches the inputs above, so the body starts where the title does. The
                 editor brings no side padding of its own (see `ticket-description` in app.css),
                 which is what leaves this box free to set its own. */}
-              <div className={`mt-1 min-h-[10rem] rounded-[10px] border border-slate-300 px-3 py-2 text-sm font-normal focus-within:border-emerald-500 dark:border-slate-600`}>
+              <div className={`mt-1 min-h-[10rem] ${cloneEditorBox}`}>
                 {descriptionEditor}
               </div>
             </div>
@@ -238,21 +237,21 @@ export function TicketModalView({
               a disabled field. The assignee is theirs, and picking anybody else takes the new
               ticket straight out of the column that opened it, which is worth saying before
               the click and not after. */}
-            <p className="text-[11px] text-slate-400 dark:text-slate-500">
+            <p className={`text-[11px] ${TEXT_3}`}>
               Opens as Todo, assigned to{" "}
               {assignee && !assignee.isViewer ? assignee.name : "you"}.
             </p>
             {assignee && !assignee.isViewer ? (
-              <p className="text-[11px] text-amber-600 dark:text-amber-400">
+              <p className="text-[11px] text-amber-700 dark:text-amber-300">
                 This column lists the tickets assigned to you, so it will not
                 appear in it.
               </p>
             ) : null}
 
             {error ? (
-              <p className="rounded-md bg-red-50 px-2 py-1.5 text-xs text-red-700 dark:bg-red-950 dark:text-red-300">
-                {error}
-              </p>
+              <div className={`overflow-hidden ${R_PIECE}`}>
+                <ErrorLine message={error} />
+              </div>
             ) : null}
           </div>
 
@@ -261,7 +260,7 @@ export function TicketModalView({
               type="button"
               onClick={() => close()}
               disabled={busy}
-              className={`cursor-pointer ${button} font-medium text-slate-500 hover:bg-slate-100 disabled:opacity-50 dark:text-slate-400 dark:hover:bg-slate-700`}
+              className={`cursor-pointer ${BUTTON} px-3 py-1.5 text-sm disabled:opacity-40`}
             >
               Cancel
             </button>
@@ -269,7 +268,7 @@ export function TicketModalView({
               type="button"
               onClick={() => submit(close)}
               disabled={!canSubmit}
-              className={`cursor-pointer ${button} bg-emerald-600 font-medium text-white hover:bg-emerald-700 disabled:opacity-50`}
+              className={`cursor-pointer ${DONE_BUTTON} px-3 py-1.5 text-sm font-medium`}
             >
               {busy ? "Creating…" : "Create ticket"}
             </button>

@@ -23,6 +23,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { GripVertical, Plus, Trash2 } from "lucide-react";
 import { type CSSProperties, useState } from "react";
 
+import { BUTTON, CARD_BOX, FIELD, ICON_BUTTON, TEXT, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 import type { BoardColumn } from "~/lib/board";
 
 export interface BoardColumnsEditorProps {
@@ -65,19 +66,16 @@ function ColumnRow({
     <li
       ref={setNodeRef}
       style={style}
-      className={`flex items-center gap-2 rounded-lg border bg-white px-2 py-1.5 dark:bg-slate-800 ${
-        isDragging
-          ? "border-slate-300 shadow-lg dark:border-slate-500"
-          : "border-slate-200 dark:border-slate-700"
-      }`}
+      // A card; lifted while it is dragged
+      className={`flex items-center gap-2 px-2 py-1.5 ${CARD_BOX} ${isDragging ? "shadow-lg" : ""}`}
     >
       <button
         type="button"
         {...attributes}
         {...listeners}
         aria-label={`Reorder ${column.title}`}
-        title="Drag to reorder"
-        className="shrink-0 cursor-grab touch-none rounded p-1 text-slate-400 hover:bg-slate-100 active:cursor-grabbing dark:text-slate-500 dark:hover:bg-slate-700"
+        data-tip="Drag to reorder"
+        className={`shrink-0 cursor-grab touch-none p-1 active:cursor-grabbing ${ICON_BUTTON}`}
       >
         <GripVertical className="size-4" />
       </button>
@@ -85,11 +83,12 @@ function ColumnRow({
         value={column.title}
         onChange={(e) => onRename(e.target.value)}
         aria-label={`${column.title} name`}
-        className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-sm text-slate-900 hover:border-slate-300 focus:border-emerald-500 focus:outline-none dark:text-slate-100 dark:hover:border-slate-600"
+        // A field only under the mouse or while typed in: in a row of them, ten boxes are noise
+        className={`min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-2 py-1 text-sm outline-none hover:border-black/10 focus:border-black/30 dark:hover:border-white/10 dark:focus:border-white/30 ${TEXT}`}
       />
       <label
-        className="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-slate-500 dark:text-slate-400"
-        title="Archive a clone when it is dropped in this column, and start it again when it is dragged out"
+        className={`flex shrink-0 cursor-pointer items-center gap-1 text-xs ${TEXT_2}`}
+        data-tip="Archive a clone when it is dropped in this column, and start it again when it is dragged out"
       >
         <input
           type="checkbox"
@@ -99,19 +98,19 @@ function ColumnRow({
         />
         archive
       </label>
-      <span className="shrink-0 rounded-full bg-slate-100 px-2 text-xs font-medium tabular-nums text-slate-500 dark:bg-slate-700 dark:text-slate-400">
+      <span className={`shrink-0 rounded-full bg-black/5 px-2 text-xs font-medium tabular-nums dark:bg-white/10 ${TEXT_2}`}>
         {count}
       </span>
       <button
         type="button"
         onClick={onDelete}
-        title={
+        data-tip={
           count > 0
             ? `Delete this column; its ${count} clone${count === 1 ? "" : "s"} move to the first one`
             : "Delete this column"
         }
         aria-label={`Delete the ${column.title} column`}
-        className="shrink-0 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-red-600 dark:text-slate-500 dark:hover:bg-slate-700 dark:hover:text-red-400"
+        className={`shrink-0 p-1 ${ICON_BUTTON} hover:text-rose-600 dark:hover:text-rose-400`}
       >
         <Trash2 className="size-4" />
       </button>
@@ -155,7 +154,7 @@ export function BoardColumnsEditor({
   return (
     <div className="space-y-3">
       {columns.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-slate-300 p-4 text-center text-xs text-slate-400 dark:border-slate-600 dark:text-slate-500">
+        <p className={`rounded-lg border border-dashed border-black/15 p-4 text-center text-xs dark:border-white/15 ${TEXT_3}`}>
           No columns yet. Add one below.
         </p>
       ) : (
@@ -189,13 +188,13 @@ export function BoardColumnsEditor({
           }}
           placeholder="New column name"
           aria-label="New column name"
-          className="min-w-0 flex-1 rounded border border-slate-300 px-2 py-1 text-sm text-slate-900 placeholder:text-slate-400 focus:border-slate-400 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500 dark:focus:border-slate-500"
+          className={`min-w-0 flex-1 px-2 py-1 text-sm placeholder:text-black/40 dark:placeholder:text-white/40 ${FIELD}`}
         />
         <button
           type="button"
           onClick={add}
           disabled={!title.trim()}
-          className="flex shrink-0 items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
+          className={`flex shrink-0 items-center gap-1 px-2 py-1 text-xs disabled:opacity-40 ${BUTTON}`}
         >
           <Plus className="size-3.5" />
           Add column

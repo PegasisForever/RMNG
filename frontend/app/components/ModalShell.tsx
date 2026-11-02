@@ -49,30 +49,37 @@ export const MODAL_ANIMATION = {
 /** How long `app.css` runs both the entry and the exit frames. `MODAL_EXIT_MS` must cover it. */
 export const MODAL_ANIMATION_MS = 200;
 
-const PANEL: Record<ModalSize, string> = {
-  sm: "max-h-[min(90vh,100%)] w-full max-w-md overflow-y-auto p-5",
-  md: "w-full max-w-lg p-5",
-  lg: "flex max-h-[min(90vh,100%)] w-full max-w-lg flex-col p-5",
-  panel:
-    "flex h-[42rem] max-h-[min(90vh,100%)] w-full max-w-4xl flex-col overflow-hidden",
+/** The panel's surface (`~/desk/GLASS.md`). Over the clone's screen (also over the wide control
+ *  panel), glass: its backdrop only darkens the screen, as the panel blurs what is under it. In
+ *  the control panel's own window there is no screen under it, so it is solid, in the page's
+ *  look. Its corners are 26 px and its padding 16 px, so a button in a corner (10 px, the piece
+ *  radius) is concentric with it (GLASS.md, Shape). Its content is flat either way
+ *  (`.on-glass`: the slate parts from `~/components` read on it). */
+const CHROME: Record<ModalSurface, string> = {
+  glass: "on-glass glass glass-thick rounded-[26px]",
+  solid:
+    "on-glass rounded-[26px] border border-black/10 bg-neutral-100 text-neutral-900 shadow-[0_24px_56px_-12px_rgb(0_0_0/0.35)] dark:border-white/10 dark:bg-neutral-900 dark:text-white",
 };
 
-/** The panel's plain surface, for a dialog not in glass. */
-const PANEL_CHROME =
-  "rounded-xl border border-slate-200 bg-white shadow-xl dark:border-slate-700 dark:bg-slate-800";
-
-/** The same in glass (`~/desk/GLASS.md`), and its backdrop: darker, with no blur (the panel
- *  blurs what is under it). Its corners are 26 px and its padding 16 px, so a button in a corner
- *  (10 px, the piece radius) is concentric with it (GLASS.md, Shape). */
-const GLASS_CHROME = "glass glass-thick rounded-[26px]";
-
-/** `PANEL` with the glass padding (16 px in place of 20). */
-const GLASS_PANEL: Record<ModalSize, string> = {
+const PANEL: Record<ModalSize, string> = {
   sm: "max-h-[min(90vh,100%)] w-full max-w-md overflow-y-auto p-4",
   md: "w-full max-w-lg p-4",
   lg: "flex max-h-[min(90vh,100%)] w-full max-w-lg flex-col p-4",
   panel: "flex h-[42rem] max-h-[min(90vh,100%)] w-full max-w-4xl flex-col overflow-hidden",
 };
+
+/** What a window dialog's panel is made of: `glass` over the clone's screen, `solid` where there
+ *  is none under the page (the control panel's own window). */
+export type ModalSurface = "glass" | "solid";
+
+const SurfaceContext = createContext<ModalSurface>("glass");
+
+/** Every window dialog inside this has this surface. The control panel's own window gives
+ *  `solid`; the page over the clone's screen needs none. */
+export const ModalSurfaceProvider = SurfaceContext.Provider;
+
+/** The surface of the window dialogs here; an open list (`AnchoredList`) takes it too. */
+export const useModalSurface = () => useContext(SurfaceContext);
 
 /** Where a dialog goes. `window`: over the whole page, on a dimmed backdrop. `inline`: it
  *  fills the nearest positioned box instead, with no backdrop and no frame. The narrow control
@@ -110,17 +117,17 @@ const AROUND =
   "pb-[calc(1rem+var(--safe-bottom,0px))] pl-[calc(1rem+var(--safe-left,0px))]";
 
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
-export function backdropClass(closing: boolean, glass = false): string {
+export function backdropClass(closing: boolean): string {
   return (
-    `fixed inset-0 z-50 flex items-center justify-center ${glass ? "bg-black/20 dark:bg-black/35" : "bg-slate-900/30"} ${AROUND} ` +
+    `fixed inset-0 z-50 flex items-center justify-center bg-black/20 dark:bg-black/35 ${AROUND} ` +
     (closing ? MODAL_ANIMATION.backdrop.exit : MODAL_ANIMATION.backdrop.enter)
   );
 }
 
 /** Split out of the markup so the entry/exit swap is testable without a renderer. */
-export function panelClass(size: ModalSize, closing: boolean, glass = false): string {
+export function panelClass(size: ModalSize, closing: boolean, surface: ModalSurface = "glass"): string {
   return (
-    `${glass ? `${GLASS_CHROME} ${GLASS_PANEL[size]}` : `${PANEL_CHROME} ${PANEL[size]}`} ` +
+    `${CHROME[surface]} ${PANEL[size]} ` +
     (closing ? MODAL_ANIMATION.panel.exit : MODAL_ANIMATION.panel.enter)
   );
 }
@@ -140,8 +147,6 @@ export interface ModalShellProps {
    *  at exactly that moment. */
   dismissible?: boolean;
   size?: ModalSize;
-  /** In glass (`~/desk/GLASS.md`), over the clone's screen; else a plain white panel. */
-  glass?: boolean;
   /** The dialog's own markup, given the shell's door out. */
   children: (close: ModalClose) => ReactNode;
 }
@@ -151,11 +156,11 @@ export function ModalShell({
   onExited,
   dismissible = true,
   size = "sm",
-  glass = false,
   children,
 }: ModalShellProps) {
   const { closing, beginExit } = useModalExit();
   const placement = useContext(PlacementContext);
+  const surface = useContext(SurfaceContext);
 
   // Read the current `onExited` through a ref so `close` keeps one identity for the life of
   // the dialog. `useModalEscape` re-registers on a new callback, and re-registering means
@@ -192,10 +197,10 @@ export function ModalShell({
   }
 
   const dialog = (
-    <div data-modal className={backdropClass(closing, glass)}>
+    <div data-modal className={backdropClass(closing)}>
       {/* Backdrop is inert — clicking it must not close the dialog, because a stray click
           outside must never discard a half-filled form. Cancel and Escape are the ways out. */}
-      <div className={panelClass(size, closing, glass)}>{children(close)}</div>
+      <div className={panelClass(size, closing, surface)}>{children(close)}</div>
     </div>
   );
   // Over the whole page, on the body: opened from inside a box that is a layer of its own (the

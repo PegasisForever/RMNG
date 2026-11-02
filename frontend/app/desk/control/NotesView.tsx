@@ -17,7 +17,7 @@ import { cloneTitle } from "~/lib/cloneTitle";
 import type { CloneTicket } from "~/lib/tickets";
 import type { Clone } from "~/lib/types";
 
-import { EmptyLine, HeaderButton, NO_SCROLLBARS, TabPanel, TabHeader, TEXT, TEXT_3 } from "./ui";
+import { EmptyLine, HeaderButton, NO_SCROLLBARS, ON_GLASS, TabPanel, TabHeader, TEXT, TEXT_3 } from "./ui";
 
 /** Which of the two shows. */
 export type NotesPane = "notes" | "chat";
@@ -80,8 +80,9 @@ export function NotesView({
     );
   }
   return (
-    // The notes and the chat scroll with no bars
-    <div className={`h-full ${NO_SCROLLBARS}`}>
+    // The notes and the chat scroll with no bars. Their parts from `~/components` are flat on the
+    // glass (wide, the side panels say so)
+    <div className={`h-full ${NO_SCROLLBARS} ${ON_GLASS}`}>
       <TabPanel
         fill
         header={

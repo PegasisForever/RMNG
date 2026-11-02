@@ -62,6 +62,7 @@ import {
   ActionSheet,
   BOX,
   boxOf,
+  BUTTON,
   CARD_BOX,
   CARD_LIST,
   DesktopMenu,
@@ -70,13 +71,13 @@ import {
   FIELD,
   HERE,
   isMouseClick,
+  LINE,
   NO_DRAG,
   NO_WORD_SELECT,
   ON_GLASS,
   TabPanel,
   TabHeader,
   PRESS,
-  R_PIECE,
   type SheetGroup,
   TEXT,
   TEXT_2,
@@ -355,8 +356,8 @@ export function ClonesView(p: ClonesViewProps) {
       onClick={() => p.onNewClone(column.id)}
       disabled={cloning}
       aria-label={`New clone in ${column.title}`}
-      title={`Create a clone in ${column.title}`}
-      className={`flex h-7 shrink-0 items-center gap-1 ${R_PIECE} px-2 text-xs font-medium normal-case tracking-normal disabled:opacity-40 ${TEXT_2} ${PRESS}`}
+      data-tip={`Create a clone in ${column.title}`}
+      className={`flex h-7 shrink-0 items-center gap-1 px-2 text-xs font-medium normal-case tracking-normal disabled:opacity-40 ${BUTTON}`}
     >
       <Plus aria-hidden className="size-3.5" />
       New clone
@@ -380,14 +381,14 @@ export function ClonesView(p: ClonesViewProps) {
           onKeyDown={(e) => e.key === "Escape" && setRenaming(null)}
           onBlur={() => setRenaming(null)}
           aria-label="Column name"
-          className={`min-w-0 flex-1 ${R_PIECE} border border-black/10 bg-white/60 px-2 py-0.5 text-sm font-normal focus:border-black/30 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:focus:border-white/30 ${TEXT}`}
+          className={`min-w-0 flex-1 px-2 py-0.5 text-sm font-normal ${FIELD}`}
         />
       </form>
     ) : (
       <>
         <span
           className="truncate"
-          title={p.onRenameColumn ? "Double-click to rename" : undefined}
+          data-tip={p.onRenameColumn ? "Double-click to rename" : undefined}
           onDoubleClick={() => p.onRenameColumn && setRenaming({ id: column.id, title: column.title })}
         >
           {column.title}
@@ -435,9 +436,10 @@ export function ClonesView(p: ClonesViewProps) {
         ) : null}
         {columns.map((column) => (
           <DropColumn key={column.id} id={column.id} items={column.cloneIds} as="section">
-            {/* Frosted over the rows that scroll beneath it */}
+            {/* Over the rows that scroll beneath it: flat, with no blur (`../GLASS.md`), so a fill
+                dense enough that the rows do not show through */}
             <h3
-              className={`sticky top-0 z-10 flex h-8 items-center gap-2 bg-white/50 pl-3 pr-1 text-[11px] font-semibold uppercase tracking-wide backdrop-blur-md dark:bg-black/30 ${TEXT_2}`}
+              className={`sticky top-0 z-10 flex h-8 items-center gap-2 border-b bg-white/85 pl-3 pr-1 text-[11px] font-semibold uppercase tracking-wide dark:bg-neutral-900/90 ${LINE} ${TEXT_2}`}
             >
               {heading(column)}
             </h3>
@@ -512,7 +514,7 @@ function CloneRow({
     </>
   );
   const state = busy ? (
-    <span className="shrink-0 text-[11px] font-medium text-sky-600 dark:text-sky-400">
+    <span className={`shrink-0 text-[11px] font-medium ${TEXT_2}`}>
       {op.kind === "delete" ? "deleting…" : op.step}
     </span>
   ) : usage ? (

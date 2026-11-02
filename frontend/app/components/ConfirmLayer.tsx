@@ -4,7 +4,7 @@
 // `routes/app.tsx`) shows them, one at a time, in order.
 import { useEffect, useState } from "react";
 
-import { BUTTON, DANGER_TEXT, DONE_BUTTON, TEXT, TEXT_2 } from "~/desk/control/ui";
+import { BUTTON, DANGER_BUTTON, DONE_BUTTON, TEXT, TEXT_2 } from "~/desk/control/ui";
 
 import { ModalShell } from "./ModalShell";
 
@@ -60,7 +60,7 @@ export function ConfirmLayer() {
     setList(queue);
   };
   return (
-    <ModalShell key={q.id} glass size="sm" onExited={() => done(false)}>
+    <ModalShell key={q.id} size="sm" onExited={() => done(false)}>
       {(close) => (
         <div className={`flex flex-col gap-3 ${TEXT}`}>
           <h2 className="text-base font-semibold">{q.title}</h2>
@@ -76,7 +76,7 @@ export function ConfirmLayer() {
               autoFocus
               className={
                 q.danger
-                  ? `${BUTTON} px-3 py-1.5 text-sm font-medium ${DANGER_TEXT}`
+                  ? `${DANGER_BUTTON} px-3 py-1.5 text-sm font-medium`
                   : `${DONE_BUTTON} px-3 py-1.5 text-sm font-medium`
               }
               onClick={() => close(() => done(true))}

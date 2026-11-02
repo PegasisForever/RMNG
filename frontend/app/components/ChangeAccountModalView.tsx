@@ -9,11 +9,14 @@
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { DropdownSelect } from "~/components/DropdownSelect";
 import { ModalShell } from "~/components/ModalShell";
+import { BUTTON, DONE_BUTTON, FIELD, TEXT, TEXT_2 } from "~/desk/control/ui";
 import type { ClaudeUsage } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
-const select =
-  "mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-900 focus:border-emerald-500 focus:outline-none dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100";
+/** A picker's trigger: the shared field (`~/desk/GLASS.md`, Flat content). */
+const select = `mt-1 w-full ${FIELD} px-3 py-2 text-sm font-normal`;
+/** A field's caption. */
+const caption = `block text-xs font-medium ${TEXT_2}`;
 
 export function ChangeAccountModalView({
   cloneName,
@@ -62,19 +65,17 @@ export function ChangeAccountModalView({
     <ModalShell size="sm" onExited={onClose}>
       {(close) => (
         <>
-          <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+          <h3 className={`text-[15px] font-semibold tracking-tight ${TEXT}`}>
             {showCodex ? "Accounts" : "Claude account"} ·{" "}
-            <span className="text-emerald-700 dark:text-emerald-400">
-              {cloneName}
-            </span>
+            <span className={TEXT_2}>{cloneName}</span>
           </h3>
-          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          <p className={`mt-1 text-xs ${TEXT_2}`}>
             Pick a pool (both sides draw from it), then per side an account:
             auto rotates inside the pool, a single account pins it — even one
             outside the pool.
           </p>
 
-          <label className="mt-4 block text-xs font-medium text-slate-600 dark:text-slate-300">
+          <label className={`mt-4 ${caption}`}>
             Group
             <DropdownSelect
               rows={[
@@ -91,7 +92,7 @@ export function ChangeAccountModalView({
             />
           </label>
 
-          <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
+          <label className={`mt-3 ${caption}`}>
             Claude account
             <AccountGroupSelect
               accounts={accounts}
@@ -103,7 +104,7 @@ export function ChangeAccountModalView({
           </label>
 
           {showCodex ? (
-            <label className="mt-3 block text-xs font-medium text-slate-600 dark:text-slate-300">
+            <label className={`mt-3 ${caption}`}>
               Codex account
               <AccountGroupSelect
                 accounts={codexAccounts}
@@ -119,7 +120,7 @@ export function ChangeAccountModalView({
             <button
               type="button"
               onClick={() => close()}
-              className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+              className={`${BUTTON} px-3 py-1.5 text-sm`}
             >
               Cancel
             </button>
@@ -129,7 +130,7 @@ export function ChangeAccountModalView({
               type="button"
               onClick={() => close(onSubmit)}
               disabled={busy}
-              className="rounded-md bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+              className={`${DONE_BUTTON} px-4 py-1.5 text-sm font-medium`}
             >
               {busy ? "Applying…" : "Apply"}
             </button>

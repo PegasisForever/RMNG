@@ -4,7 +4,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { OperationProgress, VERB } from "./OperationProgress";
 import { makeOperation } from "./__fixtures__/operations";
-import { GLASS_OUTLINE } from "~/lib/glass";
 
 function render(overrides: Parameters<typeof makeOperation>[0] = {}) {
   return renderToStaticMarkup(
@@ -14,7 +13,7 @@ function render(overrides: Parameters<typeof makeOperation>[0] = {}) {
 
 test("job cards use the card frame and separate target from source details", () => {
   const html = render({ source: "registry.example.com/team/template:latest" });
-  expect(html).toContain(GLASS_OUTLINE);
+  expect(html).toContain("border-black/10");
   expect(html).toContain("rounded-lg");
   expect(html).toMatch(/<h3[^>]*>pega-per-9<\/h3>/);
   expect(html).toContain("From registry.example.com/team/template:latest");
@@ -38,9 +37,9 @@ test.each([
 );
 
 test.each([
-  ["running", "Running", "bg-sky-500"],
+  ["running", "Running", "bg-neutral-500"],
   ["done", "Complete", "bg-emerald-500"],
-  ["error", "Failed", "bg-red-500"],
+  ["error", "Failed", "bg-rose-500"],
 ] as const)(
   "%s jobs retain status text and progress color",
   (status, label, color) => {

@@ -22,7 +22,8 @@ import {
   OverflowMenu,
   useMenuClose,
 } from "~/components/OverflowMenu";
-import { CARD_FILL_ON_GLASS, FIELD } from "~/desk/control/ui";
+import { NO_READING_DOT, STATUS_DOT, UNREAD_DOT } from "~/components/CloneStatus";
+import { CARD_FILL_ON_GLASS, FIELD, PRESS, TEXT, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
@@ -34,30 +35,10 @@ import type { CloneTokens } from "~/lib/wire/CloneTokens";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import { workspaceBadge } from "~/lib/workspace";
 
-// The control server owns this compact lifecycle indicator: blue = recent token activity,
-// gray = Docker-running but inactive, purple = Docker stopped/gone. An unread working→not-working
-// transition replaces the dot with the red `!` badge below.
-//
-// Each dot glows in its own color: two box-shadow stops, a tight bright one and a wide dim
-// one, which is what reads as light rather than as a ring. The colors are spelled out
-// because a shadow cannot inherit the `bg-*` it belongs to. Idle glows far more faintly than
-// the rest — a dot that means "nothing is happening" should not be the brightest thing on
-// the card.
-const STATUS_DOT: Record<NonNullable<Clone["monitorState"]>, { dot: string; label: string }> = {
-  working: {
-    dot: "bg-blue-500 shadow-[0_0_4px_rgb(59_130_246_/_0.7),0_0_10px_rgb(59_130_246_/_0.45)]",
-    label: "working",
-  },
-  idle: {
-    dot: "bg-slate-400 shadow-[0_0_4px_rgb(148_163_184_/_0.45)] dark:bg-slate-500 dark:shadow-[0_0_4px_rgb(100_116_139_/_0.55)]",
-    label: "not working",
-  },
-  offline: {
-    dot: "bg-purple-500 shadow-[0_0_4px_rgb(168_85_247_/_0.7),0_0_10px_rgb(168_85_247_/_0.45)]",
-    label: "offline",
-  },
-
-};
+// The control server owns the status dot (`./CloneStatus.tsx`, the same on a row): green =
+// recent token activity, grey = Docker-running but inactive, purple = Docker stopped/gone. An
+// unread working→not-working transition replaces the dot with the red `!` badge below. Flat,
+// with no glow (`~/desk/GLASS.md`).
 
 type Metric = { label: string; value: string; title: string };
 
@@ -110,15 +91,15 @@ function MetricSlot({ metric, labelWidth = "w-6" }: { metric?: Metric; labelWidt
   return (
     <span
       className="flex shrink-0 items-baseline gap-1 tabular-nums"
-      title={metric?.title}
+      data-tip={metric?.title}
       aria-hidden={metric ? undefined : true}
     >
       <span
-        className={`${labelWidth} shrink-0 text-right font-medium text-slate-400 dark:text-slate-500`}
+        className={`${labelWidth} shrink-0 text-right font-medium ${TEXT_3}`}
       >
         {metric?.label ?? ""}
       </span>
-      <span className="w-8 text-right font-semibold text-slate-700 dark:text-slate-200">
+      <span className={`w-8 text-right font-semibold ${TEXT}`}>
         {metric?.value ?? ""}
       </span>
     </span>
@@ -164,8 +145,8 @@ function AccountTag({
       : `${provider}: no account assigned`;
   return (
     <span
-      className="flex min-w-0 flex-1 items-center gap-1 text-slate-400 dark:text-slate-500"
-      title={title}
+      className={`flex min-w-0 flex-1 items-center gap-1 ${TEXT_3}`}
+      data-tip={title}
     >
       {/* The ChatGPT mark ships with no `fill`, so it paints black and vanishes on a dark
           background — invert it there. `claude.svg` carries its own fill and must NOT be
@@ -176,16 +157,16 @@ function AccountTag({
         className={`h-3 w-3 shrink-0 opacity-70 dark:opacity-90 ${logo === chatgptLogo ? "dark:invert" : ""}`}
       />
       {badge ? (
-        <span className="shrink-0 rounded bg-slate-200 px-1 text-[9px] font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+        <span className={`shrink-0 rounded bg-black/5 px-1 text-[9px] font-semibold dark:bg-white/10 ${TEXT_2}`}>
           {badge}
         </span>
       ) : null}
       {email ? (
-        <span className="min-w-0 truncate text-[10px] font-medium text-slate-600 dark:text-slate-300">
+        <span className={`min-w-0 truncate text-[10px] font-medium ${TEXT_2}`}>
           {email}
         </span>
       ) : (
-        <span className="truncate italic text-slate-500 dark:text-slate-400">
+        <span className={`truncate italic ${TEXT_3}`}>
           {selection === "none" ? "no token" : "unassigned"}
         </span>
       )}
@@ -194,8 +175,8 @@ function AccountTag({
           hover. `shrink-0` keeps the truncation pressure on the email rather than the chip. */}
       {fable ? (
         <span
-          title="recently served by the Fable model"
-          className="shrink-0 rounded bg-amber-100 px-1 text-[9px] font-semibold text-amber-700 dark:bg-amber-900 dark:text-amber-300"
+          data-tip="recently served by the Fable model"
+          className="shrink-0 rounded bg-amber-500/15 px-1 text-[9px] font-semibold text-amber-700 dark:text-amber-300"
         >
           fable
         </span>
@@ -355,7 +336,7 @@ function CopySshMenuItem({ onCopy }: { onCopy: () => Promise<boolean> }) {
         // On failure keep the menu open a beat longer, so the failure can be read
         setTimeout(onDone, ok ? 900 : 1600);
       }}
-      className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-700"
+      className={`flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-xs ${TEXT_2} ${PRESS}`}
     >
       <Terminal className="size-4 shrink-0" />
       {result === true ? "Copied!" : result === false ? "Copy failed" : "Copy SSH command"}
@@ -510,15 +491,10 @@ export function CloneCard({
   // Managed clones (backed by a container named after the clone id) get the full menu;
   // plain unmanaged rows only get remove.
   const managed = clone.managed === true;
-  // Hollow on purpose. Every other dot is a reading; this one is the absence of one, and a
-  // filled dot in a fourth colour would read as a fourth thing the agent might be doing.
   const status = clone.archived
     ? undefined
     : clone.activityUnknown
-      ? {
-          dot: "bg-transparent ring-2 ring-inset ring-amber-500 dark:ring-amber-400",
-          label: "no reading — the activity judge is unreachable",
-        }
+      ? { dot: NO_READING_DOT, label: "no reading — the activity judge is unreachable" }
       : STATUS_DOT[clone.monitorState ?? "idle"];
   // A live clone always shows both figures, falling back to zero rather than to a blank. A
   // clone that has not been scanned yet is idle, not unknowable, and a row that gains its
@@ -569,7 +545,7 @@ export function CloneCard({
       onDoubleClick={(e) => {
         if (!(e.target as Element).closest("button, input")) onOpen?.();
       }}
-      title={clone.id}
+      data-tip={clone.id}
       className={`group flex items-start gap-1 border-l-2 border-l-transparent pr-1.5 pb-2.5 pt-1.5 ${
         // Sub clone rows are indented under their parent; top-level rows keep the normal gutter.
         isChild ? "pl-6" : "pl-1.5"
@@ -594,10 +570,10 @@ export function CloneCard({
         <div className="mb-0 flex items-center gap-1">
           {busy ? (
             <div className="flex min-w-0 flex-1 items-center gap-2">
-              <span className="min-w-0 flex-1 break-words text-sm font-medium text-slate-800 dark:text-slate-100">
+              <span className={`min-w-0 flex-1 break-words text-sm font-medium ${TEXT}`}>
                 {title}
               </span>
-              <span className="shrink-0 text-[10px] font-medium text-sky-600 dark:text-sky-400">
+              <span className={`shrink-0 text-[10px] font-medium ${TEXT_2}`}>
                 {op?.kind === "delete" ? "deleting…" : op?.step}
               </span>
             </div>
@@ -678,11 +654,11 @@ export function CloneCard({
             className={`mt-1.5 w-full px-1.5 py-0.5 text-sm font-medium ${FIELD}`}
           />
         ) : !busy ? (
-          <p className="mt-1.5 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
+          <p className={`mt-1.5 break-words text-sm font-medium leading-snug ${TEXT}`}>
             {clone.unread && !selected ? (
               <span
-                className="mr-1 inline-flex size-3 items-center justify-center rounded-full bg-red-500 align-middle text-[10px] font-bold leading-none text-white shadow-[0_0_4px_rgb(239_68_68_/_0.7),0_0_10px_rgb(239_68_68_/_0.45)]"
-                title="was working and is no longer working"
+                className={`mr-1 inline-flex size-3 items-center justify-center rounded-full align-middle text-[10px] font-bold leading-none text-white ${UNREAD_DOT}`}
+                data-tip="was working and is no longer working"
                 aria-label="unread: working transitioned to not working"
               >
                 !
@@ -690,7 +666,7 @@ export function CloneCard({
             ) : status ? (
               <span
                 className={`mr-1 inline-block size-3 rounded-full align-middle ${status.dot}`}
-                title={status.label}
+                data-tip={status.label}
                 aria-label={status.label}
               />
             ) : null}
@@ -699,15 +675,10 @@ export function CloneCard({
                 is where the card already says what this clone is doing. */}
             {muted || mutedByParent ? (
               <BellOff
-                className="mr-1 inline-block size-3 align-middle text-slate-400 dark:text-slate-500"
+                className={`mr-1 inline-block size-3 align-middle ${TEXT_3}`}
                 aria-label={mutedByParent ? "muted by its parent" : "muted"}
-              >
-                <title>
-                  {mutedByParent
-                    ? "notifications muted by its parent clone"
-                    : "notifications muted"}
-                </title>
-              </BellOff>
+                data-tip={mutedByParent ? "notifications muted by its parent clone" : "notifications muted"}
+              />
             ) : null}
             {clone.linearWorkspace && clone.linearTicket ? (
               <span
@@ -720,7 +691,7 @@ export function CloneCard({
             ) : null}
             {clone.headless ? (
               <Terminal
-                className="mr-1 inline-block size-3.5 align-middle text-slate-500 dark:text-slate-400"
+                className={`mr-1 inline-block size-3.5 align-middle ${TEXT_2}`}
                 aria-label="headless clone (tmux view)"
               />
             ) : null}
@@ -734,13 +705,12 @@ export function CloneCard({
           <button
             type="button"
             aria-expanded={expanded}
-            title={`${expanded ? "hide" : "show"} ${childCount} sub clone${childCount === 1 ? "" : "s"}`}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               onToggleExpand?.();
             }}
-            className="mt-1.5 flex items-center gap-1 rounded text-[10px] font-medium text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+            className={`-ml-1 mt-1 flex items-center gap-1 rounded-md px-1 py-0.5 text-[10px] font-medium ${TEXT_2} ${PRESS}`}
           >
             {expanded ? <ChevronDown className="size-3" /> : <ChevronRight className="size-3" />}
             {expanded ? "Hide" : "Show"} {childCount} sub clone{childCount === 1 ? "" : "s"}

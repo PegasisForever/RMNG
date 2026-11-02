@@ -7,7 +7,7 @@ import { makeEnvCheckRow, makeEnvRows } from "./__fixtures__/setupEnv";
 
 /** The step sits in the wizard's card, so the story gives it that column width. */
 function Frame({ children }: { children: React.ReactNode }) {
-  return <div className="w-[38rem] p-4">{children}</div>;
+  return <div className="w-[38rem] bg-white p-4 dark:bg-neutral-900">{children}</div>;
 }
 
 /** The checklist as the container mounts it, minus the probe. The step takes it as a slot, so

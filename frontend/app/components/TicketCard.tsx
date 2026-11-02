@@ -3,7 +3,7 @@
 import { CircleDashed, CircleX, ExternalLink, GitBranch, Link2, Plus, X } from "lucide-react";
 
 import { MenuDivider, MenuItem, OverflowMenu } from "~/components/OverflowMenu";
-import { CARD_FILL_ON_GLASS } from "~/desk/control/ui";
+import { CARD_FILL_ON_GLASS, TEXT, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 import { branchNameOf, type LinearTicket } from "~/lib/tickets";
 import { workspaceBadge } from "~/lib/workspace";
 
@@ -23,12 +23,12 @@ export const STATE_LABEL: Record<LinearTicket["state"], string> = {
 
 const STATE_COLOR: Record<LinearTicket["state"], string> = {
   triage: "text-orange-500",
-  backlog: "text-slate-400 dark:text-slate-500",
-  todo: "text-slate-400 dark:text-slate-500",
+  backlog: TEXT_3,
+  todo: TEXT_3,
   in_progress: "text-amber-500",
   done: "text-indigo-500",
-  canceled: "text-slate-400 dark:text-slate-500",
-  duplicate: "text-slate-400 dark:text-slate-500",
+  canceled: TEXT_3,
+  duplicate: TEXT_3,
 };
 
 /** Linear's state mark, redrawn: a ring that fills as the work moves. Triage carries a dot,
@@ -58,9 +58,9 @@ export function StateIcon({
       viewBox="0 0 14 14"
       role="img"
       aria-label={label}
+      data-tip={label}
       className={`size-3.5 shrink-0 ${STATE_COLOR[state]}`}
     >
-      <title>{label}</title>
       <circle
         cx="7"
         cy="7"
@@ -116,9 +116,8 @@ export function PriorityIcon({ level }: { level: number }) {
   const label = PRIORITY_LABEL[level];
   if (level === 1) {
     return (
-      <svg viewBox="0 0 16 16" className="size-3.5 shrink-0" role="img" aria-label={label}>
-        <title>{label}</title>
-        <rect x="1" y="1" width="14" height="14" rx="3.5" className="fill-orange-500" />
+      <svg viewBox="0 0 16 16" className="size-3.5 shrink-0" role="img" aria-label={label} data-tip={label}>
+          <rect x="1" y="1" width="14" height="14" rx="3.5" className="fill-orange-500" />
         <rect x="7" y="4" width="2" height="5" rx="1" className="fill-white" />
         <rect x="7" y="10.5" width="2" height="2" rx="1" className="fill-white" />
       </svg>
@@ -133,8 +132,7 @@ export function PriorityIcon({ level }: { level: number }) {
     { x: 11.5, y: 3.5, h: 11 },
   ];
   return (
-    <svg viewBox="0 0 16 16" className="size-3.5 shrink-0" role="img" aria-label={label}>
-      <title>{label}</title>
+    <svg viewBox="0 0 16 16" className="size-3.5 shrink-0" role="img" aria-label={label} data-tip={label}>
       {bars.map((bar, i) => (
         <rect
           key={bar.x}
@@ -143,7 +141,7 @@ export function PriorityIcon({ level }: { level: number }) {
           width="3"
           height={bar.h}
           rx="1"
-          className={i < filled ? "fill-slate-500 dark:fill-slate-300" : "fill-slate-300 dark:fill-slate-600"}
+          className={i < filled ? "fill-black/60 dark:fill-white/75" : "fill-black/15 dark:fill-white/20"}
         />
       ))}
     </svg>
@@ -182,7 +180,7 @@ export function LabelPill({
     ? "group-hover:opacity-0 group-focus-within:opacity-0 [@media(hover:none)]:opacity-0"
     : "";
   return (
-    <span className="group inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-slate-300 px-1.5 py-0.5 text-[11px] leading-none text-slate-600 dark:border-slate-600 dark:text-slate-300">
+    <span className={`group inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-black/15 px-1.5 py-0.5 text-[11px] leading-none dark:border-white/20 ${TEXT_2}`}>
       <span className="relative flex size-2.5 shrink-0 items-center justify-center">
         <span
           aria-hidden
@@ -193,11 +191,11 @@ export function LabelPill({
           <button
             type="button"
             onClick={onRemove}
-            title={`Remove ${name}`}
+            data-tip={`Remove ${name}`}
             aria-label={`Remove label ${name}`}
             // `after:-inset-1` grows the hit area past the glyph without giving the button any
             // size of its own, so a 10px target is comfortable to hit and the pill stays put.
-            className="absolute inset-0 flex cursor-pointer items-center justify-center rounded-full text-slate-500 opacity-0 after:absolute after:-inset-1 after:content-[''] hover:text-slate-800 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 dark:text-slate-400 dark:hover:text-slate-100"
+            className="absolute inset-0 flex cursor-pointer items-center justify-center rounded-full text-black/60 opacity-0 after:absolute after:-inset-1 after:content-[''] hover:text-neutral-900 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100 dark:text-white/60 dark:hover:text-white"
           >
             <X aria-hidden className="size-2.5" />
           </button>
@@ -355,7 +353,7 @@ export function TicketCardBody({
         </div>
       </div>
 
-      <p className="mt-1 break-words text-sm font-medium leading-snug text-slate-800 dark:text-slate-100">
+      <p className={`mt-1 break-words text-sm font-medium leading-snug ${TEXT}`}>
         <span
           className={`mr-1 inline-block rounded px-1 py-0.5 align-middle text-[10px] font-semibold leading-none ${workspaceBadge(
             teamOf(ticket),
