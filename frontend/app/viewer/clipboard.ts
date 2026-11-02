@@ -6,7 +6,10 @@
 // - Local → clone: when the window gets focus, read the local clipboard. If it changed since a
 //   monitor window last saw it, offer it to the server, keep the bytes, and answer the server's
 //   requests from them. A copy in the page itself (the side panels, the control panel) comes
-//   with no change of focus, so each copy or cut in the page does the same once it is done.
+//   with no change of focus, so each copy or cut in the page does the same once it is done. So
+//   does a paste chord that goes to the clone, before its V (`beforePaste`): a tool can change
+//   the clipboard while the window keeps the focus (a clipboard history on the Mac, which
+//   then presses Cmd+V itself).
 // - Clone → local: an offer becomes the shared "pending" offer. The focused window asks at once
 //   for the best type of each kind (image, HTML, text), and writes
 //   what came after each reply. With no window focused, the next window that gets focus does
@@ -185,6 +188,10 @@ interface PageClipboard {
   onGesture(): void;
   /** Whether the local clipboard comes only from a paste chord's paste event. */
   pasteByEvent(): boolean;
+  /** A paste chord that goes to the clone, where the page reads the clipboard itself (Chrome):
+   *  read it, and offer it when it changed since a monitor window last saw it. Done once the
+   *  offer is sent (or there is none); null: no read here (Safari, Firefox: `pasteByEvent`). */
+  beforePaste(): Promise<void> | null;
   /** In a tap or a click: write the clone's clipboard to the local one. "same": it is the local
    *  clipboard's own content. Fails when the clone's clipboard is empty or does not come. */
   toLocal(): Promise<"written" | "same">;
@@ -269,6 +276,18 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
       }
     }
     if (!copied) fetchPending();
+  }
+
+  /** A paste chord's read: offer the local clipboard only when it is new (not the clone's own
+   *  copy, written here and seen: that one keeps all the clone's types). */
+  async function offerIfNew() {
+    if (!connected) return;
+    const blobs = await readLocal();
+    if (!blobs?.size) return;
+    const hash = await digest(blobs);
+    if (hash === localStorage.getItem(SEEN_KEY)) return;
+    localStorage.setItem(SEEN_KEY, hash);
+    offerLocal(blobs);
   }
 
   /** A copy or a cut in the page: offer what it put on the clipboard. With focus reads, from
@@ -478,6 +497,19 @@ export function attachClipboard(o: ClipboardOptions): PageClipboard {
     },
     onCopyKey,
     pasteByEvent: () => focusReads === false,
+    beforePaste() {
+      if (!focusReads || !connected) return null;
+      // Behind the clipboard work before it (a write of the clone's copy marks it seen first)
+      return new Promise<void>((done) =>
+        run(async () => {
+          try {
+            await offerIfNew();
+          } finally {
+            done();
+          }
+        }),
+      );
+    },
     toLocal,
     toClone,
     detach() {

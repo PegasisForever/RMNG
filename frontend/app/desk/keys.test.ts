@@ -51,7 +51,9 @@ function setup(o: { os?: Os; fullscreen?: boolean; escape?: boolean } = {}) {
     { os: o.os ?? "linux", fullscreen },
   );
   attached = keys;
-  const clone = (c: { name?: string; desktop?: boolean; pasteByEvent?: boolean } = {}): CloneKeys => ({
+  const clone = (
+    c: { name?: string; desktop?: boolean; pasteByEvent?: boolean; beforePaste?: () => Promise<void> | null } = {},
+  ): CloneKeys => ({
     send: (m: InputMsg) => {
       if (m.kind === "key_code") sent.push(`${c.name ? `${c.name} ` : ""}${m.keycode} ${m.pressed ? "down" : "up"}`);
     },
@@ -60,6 +62,7 @@ function setup(o: { os?: Os; fullscreen?: boolean; escape?: boolean } = {}) {
       onCopyKey: (e) => did.push(`copy key ${e.code}`),
       onGesture: () => did.push("gesture"),
       pasteByEvent: () => c.pasteByEvent ?? false,
+      beforePaste: () => c.beforePaste?.() ?? null,
     },
     mouse: { desktop: () => c.desktop ?? true, pointerLock: (chord) => did.push(`pointer lock ${chord}`) },
   });
@@ -355,6 +358,52 @@ describe("the clone's keys", () => {
     key("keydown", "KeyV", { ctrlKey: true });
     window.dispatchEvent(new Event("paste"));
     await new Promise((done) => setTimeout(done, 10));
+    expect(sent).toEqual(["29 down", "47 down"]);
+  });
+
+  test("a paste chord's V waits for the page's read of the clipboard (Chrome), and goes once it is done", async () => {
+    const { sent, did, keys, clone, key } = setup({ os: "mac" });
+    let done = () => {};
+    keys.give(
+      clone({
+        beforePaste: () => {
+          did.push("read");
+          return new Promise<void>((r) => (done = r));
+        },
+      }),
+    );
+    key("keydown", "MetaLeft", { metaKey: true });
+    const e = key("keydown", "KeyV", { metaKey: true });
+    // No paste event here: the browser's paste is not wanted
+    expect(e.defaultPrevented).toBe(true);
+    expect(did).toContain("read");
+    expect(sent).toEqual(["29 down"]);
+    done();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sent).toEqual(["29 down", "47 down", "47 up"]);
+  });
+
+  test("a paste chord's V let go before the read is done goes down and up after it", async () => {
+    const { sent, keys, clone, key } = setup();
+    let done = () => {};
+    keys.give(clone({ beforePaste: () => new Promise<void>((r) => (done = r)) }));
+    key("keydown", "ControlLeft", { ctrlKey: true });
+    key("keydown", "KeyV", { ctrlKey: true });
+    key("keyup", "KeyV", { ctrlKey: true });
+    expect(sent).toEqual(["29 down"]);
+    done();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sent).toEqual(["29 down", "47 down", "47 up"]);
+    key("keyup", "ControlLeft");
+    expect(sent).toEqual(["29 down", "47 down", "47 up", "29 up"]);
+  });
+
+  test("a paste chord's V goes after the read's wait, also when the read never ends", async () => {
+    const { sent, keys, clone, key } = setup();
+    keys.give(clone({ beforePaste: () => new Promise<void>(() => {}) }));
+    key("keydown", "ControlLeft", { ctrlKey: true });
+    key("keydown", "KeyV", { ctrlKey: true });
+    await new Promise((r) => setTimeout(r, 1100));
     expect(sent).toEqual(["29 down", "47 down"]);
   });
 

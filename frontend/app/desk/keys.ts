@@ -21,6 +21,9 @@ import { evdevFor } from "~/viewer/keycodes";
 /** A paste chord's key goes to the clone at most this long after its key press, also when no
  *  paste event comes (`CloneKeys.clipboard.pasteByEvent`). */
 const PASTE_WAIT_MS = 100;
+/** The same, while the page reads the local clipboard for it (`CloneKeys.clipboard.beforePaste`):
+ *  a read of an image and its offer take longer than a paste event. */
+const PASTE_READ_WAIT_MS = 1000;
 /** The keys Caps Lock changes: before one goes to the clone, its Caps Lock is brought in step. */
 const LETTER = /^Key[A-Z]$/;
 /** What has its own Escape: a dialog, a menu, an open list. */
@@ -227,8 +230,16 @@ export interface CloneKeys {
   /** The clipboard (`~/viewer/clipboard.ts`): told of each key that goes to the clone, before
    *  its gesture. `pasteByEvent`: the local clipboard reaches the page only in the paste event
    *  of a paste chord (Safari, Firefox); then the chord's key keeps its default action, which
-   *  fires that event, and goes to the clone after it, behind the offer the event makes. */
-  clipboard: { onCopyKey(e: KeyboardEvent): void; onGesture(): void; pasteByEvent(): boolean };
+   *  fires that event, and goes to the clone after it, behind the offer the event makes.
+   *  `beforePaste`: where the page reads the clipboard itself (Chrome), a read of it for a paste
+   *  chord, which offers it when it changed with the window in focus (a clipboard tool on the
+   *  Mac changes it so); the chord's key goes to the clone once it is done. Null: no read. */
+  clipboard: {
+    onCopyKey(e: KeyboardEvent): void;
+    onGesture(): void;
+    pasteByEvent(): boolean;
+    beforePaste(): Promise<void> | null;
+  };
   /** This window's mouse in the clone (`~/viewer/input.ts`): whether it shows a monitor of the
    *  clone's desktop, and the pointer lock's chords (Ctrl+Alt+G: on or off; Ctrl+Alt+P: off). */
   mouse: { desktop(): boolean; pointerLock(chord: "toggle" | "off"): void };
@@ -256,8 +267,9 @@ export function attachKeys(page: PageKeys, env: { os?: Os; fullscreen?: Fullscre
   const mods = new Map<number, ModFlag>();
   /** The chord's modifier's press, held back while the chord may follow (`chordHolds`). */
   let heldMod: number | null = null;
-  /** A paste chord's key press, held until the paste event it fires has made its offer. */
-  let heldPaste: { keycode: number; tap: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
+  /** A paste chord's key press, held until the paste event it fires has made its offer, or
+   *  (`read`) until the page's read of the clipboard has. */
+  let heldPaste: { keycode: number; tap: boolean; read: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Where a paste chord's paste goes. Safari pastes only into something editable, and fires
    *  no paste event otherwise, so the chord's key press moves the focus here, and the paste
    *  moves it back. Only for the chord: an editable focus would start an input method (IME)
@@ -358,7 +370,8 @@ export function attachKeys(page: PageKeys, env: { os?: Os; fullscreen?: Fullscre
     if (k === undefined) return;
     // A letter: the clone's Caps Lock is this keyboard's before it lands
     if (!e.repeat && LETTER.test(e.code)) c.sendLocks(e.getModifierState("CapsLock"));
-    const paste = e.code === "KeyV" && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey && c.clipboard.pasteByEvent();
+    const chord = e.code === "KeyV" && (isMac ? e.metaKey : e.ctrlKey) && !e.altKey;
+    const paste = chord && c.clipboard.pasteByEvent();
     if (!paste) e.preventDefault();
     const flag = modFlagOf(e.code);
     // macOS sends no keyup for a key released while Command is down, so the clone would hold
@@ -384,18 +397,25 @@ export function attachKeys(page: PageKeys, env: { os?: Os; fullscreen?: Fullscre
     if (keys.has(k)) send(k, false);
     if (!tap) keys.add(k);
     if (flag) mods.set(k, flag);
+    const read = chord && !paste ? c.clipboard.beforePaste() : null;
     if (paste) {
       pasteSink.focus({ preventScroll: true });
-      holdPaste(k, tap);
+      holdPaste(k, tap, false);
+    } else if (read) {
+      holdPaste(k, tap, true);
+      const held = heldPaste;
+      void read.finally(() => {
+        if (heldPaste === held) flushPaste();
+      });
     } else {
       send(k, true);
       if (tap) send(k, false);
     }
   }
 
-  function holdPaste(keycode: number, tap: boolean) {
+  function holdPaste(keycode: number, tap: boolean, read: boolean) {
     flushPaste();
-    heldPaste = { keycode, tap, timer: setTimeout(flushPaste, PASTE_WAIT_MS) };
+    heldPaste = { keycode, tap, read, timer: setTimeout(flushPaste, read ? PASTE_READ_WAIT_MS : PASTE_WAIT_MS) };
   }
 
   /** Send the held paste key's press (and, for a tap, its release). */
@@ -410,7 +430,7 @@ export function attachKeys(page: PageKeys, env: { os?: Os; fullscreen?: Fullscre
 
   // One task later, so every paste listener has run: the clipboard's sends the offer.
   const onPaste = () => {
-    if (heldPaste) setTimeout(flushPaste, 0);
+    if (heldPaste && !heldPaste.read) setTimeout(flushPaste, 0);
   };
 
   function onKeyUp(e: KeyboardEvent) {
@@ -425,6 +445,13 @@ export function attachKeys(page: PageKeys, env: { os?: Os; fullscreen?: Fullscre
       heldMod = null;
       send(k, true);
       send(k, false);
+      return;
+    }
+    if (heldPaste?.keycode === k && heldPaste.read) {
+      // Up before the read is done: the clone gets the press and the release once it is
+      heldPaste.tap = true;
+      keys.delete(k);
+      mods.delete(k);
       return;
     }
     if (heldPaste?.keycode === k) flushPaste();
