@@ -43,6 +43,13 @@ function advance(ms: number) {
   }
 }
 
+// The globals these tests stub, put back after each: test files share one process, and a later
+// file's DOM (happy-dom's) must not find these stubs
+const realGlobals = {
+  EventSource: globalThis.EventSource,
+  window: globalThis.window,
+  document: globalThis.document,
+};
 beforeEach(() => {
   FakeEventSource.all = [];
   now = 1_000_000;
@@ -58,7 +65,10 @@ beforeEach(() => {
     document: { addEventListener: () => {}, removeEventListener: () => {} },
   });
 });
-afterEach(() => setSystemTime());
+afterEach(() => {
+  setSystemTime();
+  Object.assign(globalThis, realGlobals);
+});
 
 describe("openLiveEvents watchdog", () => {
   test("pings keep a quiet stream", () => {
