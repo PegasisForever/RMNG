@@ -32,9 +32,10 @@ export interface Clone {
  /** Name of the Claude account pool this clone is balanced within (sticky — it moves only
   *  when its account exhausts). Absent when pinned to one fixed account. */
  claudeGroup?: string;
- /** The operator's Claude selection verbatim: `auto`, `none`, `group:<pool>`, or an email.
-  *  Distinguishes an auto-managed clone from one pinned or deliberately tokenless —
-  *  `claudeAccountEmail` alone cannot tell those apart. */
+ /** The operator's Claude selection verbatim: `auto` or an email (a pin; also inside a
+  *  pool), or a legacy `group:<pool>`. Distinguishes an auto-managed clone from a pinned
+  *  one — `claudeAccountEmail` alone cannot tell those apart. `~/lib/accountBinding` reads
+  *  it with the fields around it. */
  claudeSelection?: string;
  /** The Codex twins of the three above. Independent — a clone can hold both providers. */
  codexAccountEmail?: string;

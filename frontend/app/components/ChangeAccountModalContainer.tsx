@@ -1,40 +1,16 @@
 // Change a clone's Claude and Codex account/group after creation, network half.
 //
-// Two things live here: the config read that supplies the pool options, and the rule that says
-// what the clone is bound to right now, which is what seeds both pickers. The swap itself
+// The config read that supplies the pool options lives here. What the clone is bound to right
+// now seeds the pickers, read by `~/lib/accountBinding` as the card reads it. The swap itself
 // belongs to the page, which owns the busy flag and the error banner, so it stays a callback.
 // The markup is ChangeAccountModalView.
 import { useEffect, useState } from "react";
 
 import { ChangeAccountModalView } from "~/components/ChangeAccountModalView";
+import { accountBinding, clonePool } from "~/lib/accountBinding";
 import { getConfig } from "~/lib/api";
 import type { ClaudeUsage, Clone } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
-
-/** The clone's pool: the shared binding, else a legacy sticky for a clone the server
- *  has not re-saved yet. */
-function currentGroup(clone: Clone): string | null {
-    return clone.group ?? clone.claudeGroup ?? clone.codexGroup ?? null;
-}
-
-/** Current side selection ("auto" or an email). A legacy `group:<name>` selection reads
- *  as "auto" — the group half of that binding now lives in {@link currentGroup} — and so
- *  does a legacy `"none"` (no tokenless state anymore; the side resolves in scope). */
-export function currentValue(clone: Clone): string {
-    const sel =
-        clone.claudeSelection ??
-        (clone.claudeGroup ? `group:${clone.claudeGroup}` : undefined);
-    if (!sel) return clone.claudeAccountEmail ?? "auto";
-    return sel.startsWith("group:") || sel === "none" ? "auto" : sel;
-}
-
-export function currentCodexValue(clone: Clone): string {
-    const sel =
-        clone.codexSelection ??
-        (clone.codexGroup ? `group:${clone.codexGroup}` : undefined);
-    if (!sel) return clone.codexAccountEmail ?? "auto";
-    return sel.startsWith("group:") || sel === "none" ? "auto" : sel;
-}
 
 export function ChangeAccountModalContainer({
     clone,
@@ -53,12 +29,14 @@ export function ChangeAccountModalContainer({
     onClose: () => void;
     onSubmit: (claude: string, codex: string, group: string | null) => void;
 }) {
-    const [claudeValue, setClaudeValue] = useState(() => currentValue(clone));
-    const [codexValue, setCodexValue] = useState(() =>
-        currentCodexValue(clone),
+    const [claudeValue, setClaudeValue] = useState(
+        () => accountBinding(clone, "claude").selection,
+    );
+    const [codexValue, setCodexValue] = useState(
+        () => accountBinding(clone, "codex").selection,
     );
     const [groupValue, setGroupValue] = useState<string | null>(() =>
-        currentGroup(clone),
+        clonePool(clone),
     );
     const [groups, setGroups] = useState<CloneGroup[]>([]);
 
