@@ -236,7 +236,7 @@ export function ScreenView({
             nothing round them all. What is fixed in it (a sheet, a dialog) takes its space. */}
         <div
           className={`absolute inset-0 ${panel.width >= WIDE_MIN ? "" : `overflow-hidden ${CONTROL_PANEL_GLASS}`} ${
-            // In and out as a dialog is: from a blur, and back into one
+            // In and out as a dialog is: a fade and a zoom
             controlPanel.open ? MODAL_ANIMATION.panel.enter : controlPanelShown ? MODAL_ANIMATION.panel.exit : ""
           }`}
         >

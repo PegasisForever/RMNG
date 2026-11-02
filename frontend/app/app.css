@@ -202,8 +202,10 @@ body {
   --prev-level: 1.05em;
 }
 
-/* Modal entry: every dialog fades its backdrop and sharpens its panel once on mount.
-   The two classes split the job so the backdrop never scales with the panel. */
+/* Modal entry: every dialog fades its backdrop in, and fades and shrinks its panel into place,
+   once on mount. The two classes split the job so the backdrop never scales with the panel. No
+   `filter: blur()` on the panel: the browser blurs its glass content again on each frame, and
+   the entry stutters. */
 @keyframes rmng-backdrop-in {
   from {
     opacity: 0;
@@ -216,12 +218,10 @@ body {
   from {
     opacity: 0;
     transform: scale(1.25);
-    filter: blur(200px);
   }
   to {
     opacity: 1;
     transform: scale(1);
-    filter: blur(0);
   }
 }
 .rmng-backdrop-in {
@@ -231,7 +231,7 @@ body {
   transform-origin: center;
   animation: rmng-modal-in 200ms ease-out;
 }
-/* Modal exit: the mirror of entry — the panel blooms back out while the backdrop lifts.
+/* Modal exit: the mirror of entry — the panel grows and fades out while the backdrop lifts.
    Dedicated keyframes, NOT `reverse` on the entry ones: flipping direction on an
    already-finished same-name animation does not restart it, so the exit silently never
    ran (the dialog just hung frozen until the unmount timer fired). The name change from
@@ -251,12 +251,10 @@ body {
   from {
     opacity: 1;
     transform: scale(1);
-    filter: blur(0);
   }
   to {
     opacity: 0;
     transform: scale(1.25);
-    filter: blur(200px);
   }
 }
 .rmng-backdrop-out {

@@ -190,7 +190,8 @@ Each color has its light value and its `dark:` value.
 - A piece that comes in or goes out (the floating buttons, the control panel): 300 ms, ease out
   coming in, ease in going out (the right group: so the buttons at the edge are seen going), along
   the way it goes (to the right for the buttons).
-- A dialog: in from a blur, 200 ms (`~/components/ModalShell.tsx`).
+- A dialog: fades in as it shrinks into place, 200 ms (`~/components/ModalShell.tsx`). No
+  animated blur: the browser blurs the glass again on each frame, and it stutters.
 - A tooltip: comes after 300 ms of the mouse at rest, fades in.
 
 ## Rules for the code
