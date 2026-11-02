@@ -59,9 +59,9 @@ export function RebaseModalView({
   onClose,
 }: RebaseModalViewProps) {
   return (
-    // Neither Cancel nor Escape may close over a running rebase, so both are held by the
-    // same `busy`: the buttons below, and `dismissible` for the key.
-    <ModalShell size="lg" dismissible={!busy} open={open} onExited={onClose}>
+    // Close and Escape close it at any time: a rebase runs on, on the server (the container
+    // hands its job to the page)
+    <ModalShell size="lg" open={open} onExited={onClose}>
       {(close) => (
         <>
           <h3 className={`shrink-0 text-[15px] font-semibold tracking-tight ${TEXT}`}>
@@ -122,13 +122,8 @@ export function RebaseModalView({
           ) : null}
 
           <div className="mt-4 flex shrink-0 justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => close()}
-              disabled={busy}
-              className={`${BUTTON} px-3 py-1.5 text-sm disabled:opacity-40`}
-            >
-              Cancel
+            <button type="button" onClick={() => close()} className={`${BUTTON} px-3 py-1.5 text-sm`}>
+              Close
             </button>
             <button
               type="button"

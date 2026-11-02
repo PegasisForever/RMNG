@@ -179,8 +179,9 @@ export const MissingLinearKey: Story = {
   },
 };
 
-/** The fork is running. The form and both buttons lock, Escape is swallowed rather than
- *  closing over the operation, and the op's own progress renders under the fields. */
+/** The fork is running. The form and Create lock, and the op's own progress renders under the
+ *  fields. Close and Escape still close: the clone is made all the same, and the control panel
+ *  says if it fails. */
 export const Forking: Story = {
   args: {
     ...sources(),

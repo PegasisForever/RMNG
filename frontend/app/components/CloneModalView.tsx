@@ -412,9 +412,9 @@ export function CloneModalView({
   );
 
   return (
-    // Neither Cancel nor Escape may close over a running clone operation, so both are held by
-    // the same `busy`.
-    <ModalShell size="panel" dismissible={!busy} open={open} onExited={onClose}>
+    // Close and Escape close it at any time: a clone being made runs on, on the board (the
+    // container hands its job to the page)
+    <ModalShell size="panel" open={open} onExited={onClose}>
       {(close) => (
         // Settings' layout: the rail (16 px in from the dialog's 26 px corners, its buttons 10 px)
         <div className="flex min-h-0 flex-1">
@@ -439,10 +439,9 @@ export function CloneModalView({
             <button
               type="button"
               onClick={() => close()}
-              disabled={busy}
-              className={`flex h-9 items-center justify-center text-sm disabled:opacity-40 ${BUTTON}`}
+              className={`flex h-9 items-center justify-center text-sm ${BUTTON}`}
             >
-              Cancel
+              Close
             </button>
             <button
               type="button"

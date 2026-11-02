@@ -1,7 +1,8 @@
 // The clone dialog, network half: the config read that supplies the presets and pools, the
 // Linear work the ticket tabs need, the POST that starts the clone, and the operation it
 // answers with. The dialog stays open on that operation and closes when it settles, which is
-// why the op list is a prop. The form model is `~/lib/cloneDraft`, the operation is
+// why the op list is a prop. The operator may close it before: the clone is made all the same,
+// and the op goes to the page (`onLeave`, `~/lib/useLeftJobs`), which says if it fails. The form model is `~/lib/cloneDraft`, the operation is
 // `~/lib/useOperation`, and the markup is CloneModalView.
 //
 // Those two are separate on purpose. The form's rules read the form; the operation's rules
@@ -32,6 +33,7 @@ import {
   type CloneDraft,
 } from "~/lib/cloneDraft";
 import type { ClaudeUsage, Clone, Operation } from "~/lib/types";
+import type { LeaveJob } from "~/lib/useLeftJobs";
 import { useOperation } from "~/lib/useOperation";
 import type { CloneRequest } from "~/lib/wire/CloneRequest";
 import type { LinearMeta } from "~/lib/wire/LinearMeta";
@@ -50,6 +52,7 @@ export function CloneModalContainer({
   initialTicket = "",
   onClose,
   onStart,
+  onLeave,
 }: {
   /** Clones to fork from: live first, archived last; the dialog offers every managed row. */
   clones: Clone[];
@@ -60,10 +63,14 @@ export function CloneModalContainer({
   /** Seeds the existing-ticket field, e.g. from a ticket dragged onto a board column. A
    *  Linear URL is enough: the same parser reads an id out of a link or a bare `WE-142`. */
   initialTicket?: string;
-  onClose: () => void;
+  /** The dialog is finished: unmount it. `left`: it closed while the clone was being made,
+   *  which runs on. */
+  onClose: (left: boolean) => void;
   /** Starts the clone and resolves with the driving Operation: a fork of the picked source
    *  clone, or (the template tab) a clone built from the preset's image. */
   onStart: (fork: boolean, req: CloneRequest) => Promise<Operation>;
+  /** Closed while the clone is being made: the page follows it (`~/lib/useLeftJobs.ts`). */
+  onLeave?: LeaveJob;
 }) {
   const [state, dispatch] = useReducer(cloneDialogReducer, null, () =>
     emptyCloneDialog(initialTicket),
@@ -182,7 +189,12 @@ export function CloneModalContainer({
       // its exit, and `onClose` unmounts once the frames have run. A FAILED clone is not
       // settled for this purpose — the dialog stays up holding its error.
       open={!clone.done}
-      onClose={onClose}
+      onClose={() => {
+        // Closed while the clone is being made: it goes on, and the page says if it fails
+        const left = clone.phase === "running" && clone.started !== null;
+        if (left) onLeave?.({ label: "New clone", operation: clone.started! });
+        onClose(left);
+      }}
     />
   );
 }

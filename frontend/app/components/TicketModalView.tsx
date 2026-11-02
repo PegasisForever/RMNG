@@ -21,7 +21,7 @@
 //
 // Its fields are flat on the dialog's panel (`~/desk/GLASS.md`), and its fields and buttons
 // 10 px, 16 px in from the dialog's 26 px corners (GLASS.md, Shape).
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 
 import { DropdownSelect } from "~/components/DropdownSelect";
 import { ModalShell } from "~/components/ModalShell";
@@ -30,6 +30,7 @@ import { cloneEditorBox } from "~/components/cloneFieldStyles";
 import { BUTTON, DONE_BUTTON, ERROR_TEXT, ErrorLine, FIELD, R_PIECE, TEXT, TEXT_2, TEXT_3 } from "~/desk/control/ui";
 import type { TeamKey } from "~/lib/cloneDraft";
 import type { TicketPerson } from "~/lib/linear/people";
+import type { LeftJob } from "~/lib/useLeftJobs";
 
 /** What the dialog sends. `priority` follows Linear: 1 urgent, 2 high, 3 medium, 4 low. */
 export interface NewTicket {
@@ -65,6 +66,9 @@ export interface TicketModalViewProps {
   onClose: () => void;
   /** Open it. Rejecting leaves the dialog up with the message; resolving closes it. */
   onCreate: (ticket: NewTicket) => Promise<unknown>;
+  /** Closed while a create is in flight: the create, for the page to follow
+   *  (`~/lib/useLeftJobs.ts`). */
+  onLeave?: (job: LeftJob) => void;
 }
 
 export function TicketModalView({
@@ -79,11 +83,15 @@ export function TicketModalView({
   descriptionEditor,
   onClose,
   onCreate,
+  onLeave,
 }: TicketModalViewProps) {
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The create in flight (null once it ended), and whether the dialog closed before it ended. */
+  const creating = useRef<Promise<unknown> | null>(null);
+  const left = useRef(false);
 
   const chosen = teams.find((t) => t.key === team);
   // Linear refuses a team whose preset carries no key, so the dialog says so first.
@@ -97,18 +105,34 @@ export function TicketModalView({
     if (!canSubmit) return;
     setBusy(true);
     setError(null);
-    onCreate({
+    const create = onCreate({
       team: team.toUpperCase(),
       title: title.trim(),
       description,
       ...(priority > 0 ? { priority } : {}),
       ...(assigneeId !== "" ? { assigneeId } : {}),
-    })
-      .then(() => close())
+    });
+    creating.current = create;
+    create
+      .then(() => {
+        creating.current = null;
+        // A dialog closed already must not close again: its close would end the next dialog
+        if (!left.current) close();
+      })
       .catch((e: Error) => {
+        creating.current = null;
         setError(e.message);
         setBusy(false);
       });
+  };
+
+  /** Gone: a create still in flight goes to the page, which says if it fails. */
+  const exited = () => {
+    if (creating.current) {
+      left.current = true;
+      onLeave?.({ label: "New ticket", request: creating.current });
+    }
+    onClose();
   };
 
   // `h-9` pins every trigger and input to one height. A native `<select>` lays its text
@@ -120,9 +144,9 @@ export function TicketModalView({
   const label = `block text-xs font-medium ${TEXT_2}`;
 
   return (
-    // Neither Cancel nor Escape closes this while a create is in flight, so both are held by
-    // the same `busy`: the button below, and `dismissible` for the key.
-    <ModalShell size="lg" dismissible={!busy} onExited={onClose}>
+    // Close and Escape close it at any time: a create in flight runs on, and is handed to the
+    // page (`onLeave`)
+    <ModalShell size="lg" onExited={exited}>
       {(close) => (
         <div className="flex min-h-0 flex-1 flex-col">
           <h3 className={`shrink-0 text-[15px] font-semibold tracking-tight ${TEXT}`}>
@@ -256,13 +280,8 @@ export function TicketModalView({
           </div>
 
           <div className="mt-4 flex shrink-0 justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => close()}
-              disabled={busy}
-              className={`cursor-pointer ${BUTTON} px-3 py-1.5 text-sm disabled:opacity-40`}
-            >
-              Cancel
+            <button type="button" onClick={() => close()} className={`cursor-pointer ${BUTTON} px-3 py-1.5 text-sm`}>
+              Close
             </button>
             <button
               type="button"

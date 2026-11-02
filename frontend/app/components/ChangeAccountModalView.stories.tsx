@@ -82,8 +82,8 @@ export const DualProvider: Story = {
   },
 };
 
-/** The swap is in flight. Apply holds its label and takes no second click; Cancel and Escape
- *  wait for it too, because the dialog owns the call and shows how it ends. */
+/** The swap is in flight. Apply holds its label and takes no second click. Close and Escape
+ *  still close: the swap goes on, and the control panel says if it is refused. */
 export const Applying: Story = {
   args: { ...makeAccountLists(), busy: true },
 };

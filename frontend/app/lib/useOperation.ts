@@ -15,7 +15,7 @@
 //
 // The rules are pure functions and the hook is a thin reading of them, so a test reaches
 // every rule without a renderer.
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useRef } from "react";
 
 import type { Operation } from "~/lib/types";
 
@@ -125,6 +125,9 @@ export interface OperationAttempt {
   /** Start, or start over. Ignored while an attempt is busy; what makes an attempt worth
    *  starting at all (a valid form) stays the caller's own question. */
   run: () => void;
+  /** The last attempt's POST, answering with its operation; null before the first. A dialog
+   *  closed while the attempt runs hands it to the page (`./useLeftJobs.ts`). */
+  started: Promise<Operation> | null;
 }
 
 /**
@@ -151,10 +154,14 @@ export function useOperation(
     if (attempt.opId) dispatch({ type: "op", op, failureLabel });
   }, [attempt.opId, op, failureLabel]);
 
+  const started = useRef<Promise<Operation> | null>(null);
+
   function run() {
     if (opBusy(phase)) return;
     dispatch({ type: "start" });
-    start().then(
+    const post = start();
+    started.current = post;
+    post.then(
       (started) => dispatch({ type: "started", opId: started.id }),
       (e: Error) => dispatch({ type: "failed", message: e.message }),
     );
@@ -167,5 +174,6 @@ export function useOperation(
     done: phase === "done",
     error: attempt.error,
     run,
+    started: started.current,
   };
 }

@@ -17,6 +17,7 @@ import {
         useAssignee,
 } from "~/lib/linear/intake";
 import type { NewIssue } from "~/lib/linear/mutations";
+import type { LeaveJob } from "~/lib/useLeftJobs";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
 // BlockNote is browser-only and heavy; the description field pulls it in on demand. The
@@ -29,6 +30,7 @@ export function TicketModalContainer({
         presets,
         onClose,
         onCreate,
+        onLeave,
 }: {
         /** Configured presets (`config.presets`). Their labels are the dialog's team keys, and a
          *  non-empty `linearKey` says which of them can actually open a ticket. */
@@ -37,6 +39,8 @@ export function TicketModalContainer({
         /** Open the issue. Rejecting leaves the dialog up with Linear's message; resolving closes
          *  it. */
         onCreate: (issue: NewIssue) => Promise<unknown>;
+        /** Closed while a create is in flight: the page follows it (`~/lib/useLeftJobs.ts`). */
+        onLeave?: LeaveJob;
 }) {
         const teams = useMemo(() => teamKeysOf(presets), [presets]);
         // Read once on mount: storage is a session fact, and re-reading it would fight the dropdown.
@@ -86,6 +90,7 @@ export function TicketModalContainer({
                         }
                         onClose={onClose}
                         onCreate={onCreate}
+                        onLeave={onLeave}
                 />
         );
 }

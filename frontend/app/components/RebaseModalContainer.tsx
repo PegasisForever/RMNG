@@ -4,7 +4,8 @@
 //
 // Two things live here and nowhere below: the config read that supplies the presets,
 // and the operation the POST returns. The dialog stays open on that operation and
-// closes only when it settles, which is why the op list is a prop rather than
+// closes when it settles (or when the operator closes it: the op then goes to the page,
+// `onLeave`), which is why the op list is a prop rather than
 // something the View could ever have. Following that op is `~/lib/useOperation`, the
 // same rules the clone dialog and the settings panel run on. The markup is
 // RebaseModalView.
@@ -13,6 +14,7 @@ import { useEffect, useState } from "react";
 import { RebaseModalView } from "~/components/RebaseModalView";
 import { getConfig } from "~/lib/api";
 import type { Operation } from "~/lib/types";
+import type { LeaveJob } from "~/lib/useLeftJobs";
 import { useOperation } from "~/lib/useOperation";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
@@ -22,6 +24,7 @@ export function RebaseModalContainer({
   operations,
   onClose,
   onRebase,
+  onLeave,
 }: {
   /** The clone being rebased. */
   cloneId: string;
@@ -33,6 +36,8 @@ export function RebaseModalContainer({
   /** Starts the rebase and resolves with the driving Operation. The dialog stays open,
    *  showing its progress, until the operation settles. */
   onRebase: (preset: string, rebuild: boolean) => Promise<Operation>;
+  /** Closed while the rebase runs: the page follows it (`~/lib/useLeftJobs.ts`). */
+  onLeave?: LeaveJob;
 }) {
   const [presets, setPresets] = useState<PresetRedacted[]>([]);
   const [preset, setPreset] = useState(currentPreset ?? "");
@@ -82,7 +87,12 @@ export function RebaseModalContainer({
       // its exit, and `onClose` unmounts once the frames have run. A FAILED rebase is not
       // settled for this purpose — the dialog stays up holding its error.
       open={!rebase.done}
-      onClose={onClose}
+      onClose={() => {
+        // Closed while the rebase runs: it goes on, and the page says if it fails
+        if (rebase.phase === "running" && rebase.started)
+          onLeave?.({ label: `Rebase of ${cloneId}`, operation: rebase.started });
+        onClose();
+      }}
     />
   );
 }

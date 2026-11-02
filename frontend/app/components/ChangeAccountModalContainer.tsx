@@ -3,15 +3,17 @@
 // The pools come from the live state (`ControlState.groups`), as a prop. What the clone is
 // bound to right now seeds the pickers, read by `~/lib/accountBinding` as the card reads it.
 // The swap is this dialog's own: the two POSTs, the busy flag and the error live here, and
-// the dialog stays open on a refused swap, holding its error. It closes only when both sides
+// the dialog stays open on a refused swap, holding its error. Closed before the swap ends, it
+// hands the swap to the page (`onLeave`), which says if it is refused. It closes when both sides
 // took the change, so the control panel only opens it and is told when it is done
 // (`onClose`). The markup is ChangeAccountModalView.
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { ChangeAccountModalView } from "~/components/ChangeAccountModalView";
 import { accountBinding, clonePool } from "~/lib/accountBinding";
 import { swapClaudeAccount, swapCodexAccount } from "~/lib/api";
 import type { ClaudeUsage, Clone } from "~/lib/types";
+import type { LeaveJob } from "~/lib/useLeftJobs";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
 export function ChangeAccountModalContainer({
@@ -20,6 +22,7 @@ export function ChangeAccountModalContainer({
     codexAccounts,
     groups,
     onClose,
+    onLeave,
 }: {
     clone: Clone;
     /** Assignable accounts (imported Claude accounts). */
@@ -28,8 +31,10 @@ export function ChangeAccountModalContainer({
     codexAccounts: ClaudeUsage[];
     /** The pools, from the live state (`ControlState.groups`). */
     groups: CloneGroup[];
-    /** The dialog is finished (cancelled, or the swap is done): unmount it. */
+    /** The dialog is finished (closed, or the swap is done): unmount it. */
     onClose: () => void;
+    /** Closed while a swap is in flight: the page follows it (`~/lib/useLeftJobs.ts`). */
+    onLeave?: LeaveJob;
 }) {
     const [claudeValue, setClaudeValue] = useState(
         () => accountBinding(clone, "claude").selection,
@@ -46,16 +51,20 @@ export function ChangeAccountModalContainer({
     const [error, setError] = useState<string | null>(null);
     /** Both sides took the change: the dialog plays its exit and unmounts. */
     const [done, setDone] = useState(false);
+    /** The swap in flight. */
+    const swapping = useRef<Promise<unknown> | null>(null);
 
     /** The Apply button. Both sides go at once, with the picks as they stand at the click. */
     function submit() {
         if (busy) return;
         setBusy(true);
         setError(null);
-        Promise.all([
+        const swap = Promise.all([
             swapClaudeAccount(clone.id, claudeValue, groupValue),
             swapCodexAccount(clone.id, codexValue, groupValue),
-        ]).then(
+        ]);
+        swapping.current = swap;
+        swap.then(
             () => setDone(true),
             (e: Error) => {
                 setBusy(false);
@@ -83,7 +92,12 @@ export function ChangeAccountModalContainer({
             // its exit, and `onClose` unmounts once the frames have run. A refused swap is not
             // finished — the dialog stays up holding its error.
             open={!done}
-            onClose={onClose}
+            onClose={() => {
+                // Closed before the swap ended: it goes on, and the page says if it is refused
+                if (busy && !done && swapping.current)
+                    onLeave?.({ label: `Account change for ${clone.displayName ?? clone.id}`, request: swapping.current });
+                onClose();
+            }}
         />
     );
 }

@@ -52,8 +52,9 @@ export const RebuildChecked: Story = {
   args: { rebuild: true },
 };
 
-/** The rebase is running. The form and both buttons lock, and the op's own progress renders
- *  under the fields. */
+/** The rebase is running. The form and Rebase lock, and the op's own progress renders under
+ *  the fields. Close and Escape still close: the rebase goes on, and the control panel says if
+ *  it fails. */
 export const Rebasing: Story = {
   args: {
     busy: true,

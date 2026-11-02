@@ -48,7 +48,7 @@ export function ChangeAccountModalView({
   /** "auto" (rotate in scope) or an email (pin). */
   claudeValue: string;
   codexValue: string;
-  /** A swap is in flight. Locks Apply, Cancel and Escape. */
+  /** A swap is in flight. Locks Apply. */
   busy: boolean;
   /** The refused swap, in the dialog's own words rather than the control panel's error line. */
   error: string | null;
@@ -68,9 +68,9 @@ export function ChangeAccountModalView({
   const showCodex = codexAccounts.length > 0 || groups.length > 0;
 
   return (
-    // Neither Cancel nor Escape may close over a swap in flight, so both are held by the
-    // same `busy`: the buttons below, and `dismissible` for the key.
-    <ModalShell size="sm" dismissible={!busy} open={open} onExited={onClose}>
+    // Close and Escape close it at any time: a swap in flight runs on (the container hands it
+    // to the page)
+    <ModalShell size="sm" open={open} onExited={onClose}>
       {(close) => (
         <>
           <h3 className={`text-[15px] font-semibold tracking-tight ${TEXT}`}>
@@ -131,13 +131,8 @@ export function ChangeAccountModalView({
           ) : null}
 
           <div className="mt-4 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => close()}
-              disabled={busy}
-              className={`${BUTTON} px-3 py-1.5 text-sm disabled:opacity-40`}
-            >
-              Cancel
+            <button type="button" onClick={() => close()} className={`${BUTTON} px-3 py-1.5 text-sm`}>
+              Close
             </button>
             <button
               type="button"

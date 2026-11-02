@@ -47,6 +47,7 @@ import { BASTION_PORT, buildSshCommand } from "~/lib/ssh";
 import { findTicket, type LinearTicket } from "~/lib/tickets";
 import type { ClaudeUsage, Clone, ControlState } from "~/lib/types";
 import { useCloneNotifications } from "~/lib/useCloneNotifications";
+import { useLeftJobs } from "~/lib/useLeftJobs";
 import { useNow } from "~/lib/useNow";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { SoundReport } from "~/viewer/protocol";
@@ -154,6 +155,11 @@ export function ControlPanelContainer({
   const [dialog, setDialog] = useState<{ on: PanelTab; d: Dialog } | null>(null);
   const open = (d: Dialog) => tab && setDialog({ on: tab, d });
   const closeDialog = () => setDialog(null);
+  /** The dialog open now, for a job that answers after its dialog closed. */
+  const openDialog = useRef(dialog);
+  openDialog.current = dialog;
+  // A dialog closed while its job runs leaves the job here: a failure shows on the error line
+  const leave = useLeftJobs(state.operations, setError);
 
   const clonesById = new Map(state.hosts.map((h) => [h.id, h]));
   const accounts = state.claudeAccounts ?? [];
@@ -327,24 +333,27 @@ export function ControlPanelContainer({
             operations={state.operations}
             accounts={accounts}
             initialTicket={d.ticketUrl}
-            onClose={() => {
+            onClose={(left) => {
               closeDialog();
               const made = newClone.current ? clonesById.get(newClone.current) : null;
               newClone.current = null;
-              if (made) selectClone(made);
+              // Closed while it was being made: the operator went on, the screen stays
+              if (made && !left) selectClone(made);
             }}
             onStart={(fork, req) =>
               startClone(fork, req).then((op) => {
                 if (d.columnId) board.fileNewClone(op.target, d.columnId);
-                newClone.current = op.target;
+                // Only while its dialog is open: once it closed, no dialog's close shows it
+                if (openDialog.current?.d === d) newClone.current = op.target;
                 return op;
               })
             }
+            onLeave={leave}
           />
         );
       case "ticket":
         return (
-          <TicketModalContainer presets={tickets.presets} onClose={closeDialog} onCreate={tickets.create} />
+          <TicketModalContainer presets={tickets.presets} onClose={closeDialog} onCreate={tickets.create} onLeave={leave} />
         );
       case "import":
         return (
@@ -373,6 +382,7 @@ export function ControlPanelContainer({
             codexAccounts={accounts.filter((a) => a.provider === "codex")}
             groups={state.groups}
             onClose={closeDialog}
+            onLeave={leave}
           />
         );
       case "rebase":
@@ -383,6 +393,7 @@ export function ControlPanelContainer({
             operations={state.operations}
             onClose={closeDialog}
             onRebase={(preset, rebuild) => rebaseClone(d.clone.id, preset, rebuild)}
+            onLeave={leave}
           />
         );
       case "forward":
