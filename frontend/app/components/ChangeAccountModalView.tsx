@@ -4,12 +4,12 @@
 // the clone to another member account when its current one exhausts (sticky otherwise).
 //
 // Controlled: the container seeds the group + both selections from what the clone is bound
-// to now, and owns the swap calls. Nothing here reads the server, so each combination the
-// operator can pick is a story.
+// to now, and owns the swap calls, their busy flag and their error. Nothing here reads the
+// server, so each combination the operator can pick, and a refused swap, is a story.
 import { AccountGroupSelect } from "~/components/AccountGroupSelect";
 import { DropdownSelect } from "~/components/DropdownSelect";
 import { ModalShell } from "~/components/ModalShell";
-import { BUTTON, DONE_BUTTON, FIELD, TEXT, TEXT_2 } from "~/desk/control/ui";
+import { BUTTON, DONE_BUTTON, ErrorLine, FIELD, R_PIECE, TEXT, TEXT_2 } from "~/desk/control/ui";
 import type { ClaudeUsage } from "~/lib/types";
 import type { CloneGroup } from "~/lib/wire/CloneGroup";
 
@@ -27,11 +27,13 @@ export function ChangeAccountModalView({
   claudeValue,
   codexValue,
   busy,
+  error,
   onGroupChange,
   onClaudeValueChange,
   onCodexValueChange,
-  onClose,
   onSubmit,
+  open = true,
+  onClose,
 }: {
   /** The clone this is about, as the heading names it (display name, else id). */
   cloneName: string;
@@ -46,23 +48,29 @@ export function ChangeAccountModalView({
   /** "auto" (rotate in scope) or an email (pin). */
   claudeValue: string;
   codexValue: string;
-  /** A swap is in flight. */
+  /** A swap is in flight. Locks Apply, Cancel and Escape. */
   busy: boolean;
+  /** The refused swap, in the dialog's own words rather than the control panel's error line. */
+  error: string | null;
   onGroupChange: (value: string | null) => void;
   onClaudeValueChange: (value: string) => void;
   onCodexValueChange: (value: string) => void;
+  /** Apply the two picks. The dialog stays open, holding its error if the swap is refused. */
+  onSubmit: () => void;
+  /** The dialog is on screen. The container flips it false when the swap is done, and the
+   *  dialog plays its exit before the unmount rather than blinking out. */
+  open?: boolean;
   /** The dialog is finished: unmount it. The exit frames have already played. */
   onClose: () => void;
-  /** Apply the two picks. The dialog plays its exit first, so this runs on a dialog the
-   *  operator can no longer see — the page owns the swap and its error banner from here. */
-  onSubmit: () => void;
 }) {
   // The Codex picker only shows when Codex accounts exist or a pool could carry Codex
   // members; the title reflects both providers only when both are actually changeable.
   const showCodex = codexAccounts.length > 0 || groups.length > 0;
 
   return (
-    <ModalShell size="sm" onExited={onClose}>
+    // Neither Cancel nor Escape may close over a swap in flight, so both are held by the
+    // same `busy`: the buttons below, and `dismissible` for the key.
+    <ModalShell size="sm" dismissible={!busy} open={open} onExited={onClose}>
       {(close) => (
         <>
           <h3 className={`text-[15px] font-semibold tracking-tight ${TEXT}`}>
@@ -116,19 +124,24 @@ export function ChangeAccountModalView({
             </label>
           ) : null}
 
+          {error ? (
+            <div className={`mt-3 overflow-hidden ${R_PIECE}`}>
+              <ErrorLine message={error} />
+            </div>
+          ) : null}
+
           <div className="mt-4 flex justify-end gap-2">
             <button
               type="button"
               onClick={() => close()}
-              className={`${BUTTON} px-3 py-1.5 text-sm`}
+              disabled={busy}
+              className={`${BUTTON} px-3 py-1.5 text-sm disabled:opacity-40`}
             >
               Cancel
             </button>
-            {/* Apply closes too, so the exit frames run in front of the swap rather than
-              after it: `close(onSubmit)` plays them and hands off. */}
             <button
               type="button"
-              onClick={() => close(onSubmit)}
+              onClick={onSubmit}
               disabled={busy}
               className={`${DONE_BUTTON} px-4 py-1.5 text-sm font-medium`}
             >

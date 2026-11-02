@@ -66,9 +66,10 @@ describe("TermKeys", () => {
     expect(k.key(c.KeyC, false, false)).toBeNull();
     k.key(c.ControlLeft, false, false);
     expect(k.key(c.KeyC, true, false)).toBe("c");
-    k.key(c.CapsLock, true, false);
-    k.key(c.CapsLock, false, false);
+    k.locks(true);
     expect(k.key(c.KeyC, true, false)).toBe("C");
+    k.locks(false);
+    expect(k.key(c.KeyC, true, false)).toBe("c");
     expect(k.key(c.MetaLeft, true, false)).toBeNull();
     expect(k.key(c.ArrowUp, true, true)).toBe("\x1bOA");
   });

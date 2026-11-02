@@ -191,8 +191,10 @@ pub struct RmngClone {
     /// clone (server picks the best account in scope and may hot-swap it) from one pinned
     /// to a fixed account — `claude_account_email` alone can't tell these apart. Group
     /// binding moved to the shared [`RmngClone::group`]: with a group set, an `"auto"`
-    /// selection resolves inside it, otherwise fleet-wide. Legacy `"none"`/`"group:<name>"`
-    /// values migrated to `"auto"` (+ `group`) on load.
+    /// selection resolves inside it, otherwise fleet-wide. Every writer stores it through
+    /// the control-server's `pool::normalize_selection`, which stores a legacy `"none"` as
+    /// `"auto"`; a retired `"group:<name>"` from an old client is stored as sent and still
+    /// binds that group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_selection: Option<String>,
     /// Email of the imported Codex (ChatGPT) account whose token is written into this
@@ -211,7 +213,7 @@ pub struct RmngClone {
     /// Name of the single account pool this clone draws BOTH providers' accounts from
     /// (`None` = no pool). With a group set, an `"auto"` per-side selection resolves to
     /// the least-used member of that side's provider inside the group; an explicit email
-    /// or `"none"` on a side overrides the group for that side only. `claude_group` /
+    /// on a side overrides the group for that side only. `claude_group` /
     /// `codex_group` record the group each side's current account was picked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
@@ -713,8 +715,8 @@ pub struct CloneRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub linear: Option<LinearMeta>,
-    /// This side's account: an email pins it, `auto` rotates inside the pool, `none` leaves
-    /// the clone tokenless, and a legacy `group:<pool>` binds that pool. Omitted, the side
+    /// This side's account: an email pins it, `auto` rotates inside the pool, a legacy `none`
+    /// reads as `auto`, and a legacy `group:<pool>` binds that pool. Omitted, the side
     /// follows the plan's pool with a fresh pick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

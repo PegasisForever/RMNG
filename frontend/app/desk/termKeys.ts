@@ -1,7 +1,8 @@
 // The on-screen keyboard typing into a headless clone's terminal (`./TerminalScreen.tsx`): its keys send
 // evdev codes (`./keyboard.ts`), as to a desktop, and this turns them into the bytes a terminal's
 // keys make (xterm's: a US keyboard, Ctrl and Alt as a terminal reads them). It keeps which
-// modifiers are down and Caps Lock, from the same presses; a click takes the modifiers too.
+// modifiers are down, from the same presses, and Caps Lock, as the keyboard says it (`locks`);
+// a click takes the modifiers too.
 import { CODE_TO_EVDEV } from "~/viewer/keycodes";
 
 const ESC = "\x1b";
@@ -138,13 +139,14 @@ export class TermKeys {
     }
     if (!pressed) return null;
     const id = BY_CODE.get(code);
-    if (id === "CapsLock") {
-      this.caps = !this.caps;
-      return null;
-    }
     if (!id) return null;
     const m = this.mods();
     return termBytes(id, { shift: m.shiftKey, ctrl: m.ctrlKey, alt: m.altKey }, this.caps, appCursor);
+  }
+
+  /** The keyboard's Caps Lock is on or off. */
+  locks(caps: boolean) {
+    this.caps = caps;
   }
 
   /** The modifiers down, as a mouse event says them (a Shift-click selects in a terminal whose

@@ -186,7 +186,7 @@ export function orderTickets(tickets: LinearTicket[], order: string[]): LinearTi
  *
  *  Lowercased, matching what the server stores, so the list this produces and the one that
  *  comes back over SSE are the same array rather than two spellings of it. */
-export function adoptTickets(tickets: LinearTicket[], order: string[]): string[] | null {
+export function adoptTickets(tickets: { id: string }[], order: string[]): string[] | null {
   const known = new Set(order.map((id) => id.toLowerCase()));
   const fresh: string[] = [];
   for (const t of tickets) {

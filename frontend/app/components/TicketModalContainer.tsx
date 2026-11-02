@@ -1,22 +1,22 @@
-// Open a Linear issue from the board, network half. The Linear work is `~/lib/linear/intake`,
-// shared with the clone dialog; the markup is TicketModalView.
+// Open a Linear issue from the board, network half. The create is the ticket module's
+// (`~/lib/linear/useTickets.ts`), the team and people steps `~/lib/linear/intake`'s, shared
+// with the clone dialog; the markup is TicketModalView.
 //
 // The team is held here rather than in the View because three impure things hang off it: the
 // people lookup, the key that stores a pasted image, and what gets remembered for next time.
 //
-// The created ticket goes back up rather than being handled here: the column writes it into
-// its own list and opens its panel, which is the page's call and not the dialog's.
+// The create goes up rather than being done here: the ticket module writes the new ticket
+// into its own list and opens its panel, which is the page's call and not the dialog's.
 import { lazy, Suspense, useMemo, useState } from "react";
 
 import { TicketModalView } from "~/components/TicketModalView";
 import { teamKeysOf } from "~/lib/cloneDraft";
 import {
         keyFor,
-        openTicket,
         startingTeam,
         useAssignee,
 } from "~/lib/linear/intake";
-import type { LinearTicket } from "~/lib/tickets";
+import type { NewIssue } from "~/lib/linear/mutations";
 import type { PresetRedacted } from "~/lib/wire/PresetRedacted";
 
 // BlockNote is browser-only and heavy; the description field pulls it in on demand. The
@@ -28,14 +28,15 @@ const MarkdownEditorContainer = lazy(
 export function TicketModalContainer({
         presets,
         onClose,
-        onCreated,
+        onCreate,
 }: {
         /** Configured presets (`config.presets`). Their labels are the dialog's team keys, and a
          *  non-empty `linearKey` says which of them can actually open a ticket. */
         presets: PresetRedacted[];
         onClose: () => void;
-        /** The issue Linear answered with, once it exists. The dialog closes either way. */
-        onCreated: (ticket: LinearTicket) => void;
+        /** Open the issue. Rejecting leaves the dialog up with Linear's message; resolving closes
+         *  it. */
+        onCreate: (issue: NewIssue) => Promise<unknown>;
 }) {
         const teams = useMemo(() => teamKeysOf(presets), [presets]);
         // Read once on mount: storage is a session fact, and re-reading it would fight the dropdown.
@@ -84,9 +85,7 @@ export function TicketModalContainer({
                                 </Suspense>
                         }
                         onClose={onClose}
-                        onCreate={(ticket) =>
-                                openTicket(presets, ticket).then(onCreated)
-                        }
+                        onCreate={onCreate}
                 />
         );
 }

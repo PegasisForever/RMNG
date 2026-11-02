@@ -330,7 +330,7 @@ function ServerPane({
 }
 
 /** The settings form and everything it can do, as `useSettingsPanel` hands it over. */
-export interface SettingsPanelProps {
+export interface SettingsFormProps {
   /** The whole form, as one editable model. Null while the config is still in flight, which
    *  is what draws the loading state. */
   draft: SettingsDraft | null;
@@ -378,7 +378,11 @@ export interface SettingsPanelProps {
    *  server's message, and one verdict overwriting the other would read as the wrong answer. */
   judgeTestMessage: string | null;
   onTestJudge: () => void;
+}
 
+/** The Board category's columns and what can be done to them, as the board module hands
+ *  them over (`~/desk/control/useBoard.ts`). */
+export interface BoardColumnsSettings {
   /** The board's columns, left to right. */
   boardColumns: BoardColumn[];
   /** Clones per column id, so a delete can say what it displaces. */
@@ -389,6 +393,10 @@ export interface SettingsPanelProps {
   onDeleteBoardColumn: (columnId: string) => void;
   onReorderBoardColumns: (columnIds: string[]) => void;
 }
+
+/** The settings form and everything it can do: the form from `useSettingsPanel`, the
+ *  columns from the board module. */
+export type SettingsPanelProps = SettingsFormProps & BoardColumnsSettings;
 
 /** One category's pane of sections. Each pane declares only the fields it renders; this
  *  switch assembles each pane's props from the panel's. Adding a category is a branch here

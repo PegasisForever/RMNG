@@ -25,7 +25,9 @@ app's: `/?clone=…`, `/?monitor=1`.
 
 - `app/desk/`: the screen (`FullDesk.tsx`, `ScreenView.tsx`), its floating buttons, the
   on-screen keyboard and trackpad, the terminal of a headless clone, and the connection to the
-  selected clone (`remote.ts`, `session.ts`). The glass look is in `app/desk/GLASS.md`.
+  selected clone (`remote.ts`, `session.ts`). What the keys' and the trackpad's touches do is
+  `touchInput.ts`, with no React; it writes to a clone sink (`cloneSink.ts`: the desktop's
+  session, or the terminal). The glass look is in `app/desk/GLASS.md`.
 - `app/desk/control/`: the control panel's tabs (Usage, Tickets, Clones, Notes, Settings).
 - `app/viewer/`: the media client. A worker opens the WebSocket (`/api/viewer`), decodes the
   monitor's H.264 with WebCodecs and draws it. Monitor 0's window also plays the selected

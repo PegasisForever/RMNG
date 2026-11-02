@@ -16,14 +16,9 @@ import { GAP, keysLayout } from "./geometry";
 import { CAPS_LOCK, type Key, SHIFTS, keyLabel, keyRows } from "./keyboard";
 import { SLOP_PX } from "./keypad";
 import type { ModState } from "./modifiers";
+import type { TouchKind } from "./touchInput";
 
-/** Evdev mouse buttons. */
-export const BTN_LEFT = 0x110;
-export const BTN_RIGHT = 0x111;
-export const BTN_MIDDLE = 0x112;
-
-
-export type TouchKind = "down" | "move" | "up" | "cancel";
+export type { TouchKind };
 
 export type KeyboardViewProps = {
   /** The keyboard area, CSS px, and the space at its bottom the home bar is over. */

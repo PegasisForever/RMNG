@@ -46,6 +46,7 @@ import chatgptLogo from "~/assets/chatgpt.svg";
 import claudeLogo from "~/assets/claude.svg";
 import { CloneStatusDot, statusLabel } from "~/components/CloneStatus";
 import { formatCloneUsage, RenameField } from "~/components/CloneCard";
+import { type AccountBinding, accountBinding } from "~/lib/accountBinding";
 import { cloneTitle } from "~/lib/cloneTitle";
 import { type BoardColumn, resolveColumns, subCloneTree, withDefaults } from "~/lib/board";
 import { formatTokenCount } from "~/lib/format";
@@ -579,8 +580,8 @@ function CloneRow({
           <span className={`mt-0.5 flex items-center gap-2 text-[11px] ${TEXT_3}`}>
             {clone.managed ? (
               <>
-                <Account logo={claudeLogo} email={clone.claudeAccountEmail} selection={clone.claudeSelection} group={clone.group ?? clone.claudeGroup} />
-                <Account logo={chatgptLogo} invert email={clone.codexAccountEmail} selection={clone.codexSelection} group={clone.group ?? clone.codexGroup} />
+                <Account logo={claudeLogo} binding={accountBinding(clone, "claude")} />
+                <Account logo={chatgptLogo} invert binding={accountBinding(clone, "codex")} />
               </>
             ) : (
               <span className="min-w-0 flex-1 truncate">{clone.id}</span>
@@ -596,27 +597,14 @@ function CloneRow({
 }
 
 /** A provider's account on a clone: the logo, the pool or "auto" when the server picks, and
- *  the account in use. */
-function Account({
-  logo,
-  invert = false,
-  email,
-  selection,
-  group,
-}: {
-  logo: string;
-  invert?: boolean;
-  email: string | null | undefined;
-  selection: string | null | undefined;
-  group: string | null | undefined;
-}) {
-  const badge = group ?? (selection === "auto" ? "auto" : null);
+ *  the account in use (`~/lib/accountBinding`). */
+function Account({ logo, invert = false, binding }: { logo: string; invert?: boolean; binding: AccountBinding }) {
   return (
     <span className="flex min-w-0 flex-1 items-center gap-1">
       <img src={logo} alt="" className={`size-3 shrink-0 opacity-70 ${invert ? "dark:invert" : ""}`} />
-      {badge ? <span className={`shrink-0 rounded bg-black/5 px-1 text-[10px] dark:bg-white/10 ${TEXT_2}`}>{badge}</span> : null}
-      <span className={`min-w-0 truncate ${email ? TEXT_2 : `italic ${TEXT_3}`}`}>
-        {email ?? (selection === "none" ? "no token" : "unassigned")}
+      {binding.badge ? <span className={`shrink-0 rounded bg-black/5 px-1 text-[10px] dark:bg-white/10 ${TEXT_2}`}>{binding.badge}</span> : null}
+      <span className={`min-w-0 truncate ${binding.email ? TEXT_2 : `italic ${TEXT_3}`}`}>
+        {binding.label}
       </span>
     </span>
   );

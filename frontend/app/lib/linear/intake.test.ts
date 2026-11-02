@@ -1,9 +1,11 @@
-// The ticket steps both dialogs run, against a fake Linear: which team a reopened dialog
+// The ticket steps both dialogs run, against Linear in memory: which team a reopened dialog
 // starts on, and what reaches the clone route once the issue exists.
 import { expect, test } from "bun:test";
 
-import { startingTeam, ticketForClone, type LinearPort } from "./intake";
+import { startingTeam, ticketForClone } from "./intake";
 import type { ResolvedIssue } from "./issues";
+import { memoryLinear } from "./memoryLinear";
+import type { LinearPort } from "./port";
 import type { LinearTicket } from "./types";
 import type { PresetRedacted } from "../wire/PresetRedacted";
 
@@ -28,6 +30,7 @@ function issue(over: Partial<ResolvedIssue> = {}): ResolvedIssue {
 function port(over: Partial<LinearPort> = {}): LinearPort & { started: string[] } {
   const started: string[] = [];
   return {
+    ...memoryLinear(),
     started,
     create: async () => {
       throw new Error("not expected");

@@ -1,8 +1,9 @@
 // A headless clone's terminal, in monitor 0's window in place of the clone's screen: the
 // tab bar (`./TermBar.tsx`) and one xterm.js terminal per tmux session (`~/viewer/terminal.tsx`).
 //
-// - Mouse and keyboard mode: the terminal has the page's keys, mouse and selection. The control panel's chord is the page's.
-// - Touch mode: the on-screen keyboard types into it (`./remote.ts`, `./termKeys.ts`); the terminal never
+// - Mouse and keyboard mode: the terminal has the page's keys, mouse and selection. The control panel's chord is the page's
+//   (`./keys.ts` runs it).
+// - Touch mode: the on-screen keyboard types into it (`./touchInput.ts`, `./cloneSink.ts`); the terminal never
 //   brings up the system keyboard. Its area is a trackpad, as the keys are: they move a pointer
 //   drawn here (`cursor`), and its clicks, drags and scrolls go to the terminal as a mouse's.
 //
@@ -14,7 +15,7 @@ import type { TermData } from "~/lib/wire/TermData";
 import { type TermApi, useTermTabs } from "~/viewer/terminal";
 
 import type { TouchKind } from "./KeyboardView";
-import { isControlPanelChord } from "./shortcut";
+import { isControlPanelChord } from "./keys";
 import { TerminalScreenView } from "./TerminalScreenView";
 
 export function TerminalScreen({
@@ -26,7 +27,6 @@ export function TerminalScreen({
   top,
   cursor,
   onPad,
-  onChord,
 }: {
   sessions: string[];
   send: (msg: FromBrowser) => void;
@@ -42,7 +42,6 @@ export function TerminalScreen({
   cursor: { x: number; y: number } | null;
   /** A finger on the terminal's area (touch mode). */
   onPad: (kind: TouchKind, e: PointerEvent<HTMLDivElement>) => void;
-  onChord: () => void;
 }) {
   const { box, active, setActive } = useTermTabs({
     sessions,
@@ -50,14 +49,8 @@ export function TerminalScreen({
     sink,
     api,
     focus: !touch,
-    ownKey: (e) => {
-      if (!isControlPanelChord(e)) return false;
-      if (e.type === "keydown") {
-        e.preventDefault();
-        if (!e.repeat) onChord();
-      }
-      return true;
-    },
+    // The chord is the page's: xterm.js does nothing with it, and the window's keys run it
+    ownKey: (e) => isControlPanelChord(e),
   });
   return (
     <TerminalScreenView

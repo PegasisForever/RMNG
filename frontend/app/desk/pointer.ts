@@ -17,7 +17,7 @@ export function pointerGain(d: number, ms: number): number {
  *  speed of 100%. The content follows the fingers, as Windows does by default: fingers up
  *  scroll down. The layout's speed scales it (`scrollGain`); the phone's layout's is 15%
  *  (PHONE_SCROLL_SPEED), as this base was much too fast on a phone. It goes out as
- *  touchpad scroll (finger source, see `~/desk/remote.ts`), not as wheel notches. */
+ *  touchpad scroll (finger source, see `~/desk/cloneSink.ts`), not as wheel notches. */
 const SCROLL_BASE = -2;
 
 /** The phone's layout's scroll speed: what it claims, and what it scrolls at until the server's

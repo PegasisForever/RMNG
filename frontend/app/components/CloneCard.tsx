@@ -27,6 +27,7 @@ import { CARD_FILL_ON_GLASS, FIELD, PRESS, TEXT, TEXT_2, TEXT_3 } from "~/desk/c
 
 import chatgptLogo from "../assets/chatgpt.svg";
 import claudeLogo from "../assets/claude.svg";
+import { type AccountBinding, accountBinding } from "~/lib/accountBinding";
 import { cloneTitle } from "~/lib/cloneTitle";
 import { formatTokenCount } from "~/lib/format";
 import type { CloneTicket } from "~/lib/tickets";
@@ -76,17 +77,6 @@ export function formatCloneUsage(
  *  rows match by construction. An archived clone drops CPU and MEM entirely rather than
  *  rendering them empty: it keeps only the token pair, which is narrower on both rows equally.
  *  The empty-slot case remains only for a caller that has no value to give. */
-/** The selection {@link AccountTag} reads the badge off: the clone-level group
- *  binding first (it moved out of the selection string — see
- *  `ChangeAccountModalContainer`), then a legacy per-side group, then the
- *  side's own selection. Without this the badge always reads "auto". */
-function badgeSelection(
-  group: string | null | undefined,
-  selection?: string | null,
-): string | undefined {
-  return group ? `group:${group}` : (selection ?? undefined);
-}
-
 function MetricSlot({ metric, labelWidth = "w-6" }: { metric?: Metric; labelWidth?: string }) {
   return (
     <span
@@ -108,10 +98,11 @@ function MetricSlot({ metric, labelWidth = "w-6" }: { metric?: Metric; labelWidt
 
 /** The clone's account binding for one provider: `[logo] [group badge] [account in use]`.
  *
- *  `email` is the account actually installed; `selection` is the operator's intent verbatim
- *  (`auto` / `none` / `group:<pool>` / a pinned email). Both are shown because they answer
- *  different questions: an `auto` clone landed on some concrete account, and only the selection
- *  says whether it may be hot-swapped out from under you. A clone with neither is tokenless.
+ *  `binding` is the reading of the clone's fields (`~/lib/accountBinding`). Its email is the
+ *  account actually installed; its badge is the rule that picks it (the pool, or `auto`). Both
+ *  are shown because they answer different questions: an `auto` clone landed on some concrete
+ *  account, and only the rule says whether it may be hot-swapped out from under you. A pinned
+ *  side has no badge: the pin *is* the email already beside it, so a chip would just repeat it.
  *
  *  Only the group badge carries a background — it is the *rule*, a fixed short token that reads
  *  as a chip. The account is the *result*, variable-length and the thing you actually scan for,
@@ -122,31 +113,17 @@ function MetricSlot({ metric, labelWidth = "w-6" }: { metric?: Metric; labelWidt
  *  decays on its own, so this only ever renders what is currently true. */
 function AccountTag({
   logo,
-  provider,
-  email,
-  selection,
+  binding,
   fable = false,
 }: {
   logo: string;
-  provider: string;
-  email?: string;
-  selection?: string;
+  binding: AccountBinding;
   fable?: boolean;
 }) {
-  const pool = selection?.startsWith("group:") ? selection.slice("group:".length) : undefined;
-  // A pinned selection has no badge: the selection *is* the email already beside it, so a chip
-  // would just repeat it. Absent both, the clone is tokenless and only the placeholder shows.
-  const badge = pool ?? (selection === "auto" ? "auto" : undefined);
-  const mode = pool ? `pool ${pool}` : selection === "auto" ? "auto" : undefined;
-  const title = email
-    ? `${provider}: ${email}${mode ? ` (${mode})` : " (pinned)"}`
-    : selection === "none"
-      ? `${provider}: no account (deliberately tokenless)`
-      : `${provider}: no account assigned`;
   return (
     <span
       className={`flex min-w-0 flex-1 items-center gap-1 ${TEXT_3}`}
-      data-tip={title}
+      data-tip={binding.title}
     >
       {/* The ChatGPT mark ships with no `fill`, so it paints black and vanishes on a dark
           background — invert it there. `claude.svg` carries its own fill and must NOT be
@@ -156,19 +133,17 @@ function AccountTag({
         alt=""
         className={`h-3 w-3 shrink-0 opacity-70 dark:opacity-90 ${logo === chatgptLogo ? "dark:invert" : ""}`}
       />
-      {badge ? (
+      {binding.badge ? (
         <span className={`shrink-0 rounded bg-black/5 px-1 text-[9px] font-semibold dark:bg-white/10 ${TEXT_2}`}>
-          {badge}
+          {binding.badge}
         </span>
       ) : null}
-      {email ? (
+      {binding.email ? (
         <span className={`min-w-0 truncate text-[10px] font-medium ${TEXT_2}`}>
-          {email}
+          {binding.label}
         </span>
       ) : (
-        <span className={`truncate italic ${TEXT_3}`}>
-          {selection === "none" ? "no token" : "unassigned"}
-        </span>
+        <span className={`truncate italic ${TEXT_3}`}>{binding.label}</span>
       )}
       {/* Placed after the email so it stays visible when a long address truncates: it is
           transient news about right now, whereas the address is stable and re-readable on
@@ -589,12 +564,7 @@ export function CloneCard({
               <div className="flex min-w-0 items-center gap-2">
                 <AccountTag
                   logo={claudeLogo}
-                  provider="Claude"
-                  email={clone.claudeAccountEmail}
-                  selection={badgeSelection(
-                    clone.group ?? clone.claudeGroup,
-                    clone.claudeSelection,
-                  )}
+                  binding={accountBinding(clone, "claude")}
                   fable={tokens?.fableActive}
                 />
                 {/* The arrow labels are one glyph, so they get their own narrow width rather
@@ -603,15 +573,7 @@ export function CloneCard({
                 {cpuMetric ? <MetricSlot metric={cpuMetric} /> : null}
               </div>
               <div className="flex min-w-0 items-center gap-2">
-                <AccountTag
-                  logo={chatgptLogo}
-                  provider="Codex"
-                  email={clone.codexAccountEmail}
-                  selection={badgeSelection(
-                    clone.group ?? clone.codexGroup,
-                    clone.codexSelection,
-                  )}
-                />
+                <AccountTag logo={chatgptLogo} binding={accountBinding(clone, "codex")} />
                 <MetricSlot metric={outMetric} labelWidth="w-2" />
                 {memMetric ? <MetricSlot metric={memMetric} /> : null}
               </div>
