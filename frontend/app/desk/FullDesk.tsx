@@ -35,6 +35,9 @@
 // one on this screen takes the page out of its fullscreen. A button opens the windows of the
 // layout's other monitors while any is not open.
 //
+// In the browser's own fullscreen (F11, the green button) the keys are not locked, so a dialog
+// asks the operator to leave it and use the Fullscreen button (`./BrowserFullscreenDialog.tsx`).
+//
 // It runs in the frame of the shell (`public/shell.html`) where the browser has
 // fullscreen: the fullscreen, the key lock, the window's name and address are the shell's
 // (`~/lib/host.ts`), so a reload onto a new build keeps them.
@@ -61,7 +64,9 @@ import { firstLayout, startScale } from "./firstLayout";
 import { FLOAT_BUTTON, FLOAT_GAP } from "./FloatingButtons";
 import { followAxis, type Insets, naturalKeysHeight, phoneMonitorSize, screenFit } from "./geometry";
 import { useInputMode } from "./inputMode";
-import { controlPanelChordLabel, toggleFullscreen } from "./keys";
+import { BrowserFullscreenDialog } from "./BrowserFullscreenDialog";
+import { inBrowserFullscreen, leaveBrowserFullscreenKeys, watchBrowserFullscreen } from "./browserFullscreen";
+import { controlPanelChordLabel, currentOs, toggleFullscreen } from "./keys";
 import { HANDLE_H } from "./KeyboardHandle";
 import { type TouchKind } from "./KeyboardView";
 import { readKeyboardDocked, readKeyboardHeight, saveKeyboardDocked, saveKeyboardHeight } from "./keyboardDock";
@@ -163,6 +168,27 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     doc.addEventListener("fullscreenchange", on);
     return () => doc.removeEventListener("fullscreenchange", on);
   }, []);
+  /** The window is in the browser's own fullscreen, where the keys are not locked. */
+  const [browserFull, setBrowserFull] = useState(false);
+  const browserFullRef = useRef(browserFull);
+  browserFullRef.current = browserFull;
+  useEffect(() => {
+    const w = hostWindow();
+    const on = () => setBrowserFull(inBrowserFullscreen(w));
+    on();
+    return watchBrowserFullscreen(w, on);
+  }, []);
+  /** Its dialog: put off (Not now, Escape) until the browser's fullscreen ends; on screen,
+   *  including its exit frames. Mouse and keyboard mode only: touch has no keys to lock. */
+  const [fullHintOff, setFullHintOff] = useState(false);
+  useEffect(() => {
+    if (!browserFull) setFullHintOff(false);
+  }, [browserFull]);
+  const fullHint = mouse && browserFull && !fullHintOff;
+  const [fullHintShown, setFullHintShown] = useState(false);
+  useEffect(() => {
+    if (fullHint) setFullHintShown(true);
+  }, [fullHint]);
 
   // The keyboard: the display's width; its keys square, no taller than KEYBOARD_PART of the
   // display, until its bar sets another height
@@ -217,7 +243,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   };
   /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. Else the keys
    *  are the page's (`./keys.ts`), and so are a Mac's edit keys while the keyboard is locked. */
-  const mouseInput = mouse && !controlPanel && !layoutOpen && !(peek && overGroup);
+  const mouseInput = mouse && !controlPanel && !layoutOpen && !fullHintShown && !(peek && overGroup);
   const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, page: { chord: toggleControlPanel, escape } });
 
   // Files dropped on the clone's screen go to the selected clone's home, one after another
@@ -635,6 +661,16 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
               r.claim();
             }}
             onClose={() => setLayoutOpen(false)}
+          />
+        ) : fullHintShown ? (
+          <BrowserFullscreenDialog
+            open={fullHint}
+            leaveKeys={leaveBrowserFullscreenKeys(currentOs())}
+            onExited={() => {
+              setFullHintShown(false);
+              // Closed by Not now or Escape, not by the end of the browser's fullscreen
+              if (browserFullRef.current) setFullHintOff(true);
+            }}
           />
         ) : null
       }

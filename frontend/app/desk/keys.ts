@@ -30,7 +30,7 @@ const POPUPS = "[data-modal], [role=dialog], [role=menu], [role=listbox]";
 
 export type Os = "mac" | "windows" | "linux";
 
-function currentOs(): Os {
+export function currentOs(): Os {
   const p = typeof navigator === "undefined" ? "" : navigator.platform;
   return /Mac/.test(p) ? "mac" : /Win/.test(p) ? "windows" : "linux";
 }
