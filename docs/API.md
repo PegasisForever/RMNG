@@ -708,8 +708,8 @@ The server keeps no list of layouts. Each client keeps its own layout in its bro
 (a desktop browser: up to 8 monitors, one window each; a phone or a tablet: one monitor, its
 screen; edited in the Edit layout dialog, which opens on a long press of the Fullscreen or the
 Fit button) and sends it on each real action of the operator in it (a touch, a
-click, a key, a wheel, the mouse moving, the window opening or coming to the front), only while
-its window is in the foreground. The last layout sent is in force: it is stored as
+click, a key, a wheel, the mouse moving in a window that has the focus, the window opening or
+coming to the front), only while its window is in the foreground. The last layout sent is in force: it is stored as
 `ControlState.layout` and its scroll settings go to every monitor window (`scroll`). `client` is
 a random id the client keeps; `label` says what it is (`desktop`, `phone`).
 

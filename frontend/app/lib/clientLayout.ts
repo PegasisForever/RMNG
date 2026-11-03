@@ -7,9 +7,11 @@
 // (`POST /api/layout/claim`, `ControlState.layout`).
 //
 // A client claims on each real action of the operator in it: a touch, a click, a key, a wheel,
-// the mouse moving, and the window being opened or coming to the front. Only while the window
-// is in the foreground: a phone browser woken in the background (Android does that when the
-// charger goes in) must not take the clones from the desktop. A client never claims because
+// the mouse moving in a window that has the focus, and the window being opened or coming to the
+// front. Only while the window is in the foreground: a phone browser woken in the background
+// (Android does that when the charger goes in) must not take the clones from the desktop. A mouse
+// that only passes over a window without the focus (another computer's, on the way somewhere
+// else) does not take them either. A client never claims because
 // it sees another client's layout, so two clients never take turns by themselves.
 import { claimLayout } from "~/lib/api";
 import type { ControlState } from "~/lib/types";
@@ -174,8 +176,9 @@ export type MonitorChannelMsg =
  *  a layout it has already, so more would be noise. */
 const CLAIM_EVERY_MS = 2000;
 
-/** The operator's actions that claim. */
-const ACTIONS = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"] as const;
+/** The operator's actions that claim. A mouse move claims only with the focus (`MOVES`). */
+const ACTIONS = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
+const MOVES = "pointermove";
 
 /** The window is the one the operator looks at. */
 const shown = () => document.visibilityState === "visible";
@@ -204,6 +207,7 @@ export function attachLayoutClaims(
   const onAction = () => shown() && claim();
   const onFront = () => shown() && document.hasFocus() && claim();
   for (const a of ACTIONS) window.addEventListener(a, onAction, { capture: true, passive: true });
+  window.addEventListener(MOVES, onFront, { capture: true, passive: true });
   document.addEventListener("visibilitychange", onFront);
   window.addEventListener("focus", onFront);
   onFront();
@@ -211,6 +215,7 @@ export function attachLayoutClaims(
     claim,
     detach() {
       for (const a of ACTIONS) window.removeEventListener(a, onAction, { capture: true });
+      window.removeEventListener(MOVES, onFront, { capture: true });
       document.removeEventListener("visibilitychange", onFront);
       window.removeEventListener("focus", onFront);
     },
