@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 
 import { openLiveEvents } from "~/lib/liveEvents";
-import { emptyState } from "~/lib/types";
+import { type ControlState, emptyState } from "~/lib/types";
 import type { ContainerStats } from "~/lib/wire/ContainerStats";
 import type { LxcStats } from "~/lib/wire/LxcStats";
 
@@ -18,6 +18,8 @@ export function useLiveState() {
   const [state, setState] = useState(emptyState);
   const [stats, setStats] = useState<Record<string, ContainerStats>>({});
   const [lxcStats, setLxcStats] = useState<LxcStats | null>(null);
+  /** The first state frame came: until then `state` is `emptyState`, not the server's. */
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     // The build this page belongs to, learned from the first `version` frame. The server
     // sends one per connection, and an upgrade drops every connection, so the reconnect
@@ -34,7 +36,10 @@ export function useLiveState() {
         }
       };
     const close = openLiveEvents("/events", {
-      message: json(setState),
+      message: json((v: ControlState) => {
+        setState(v);
+        setLoaded(true);
+      }),
       stats: json(setStats),
       lxcStats: json(setLxcStats),
       // The server restarted onto a different build, so this page's bundle is stale: its
@@ -60,5 +65,5 @@ export function useLiveState() {
     });
     return close;
   }, []);
-  return { state, stats, lxcStats };
+  return { state, stats, lxcStats, loaded };
 }

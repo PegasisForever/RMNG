@@ -497,10 +497,15 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
 
   // The clone px the dock covers, taken from the monitor in what this browser claims: all the
   // pinned columns at the monitor's pixel scale (`dockCut`), not what the window's size shows of
-  // them, nor its insets. The window keeps it with its pins, for every window's claim.
+  // them, nor its insets. The window keeps it with its pins, for every window's claim. Not before
+  // the server's state came: until then the board has only the default columns, so the pins of
+  // the operator's own columns drop out, and a slow first state (a WAN, the reload after a
+  // deploy) changed the clone's resolution two times.
   const cut = pins.length && mine ? dockCut(dockWidth(pins), dpr, scale) : 0;
   const layoutClient = r.live.state.layout?.client;
+  const stateLoaded = r.live.loaded;
   useEffect(() => {
+    if (!stateLoaded) return;
     const t = setTimeout(() => {
       const d = readDock(monitor);
       if (d.cut === cut) return;
@@ -512,7 +517,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     }, DOCK_SETTLE_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monitor, cut]);
+  }, [monitor, cut, stateLoaded]);
 
   const fit = screenFit(width - dockBox, areaH, r.monitor.width, r.monitor.height, dpr, scale);
   // The video's pixels stay those of the unzoomed view; a zoom scales the picture
