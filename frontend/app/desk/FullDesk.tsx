@@ -775,9 +775,8 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
         keyboard: !mouse,
         keyboardOpen: keysShown,
         keyboardDocked: docked,
-        // A browser that opens windows fits each monitor in the Edit layout dialog
         // A terminal fits by itself
-        fit: r.termContent || (windows && fullscreen !== null) ? undefined : { fits, onFit: () => fitTo(target) },
+        fit: r.termContent ? undefined : { fits, onFit: () => fitTo(target) },
         badge: r.unread,
         onControlPanel: () => setControlPanel((p) => !p),
         onKeyboard: () => !docked && setKeyboard((k) => !k),

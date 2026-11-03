@@ -1,8 +1,8 @@
 // The floating buttons of the screen (`./FullDesk.tsx`), on top in the screen's top-right
 // corner, right to left:
 //
-// - Fit (only where the browser opens no windows of its own: a phone, a tablet): gives the
-//   clone's monitor this window's size; dim when it has it already. A long press opens the Edit
+// - Fit: gives the clone's monitor this window's size (on a desktop, the monitor this window
+//   shows; the others keep theirs); dim when it has it already. A long press opens the Edit
 //   layout dialog.
 // - Fullscreen (where the browser has it): the page's own fullscreen, the only one that hands
 //   the system's chords, such as Super+Space, to the page. A long press opens the Edit layout
@@ -49,8 +49,8 @@ export function FloatingButtons({
   keyboardOpen: boolean;
   /** The keyboard is docked: always shown, under the clone's screen. */
   keyboardDocked: boolean;
-  /** Fit: whether the clone's monitor has this window's size already, and the fit; absent where
-   *  the browser opens windows of its own (the Edit layout dialog fits each there). */
+  /** Fit: whether the clone's monitor has this window's size already, and the fit; absent for a
+   *  terminal (it fits by itself). */
   fit?: { fits: boolean; onFit: () => void };
   /** A count on the control panel button (clones that stopped working unseen). */
   badge?: number;

@@ -51,6 +51,6 @@ export const KeyboardDocked: Story = { args: { keyboardOpen: true, keyboardDocke
  *  them. */
 export const MonitorsToOpen: Story = { args: { monitors: { missing: [1, 2], onOpen: fn() } } };
 
-/** A desktop: no Fit (the Edit layout dialog fits each monitor; a right click on Fullscreen
- *  opens it), and no keyboard in mouse mode. Hover a button for its tooltip. */
-export const Desktop: Story = { args: { fit: undefined, keyboard: false } };
+/** A desktop: Fit fits the monitor this window shows (a right click on it or on Fullscreen opens
+ *  the Edit layout dialog), and no keyboard in mouse mode. Hover a button for its tooltip. */
+export const Desktop: Story = { args: { keyboard: false } };
