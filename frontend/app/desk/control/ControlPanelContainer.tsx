@@ -154,6 +154,8 @@ export function ControlPanelContainer({
     onShowPanel: (tab?: PanelTab) => void;
     /** A dialog is on the page that shows with the control panel closed (or none any more). */
     onDialog?: (open: boolean) => void;
+    /** A clone chosen in a docked column is on the screen now: the keys go to it. */
+    onCloneShown?: () => void;
   };
 }) {
   const [error, setError] = useState<string | null>(null);
@@ -539,12 +541,16 @@ export function ControlPanelContainer({
             mutedClones={board.mutedClones}
             selectedId={state.selected ?? null}
             notesId={notesId}
-            onSelect={selectClone}
+            onSelect={(clone) => {
+              selectClone(clone);
+              if (docked && !clone.archived) dock?.onCloneShown?.();
+            }}
             onRename={(clone, name) => run(renameClone(clone.id, name))}
             onOpen={(clone) => {
               selectClone(clone);
               // An archived one has no screen: its notes stay open
               if (!clone.archived) onTab(null);
+              if (docked && !clone.archived) dock?.onCloneShown?.();
             }}
             onNewClone={(columnId) => open({ kind: "clone", ticketUrl: "", columnId })}
             onMoveToColumn={(clone, columnId) => board.moveClone(clone.id, columnId)}

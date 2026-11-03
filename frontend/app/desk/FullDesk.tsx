@@ -177,6 +177,9 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
    *  panel closed (a pinned column's). */
   const [overDock, setOverDock] = useState(false);
   const [panelDialog, setPanelDialog] = useState(false);
+  /** A clone was just chosen in the dock: its keys go to the clone while the mouse stays over
+   *  the dock, until a press in the dock (or the mouse leaves it). */
+  const [dockKeys, setDockKeys] = useState(false);
   /** The box for the alerts of clones that stopped working (monitor 0's window only). */
   const [alertsAt, setAlertsAt] = useState<HTMLDivElement | null>(null);
   /** The page is fullscreen (its own fullscreen); null where the browser has none. */
@@ -271,7 +274,17 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
   /** The mouse and the keys go to the clone: mouse mode, nothing over the screen. Else the keys
    *  are the page's (`./keys.ts`), and so are a Mac's edit keys while the keyboard is locked. */
   const mouseInput = mouse && !controlPanel && !layoutOpen && !fullHintShown && !(peek && overGroup) && !overDock && !panelDialog;
-  const r = useRemote({ box, overlay, monitor, kind, mouse: mouseInput, onZoom, page: { chord: toggleControlPanel, escape } });
+  const keysInput = mouse && overDock && dockKeys && !controlPanel && !layoutOpen && !fullHintShown && !panelDialog;
+  const r = useRemote({
+    box,
+    overlay,
+    monitor,
+    kind,
+    mouse: mouseInput,
+    keys: keysInput,
+    onZoom,
+    page: { chord: toggleControlPanel, escape },
+  });
 
   // The pinned columns: those of columns there are, in the board's order. The dock holds as
   // many as leave the clone's screen room, and the screen is in the space right of it. The
@@ -304,6 +317,27 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
     window.addEventListener("pointermove", onMove, { capture: true, passive: true });
     return () => window.removeEventListener("pointermove", onMove, { capture: true });
   }, [mouse]);
+
+  // The keys a clone chosen in the dock has are the page's again at a press in the dock (or a
+  // menu of it), and once the mouse leaves the dock (over the screen they are the clone's anyway)
+  useEffect(() => {
+    if (!dockKeys) return;
+    const onDown = (e: globalThis.PointerEvent) => {
+      if (e.target instanceof Element && e.target.closest("[data-dock], [role=menu], [role=listbox]")) setDockKeys(false);
+    };
+    window.addEventListener("pointerdown", onDown, { capture: true });
+    return () => window.removeEventListener("pointerdown", onDown, { capture: true });
+  }, [dockKeys]);
+  useEffect(() => {
+    if (!overDock) setDockKeys(false);
+  }, [overDock]);
+  /** A clone chosen in the dock: the keys go to it at once, the mouse still over the dock. The
+   *  press's focus leaves the dock, so Space or Enter does not press its button again. */
+  const onDockClone = () => {
+    const a = document.activeElement;
+    if (a instanceof HTMLElement && a.closest("[data-dock]")) a.blur();
+    setDockKeys(true);
+  };
 
   // Files dropped on the clone's screen go to the selected clone's home, one after another
   // (`~/viewer/upload.ts`). A drop on the control panel, the right group or a dialog is theirs.
@@ -722,6 +756,7 @@ export function FullDesk({ width, height, safe, monitor, onMonitor }: Props) {
                 setControlPanel(true);
               },
               onDialog: setPanelDialog,
+              onCloneShown: onDockClone,
             }}
           />
         ),

@@ -55,6 +55,7 @@ export function useRemote({
   monitor,
   kind,
   mouse,
+  keys: keysOnly = false,
   onZoom,
   page,
 }: {
@@ -69,6 +70,9 @@ export function useRemote({
   /** Mouse and keyboard mode, with nothing over the screen: the page's mouse and keys go to the
    *  clone. */
   mouse: boolean;
+  /** Mouse mode with the mouse the page's (over the pinned columns): the keys go to the clone
+   *  all the same (a clone just chosen there, to type in at once). */
+  keys?: boolean;
   /** A pinch on the trackpad (the screen's): the view's zoom changes by `factor`. */
   onZoom?: (factor: number) => void;
   /** What the page does with the keys it has (`./keys.ts`): the control panel's chord, Escape. */
@@ -189,12 +193,23 @@ export function useRemote({
     };
   }, []);
 
-  // Mouse mode: the page's mouse and keys go to the clone
+  // Mouse mode: the page's mouse and keys go to the clone (or its keys alone: `keys`)
   useEffect(() => {
     const s = session.current;
     const clip = clipboard.current;
     const k = keys.current;
-    if (!mouse || !s || !clip || !k || !overlay.current) return;
+    if (!s || !clip || !k) return;
+    if (!mouse) {
+      if (!keysOnly) return;
+      // The keys alone: no pointer lock, as the mouse is not the clone's
+      const desktop = () => {
+        const sp = last.current.spec;
+        return sp?.content.mode === "desktop" && sp.monitors.some((m) => m.id === monitor);
+      };
+      k.give({ send: s.send, sendLocks: s.locks, clipboard: clip, mouse: { desktop, pointerLock: () => {} } });
+      return () => k.give(null);
+    }
+    if (!overlay.current) return;
     const input = attachInput({
       canvas: s.canvas,
       overlay: overlay.current,
@@ -214,7 +229,7 @@ export function useRemote({
       pageInput.current = null;
       input.detach();
     };
-  }, [mouse, monitor, sessionNo, overlay]);
+  }, [mouse, keysOnly, monitor, sessionNo, overlay]);
 
   const usage = formatLxcUsage(live.lxcStats);
   /** Clones that stopped working and nobody has looked at yet: a count on the Clones tab. */
