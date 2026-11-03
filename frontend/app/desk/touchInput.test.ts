@@ -267,8 +267,14 @@ describe("TouchInput on the desktop", () => {
     expect(input.state().dictation).toBe("listening");
     dictation.interim("hel");
     expect(input.state().heard).toBe("hel");
-    dictation.final("hé");
+    dictation.edit({ erase: 0, type: "hé" });
     expect(log).toEqual(["'h'↓", "'h'↑", "'é'↓", "'é'↑"]);
+  });
+
+  test("dictation's fix of its text goes back with Backspace, then types", () => {
+    tap(DICTATE);
+    dictation.edit({ erase: 2, type: "y" });
+    expect(log).toEqual(["Backspace↓", "Backspace↑", "Backspace↓", "Backspace↑", "'y'↓", "'y'↑"]);
   });
 
   test("three fingers that swipe send the overview's and the workspaces' keys", () => {
@@ -338,8 +344,14 @@ describe("TouchInput on a terminal", () => {
     tap(TO_CLONE);
     await settle();
     tap(DICTATE);
-    dictation.final("hi");
+    dictation.edit({ erase: 0, type: "hi" });
     expect(log).toEqual(['"ls\\n"', '"hi"']);
+  });
+
+  test("dictation's Backspace is the terminal's", () => {
+    tap(DICTATE);
+    dictation.edit({ erase: 1, type: "y" });
+    expect(log).toEqual([JSON.stringify("\x7f"), '"y"']);
   });
 
   test("swipes and pinches do nothing", () => {

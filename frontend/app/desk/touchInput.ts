@@ -105,7 +105,14 @@ export class TouchInput {
     this.dictate = (o.dictation ?? ((on) => new Dictation(on)))({
       state: (dictation) => this.set({ dictation }),
       interim: (heard) => this.set({ heard }),
-      final: (text) => this.sink.text(text),
+      edit: ({ erase, type }) => {
+        // Backspace as a key, so the terminal gets its byte too
+        for (let i = 0; i < erase; i++) {
+          this.sink.key(CODE_TO_EVDEV.Backspace, true);
+          this.sink.key(CODE_TO_EVDEV.Backspace, false);
+        }
+        if (type) this.sink.text(type);
+      },
     });
     this.snap = {
       mods: new Map(),
