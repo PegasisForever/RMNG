@@ -40,6 +40,8 @@ export interface Session {
 
 export interface SessionEvents {
   onSpec(spec: ViewSpec): void;
+  /** The picture's size, monitor px: at the first frame, and when a frame has another size. */
+  onFrameSize(size: { width: number; height: number }): void;
   onCursor(c: CursorMeta): void;
   onConnected(connected: boolean): void;
   /** The sound's report, once a second while it plays (`~/viewer/sound.ts`). */
@@ -98,6 +100,7 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
     if (m.type === "message") onServerMessage(m.msg);
     else if (m.type === "clipboard") events.onClipboardData(m.data);
     else if (m.type === "connected") events.onConnected(m.connected);
+    else if (m.type === "frameSize") events.onFrameSize({ width: m.width, height: m.height });
   };
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
   post(

@@ -235,4 +235,6 @@ export type WorkerOut =
   | { type: "message"; msg: ToBrowser }
   /** A clipboard reply, put together from its pieces, its bytes transferred. */
   | { type: "clipboard"; data: ClipboardBytes }
-  | { type: "connected"; connected: boolean };
+  | { type: "connected"; connected: boolean }
+  /** The picture's size, monitor px: at the first frame, and when a frame has another size. */
+  | { type: "frameSize"; width: number; height: number };

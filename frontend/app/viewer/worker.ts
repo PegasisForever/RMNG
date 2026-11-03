@@ -336,8 +336,10 @@ function onFrame(frame: VideoFrame) {
   const seq = seqOf(frame.timestamp);
   if (seq !== undefined) done(seq);
   // A new monitor size leaves parts of the old picture in the bars.
+  // The page sizes the canvas to it (it can come before or after the view spec's size).
   if (last?.displayWidth !== frame.displayWidth || last.displayHeight !== frame.displayHeight) {
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    post({ type: "frameSize", width: frame.displayWidth, height: frame.displayHeight });
   }
   last?.close();
   last = frame;

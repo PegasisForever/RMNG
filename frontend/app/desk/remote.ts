@@ -25,6 +25,7 @@ import type { SoundReport } from "~/viewer/protocol";
 import type { TermApi } from "~/viewer/terminal";
 
 import { desktopSink, terminalSink } from "./cloneSink";
+import { withFrameSize } from "./frameSize";
 import { type Keys, type PageKeys, attachKeys } from "./keys";
 import { KeySounds } from "./keySound";
 import { PHONE_SCROLL_SPEED } from "./pointer";
@@ -133,11 +134,24 @@ export function useRemote({
 
   useEffect(() => {
     if (!box.current) return;
+    /** The server's last spec, and the size of the picture this window shows. */
+    let serverSpec: ViewSpec | null = null;
+    let frame: Size | null = null;
+    const showSpec = () => {
+      if (!serverSpec) return;
+      const s = withFrameSize(serverSpec, monitor, frame);
+      setSpec(s);
+      last.current.spec = s;
+      pageInput.current?.input.setLayout(s.content.mode === "desktop" ? s.monitors : []);
+    };
     session.current = openSession(box.current, monitor, {
       onSpec(s) {
-        setSpec(s);
-        last.current.spec = s;
-        pageInput.current?.input.setLayout(s.content.mode === "desktop" ? s.monitors : []);
+        serverSpec = s;
+        showSpec();
+      },
+      onFrameSize(size) {
+        frame = size;
+        showSpec();
       },
       onCursor(c) {
         last.current.cursor = c;
