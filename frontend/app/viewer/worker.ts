@@ -46,9 +46,31 @@ const scope = self as unknown as Worker;
 const post = (m: WorkerOut, transfer: Transferable[] = []) => scope.postMessage(m, transfer);
 
 /** After a socket on which the server spoke closes, connect again at once; after each try that
- *  fails, wait this long, doubled each time up to RECONNECT_MAX_MS. */
-const RECONNECT_FIRST_MS = 400;
-const RECONNECT_MAX_MS = 1000;
+ *  fails, wait this long, doubled each time up to RECONNECT_MAX_MS. Short: while the network
+ *  comes back (a laptop waking up) each try fails fast, and the first after it should come soon. */
+const RECONNECT_FIRST_MS = 250;
+const RECONNECT_MAX_MS = 500;
+/** Liveness. The server answers an `echo` ahead of the video in its queue; the browser sees no
+ *  WebSocket ping. A socket that hears nothing for STALE_MS after an echo is half-open (a
+ *  Wi-Fi drop with no sign of it: no error, nothing arrives), so it is dropped and a new one
+ *  opened at once. STALE_MS leaves room for one large keyframe on a slow link: a message is
+ *  heard only when all of it has arrived. */
+const ECHO_MS = 1000;
+const STALE_MS = 6000;
+/** A socket not open in 3 times the last connect's time (within these limits; the longest
+ *  before the first connect) is given up and a new one opened: one started while the network
+ *  was gone (a laptop waking up, a tunnel such as Tailscale whose packets go nowhere) can wait
+ *  for good, and Chrome starts no other socket to the server while one is connecting. Every
+ *  second try in a row that times out gets twice as long, for a link slower than it was. */
+const CONNECT_MIN_MS = 1500;
+const CONNECT_MAX_MS = 8000;
+/** The liveness check's interval; a tick this much later than due means the machine slept.
+ *  Wall-clock time: on a Mac `performance.now()` stops while the machine sleeps. */
+const LIVE_MS = 250;
+const SLEPT_MS = 3000;
+/** A wake within this long of the socket's start is the same wake (the page's events and the
+ *  clock come together): the socket is not replaced again. */
+const WAKE_AGAIN_MS = 1000;
 /** After this many decoder errors, each within ERROR_WINDOW_MS of the one before, use Chrome's
  *  software decoder for the rest of the page's life. */
 const SOFTWARE_AFTER_ERRORS = 3;
@@ -78,8 +100,19 @@ let url = "";
 let monitor = 0;
 let ctx: OffscreenCanvasRenderingContext2D;
 let ws: WebSocket | null = null;
-/** The wait before the next connect, when the last try failed. */
+/** The wait before the next connect, when the last try failed, and its timer. */
 let reconnectMs = 0;
+let retry: ReturnType<typeof setTimeout> | undefined;
+/** Liveness (wall-clock ms): when the socket was started, when it last heard anything, the
+ *  time by which it must hear something (Infinity: nothing asked), the last echo sent, how long
+ *  the last connect took (null: none yet), and the connects in a row that timed out. */
+let startedAt = 0;
+let heardAt = 0;
+let deadline = Infinity;
+let echoAt = 0;
+let echoId = 0;
+let connectTook: number | null = null;
+let timeouts = 0;
 /** The last frame drawn, kept to draw again when the canvas changes size. */
 let last: VideoFrame | null = null;
 
@@ -429,15 +462,106 @@ function setSound(on: boolean, port?: MessagePort) {
   send({ t: "sound", on });
 }
 
+/** Send an echo; something must be heard within `within` ms (a sooner limit stays). */
+function probe(within: number) {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  const now = Date.now();
+  echoAt = now;
+  echoId = (echoId + 1) >>> 0;
+  deadline = Math.min(deadline, now + within);
+  ws.send(JSON.stringify({ t: "echo", id: echoId } satisfies FromBrowser));
+}
+
+/** Give up the socket at once, without waiting for its close (a half-open socket's close can
+ *  take minutes), and open a new one now. The server replaces the old socket of this page with
+ *  the new one (`tab`). */
+function reopen() {
+  const old = ws;
+  if (old) {
+    ws = null;
+    const wasOpen = old.readyState === WebSocket.OPEN;
+    old.onopen = old.onmessage = old.onclose = old.onerror = null;
+    try {
+      old.close();
+    } catch {
+      // closing a socket that never opened can throw in some browsers
+    }
+    if (wasOpen) post({ type: "connected", connected: false });
+  }
+  reconnectMs = 0;
+  connect();
+}
+
+/** How long the socket now connecting may take. */
+function connectLimit(): number {
+  const base =
+    connectTook === null ? CONNECT_MAX_MS : Math.min(Math.max(connectTook * 3, CONNECT_MIN_MS), CONNECT_MAX_MS);
+  return timeouts % 2 ? Math.min(base * 2, CONNECT_MAX_MS) : base;
+}
+
+/** The page may have slept or been off the network (`wake` from the page: the network came
+ *  back, the page was thawed or restored; or this worker's clock jumped: the machine slept).
+ *  The socket from before it may be dead with no sign of it, and finding out costs seconds, so
+ *  it is replaced at once: a new socket costs one keyframe. One waiting to retry tries now. */
+function wake() {
+  if (!ws) {
+    if (retry !== undefined) {
+      reconnectMs = 0;
+      connect();
+    }
+    return;
+  }
+  if (Date.now() - startedAt < WAKE_AGAIN_MS) return;
+  timeouts = 0;
+  reopen();
+}
+
+let tickAt = 0;
+/** Each LIVE_MS: an echo each ECHO_MS, a socket that went quiet or does not open replaced. */
+function watch() {
+  const now = Date.now();
+  const late = tickAt ? now - tickAt - LIVE_MS : 0;
+  // The clock was set back: the times kept are in the future, so start them again
+  if (now < tickAt) {
+    heardAt = startedAt = echoAt = now;
+    deadline = Infinity;
+  }
+  tickAt = now;
+  if (late > SLEPT_MS) wake();
+  if (!ws) return;
+  if (ws.readyState === WebSocket.CONNECTING) {
+    if (now - startedAt > connectLimit()) {
+      timeouts++;
+      reopen();
+    }
+    return;
+  }
+  if (ws.readyState !== WebSocket.OPEN) return;
+  if (now > deadline || (deadline !== Infinity && deadline - now > STALE_MS)) {
+    console.warn(`viewer socket silent for ${now - heardAt} ms; reconnecting`);
+    return reopen();
+  }
+  if (now - echoAt >= ECHO_MS) probe(STALE_MS);
+}
+
 function connect() {
+  clearTimeout(retry);
+  retry = undefined;
+  startedAt = heardAt = Date.now();
+  deadline = Infinity;
+  echoAt = 0;
   clipIn = upAcked = 0;
   upOut = [];
   upRate = new RateMeter();
   upFloor = Infinity;
   newCopy();
-  ws = new WebSocket(url);
-  ws.binaryType = "arraybuffer";
-  ws.onopen = () => {
+  const sock = new WebSocket(url);
+  ws = sock;
+  sock.binaryType = "arraybuffer";
+  sock.onopen = () => {
+    heardAt = Date.now();
+    connectTook = heardAt - startedAt;
+    timeouts = 0;
     // No keyframe request: joining primes this monitor with a fresh keyframe. Frames still in
     // the old decoder belong to the old socket, and so does what it decoded until now.
     resetDecoder();
@@ -450,9 +574,12 @@ function connect() {
     for (const h of freshInput(held, now)) send({ t: "input", ...h.msg });
     held = [];
   };
-  ws.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
+  sock.onmessage = (e: MessageEvent<ArrayBuffer | string>) => {
+    heardAt = Date.now();
+    deadline = Infinity;
     if (typeof e.data === "string") {
       const msg = JSON.parse(e.data) as ToBrowser;
+      if (msg.t === "echo") return;
       // The server's first message: it is up, so a later close reconnects at once. (Reset on
       // open, a server that accepts and closes at once would be tried in a tight loop.)
       if (msg.t === "version") reconnectMs = 0;
@@ -470,10 +597,11 @@ function connect() {
       onClipboardPiece(e.data);
     }
   };
-  ws.onclose = () => {
+  sock.onclose = () => {
+    if (ws !== sock) return;
     ws = null;
     post({ type: "connected", connected: false });
-    setTimeout(connect, reconnectMs);
+    retry = setTimeout(connect, reconnectMs);
     reconnectMs = Math.min(reconnectMs * 2 || RECONNECT_FIRST_MS, RECONNECT_MAX_MS);
   };
 }
@@ -492,6 +620,10 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
     setSound(m.on, m.port);
     return;
   }
+  if (m.type === "wake") {
+    wake();
+    return;
+  }
   if (m.type === "resize") {
     // Setting the size clears the canvas.
     ctx.canvas.width = m.width;
@@ -504,10 +636,13 @@ scope.onmessage = (e: MessageEvent<WorkerIn>) => {
   // window with the new one at once, which may still be open on a network that is gone.
   url = `${m.url}&tab=${crypto.randomUUID()}`;
   ctx = m.canvas.getContext("2d")!;
+  // A GPU reset (it can come with a wake) clears the canvas: draw the last frame again
+  m.canvas.addEventListener("contextrestored", draw);
   resetDecoder();
   connect();
   setInterval(() => {
     ack();
     checkHeld();
   }, ACK_MS);
+  setInterval(watch, LIVE_MS);
 };

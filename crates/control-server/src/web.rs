@@ -266,7 +266,7 @@ fn small_send_queue(listener: &impl std::os::fd::AsRawFd) {
 ///     `addEventListener("stats")`: latest snapshot on connect, then one per poll tick;
 ///   - CT-wide CPU/RAM/disk as a named `lxcStats` event;
 ///   - the server's build id as a named `version` event, once per connection;
-///   - a named `ping` event every 15s (an observable heartbeat the client's reconnect
+///   - a named `ping` event every 5s (an observable heartbeat the client's reconnect
 ///     watchdog measures).
 ///
 /// Stats and LXC stats ride separate SSE-only buses ([`crate::monitor::StatsBus`],
@@ -334,14 +334,18 @@ async fn events(State(app): State<App>) -> Sse<impl Stream<Item = Result<Event, 
     )
 }
 
-/// Observable heartbeat: a named `ping` event every 15s. Unlike the low-level keep-alive
+/// Observable heartbeat: a named `ping` event every [`SSE_PING_EVERY`]. Unlike the low-level keep-alive
 /// *comment* (which `EventSource` swallows silently), the client can see this — so its
 /// watchdog (`frontend/app/lib/liveEvents.ts`) can tell a wedged/half-open socket (pings stop
 /// arriving → reconnect) apart from a merely idle stream (pings keep arriving → stay put).
-/// First tick at 15s; each stream's initial snapshot already proves liveness on connect.
+/// First tick after one interval; each stream's initial snapshot already proves liveness on
+/// connect. Short, so a page notices a dead connection (a sleep, a Wi-Fi drop) within seconds:
+/// the client's `PING_MS` must match.
+const SSE_PING_EVERY: Duration = Duration::from_secs(5);
+
 fn sse_heartbeat() -> impl Stream<Item = Result<Event, Infallible>> {
     futures::stream::unfold((), |()| async {
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        tokio::time::sleep(SSE_PING_EVERY).await;
         Some((
             Ok::<Event, Infallible>(Event::default().event("ping").data("{}")),
             (),

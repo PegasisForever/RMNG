@@ -81,8 +81,11 @@ are a plain string or `{error}`.
 ### `GET /events`
 
 Subscribe to all control-state changes. Emits a full `ControlState` JSON snapshot
-immediately, then a fresh snapshot on every `store.mutate()`; a `ping` comment every 20 s
-keeps the connection alive. This is what the web app subscribes to.
+immediately, then a fresh snapshot on every `store.mutate()`; a named `ping` event every 5 s
+lets the page see that the connection is alive (with nothing for 12 s it opens a new one; at a
+sign of a wake, such as the laptop waking up or the network coming back, it opens a new one at
+once), and a `ping` comment every 20 s keeps proxies from closing it. This is what
+the web app subscribes to.
 
 One named `version` event rides every connection, once, right after the snapshot:
 
@@ -1099,7 +1102,7 @@ elsewhere, such as the assistant's own web page, show up too. Busy follows the a
 | --- | --- | --- | --- |
 | `GET /api/chat/:id` | — | `ChatSnapshot` | `{busy, activity, messages[], scheduled[]}` snapshot |
 | `POST /api/chat/:id` | `{text}` | `202` / `409` | Send to the clone's chat (creating it on the first message). While the assistant works, the message steers it: pi-web queues it into the run, and the agent reads it at its next step. `409` when archived, when no assistant / server address is set, or for a second message while the chat's first one is still being created. A send that fails to reach the assistant leaves a `⚠` notice with the text |
-| `GET /api/chat/:id/events` | — | SSE `ChatSnapshot` | Snapshot + a fresh one on each change; a named `ping` event every 15 s (the page's reconnect watchdog), plus a 20 s keep-alive comment |
+| `GET /api/chat/:id/events` | — | SSE `ChatSnapshot` | Snapshot + a fresh one on each change; a named `ping` event every 5 s (the page's reconnect watchdog), plus a 20 s keep-alive comment |
 | `POST /api/chat/:id/abort` | — | `204` | Best-effort abort of the assistant's current run |
 
 `ChatMessage` = `{ id, role (user|assistant), text, ts }`. `messages` holds the user messages and

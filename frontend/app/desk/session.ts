@@ -110,6 +110,15 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
     [offscreen],
   );
   let sound: ReturnType<typeof attachSound> | null = null;
+  // The network came back, or the browser thawed the page or restored it from its back-forward
+  // cache: the worker replaces its socket now. (A sleep the worker sees on its own clock; it
+  // keeps running while the page is hidden.)
+  const wake = (e: Event) => {
+    if (e.type !== "pageshow" || (e as PageTransitionEvent).persisted) post({ type: "wake" });
+  };
+  window.addEventListener("online", wake);
+  window.addEventListener("pageshow", wake);
+  document.addEventListener("resume", wake);
 
   return {
     canvas,
@@ -130,6 +139,9 @@ export function openSession(box: HTMLElement, monitor: number, events: SessionEv
       }
     },
     detach() {
+      window.removeEventListener("online", wake);
+      window.removeEventListener("pageshow", wake);
+      document.removeEventListener("resume", wake);
       sound?.detach();
       worker.terminate();
       canvas.remove();

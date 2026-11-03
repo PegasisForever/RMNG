@@ -203,7 +203,9 @@ export type WorkerIn =
   | { type: "send"; msg: FromBrowser }
   | { type: "clipboard"; data: ClipboardBytes }
   | { type: "resize"; width: number; height: number }
-  | { type: "sound"; on: boolean; port?: MessagePort };
+  | { type: "sound"; on: boolean; port?: MessagePort }
+  /** The network came back, or the page was thawed or restored: replace the socket now. */
+  | { type: "wake" };
 
 /** Worker → sound worklet: one decoded packet (`pcm`, its channels transferred), the quiet
  *  marker, or `reset`: a new stream, or the sound was off, so what waits is stale. */

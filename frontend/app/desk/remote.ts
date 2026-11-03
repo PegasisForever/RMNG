@@ -38,6 +38,10 @@ const START_MONITOR = { width: 1002, height: 808 };
  *  so they do not pull the drawn cursor back. */
 const OWN_MOVES_MS = 400;
 
+/** A socket down for less than this (a new one after a wake) shows nothing: the last picture
+ *  stays, and input waits for the new socket. */
+const SHOW_DOWN_MS = 1000;
+
 /** The page's own time and waits, for the touch input. */
 const PAGE_CLOCK: Clock = {
   now: () => performance.now(),
@@ -80,7 +84,9 @@ export function useRemote({
 }) {
   const session = useRef<Session | null>(null);
   const [spec, setSpec] = useState<ViewSpec | null>(null);
+  /** Whether the screen shows as connected: false only once the socket was down SHOW_DOWN_MS. */
   const [connected, setConnected] = useState(false);
+  const downTimer = useRef<number | undefined>(undefined);
   const [shape, setShape] = useState<CursorShape | null>(null);
   const [hidden, setHidden] = useState(false);
   const [pos, setPos] = useState({ x: START_MONITOR.width / 2, y: START_MONITOR.height / 2 });
@@ -146,9 +152,11 @@ export function useRemote({
         setPos({ x: c.x, y: c.y });
       },
       onConnected(c) {
-        setConnected(c);
         last.current.connected = c;
         clipboard.current?.setConnected(c);
+        window.clearTimeout(downTimer.current);
+        if (c) setConnected(true);
+        else downTimer.current = window.setTimeout(() => setConnected(false), SHOW_DOWN_MS);
       },
       onScroll(mode, speed) {
         scroll.current = { mode, speed };
@@ -161,6 +169,7 @@ export function useRemote({
     });
     setSessionNo((n) => n + 1);
     return () => {
+      window.clearTimeout(downTimer.current);
       session.current?.detach();
       session.current = null;
       last.current = { spec: null, cursor: null, connected: false };

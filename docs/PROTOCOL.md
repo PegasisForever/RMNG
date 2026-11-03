@@ -135,7 +135,7 @@ keeps only the pieces of the replies it asked for since then.
 | `term_new_session` | — | Make a new tmux session (the "+" tab). |
 | `request_keyframe` | `RequestKeyframe {monitor_id}` | Re-encode the monitor's last frame as a keyframe: after a decode error. Ignored for a monitor other than the socket's own (`?monitor=`). |
 | `ack` | `{seq, held_ms, clip, decoding}` (u32 each) | The newest video frame the decoder output (`seq` from its header; a frame dropped while the window waits for a keyframe counts when it arrives), how long, in ms, the window held that number before this message, how many clipboard pieces arrived on this socket (`clip`, wraps; 0 when left out), and how many frames wait in the window's decoder (`decoding`, its `decodeQueueSize`; 0 when left out). Sent every 50 ms when `seq` changed, at once when a clipboard piece arrives, and once a second otherwise. Before the first frame (a terminal, or no video yet) `seq` is 0, which the server ignores. Below. |
-| `echo` | `{id}` (u32) | The server answers with `echo` and the same `id`, ahead of the video that waits in this socket's queue. The time to the answer is the round trip plus the wait in the kernel send buffer and in any proxy on the way. `rmng-fps` uses it; the viewer does not send it. |
+| `echo` | `{id}` (u32) | The server answers with `echo` and the same `id`, ahead of the video that waits in this socket's queue. The time to the answer is the round trip plus the wait in the kernel send buffer and in any proxy on the way. `rmng-fps` uses it, and the web app sends one each second to see that the socket is alive (see Reconnect). |
 | `sound` | `{on}` (bool) | Send the selected clone's sound to this socket (kind `3`), or stop. A socket gets none until it asks, and one that asks takes the sound from every other; the window asks again on each new socket. |
 
 **Connect.** The server queues the view spec, the last cursor of this monitor and the
@@ -249,10 +249,30 @@ closed. One WebSocket message may be up to 32 MiB; a clipboard reply is at most 
 
 **Reconnect.** When a socket on which the window got `version` closes, the window connects
 again at once; after each try that fails (also one the server accepts and closes at once) it
-waits 400 ms, doubled each time up to 1 s. The new socket is primed
+waits 250 ms, then 500 ms. The new socket is primed
 again. Input made while the socket is down waits in the window and goes when the new socket
 opens: pointer moves in a row become the newest one, relative moves in a row add up, and
 input more than 2 s old is dropped, except key and button releases.
+
+After a sleep or a network drop a socket can stay open in the browser and get nothing, with no
+error (half-open). So:
+
+- At a sign of a wake (the browser's `online`, a page thawed or restored from the back-forward
+  cache, or the window's clock jumping more than 3 s: the machine slept) the window drops the
+  socket without waiting for its close and connects again at once (the server replaces the old
+  socket of the page, `tab`). That costs one keyframe. Signs that come within 1 s of the new
+  socket's start do not replace it again.
+- With no sign, the window sends an `echo` each second. When it gets nothing at all (video,
+  answers, anything) for 6 s after an `echo`, it drops the socket and connects again at once.
+  The 6 s leave room for one large keyframe on a slow link: a message counts only when all of
+  it has arrived.
+- A socket that does not open in 3 times the last connect's time (1.5 s at least, 8 s at most,
+  and 8 s before the first connect) is dropped and a new one opened, as one started while the
+  network was gone (or into a tunnel whose packets go nowhere) can wait for good, and Chrome
+  starts no other socket to the server while one connects. Every second try in a row that
+  times out gets twice as long.
+- A failed try is followed by the next after 250 ms, then 500 ms.
+- The page shows "Connecting…" only when the socket is down for more than 1 s.
 
 **Held input.** When the selection moves to another clone, or the socket closes, the server
 releases the keys and buttons this socket still holds down in the old clone.

@@ -35,7 +35,8 @@ app's: `/?clone=…`, `/?monitor=1`.
   input, the clipboard, and file upload. The protocol is in `../docs/PROTOCOL.md`.
 - `app/components/`: dialogs (New clone, tickets, accounts, layout, port forward), the Settings
   panes, chat and notes.
-- `app/lib/`: the live state over SSE (`useLiveState.ts`: `/events` → `ControlState`), the
+- `app/lib/`: the live state over SSE (`useLiveState.ts`: `/events` → `ControlState`; the stream
+  opens again by itself after a sleep or a network drop, `liveEvents.ts` and `wake.ts`), the
   API calls (`api.ts`), the monitor layouts (`clientLayout.ts`), and the generated wire types.
 - `public/`: the shell, the web app manifest and the service worker.
 
