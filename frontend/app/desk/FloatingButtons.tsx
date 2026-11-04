@@ -1,12 +1,12 @@
 // The floating buttons of the screen (`./FullDesk.tsx`), on top in the screen's top-right
 // corner, right to left:
 //
-// - Fit: gives the clone's monitor this window's size (on a desktop, the monitor this window
-//   shows; the others keep theirs); dim when it has it already. A long press opens the Edit
-//   layout dialog.
 // - Fullscreen (where the browser has it): the page's own fullscreen, the only one that hands
 //   the system's chords, such as Super+Space, to the page. A long press opens the Edit layout
 //   dialog.
+// - Fit: gives the clone's monitor this window's size (on a desktop, the monitor this window
+//   shows; the others keep theirs); dim when it has it already. A long press opens the Edit
+//   layout dialog.
 // - Keyboard (touch mode only): a tap shows or hides the floating keyboard; a long press docks
 //   it (always shown) or undocks it; a bar under its icon while docked.
 // - Control panel: the control panel (usage, tickets, clones, notes,
@@ -104,16 +104,6 @@ export function FloatingButtons({
           {keyboardDocked ? <span aria-hidden className="absolute bottom-2 h-0.5 w-5 rounded-full bg-current" /> : null}
         </Round>
       ) : null}
-      {fullscreen ? (
-        <Round
-          label={fullscreen.on ? "Leave fullscreen" : "Fullscreen"}
-          hold="edit the layout"
-          onClick={fullscreen.toggle}
-          onLongPress={onLayout}
-        >
-          {fullscreen.on ? <Minimize aria-hidden className="size-5" /> : <Maximize aria-hidden className="size-5" />}
-        </Round>
-      ) : null}
       {fit ? (
         <Round
           label={fit.fits ? "The clone fits this window" : "Fit the clone to this window"}
@@ -123,6 +113,16 @@ export function FloatingButtons({
           onLongPress={onLayout}
         >
           <Expand aria-hidden className="size-5" />
+        </Round>
+      ) : null}
+      {fullscreen ? (
+        <Round
+          label={fullscreen.on ? "Leave fullscreen" : "Fullscreen"}
+          hold="edit the layout"
+          onClick={fullscreen.toggle}
+          onLongPress={onLayout}
+        >
+          {fullscreen.on ? <Minimize aria-hidden className="size-5" /> : <Maximize aria-hidden className="size-5" />}
         </Round>
       ) : null}
     </div>

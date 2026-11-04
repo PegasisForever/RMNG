@@ -102,7 +102,7 @@ type Story = StoryObj<typeof meta>;
 
 // ---- touch mode, on a phone ----
 
-/** The screen and the three buttons (Control panel, Keyboard, Fullscreen, Fit). */
+/** The screen and the three buttons (Control panel, Keyboard, Fit, Fullscreen). */
 export const Phone: Story = {};
 
 /** The keyboard floats over the bottom of the screen; the screen moved up to keep the cursor
