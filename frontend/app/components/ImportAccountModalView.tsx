@@ -5,8 +5,8 @@
 // nowhere else it exists, because both providers pin their redirect to the operator's own
 // machine and neither accepts another. No clone, no tunnel, no inbound path to the server.
 //
-// The dialog is the two things the operator does: a button that opens the sign-in page, and
-// a box for the address the browser ends on, under one line that says so. A new account also
+// The dialog is the two things the operator does: a button that opens the sign-in page (with
+// one beside it that copies its address, for a browser other than this one), and a box for the address the browser ends on, under one line that says so. A new account also
 // picks its provider and its pool: an account in no pool is one the rotator will never hand to
 // a clone, which is a strange thing to leave as the default outcome of adding an account. A
 // sign-in again has both from the account it repairs (or replaces), so it has neither.
@@ -20,8 +20,8 @@
 //
 // It renders from props alone. Every server call lives in ImportAccountModalContainer, and
 // every state the operator can reach here is a prop, so all of them are stories.
-import { AlertTriangle, Check, ExternalLink, Loader2 } from "lucide-react";
-import type { ReactNode } from "react";
+import { AlertTriangle, Check, Copy, ExternalLink, Loader2 } from "lucide-react";
+import { type ReactNode, useState } from "react";
 
 import { DropdownSelect } from "~/components/DropdownSelect";
 import { ModalShell } from "~/components/ModalShell";
@@ -74,6 +74,7 @@ export function ImportAccountModalView({
   open = true,
   onClose,
   onImport,
+  onCopy,
 }: {
   provider: "claude" | "codex";
   /** The URL to open, once the server has answered. Null while it is being asked for. */
@@ -103,6 +104,8 @@ export function ImportAccountModalView({
    *  frames have already played. */
   onClose: () => void;
   onImport: () => void;
+  /** Put the sign-in address on the clipboard; answers whether it landed there. */
+  onCopy: (text: string) => Promise<boolean>;
 }) {
   const canImport = !importing && pasted.trim().length > 0;
   const site = provider === "codex" ? "ChatGPT" : "Claude";
@@ -144,18 +147,21 @@ export function ImportAccountModalView({
                 </div>
               )}
 
-              <a
-                href={loginUrl ?? undefined}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-disabled={!loginUrl}
-                className={`mt-3 flex w-full items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium ${LOOK.open} ${
-                  loginUrl ? "" : "pointer-events-none opacity-50"
-                }`}
-              >
-                {loginUrl ? `Open the ${site} sign-in page` : "Preparing the sign-in…"}
-                {loginUrl ? <ExternalLink aria-hidden className="size-3.5" /> : null}
-              </a>
+              <div className="mt-3 flex gap-1.5">
+                <a
+                  href={loginUrl ?? undefined}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-disabled={!loginUrl}
+                  className={`flex min-w-0 flex-1 items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium ${LOOK.open} ${
+                    loginUrl ? "" : "pointer-events-none opacity-50"
+                  }`}
+                >
+                  {loginUrl ? `Open the ${site} sign-in page` : "Preparing the sign-in…"}
+                  {loginUrl ? <ExternalLink aria-hidden className="size-3.5" /> : null}
+                </a>
+                <CopyLink url={loginUrl} onCopy={onCopy} />
+              </div>
               <input
                 value={pasted}
                 onChange={(e) => onPastedChange(e.target.value)}
@@ -203,6 +209,31 @@ export function ImportAccountModalView({
         </>
       )}
     </ModalShell>
+  );
+}
+
+/** Copy the sign-in address, for a browser other than this one. A tick for a moment once the
+ *  write landed; the tick is this button's own state. */
+function CopyLink({ url, onCopy }: { url: string | null; onCopy: (text: string) => Promise<boolean> }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={!url}
+      onClick={() => {
+        if (!url) return;
+        void onCopy(url).then((ok) => {
+          if (!ok) return;
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+      data-tip={url ? "Copy the link" : undefined}
+      aria-label="Copy the sign-in link"
+      className={`flex shrink-0 items-center justify-center px-3 ${LOOK.open} disabled:pointer-events-none disabled:opacity-50`}
+    >
+      {copied ? <Check aria-hidden className={`size-3.5 ${LOOK.ok}`} /> : <Copy aria-hidden className="size-3.5" />}
+    </button>
   );
 }
 

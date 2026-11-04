@@ -40,6 +40,7 @@ const meta = {
     onGroupChange: fn(),
     onClose: fn(),
     onImport: fn(),
+    onCopy: fn(async () => true),
   },
 } satisfies Meta<typeof ImportAccountModalView>;
 

@@ -19,6 +19,7 @@ import { useEffect, useState } from "react";
 
 import { ImportAccountModalView } from "~/components/ImportAccountModalView";
 import { beginLogin, completeLogin } from "~/lib/api";
+import { copyText } from "~/lib/clipboard";
 import { checkSignIn } from "~/lib/signInCheck";
 import type { ClaudeUsage } from "~/lib/types";
 
@@ -127,6 +128,7 @@ export function ImportAccountModalContainer({
       // Closed before the end, the account is signed in all the same: the page refreshes too
       onClose={() => (landed ? onImported(landed.email) : onClose())}
       onImport={submit}
+      onCopy={copyText}
     />
   );
 }
