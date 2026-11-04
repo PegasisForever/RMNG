@@ -121,6 +121,7 @@ default `/events` frame, without opening an SSE stream. For one-off readers (the
 | `operations` | `Operation[]` | in-flight + recent clone/delete/archive/unarchive/pull/commit/update jobs |
 | `claudeAccounts` | `ClaudeUsage[]` | every imported account's token-free usage view — **both** providers in one flat list, tagged by `provider` |
 | `codexResetMarks` | `CodexResetMark[]` | which Codex accounts have already spent a rate-limit reset this 7d window (cooldown bookkeeping) |
+| `claudeResetMarks` | `CodexResetMark[]` | the same for Claude's auto-used usage resets |
 | `cloneTokens` | `{ [cloneId]: CloneTokens }` | all-time per-clone token totals + the transient Fable flag — see [below](#clonetokens) |
 
 Despite its name `claudeAccounts` is provider-agnostic: the Claude and Codex pollers each
@@ -129,7 +130,8 @@ replace only their own rows (`clone_ops::replace_provider_views`), so a reader f
 existed has none, which means Claude. `ClaudeUsage` carries no tokens, only `email`, `active`,
 `assignable` (whether the account can run a clone right now, see
 [Accounts](#accounts-claude--codex)), the `fiveHour`/`sevenDay` windows, Claude's model-scoped
-`fable` window, `spend`, and Codex's `resetCredits`.
+`fable` window, `spend`, and `resetCredits`: the usage resets left (Codex's reset credits, or
+the resets on a Claude account's reset grants, with one line per grant in `resetDetail`).
 
 `Clone` carries its `id` and `host`, the `managed` flag
 (true = a Docker container named after the clone id backs it; false = a plain unmanaged

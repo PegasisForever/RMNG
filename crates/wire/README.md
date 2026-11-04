@@ -34,7 +34,7 @@ The other transport types (socket, holder) are serde-only.
 ControlState { selected: Option<String>, layout: Option<ClientLayout>,
                hosts: Vec<RmngClone>, board_columns, ticket_order, muted_clones,
                operations: Vec<Operation>, groups, claude_accounts: Vec<ClaudeUsage>,
-               codex_reset_marks, clone_tokens }
+               codex_reset_marks, claude_reset_marks, clone_tokens }
 RmngClone { id, host, managed, archived, source?, claude_account_email?,
        claude_group?, claude_selection?, codex_account_email?, codex_group?,
        codex_selection?, group?, linear_*?, preset_name?, display_name?,
@@ -44,13 +44,14 @@ Operation { id, kind: Clone|Delete|Archive|Unarchive|Pull|Prebuild|Update,
             target, source?, status, step, pct,
             message, log: Vec<String>, container?, started_at, finished_at? }
 ClaudeUsage { id, email, provider, active, assignable?, error?, stale?,
-              last_updated, five_hour?, seven_day?, spend? }
+              last_updated, five_hour?, seven_day?, spend?, reset_credits?,
+              reset_detail? }
 MonitorSpec { width, height, x, y, primary }
 
 # configuration (edited via the Settings UI, not hand-edited files)
 AppConfig { docker{hostname_prefix, clone_cpus, clone_memory_mb, homes_parent},
             presets: [{name, labels: [label], linear_key, vars: [{key, value}]}],
-            claude{poll, pinnedEmail, swap...},
+            claude{autoReset},
             clone_groups: [{name, accounts: [email]}],
             codex{autoReset},
             codex_groups: [{name, accounts: [email]}],
@@ -68,6 +69,7 @@ AppConfig { docker{hostname_prefix, clone_cpus, clone_memory_mb, homes_parent},
 # 0600 `codex-accounts.json`; the server refreshes it and pushes a short-lived
 # auth.json into assigned clones' ~/.codex/auth.json (refresh_token emptied; see control-server).
 CodexConfig { autoReset: bool }
+ClaudeConfig { autoReset: bool }
 AppConfigRedacted   # GET /api/config shape: same fields, preset linear keys included
 SetupEnv / EnvCheckRow   # GET /api/setup/env: the wizard's environment preflight rows
 # The only credential is the preset linear key (the Docker backend has none — local unix

@@ -19,7 +19,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       cloneMemoryMb: 32768,
       homesParent: "tank/rmng/homes",
     },
-    claude: {},
+    claude: { autoReset: false },
     codex: { autoReset: false },
     groups: [],
     presets: [],

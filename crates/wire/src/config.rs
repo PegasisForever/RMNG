@@ -377,11 +377,17 @@ pub fn dockerfile_tag(dockerfile: &str) -> String {
     format!("rmng-p-{:016x}", fnv1a64(dockerfile.trim_end().as_bytes()))
 }
 
-/// No knobs left (usage poll interval + pinned email are hardcoded/gone). The struct
-/// stays so the `claude` key in old config files keeps parsing.
+/// The Claude side's one knob. An old config file's empty `claude` object still parses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
-pub struct ClaudeConfig {}
+pub struct ClaudeConfig {
+    /// When true, auto-use one Claude usage reset (a grant that clears the weekly limit)
+    /// once every managed Claude account is over the weekly cap with no 7d reset within
+    /// 24h: the same gate as [`CodexConfig::auto_reset`] (see `claude_reset.rs`).
+    #[serde(default)]
+    pub auto_reset: bool,
+}
 
 /// Which backend settles the clones the file checks cannot.
 ///

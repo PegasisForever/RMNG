@@ -12,6 +12,7 @@ mod buildinfra;
 mod cgroup;
 mod chat;
 mod claude;
+mod claude_reset;
 mod clone_home;
 mod clone_ops;
 mod clone_plan;

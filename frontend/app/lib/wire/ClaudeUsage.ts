@@ -29,7 +29,13 @@ assignable: boolean | null, error: string | null, stale: boolean | null, lastUpd
  */
 fable: ClaudeUsageWindow | null, spend: ClaudeSpend | null, 
 /**
- * Codex only: banked rate-limit reset credits ("usage resets") left on the
- * account. `None` for Claude (no such concept) and when usage is unavailable.
+ * Usage resets left on the account. Codex: its banked rate-limit reset credits.
+ * Claude: the resets left on its reset grants, summed (`None` while it holds no
+ * grant). `None` when usage is unavailable.
  */
-resetCredits: bigint | null, };
+resetCredits: bigint | null, 
+/**
+ * Claude only: one line per reset grant (what it clears, how many are left, until when,
+ * and why it cannot be used now), for the count's tooltip. `None` with no grant.
+ */
+resetDetail: string | null, };

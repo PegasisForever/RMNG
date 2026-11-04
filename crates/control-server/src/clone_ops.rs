@@ -370,6 +370,7 @@ mod tests {
             fable: None,
             spend: None,
             reset_credits: None,
+            reset_detail: None,
         }
     }
 
@@ -490,6 +491,7 @@ mod tests {
                 fable: None,
                 spend: None,
                 reset_credits: None,
+                reset_detail: None,
             }
         }
         let app = crate::app::App::test_app();
@@ -568,6 +570,7 @@ mod tests {
                 fable: None,
                 spend: None,
                 reset_credits: None,
+                reset_detail: None,
             })
             .collect();
 

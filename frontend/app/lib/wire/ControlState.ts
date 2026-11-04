@@ -70,6 +70,10 @@ claudeAccounts: Array<ClaudeUsage>,
  */
 codexResetMarks: Array<CodexResetMark>, 
 /**
+ * The same for Claude's auto-reset: one mark per account and weekly window.
+ */
+claudeResetMarks: Array<CodexResetMark>, 
+/**
  * All-time per-clone token totals, keyed by clone id. Unlike the volatile CPU/RAM
  * stats map (which rides its own SSE bus precisely because it changes every tick),
  * this is persisted: it is cumulative, and the logs it is derived from get pruned.

@@ -58,6 +58,7 @@ export interface SettingsDraft {
   cloneMemoryMb: number;
   /** The single pool list: each pool may mix Claude and Codex accounts. */
   groups: GroupDraft[];
+  claude: { autoReset: boolean };
   codex: { autoReset: boolean };
   agentPlaybook: string;
   globalPrompt: string;
@@ -119,6 +120,10 @@ export function settingsDraftFrom(c: AppConfigRedacted): SettingsDraft {
       name: g.name,
       accounts: [...g.accounts],
     })),
+    claude: {
+      // An old server sends `claude: {}`.
+      autoReset: c.claude?.autoReset ?? false,
+    },
     codex: {
       autoReset: c.codex.autoReset,
     },
@@ -193,6 +198,7 @@ export function settingsPatch(draft: SettingsDraft): Record<string, unknown> {
       cloneMemoryMb: draft.cloneMemoryMb,
     },
     groups,
+    claude: { autoReset: draft.claude.autoReset },
     codex: { autoReset: draft.codex.autoReset },
     ssh: draft.ssh,
     agentPlaybook: draft.agentPlaybook,

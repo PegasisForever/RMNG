@@ -16,7 +16,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
       cloneMemoryMb: 32768,
       homesParent: "tank/rmng/homes",
     },
-    claude: {},
+    claude: { autoReset: false },
     codex: { autoReset: false },
     groups: [{ name: "pooled", accounts: [{ email: "alex@example.com" }] }],
     presets: [
@@ -47,6 +47,7 @@ function config(overrides: Partial<AppConfigRedacted> = {}): AppConfigRedacted {
 /** The patch, narrowed to the shape the tests read. */
 type Patch = {
   docker: { hostnamePrefix: string };
+  claude: { autoReset: boolean };
   codex: { autoReset: boolean };
   groups: { name: string; accounts: GroupMember[] }[];
   presets: {
@@ -275,4 +276,13 @@ test("the assistant addresses round-trip, trimmed", () => {
   expect(draft.assistant).toEqual({ url: "http://10.0.0.12:9999", serverUrl: "http://10.0.0.129:9000" });
   const edited = { ...draft, assistant: { url: " http://a:1 ", serverUrl: "http://b:2\n" } };
   expect(patch(edited).assistant).toEqual({ url: "http://a:1", serverUrl: "http://b:2" });
+});
+
+test("the Claude auto-reset switch round-trips, and an old server's empty claude object reads as off", () => {
+  const on = settingsDraftFrom(config({ claude: { autoReset: true } }));
+  expect(on.claude.autoReset).toBe(true);
+  expect(patch(on).claude.autoReset).toBe(true);
+
+  const old = settingsDraftFrom(config({ claude: {} as AppConfigRedacted["claude"] }));
+  expect(old.claude.autoReset).toBe(false);
 });

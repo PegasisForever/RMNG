@@ -81,7 +81,7 @@ export function TooltipLayer() {
       style={at ?? { left: 0, top: 0 }}
     >
       <span>{tip.text}</span>
-      {tip.sub ? <span className="text-black/60 dark:text-white/60">{tip.sub}</span> : null}
+      {tip.sub ? <span className="whitespace-pre-line text-black/60 dark:text-white/60">{tip.sub}</span> : null}
     </div>,
     document.body,
   );

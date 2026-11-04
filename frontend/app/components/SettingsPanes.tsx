@@ -252,6 +252,21 @@ function LlmPane({
           none reset within 24h, spend one banked reset to bring an account
           back)
         </label>
+        <label className={`mt-2 flex items-center gap-2 text-sm ${TEXT_2}`}>
+          <input
+            type="checkbox"
+            checked={draft.claude.autoReset}
+            onChange={(e) =>
+              onDraftChange("claude", {
+                ...draft.claude,
+                autoReset: e.target.checked,
+              })
+            }
+          />
+          Auto-use Claude usage resets (the same rule: when every account is
+          &gt;95% weekly and none reset within 24h, use one reset that clears
+          the weekly limit)
+        </label>
       </Section>
 
       <SettingsStuckSection

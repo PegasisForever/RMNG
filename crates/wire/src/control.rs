@@ -467,14 +467,20 @@ pub struct ClaudeUsage {
     pub fable: Option<ClaudeUsageWindow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend: Option<ClaudeSpend>,
-    /// Codex only: banked rate-limit reset credits ("usage resets") left on the
-    /// account. `None` for Claude (no such concept) and when usage is unavailable.
+    /// Usage resets left on the account. Codex: its banked rate-limit reset credits.
+    /// Claude: the resets left on its reset grants, summed (`None` while it holds no
+    /// grant). `None` when usage is unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_credits: Option<i64>,
+    /// Claude only: one line per reset grant (what it clears, how many are left, until when,
+    /// and why it cannot be used now), for the count's tooltip. `None` with no grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_detail: Option<String>,
 }
 
-/// One recorded auto-consumed (or reserved) Codex reset. Persisted in `ControlState`
-/// so a server restart can't re-spend on an account already reset this 7d window.
+/// One recorded auto-consumed (or reserved) usage reset, Codex or Claude (each side keeps
+/// its own list). Persisted in `ControlState` so a server restart can't re-spend on an
+/// account already reset this 7d window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "../../../frontend/app/lib/wire/")]
@@ -579,6 +585,9 @@ pub struct ControlState {
     /// account per week, so it belongs in `state.json` (unlike per-tick stats).
     #[serde(default)]
     pub codex_reset_marks: Vec<CodexResetMark>,
+    /// The same for Claude's auto-reset: one mark per account and weekly window.
+    #[serde(default)]
+    pub claude_reset_marks: Vec<CodexResetMark>,
     /// All-time per-clone token totals, keyed by clone id. Unlike the volatile CPU/RAM
     /// stats map (which rides its own SSE bus precisely because it changes every tick),
     /// this is persisted: it is cumulative, and the logs it is derived from get pruned.
@@ -937,6 +946,7 @@ mod tests {
                 fable: None,
                 spend: None,
                 reset_credits: Some(3),
+                reset_detail: None,
             }],
             ..Default::default()
         };

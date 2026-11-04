@@ -421,7 +421,7 @@ fn parse_consume_outcome(body: &str) -> ConsumeOutcome {
 }
 
 /// A 32-hex-char idempotency key (no `uuid` dep; `rand_u64` from `clone_ops`).
-fn new_request_id() -> String {
+pub(crate) fn new_request_id() -> String {
     format!("{:016x}{:016x}", rand_u64(), rand_u64())
 }
 
@@ -499,6 +499,7 @@ fn to_usage(acct: &StoredCodexAccount, raw: RawUsage) -> ClaudeUsage {
         fable: None, // Fable is a Claude-model limit; never present for Codex.
         spend: None,
         reset_credits,
+        reset_detail: None,
     }
 }
 
@@ -517,16 +518,18 @@ fn codex_base(acct: &StoredCodexAccount) -> ClaudeUsage {
         fable: None,
         spend: None,
         reset_credits: None,
+        reset_detail: None,
     }
 }
 
 /// Per-account inputs the fleet gate needs, extracted from a fresh raw usage fetch
 /// (epoch-seconds based, so the gate never round-trips the display ISO string).
-struct FleetFacts {
-    account_id: String,
-    seven_pct: f64,
-    seven_reset_at: i64,
-    reset_credits: i64,
+#[derive(Clone)]
+pub(crate) struct FleetFacts {
+    pub(crate) account_id: String,
+    pub(crate) seven_pct: f64,
+    pub(crate) seven_reset_at: i64,
+    pub(crate) reset_credits: i64,
 }
 
 /// Extract gate facts from a raw usage response. `None` if the weekly window or its
@@ -558,7 +561,7 @@ fn gate_facts(account_id: &str, raw: &RawUsage) -> Option<FleetFacts> {
 }
 
 /// The fleet gate. Returns the account id to spend one reset on, or `None`.
-fn choose_reset_target(
+pub(crate) fn choose_reset_target(
     facts: &[FleetFacts],
     account_count: usize,
     marks: &[wire::CodexResetMark],
@@ -596,7 +599,7 @@ fn choose_reset_target(
 }
 
 /// Drop marks whose 7d window has already elapsed (account is now in a new window).
-fn prune_marks(marks: &mut Vec<wire::CodexResetMark>, now_secs: i64) {
+pub(crate) fn prune_marks(marks: &mut Vec<wire::CodexResetMark>, now_secs: i64) {
     marks.retain(|m| m.window_resets_at > now_secs);
 }
 

@@ -59,6 +59,9 @@ export function makeClaudeAccounts(now: number): ClaudeUsage[] {
       fiveHour: { pct: 42, resetsAt: at(2 * HOUR + 15 * MINUTE) },
       sevenDay: { pct: 61, resetsAt: at(76 * HOUR) },
       fable: { pct: 8, resetsAt: at(76 * HOUR) },
+      // A Claude account with reset grants: the count, and one tooltip line per grant.
+      resetCredits: 2n,
+      resetDetail: "Weekly reset: 1 of 1 left, until 2026-07-30\n5-hour reset: 1 of 2 left",
     }),
     makeUsage({
       email: "sam@example.com",

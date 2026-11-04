@@ -512,7 +512,7 @@ Ports, the data directory, the clone socket and the Docker socket are constants 
 | `setup_complete` | bool | `false` | latched `true` by the first-run setup wizard; gates the frontend to the wizard until then |
 | `docker` | `DockerConfig` | see below | hostname prefix + per-clone limits + ZFS parent dataset for clone homes |
 | `presets` | `Preset[]` | `[]` | clone presets: env vars + Linear key + auto-select ticket-id prefixes (the key is a credential, and `GET /api/config` vends it to the clients) |
-| `claude` | `ClaudeConfig` | — | usage polling config |
+| `claude` | `ClaudeConfig` | — | Claude auto-reset switch |
 | `groups` | `CloneGroup[]` | `[]` | the single named account-pool list (Claude + Codex members mixed); a clone binds at most one pool, each rotator side only sees its own provider members (not secret) |
 | `agent_playbook` | string | shipped default | the person's ticket procedure and app quirks for the assistant (how to drive a desktop is the assistant's own knowledge), sent with the preset's append in the `[From RMNG]` header of each new assistant chat's first message (see [API.md](API.md#per-clone-assistant-chat)); nothing is written into the clone. Seeded from [agent-playbook.md](../crates/wire/src/agent-playbook.md); editable in Settings; **non-secret** (passes through the redacted view); applies to the next new chat |
 | `judge` | `JudgeConfig` | `gpt-5.6-luna` | working-vs-stuck detection: `codexModel` (default `gpt-5.6-luna`) and `codexEmail` (`null` = the first imported Codex account). No credential of its own: the calls run on that account's ChatGPT plan, using the token the server already holds to run its clones. Nothing secret, so the whole struct passes through the redacted view. No Codex account imported ⇒ no clone is ever reported `working` (see [monitorState](API.md#monitorstate)). Settings → Agents |
@@ -549,7 +549,15 @@ Ports, the data directory, the clone socket and the Docker socket are constants 
   (blank `linearKey` keeps the stored one; omitted row deletes). One-shot migration at
   load: legacy `envPresets` seed `presets` (no labels/keys); legacy per-workspace `linear`
   keys are dropped (re-enter per preset in Settings).
-- **`ClaudeConfig`**: `poll_secs` (`600`, floored 15), `pinned_email?`.
+- **`ClaudeConfig`**: `auto_reset` (bool, default `false`): the Codex gate for Claude's usage
+  resets (below).
+- **Claude usage resets:** a subscription can hold reset grants (Anthropic's program
+  `cedar_ember`). The poller reads them with `GET https://api.anthropic.com/api/oauth/usage?cedar_ember=1`
+  under Claude Code's User-Agent (any other one reads `ineligible_reason: "surface"`), and
+  publishes the resets left as `resetCredits` with one line per grant in `resetDetail`.
+  Auto-use claims one with `POST /api/organizations/{org}/reset_rate_limits`
+  `{program: "cedar_ember", grant_id, request_id}`, at most once per account and weekly
+  window (`ControlState.claudeResetMarks`); see `control-server/src/claude_reset.rs`.
 - <a id="claude-accounts"></a>**Claude accounts** live outside config, in the server's 0600
   secret store `claude-accounts.json`: per account an OAuth pair (`access_token` +
   single-use `refresh_token`, both **secret**), obtained by signing in to the provider at

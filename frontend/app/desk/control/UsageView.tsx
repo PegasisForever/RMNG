@@ -153,7 +153,8 @@ function AccountCard({
   onReplace: (account: ClaudeUsage) => void;
 }) {
   const codex = a.provider === "codex";
-  const credits = codex && a.resetCredits != null ? Number(a.resetCredits) : null;
+  /** Usage resets left: Codex's reset credits, or the resets on a Claude account's grants. */
+  const credits = a.resetCredits != null ? Number(a.resetCredits) : null;
   const empty = !a.fiveHour && !a.sevenDay && !a.fable;
   /** Its tokens no longer work: the sign-in button says all of it, so the server's error (the
    *  provider's own words) does not show. */
@@ -169,7 +170,11 @@ function AccountCard({
         <span className={`min-w-0 flex-1 truncate text-xs font-medium ${TEXT}`}>{a.email}</span>
         {a.spend ? <span className={`shrink-0 text-[11px] tabular-nums ${TEXT_2}`}>{spendLine(a.spend)}</span> : null}
         {credits == null ? null : (
-          <span className={`shrink-0 text-[11px] tabular-nums ${credits === 0 ? DANGER_TEXT : TEXT_2}`}>
+          <span
+            data-tip={`${credits} usage reset${credits === 1 ? "" : "s"} left`}
+            data-tip-sub={a.resetDetail ?? undefined}
+            className={`shrink-0 text-[11px] tabular-nums ${credits === 0 ? DANGER_TEXT : TEXT_2}`}
+          >
             ⟳ {credits}
           </span>
         )}

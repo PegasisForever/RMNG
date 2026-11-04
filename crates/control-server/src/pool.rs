@@ -2159,6 +2159,7 @@ mod tests {
             fable: None,
             spend: None,
             reset_credits: None,
+            reset_detail: None,
         };
         assert_eq!(row_provider(&row), ClaudePool::PROVIDER);
         row.provider = Some(wire::Provider::Codex);

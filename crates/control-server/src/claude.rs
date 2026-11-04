@@ -346,15 +346,20 @@ struct RawUsage {
     extra_usage: Option<RawExtra>,
     #[serde(default)]
     limits: Vec<RawLimit>,
+    /// The reset grants ([`crate::claude_reset`]), raw: a block that does not read must not
+    /// cost the account its usage numbers.
+    #[serde(default)]
+    cedar_ember: Option<serde_json::Value>,
 }
 
 async fn fetch_usage(http: &reqwest::Client, token: &str) -> Result<RawUsage> {
+    // `cedar_ember=1` adds the reset grants, and only Claude Code's User-Agent gets them.
     let resp = http
-        .get(USAGE_URL)
+        .get(format!("{USAGE_URL}?cedar_ember=1"))
         .timeout(FETCH_TIMEOUT)
         .header("Authorization", format!("Bearer {token}"))
         .header("anthropic-beta", OAUTH_BETA_HEADER)
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", crate::claude_reset::CLI_USER_AGENT)
         .send()
         .await?;
     let status = resp.status();
@@ -393,6 +398,7 @@ fn fable_window(limits: &[RawLimit]) -> Option<ClaudeUsageWindow> {
 
 fn to_usage(acct: &StoredClaudeAccount, raw: RawUsage) -> ClaudeUsage {
     let fable = fable_window(&raw.limits);
+    let resets = crate::claude_reset::Status::parse(raw.cedar_ember.as_ref());
     let spend = raw
         .extra_usage
         .filter(|e| e.is_enabled)
@@ -416,7 +422,8 @@ fn to_usage(acct: &StoredClaudeAccount, raw: RawUsage) -> ClaudeUsage {
         seven_day: to_window(raw.seven_day),
         fable,
         spend,
-        reset_credits: None,
+        reset_credits: resets.as_ref().and_then(|r| r.credits()),
+        reset_detail: resets.as_ref().and_then(|r| r.detail()),
     }
 }
 
@@ -435,6 +442,7 @@ fn claude_base(acct: &StoredClaudeAccount) -> ClaudeUsage {
         fable: None,
         spend: None,
         reset_credits: None,
+        reset_detail: None,
     }
 }
 
@@ -459,6 +467,8 @@ async fn poll_inner(app: &App) -> Result<bool> {
 
     let mut any429 = false;
     let mut views = Vec::with_capacity(accts.len());
+    // What the auto-reset gate needs, one per account whose usage came back.
+    let mut fleet: Vec<crate::claude_reset::Facts> = Vec::with_capacity(accts.len());
 
     for (i, acct) in accts.iter().enumerate() {
         if i > 0 {
@@ -479,11 +489,13 @@ async fn poll_inner(app: &App) -> Result<bool> {
             if fresh.account_uuid.is_empty() {
                 backfill_account_uuid(app, &acct.email, &token).await;
             }
-            Ok::<_, anyhow::Error>(to_usage(acct, raw))
+            let facts = gate_facts(&acct.id, &raw); // before `raw` moves into to_usage
+            Ok::<_, anyhow::Error>((to_usage(acct, raw), facts))
         }
         .await;
         match outcome {
-            Ok(mut u) => {
+            Ok((mut u, facts)) => {
+                fleet.extend(facts);
                 // The fetch above ran on this account's own token, so the token works.
                 u.assignable = Some(true);
                 app.claude
@@ -529,6 +541,8 @@ async fn poll_inner(app: &App) -> Result<bool> {
         }
     }
 
+    auto_reset(app, &accts, &fleet, &mut views).await;
+
     crate::clone_ops::replace_provider_views(app, wire::Provider::Claude, views);
 
     // Rotations were fanned out per account as they happened; this sweep only retries
@@ -536,6 +550,132 @@ async fn poll_inner(app: &App) -> Result<bool> {
     push_stale_tokens::<ClaudePool>(app).await;
 
     Ok(any429)
+}
+
+/// The auto-reset gate's inputs from one fresh usage reply. `None` without a weekly window
+/// or its reset time: such an account cannot be confirmed capped, so the gate does not fire.
+/// The raw (unrounded) weekly percent, as on the Codex side.
+fn gate_facts(account_id: &str, raw: &RawUsage) -> Option<crate::claude_reset::Facts> {
+    let seven = raw.seven_day.as_ref()?;
+    let seven_reset_at = seven
+        .resets_at
+        .as_deref()
+        .and_then(crate::pool::parse_rfc3339_utc_secs)?;
+    let (grant_id, credits) = crate::claude_reset::Status::parse(raw.cedar_ember.as_ref())
+        .map(|s| s.weekly_pick())
+        .unwrap_or((None, 0));
+    Some(crate::claude_reset::Facts {
+        fleet: crate::codex::FleetFacts {
+            account_id: account_id.to_string(),
+            seven_pct: seven.utilization.unwrap_or(0.0),
+            seven_reset_at,
+            reset_credits: credits,
+        },
+        grant_id,
+    })
+}
+
+/// Spend one weekly reset when the gate says so ([`crate::claude_reset`]): every account
+/// over the weekly cap, none of them back within 24h. Off unless `claude.autoReset`.
+async fn auto_reset(
+    app: &App,
+    accts: &[StoredClaudeAccount],
+    fleet: &[crate::claude_reset::Facts],
+    views: &mut [ClaudeUsage],
+) {
+    let now_secs = now_ms() / 1000;
+    let gate: Vec<crate::codex::FleetFacts> = fleet.iter().map(|f| f.fleet.clone()).collect();
+    let marks = app.store.get().claude_reset_marks;
+    let Some(target_id) = crate::codex::choose_reset_target(
+        &gate,
+        accts.len(),
+        &marks,
+        now_secs,
+        app.config().claude.auto_reset,
+    ) else {
+        return;
+    };
+    let (Some(facts), Some(acct)) = (
+        fleet.iter().find(|f| f.fleet.account_id == target_id),
+        accts.iter().find(|a| a.id == target_id),
+    ) else {
+        return;
+    };
+    let Some(grant_id) = facts.grant_id.clone() else {
+        return;
+    };
+    let window = facts.fleet.seven_reset_at;
+    let req_id = crate::codex::new_request_id();
+    let fresh = match fresh_access_token(app, &acct.email).await {
+        Ok((fresh, _)) => fresh,
+        Err(e) => {
+            tracing::warn!(
+                "claude auto-reset: token refresh for {} failed: {e} (no mark reserved, retrying next poll)",
+                acct.email
+            );
+            return;
+        }
+    };
+    if fresh.org_uuid.is_empty() {
+        tracing::warn!(
+            "claude auto-reset: {} has no organization uuid; cannot claim",
+            acct.email
+        );
+        return;
+    }
+    // The mark first, before the POST: no outcome, not even a crash, can spend a second one
+    // on this account in this weekly window.
+    app.store.mutate(|s| {
+        s.claude_reset_marks.retain(|m| m.account_id != target_id);
+        s.claude_reset_marks.push(wire::CodexResetMark {
+            account_id: target_id.clone(),
+            window_resets_at: window,
+            consumed_at: now_ms(),
+            redeem_request_id: req_id.clone(),
+        });
+        crate::codex::prune_marks(&mut s.claude_reset_marks, now_secs);
+    });
+    match crate::claude_reset::claim(
+        &app.http,
+        &fresh.access_token,
+        &fresh.org_uuid,
+        &grant_id,
+        &req_id,
+    )
+    .await
+    {
+        Ok(r) if r.result.as_deref() == Some("reset") => {
+            tracing::info!(
+                "claude auto-reset used grant {grant_id} on {} (7d was {:.0}%, {:?} left); re-polling",
+                acct.email,
+                facts.fleet.seven_pct,
+                r.resets_left
+            );
+            // The numbers after the reset now, not one poll later: the rotator reads them.
+            if let Ok(raw2) = fetch_usage(&app.http, &fresh.access_token).await {
+                let mut u2 = to_usage(acct, raw2);
+                u2.assignable = Some(true);
+                app.claude
+                    .last_good
+                    .lock()
+                    .unwrap()
+                    .insert(acct.id.clone(), u2.clone());
+                if let Some(v) = views.iter_mut().find(|v| v.id == acct.id) {
+                    *v = u2;
+                }
+            }
+        }
+        Ok(r) => tracing::warn!(
+            "claude auto-reset for {}: {:?} ({:?}) (mark kept, no retry this window)",
+            acct.email,
+            r.result,
+            r.reason
+        ),
+        Err(e) => tracing::warn!(
+            "claude auto-reset claim for {} failed: {e:#} (mark kept)",
+            acct.email
+        ),
+    }
 }
 
 /// One rotation pass over every named group plus the implicit "auto" pool (all imported
@@ -1384,6 +1524,7 @@ mod tests {
             fable: None,
             spend: None,
             reset_credits: None,
+            reset_detail: None,
         }
     }
 

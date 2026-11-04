@@ -160,11 +160,14 @@ export interface ClaudeUsage {
   *  when the account has no such scoped limit. */
  fable?: ClaudeUsageWindow;
  spend?: ClaudeSpend;
- /** Codex only: banked rate-limit reset credits ("usage resets") left on the
-  *  account. Absent/null for Claude (no such concept) and when usage is
-  *  unavailable. Wire type is `bigint | null` — callers must `Number(...)`
-  *  it before numeric comparison. */
+ /** Usage resets left on the account: Codex's banked reset credits, or the resets on a
+  *  Claude account's reset grants (absent while it holds no grant). Absent/null when usage
+  *  is unavailable. Wire type is `bigint | null` — callers must `Number(...)` it before
+  *  numeric comparison. */
  resetCredits?: bigint | null;
+ /** Claude only: one line per reset grant (what it clears, how many are left, until when),
+  *  for the count's tooltip. */
+ resetDetail?: string | null;
 }
 
 export interface ControlState {

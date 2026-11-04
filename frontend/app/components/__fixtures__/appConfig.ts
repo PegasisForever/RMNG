@@ -25,7 +25,7 @@ export function makeAppConfig(
       cloneMemoryMb: 32768,
       homesParent: "tank/rmng/homes",
     },
-    claude: {},
+    claude: { autoReset: false },
     codex: { autoReset: false },
     // Built per call, down to the member list, so two configs from this builder never share
     // an array with each other or with the accounts fixture module.
