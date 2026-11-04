@@ -8,6 +8,10 @@
 // A headless clone has a terminal in place of a desktop (`./TerminalScreen.tsx`, in monitor 0's
 // window): the touch input goes to it (`./cloneSink.ts`), and the trackpads move a pointer the
 // page draws over it.
+//
+// A page that is not HTTPS (not a secure context) opens no connection: the browser gives such a
+// page no video or sound decoder (WebCodecs) and no clipboard, so the screen shows a note in
+// place of the clone. The server state, and so the control panel, comes all the same.
 import { type RefObject, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { formatLxcUsage } from "~/lib/format";
@@ -42,6 +46,9 @@ const OWN_MOVES_MS = 400;
 /** A socket down for less than this (a new one after a wake) shows nothing: the last picture
  *  stays, and input waits for the new socket. */
 const SHOW_DOWN_MS = 1000;
+
+/** Why the clone's screen does not show on a page that is not HTTPS. */
+const NOT_SECURE_NOTE = "This page is not HTTPS, so the clone's screen cannot show. Open the server's HTTPS address.";
 
 /** The page's own time and waits, for the touch input. */
 const PAGE_CLOCK: Clock = {
@@ -133,7 +140,8 @@ export function useRemote({
   const [sessionNo, setSessionNo] = useState(0);
 
   useEffect(() => {
-    if (!box.current) return;
+    // No decoders on a page that is not HTTPS: no connection, the note says why
+    if (!box.current || !window.isSecureContext) return;
     /** The server's last spec, and the size of the picture this window shows. */
     let serverSpec: ViewSpec | null = null;
     let frame: Size | null = null;
@@ -347,19 +355,21 @@ export function useRemote({
    *  keys' note. */
   const touchShown = useSyncExternalStore(touch.subscribe, touch.state, touch.state);
 
-  const note = !connected
-    ? "Connecting…"
-    : spec && spec.monitors.length === 0
-      ? "No clone is selected."
-      : terminal
-        ? monitor === 0
-          ? null
-          : "This clone has no desktop. Its terminal is in the monitor 0 window."
-        : live.state.layout && live.state.layout.client !== clientId(kind)
-          ? `In use on ${live.state.layout.label === kind ? "another" : "the"} ${live.state.layout.label}. ${
-              mouse ? "Click" : "Touch"
-            } to use it here.`
-          : touchShown.clipNote;
+  const note = !window.isSecureContext
+    ? NOT_SECURE_NOTE
+    : !connected
+      ? "Connecting…"
+      : spec && spec.monitors.length === 0
+        ? "No clone is selected."
+        : terminal
+          ? monitor === 0
+            ? null
+            : "This clone has no desktop. Its terminal is in the monitor 0 window."
+          : live.state.layout && live.state.layout.client !== clientId(kind)
+            ? `In use on ${live.state.layout.label === kind ? "another" : "the"} ${live.state.layout.label}. ${
+                mouse ? "Click" : "Touch"
+              } to use it here.`
+            : touchShown.clipNote;
 
   return {
     session,

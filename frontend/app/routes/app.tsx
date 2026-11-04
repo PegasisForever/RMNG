@@ -76,8 +76,6 @@ export default function App() {
   }, [search]);
   const probe = useRef<HTMLDivElement>(null);
   const [page, setPage] = useState<Page | null>(null);
-  // Null until the effect has looked: the page has no `window` while it is built
-  const [secure, setSecure] = useState<boolean | null>(null);
   /** The first-run setup: unknown (null) until the config is read, then whether it is done.
    *  A config that cannot be read counts as done: the app then shows its own errors. */
   const [setup, setSetup] = useState<{ done: true } | { done: false; config: AppConfigRedacted } | null>(null);
@@ -89,8 +87,6 @@ export default function App() {
   useEffect(readSetup, []);
 
   useEffect(() => {
-    setSecure(window.isSecureContext);
-
     // The phone's keyboard can make the page shorter: while it is up the page stays as it was
     const update = () => probe.current && !isTyping() && setPage(measure(probe.current));
     update();
@@ -129,19 +125,11 @@ export default function App() {
     );
   }
 
-  const message = secure === false ? "This page is not HTTPS: open it at the server's HTTPS address." : null;
-
   return (
     <div className="fixed inset-0 touch-none select-none overflow-hidden bg-black text-white">
       <div ref={probe} className="pointer-events-none absolute inset-0 pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)] pt-[env(safe-area-inset-top)]" />
-      {message && page ? (
-        // A note, as "Connecting…" over the clone's screen
-        <p className="absolute inset-0 flex items-center justify-center p-6">
-          <span className="glass glass-thick rounded-full px-4 py-2 text-center text-sm">{message}</span>
-        </p>
-      ) : null}
-      {secure && page && setup && controlPanelOnly ? <ControlPanelWindow width={page.size[0]} /> : null}
-      {secure && page && setup && !controlPanelOnly ? (
+      {page && setup && controlPanelOnly ? <ControlPanelWindow width={page.size[0]} /> : null}
+      {page && setup && !controlPanelOnly ? (
         <FullDesk
           width={page.size[0]}
           height={page.size[1]}
