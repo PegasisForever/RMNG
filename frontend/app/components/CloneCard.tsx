@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
+  GitFork,
   Layers,
   Network,
   Pencil,
@@ -190,6 +191,8 @@ export interface CloneCardProps {
   onChangeAccount: () => void;
   /** Rebase this clone onto a preset's image (dataset + id kept). */
   onRebase: () => void;
+  /** Open the Fork dialog: a new clone with a copy of this one's home. */
+  onFork: () => void;
   /** Open the port-forward command dialog for this clone. */
   onPortForward: () => void;
   /** Gracefully stop a managed clone while retaining it. */
@@ -322,7 +325,7 @@ function CopySshMenuItem({ onCopy }: { onCopy: () => Promise<boolean> }) {
   );
 }
 
-/** The per-clone overflow menu (⋮): Linear, change-account, rebase, port forward, SSH,
+/** The per-clone overflow menu (⋮): Linear, fork, change-account, rebase, port forward, SSH,
  *  archive, mute, delete. Unmanaged rows (no container) only get Remove. The shell — trigger, portal, positioning, item row —
  *  is shared with the ticket cards; only this list of actions is the clone's own. */
 function CloneMenu({
@@ -332,6 +335,7 @@ function CloneMenu({
   busy,
   onChangeAccount,
   onRebase,
+  onFork,
   onPortForward,
   onArchive,
   onUnarchive,
@@ -351,6 +355,7 @@ function CloneMenu({
   busy: boolean;
   onChangeAccount: () => void;
   onRebase: () => void;
+  onFork: () => void;
   onPortForward: () => void;
   onArchive: () => void;
   onUnarchive: () => void;
@@ -386,6 +391,7 @@ function CloneMenu({
       ) : null}
       {managed && !archived ? (
         <>
+          <MenuItem icon={GitFork} label="Fork…" onClick={onFork} />
           <MenuItem icon={UserCog} label="Change account…" onClick={onChangeAccount} />
           <MenuItem icon={Layers} label="Rebase…" onClick={onRebase} />
           <MenuItem icon={Network} label="Port forward…" onClick={onPortForward} />
@@ -435,6 +441,7 @@ export function CloneCard({
   onDelete,
   onChangeAccount,
   onRebase,
+  onFork,
   onPortForward,
   onArchive,
   onUnarchive,
@@ -592,6 +599,7 @@ export function CloneCard({
             busy={busy}
             onChangeAccount={onChangeAccount}
             onRebase={onRebase}
+            onFork={onFork}
             onPortForward={onPortForward}
             onArchive={onArchive}
             onUnarchive={onUnarchive}

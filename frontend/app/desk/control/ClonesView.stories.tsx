@@ -35,6 +35,7 @@ const meta = {
     onOpenInLinear: fn(),
     onChangeAccount: fn(),
     onRebase: fn(),
+    onFork: fn(),
     onPortForward: fn(),
     onCopySsh: fn(async () => true),
     onToggleMute: fn(),

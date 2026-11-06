@@ -21,6 +21,7 @@ import { useSearchParams } from "react-router";
 
 import { ChangeAccountModalContainer } from "~/components/ChangeAccountModalContainer";
 import { CloneModalContainer } from "~/components/CloneModalContainer";
+import { ForkModalContainer } from "~/components/ForkModalContainer";
 import { ask } from "~/components/ConfirmLayer";
 import { ImportAccountModalContainer } from "~/components/ImportAccountModalContainer";
 import { ModalPlacementProvider, ModalSurfaceProvider } from "~/components/ModalShell";
@@ -42,7 +43,9 @@ import {
   startClone,
   unarchiveClone,
 } from "~/lib/api";
+import { columnIdOf, resolveColumns, withDefaults } from "~/lib/board";
 import { copyText } from "~/lib/clipboard";
+import { cloneTitle } from "~/lib/cloneTitle";
 import { columnPin, RAIL_PIN, TICKETS_PIN } from "~/lib/dock";
 import { useTickets } from "~/lib/linear/useTickets";
 import { workspaceHomeUrl } from "~/lib/linear/workspaces";
@@ -90,6 +93,7 @@ type Dialog =
   | { kind: "import"; replacing: ClaudeUsage | null; provider?: "claude" | "codex"; group?: string }
   | { kind: "account"; clone: Clone }
   | { kind: "rebase"; clone: Clone }
+  | { kind: "fork"; clone: Clone }
   | { kind: "forward"; clone: Clone };
 
 export function ControlPanelContainer({
@@ -434,6 +438,38 @@ export function ControlPanelContainer({
             onLeave={leave}
           />
         );
+      case "fork": {
+        const ticket = tickets.forClones[d.clone.id];
+        return (
+          <ForkModalContainer
+            clone={d.clone}
+            ticketTitle={d.clone.linearTicket ? cloneTitle(d.clone, ticket) : null}
+            operations={state.operations}
+            accounts={accounts}
+            onClose={(left) => {
+              closeDialog();
+              const made = newClone.current ? clonesById.get(newClone.current) : null;
+              newClone.current = null;
+              // Closed while it was being made: the operator went on, the screen stays
+              if (made && !left) selectClone(made);
+            }}
+            onFork={(req) =>
+              startClone(true, req).then((op) => {
+                // Not a sub clone: it goes in the column of its source (or of the source's
+                // parent). A sub clone shows under its parent and has no column.
+                if (!req.parent) {
+                  const columns = resolveColumns(withDefaults(board.columns), state.hosts);
+                  const columnId = columnIdOf(columns, d.clone.parent ?? d.clone.id);
+                  if (columnId) board.fileNewClone(op.target, columnId);
+                }
+                if (openDialog.current?.d === d) newClone.current = op.target;
+                return op;
+              })
+            }
+            onLeave={leave}
+          />
+        );
+      }
       case "forward":
         return <PortForwardModal clone={d.clone} sshPublicHost={sshHost} onClose={closeDialog} onCopy={copyText} />;
     }
@@ -559,6 +595,7 @@ export function ControlPanelContainer({
             onOpenInLinear={(url) => window.open(url, "_blank", "noopener,noreferrer")}
             onChangeAccount={(clone) => open({ kind: "account", clone })}
             onRebase={(clone) => open({ kind: "rebase", clone })}
+            onFork={(clone) => open({ kind: "fork", clone })}
             onPortForward={(clone) => open({ kind: "forward", clone })}
             onCopySsh={(clone) => copyText(buildSshCommand(sshHost, BASTION_PORT, clone.id))}
             onToggleMute={(clone) => board.toggleMute(clone.id)}

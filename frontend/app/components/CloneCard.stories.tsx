@@ -32,6 +32,7 @@ const meta = {
     onDelete: fn(),
     onChangeAccount: fn(),
     onRebase: fn(),
+    onFork: fn(),
     onPortForward: fn(),
     onArchive: fn(),
     onUnarchive: fn(),

@@ -29,6 +29,7 @@ import {
   Columns3,
   Ellipsis,
   ExternalLink,
+  GitFork,
   Layers,
   Network,
   Pencil,
@@ -115,6 +116,8 @@ export interface ClonesViewProps {
   onOpenInLinear: (url: string) => void;
   onChangeAccount: (clone: Clone) => void;
   onRebase: (clone: Clone) => void;
+  /** Open the Fork dialog for a live managed clone. */
+  onFork: (clone: Clone) => void;
   onPortForward: (clone: Clone) => void;
   /** Copy the clone's SSH command; answers whether it landed. */
   onCopySsh: (clone: Clone) => Promise<boolean>;
@@ -215,6 +218,7 @@ export function ClonesView(p: ClonesViewProps) {
       onDelete: () => p.onDelete(c),
       onChangeAccount: () => p.onChangeAccount(c),
       onRebase: () => p.onRebase(c),
+      onFork: () => p.onFork(c),
       onPortForward: () => p.onPortForward(c),
       onArchive: () => p.onArchive(c),
       onUnarchive: () => p.onUnarchive(c),
@@ -270,6 +274,7 @@ export function ClonesView(p: ClonesViewProps) {
           ...(url ? [{ icon: ExternalLink, label: "Open in Linear", onSelect: () => p.onOpenInLinear(url) }] : []),
           ...(managed && !archived
             ? [
+                { icon: GitFork, label: "Fork", onSelect: () => p.onFork(clone) },
                 { icon: UserCog, label: "Change account", onSelect: () => p.onChangeAccount(clone) },
                 { icon: Layers, label: "Rebase", onSelect: () => p.onRebase(clone) },
                 { icon: Network, label: "Port forward", onSelect: () => p.onPortForward(clone) },

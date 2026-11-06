@@ -590,7 +590,8 @@ copies a live clone's home instead, leaving the source running. Both take the sa
 `Operation` at once and progress flows over `/events`. When the request sets `kickoff`, the
 server sends the agent its first message after the clone is up
 ([chat::kickoff_agent](../crates/control-server/src/chat.rs)): the ticket URL, else
-`firstMessage`, with both instruction fields appended. Without `kickoff` nothing is sent, not
+`firstMessage`, with both instruction fields appended. A fork that sends a `firstMessage`
+gets that message, not the ticket URL: it already has its source's work. Without `kickoff` nothing is sent, not
 even for a ticket a fork inherited.
 
 The server makes no Linear calls here. A client that starts a clone for a ticket looks the

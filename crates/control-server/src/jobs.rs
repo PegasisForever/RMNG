@@ -360,6 +360,11 @@ async fn run_clone(app: App, op: OpHandle, plan: ClonePlan) -> anyhow::Result<Fi
     let kickoff = plan.kickoff;
     let row_id = row.id.clone();
     let forked = plan.source.is_some();
+    // A fork with a message of its own starts on that message: it already has its source's
+    // work and ticket, so the ticket link would start it over. Any other clone starts on its
+    // ticket first, as before.
+    let own_message = first_message.as_deref().is_some_and(|m| !m.trim().is_empty());
+    let ticket_url = if forked && own_message { None } else { ticket_url };
     Ok(Finish::new(message)
         .state(move |s| {
             s.hosts.insert(0, row);
